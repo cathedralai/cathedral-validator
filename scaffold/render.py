@@ -20,6 +20,7 @@ vector is accepted, rejected, or the tick moves on to another row.
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import sys
@@ -136,6 +137,7 @@ class _Stream:
         self.feed_bits: list[str] = []
         self.feed_open = False
         self.in_tick = False
+        self.rows_since_rule = 0
         self.tick_started: float | None = None
 
     def elapsed(self) -> str:
@@ -149,20 +151,36 @@ class _Stream:
         print(text)
 
     def row(self, label: str, text: str) -> None:
+        # Anything emitted outside a tick (startup preflight, receipt recovery)
+        # opens its own block, so a row is never orphaned above the first rule.
+        if not self.in_tick:
+            self.rule("")
         self.flush_feed(unless=label)
         self.write(f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}{text}")
+        self.rows_since_rule += 1
 
     def note(self, symbol: str, text: str) -> None:
+        if not self.in_tick:
+            self.rule("")
         self.flush_feed()
         self.write(f"{_INDENT}{symbol} {text}")
+        self.rows_since_rule += 1
 
-    def rule(self, stamp: str) -> None:
+    def rule(self, stamp: str = "") -> None:
+        # Rows emitted outside a tick carry no event timestamp of their own, so
+        # the block is stamped with the wall clock instead of rendering blank.
+        stamp = stamp or datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")
+        # An empty block helps nobody: a rule drawn with nothing under it yet
+        # is reused rather than stacked.
+        if self.in_tick and self.rows_since_rule == 0:
+            return
         self.flush_feed()
         if self.in_tick:
             self.write()
         head = f"── {stamp} "
         self.write(dim(_INDENT + head + "─" * max(0, _RULE_WIDTH - len(head))))
         self.in_tick = True
+        self.rows_since_rule = 0
         self.tick_started = time.monotonic()
 
     # -- the one accumulated row -------------------------------------------
