@@ -2925,7 +2925,19 @@ CHAIN_OPERATION_DEADLINE_SECS = 180.0
 # synchronous SDK deadline plus an explicit clock/RPC margin. The mortal era
 # is intentionally short and is also bounded by the evidence block window.
 SN39_MIN_VALIDITY_MARGIN_SECS = 60.0
-SN39_MORTAL_PERIOD_BLOCKS = 4
+# The era is anchored at the PROVEN FINALIZED block, not the best head, so the
+# real inclusion window is this period minus the live finality lag. Measured
+# finney lag is a steady 2-3 blocks, which left a 4-block era with only one or
+# two blocks of validity by the time the transaction reached the pool, and it
+# expired unincluded. Sixteen covers the lag plus block-author latency while
+# keeping the era far shorter than an epoch.
+#
+# This is also the era-registration bound: worst_case_evictions scales as
+# max_regs_per_block * this constant, so widening the window automatically
+# tightens the UID replacement-safety proof rather than loosening it. At the
+# live subnet state that means a worst case of 16 evictions against a rewarded
+# target proven safe to an eviction depth of 112.
+SN39_MORTAL_PERIOD_BLOCKS = 16
 # A launch write must finalize comfortably before the next epoch. UID targets
 # are separately proven replacement-safe for the complete mortal era; there is
 # deliberately no automatic second/corrective weight write.
