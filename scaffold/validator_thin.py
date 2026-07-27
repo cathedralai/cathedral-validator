@@ -1551,26 +1551,29 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
         # assurance level. Never append a later PASS/NOT_PROVEN event that a
         # tail-based consumer could mistake for the final verdict.
         return False
-    if (
-        audit.status == "PASS"
-        and getattr(audit, "assurance", "receipts_only") != "full"
-    ):
-        # Receipts-only recomputation is PARTIAL provenance. Positive raw
-        # evidence may already have replayed successfully while independently
-        # anchored non-verified candidates remain unsupported by replayable
-        # negative evidence. Never erase that distinction in the operator log.
-        # It must not be announced as a provenance PASS or persist the durable
-        # reservation state as if it were FULL.
-        reasons = list(getattr(audit, "not_proven_reasons", ()) or ())
+    if audit.status == "PASS" and assurance_rank(
+        getattr(audit, "assurance", None)
+    ) < _minimum_assurance_rank(args):
+        # Below the configured bar this is PARTIAL provenance. Positive raw
+        # evidence may already have replayed successfully while the paid set
+        # and the replayed set still disagree. Never erase that distinction in
+        # the operator log: it must not be announced as a provenance PASS or
+        # persist the durable reservation state as if it were proven.
+        scope = dict(getattr(audit, "assurance_scope", {}) or {})
+        reasons = list(scope.get("failures") or []) + list(
+            getattr(audit, "not_proven_reasons", ()) or ()
+        )
         raw_replayed = list(getattr(audit, "raw_replayed_hotkeys", ()) or ())
         replay_summary = (
             f"positive raw evidence replayed for {len(raw_replayed)} miner(s)"
             if raw_replayed
             else "no positive raw evidence replayed"
         )
-        detail = f"{replay_summary}; whole-epoch FULL assurance is not established" + (
-            ": " + "; ".join(reasons) if reasons else ""
-        )
+        detail = (
+            f"{replay_summary}; assurance "
+            f"{getattr(audit, 'assurance', 'unknown')!s} is below the required "
+            f"level"
+        ) + (": " + "; ".join(str(r) for r in reasons) if reasons else "")
         events.event(
             "PROVENANCE_AUDIT_NOT_PROVEN",
             stage="provenance",
@@ -8486,12 +8489,14 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
     inclusion_policy: InclusionPolicy | None = None
     if broadcast:
         authority_audit = getattr(args, "_authority_full_audit", None)
-        if (
-            getattr(authority_audit, "status", None) != PASS
-            or getattr(authority_audit, "assurance", None) != "full"
-        ):
+        # Same rank test as the audit gate. Two places comparing assurance by
+        # string equality is how one of them ends up demanding a level the
+        # other stopped producing.
+        if getattr(authority_audit, "status", None) != PASS or assurance_rank(
+            getattr(authority_audit, "assurance", None)
+        ) < _minimum_assurance_rank(args):
             raise wire.VectorError(
-                "authority submission has no current FULL provenance audit"
+                "authority submission has no provenance audit at the required assurance"
             )
         preflight, hk2uid, uid_weights, inclusion_policy = (
             _revalidate_authority_after_audit(
@@ -8724,7 +8729,8 @@ def _drain_shadow_audit_once(args) -> bool:
         healthy = healthy and (
             persisted
             and finished_audit.status == "PASS"
-            and getattr(finished_audit, "assurance", "receipts_only") == "full"
+            and assurance_rank(getattr(finished_audit, "assurance", None))
+            >= _minimum_assurance_rank(args)
             and finished_audit.agrees_with_vector is True
         )
     if not resolved:
