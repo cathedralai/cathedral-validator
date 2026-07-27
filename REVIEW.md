@@ -30,41 +30,83 @@ git -C /tmp/cathedral-upstream checkout fd02392dc969bbea09e3107febb64f1f5f748391
 ./tools/manifest.sh verify /tmp/cathedral-upstream
 ```
 
-Expected output, exactly:
+Expected output, exactly, and exit status 0:
 
 ```
 == local integrity ==
-  all tracked files match MANIFEST.sha256
+  258 tracked files match MANIFEST.sha256
   manifest covers exactly the tracked file set
 == upstream byte-identity ==
   manifest records fd02392dc969bbea09e3107febb64f1f5f748391
   checkout is      fd02392dc969bbea09e3107febb64f1f5f748391
   249 files confirmed byte-identical to upstream
+  2 declared divergences confirmed different: pyproject.toml README.md
+  7 additions confirmed absent upstream
+VERIFY OK
 ```
 
+Every one of those lines is gated on the check it describes, and any failure
+exits nonzero. Do not take that on faith either. Check 1b below proves it.
+
 `MANIFEST.origin.tsv` classifies every tracked file as `identical`, `modified`,
-or `local`, and records both hashes. To see the full divergence in one line:
+or `local`, and records both hashes. To see the full divergence:
 
 ```sh
 awk -F'\t' '$3!="identical" && !/^#/ && $1!="path" {print $3, $1}' MANIFEST.origin.tsv
 ```
 
-Expected, and nothing else (260 tracked files, of which the two manifest files
-are excluded from the manifest because a file cannot contain its own hash):
+Expected, and nothing else:
 
 ```
-local    .github/workflows/tests.yml
-local    BOUNDARY.md
+local .github/workflows/tests.yml
+local BOUNDARY.md
 modified README.md
-local    REVIEW.md
+local REVIEW.md
 modified pyproject.toml
-local    tests/boundary/test_no_game_dependency.py
-local    tools/manifest.sh
-local    tools/sync-from-upstream.sh
-local    tools/upstream-manifest.txt
+local tests/boundary/test_no_game_dependency.py
+local tools/manifest.sh
+local tools/sync-from-upstream.sh
+local tools/upstream-manifest.txt
 ```
 
-Two modified files, seven additions, 249 untouched.
+**Counting, because the numbers look inconsistent until you know why.** 260
+tracked files: 249 identical, 2 modified, 9 with no upstream counterpart. The
+awk output shows only 7 `local` rows, and `verify` says "258 tracked files match"
+rather than 260, because `MANIFEST.sha256` and `MANIFEST.origin.tsv` are
+excluded from the manifest. A file cannot contain its own hash.
+
+## Check 1b: prove the verifier actually gates
+
+A verifier that prints success unconditionally is worse than none. An earlier
+revision of `tools/manifest.sh` did exactly that: it swallowed `sha256sum -c`
+failures with `|| true` and then printed "all tracked files match" regardless,
+exiting 0 on a tampered tree. Run the self-test rather than trusting the current
+version:
+
+```sh
+./tools/manifest.sh selftest /tmp/cathedral-upstream
+```
+
+Expected, with exit status 0:
+
+```
+PASS  baseline copy verifies clean
+PASS  tampered file rejected (stale manifest)
+PASS  build refused to bless an undeclared divergence
+PASS  forged manifest rejected (local bytes hashed against upstream)
+SELFTEST OK
+```
+
+It copies the working tree to a temp dir, appends a line to
+`scaffold/validator_thin.py`, and asserts rejection three ways: with the
+manifest untouched, with `build` re-run to launder the change, and with the
+manifest hand-forged to record the tampered hash as `identical`. The third case
+is the one that matters, because comparing only recorded hashes would let a
+rebuilt manifest bless anything. `verify` hashes the local file directly against
+the upstream checkout.
+
+This same self-test runs in CI against a fresh upstream clone, so the gate is
+exercised on every push rather than only when someone remembers.
 
 Then read the two modified files' diffs. They are small:
 
@@ -145,18 +187,29 @@ python -m pytest -q scaffold/publisher/tests \
 
 This suite **fails** in any environment without PostgreSQL and outbound network,
 and those failures are inherited from upstream rather than caused by the
-extraction. Do not read a red result here as an extraction defect. The way to
-tell the difference is to run the same suite in the upstream checkout with the
-same interpreter and diff the failure sets:
+extraction. Do not read a red result here as an extraction defect.
+
+**Do not compare against a failure count, including the ones in this document.**
+The count is network-dependent and unstable: the same suite on one machine
+within an hour produced 44, 43, and once 15 failures. A count tells you nothing.
+
+Compare **failure sets**, from two runs in the same session, back to back:
 
 ```sh
-# in /tmp/cathedral-upstream, same Python, same extras
-python -m pytest -q scaffold/publisher/tests tests/thin
+DESEL='--deselect scaffold/publisher/tests/test_validator_two_mode.py::test_required_ci_collection_gate_returns_zero'
+
+cd /tmp/cathedral-upstream   # same Python, same extras
+python -m pytest -q scaffold/publisher/tests $DESEL 2>&1 | grep '^FAILED' | sed 's/FAILED //' | sort > /tmp/upstream.txt
+
+cd -                         # back to this repo
+python -m pytest -q scaffold/publisher/tests $DESEL 2>&1 | grep '^FAILED' | sed 's/FAILED //' | sort > /tmp/here.txt
+
+comm -23 /tmp/here.txt /tmp/upstream.txt   # fails here, passes upstream
 ```
 
-At the time of writing, on macOS with Python 3.11.14: upstream 44 failed / 1230
-passed, here 45 failed / 1238 passed, and the single extra failure is the
-deselected test above. Anything beyond that difference is worth investigating.
+That last command must print nothing. Anything it prints is an extraction defect
+worth investigating. On the most recent back-to-back pair the two sets were
+byte-identical at 43 failures each.
 
 The one deselection is `test_required_ci_collection_gate_returns_zero`, which
 reads upstream's `.github/workflows/two-mode-provenance.yml` and asserts on its
@@ -214,13 +267,20 @@ decision that has not been made.
 
 `cathedral-scaffold` and the `cathedral` package pulled by the `provenance`
 extra **both** declare a `cathedral-validator` console script. Whichever installs
-last wins. With `uv pip install -e '.[provenance]'`, the exact command in
-`VALIDATOR.md:111`, the work repo's neuron validator wins and
-`cathedral-validator` fails with a confusing argparse error. With `pip`, the
-correct one wins. This is inherited from upstream, not introduced here.
-`BOUNDARY.md` has the full table. Check with:
+last wins, and with uv which one that is varies **between identical runs**:
+across 13 clean-venv installs on uv 0.9.9, 6 produced the work repo's neuron
+validator and 7 produced the correct one. pip put the local project last in all
+3 runs observed. Inherited from upstream, not introduced here. `BOUNDARY.md` has
+the measured table.
+
+Because it is non-deterministic, checking once proves nothing about the next
+install. **Run this after every install**, and treat it as required:
 
 ```sh
 grep 'import main' "$(dirname "$(command -v cathedral-validator)")/cathedral-validator"
-# expect: from scaffold.cli import main
+# required: from scaffold.cli import main
 ```
+
+If it prints `from cathedral.neuron.validator import main`, fix with
+`python -m pip install -e . --no-deps` and re-check. That reinstates the correct
+entry point and leaves the `cathedral` package importable.

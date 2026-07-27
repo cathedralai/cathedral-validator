@@ -73,12 +73,13 @@ scripts/validator_release_gate.py
 scripts/verify_receipt.py
 
 # --- validator-owned root verify harnesses (closure satisfied by the above) ---
-# publisher_verify.py is deliberately NOT here: its audit-scanner bridge does a
-# module-scope `from game.arena import audit_scanner_smoke` at :632. See BOUNDARY.md.
+# Only two of upstream's thirteen are carried. Deliberately NOT here, so a
+# re-sync cannot quietly reintroduce them (see BOUNDARY.md for the full table):
+#   publisher_verify.py  module-scope `from game.arena import audit_scanner_smoke` at :632
+#   live_smoke.py        miner write path over HTTP against a deployed publisher
+#   postgres_verify.py   needs a live PostgreSQL; storage layer, not the chain decision
 weights_verify.py
-postgres_verify.py
 wire_compat.py
-live_smoke.py
 
 # --- validator docs ---
 VALIDATOR.md

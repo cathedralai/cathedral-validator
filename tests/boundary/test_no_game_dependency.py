@@ -27,7 +27,18 @@ FOREIGN_ROOTS = {"game", "hunt_board"}
 
 
 def _tracked_python_files() -> list[pathlib.Path]:
-    skip_parts = {".git", "__pycache__", ".pytest_cache", ".venv", "build", "dist"}
+    skip_parts = {
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "venv",
+        "env",
+        ".tox",
+        "site-packages",
+        "build",
+        "dist",
+    }
     return sorted(
         path
         for path in REPO_ROOT.rglob("*.py")
@@ -206,17 +217,35 @@ def test_audit_scanner_routes_refuse_before_reaching_the_sat_lane():
 def test_enabling_the_audit_scanner_is_what_would_need_the_sat_lane():
     """Negative control: the gate, not luck, is what keeps the lane out.
 
-    With the feature flag on and game/ absent, the route must fail rather than
-    serve, and it must fail specifically because the game package is missing.
+    With the feature flag on and game/ absent, the route must fail, and it must
+    fail *because* the game package is missing. Asserting only that it fails
+    would also pass if the route were broken for some unrelated reason, which
+    would leave the back-edge claim unproven.
     """
     result = _probe(
         """
         import os
         os.environ["CATHEDRAL_AUDIT_SCANNER_ENABLED"] = "1"
         app = build_app(database_path=":memory:", signing_key_hex=EVAL_KEY_HEX)
-        with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.get("/v1/audit-scanner/differential")
-        outcome = {"status": response.status_code}
+
+        outcome = {}
+        # raise_server_exceptions=True so the handler's exception propagates
+        # here instead of being flattened into an opaque 500. The identity of
+        # that exception is the whole point of this test.
+        with TestClient(app) as client:
+            try:
+                response = client.get("/v1/audit-scanner/differential")
+                outcome["status"] = response.status_code
+                outcome["raised"] = None
+            except ModuleNotFoundError as exc:
+                outcome["status"] = None
+                outcome["raised"] = "ModuleNotFoundError"
+                outcome["missing_module"] = exc.name
+            except BaseException as exc:  # noqa: BLE001
+                outcome["status"] = None
+                outcome["raised"] = type(exc).__name__
+                outcome["detail"] = str(exc)[:200]
+
         try:
             import game  # noqa: F401
             outcome["game_importable"] = True
@@ -228,7 +257,20 @@ def test_enabling_the_audit_scanner_is_what_would_need_the_sat_lane():
     )
     assert result["game_importable"] is False
     assert result["missing"] == "game"
+
+    # The route must not have served a result.
     assert result["status"] != 200, (
         "the audit-scanner differential route served a result without game/ "
         "present; the back-edge analysis in BOUNDARY.md is wrong"
+    )
+
+    # And the reason must be the absent SAT lane, not some unrelated breakage.
+    assert result["raised"] == "ModuleNotFoundError", (
+        "expected the enabled route to raise ModuleNotFoundError for the "
+        f"missing SAT lane; got {result.get('raised')} "
+        f"{result.get('detail', '')} status={result.get('status')}"
+    )
+    assert result["missing_module"] == "game", (
+        "the enabled route failed for a reason other than the absent game "
+        f"package: missing module was {result.get('missing_module')!r}"
     )

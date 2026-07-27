@@ -17,14 +17,19 @@ tmpfiles unit names, and added `docs/SN39_LAUNCH_CUTOVER_20260726.md`; all three
 are carried here.
 
 Nothing in the upstream repo was modified, moved, or deleted. This is a copy.
-The upstream reproduction locks, release manifests, and public reproduction
-paths all still resolve against the paths they already pin, which is the Phase 0
-constraint in `REPO-SPLIT-PLAN.md`.
+That matters because three things pin current upstream paths: the reproduction
+lock (`requirements/sn39-reproduction.lock`) pins the work repo as a GitHub
+archive at an exact commit, the release manifest and file digests are computed
+over the current tree, and the public reproduction path verifies against
+specific paths. A derived copy at new paths breaks none of them. Moving or
+deleting anything upstream would break all three.
 
 ## Selection rule
 
-The split plan's ownership test: *does it decide what goes on chain, or verify
-what does?*
+The ownership test used throughout: **does it decide what goes on chain, or
+verify what does?** If yes, it belongs to the validator and is carried here. If
+it instead produces scored work or the evidence for it, it belongs to the work
+lanes and stays upstream.
 
 Applied mechanically rather than by judgement wherever possible. The included
 Python set is the **import closure** of the validator entry points plus the
@@ -48,7 +53,7 @@ from a repo-relative path.
 | `requirements/` | Reproduction and build locks, asserted on by the shipped tests |
 | `scripts/` (11 of 22) | Validator-owned; every one is referenced by a shipped test |
 | `fixtures/` | Publisher test fixtures |
-| `docs/` (13 of 20) | Validator docs |
+| `docs/` (13 of 20 top-level entries) | Validator docs. 12 `.md` files plus the `docs/evidence/` directory, which counts as one entry and holds 6 files, so 18 files in total |
 | `VALIDATOR.md` | Primary validator operator doc |
 | `weights_verify.py`, `wire_compat.py` | Validator-owned root harnesses. See the sorting below |
 
@@ -77,7 +82,8 @@ from a repo-relative path.
 | `AUDIT_ARENA_V0.md`, `CATHEDRAL_V0_LANES.md`, `DISTILLATION_READINESS.md`, `LANE2_SECURE_COMPUTE_PLAN.md`, `LAUNCH_*.md`, `SOLVER_ATTESTATION_STATUS.md`, `TEE_GPU_CAPACITY.md` | Lane and launch planning docs |
 | `README.md` (upstream) | Replaced with a derived-repo README |
 | `railway.toml`, `deploy/Dockerfile`, `deploy/railway.toml`, `deploy/entrypoint.sh`, `deploy/requirements.txt` | Upstream deployment packaging; this repo is not a deploy source |
-| `deploy/` planning docs, `deploy/observability`, `deploy/sandbox`, `deploy/canonical-validator-feed`, `deploy/v2-beta-router`, `deploy/weights-failover` | Not read by anything carried here |
+| `deploy/` operator utilities: `check_env_surface.py`, `check_env_template.py`, `export_minimal_state.py`, `import_minimal_state.py`, `railway-split.ps1`, `.env.example` | Environment and state-migration tooling for the upstream deployment. Nothing carried here reads them, and this repo is not a deploy source |
+| `deploy/` planning and review docs (26 `.md` files), `deploy/observability`, `deploy/sandbox`, `deploy/canonical-validator-feed`, `deploy/v2-beta-router`, `deploy/weights-failover` | Not read by anything carried here |
 | `.github/workflows/*` (upstream) | Upstream CI, including the cross-repo provenance job. Replaced with one workflow |
 | `.gitattributes`, `.dockerignore` | Only govern files this repo does not carry |
 
@@ -125,9 +131,12 @@ two that verify chain-facing artifacts and run without external services.
 
 ## The `game.arena` back-edge
 
-`REPO-SPLIT-PLAN.md` flags a bidirectional coupling: `game/publisher.py` imports
-`scaffold.*`, and `scaffold/publisher/app.py` imports back into `game.arena` at
-`:3764` and `:4211`.
+Upstream, `game/` and `scaffold/` are coupled in both directions:
+`game/publisher.py:20-25` imports `scaffold.dimacs`, `scaffold.grading`,
+`scaffold.lanes.sandbox`, `scaffold.polaris`, `scaffold.publisher`, and
+`scaffold.verify`; and `scaffold/publisher/app.py` imports back into
+`game.arena` at `:3764` and `:4211`. That back-edge is the reason a validator
+extraction is not simply "copy `scaffold/`".
 
 **Decision: keep `app.py` byte-identical and do not ship `game/`.**
 
@@ -183,11 +192,15 @@ Every other carried file is **byte-identical** to its `fd02392d` counterpart:
 restored to upstream's exact bytes, because upstream's already covers everything
 this repo generates.
 
-Files with no upstream counterpart, which are additions rather than divergences:
-`BOUNDARY.md`, `REVIEW.md`, `MANIFEST.sha256`, `MANIFEST.origin.tsv`,
-`.github/workflows/tests.yml`, `tests/boundary/test_no_game_dependency.py`,
-`tools/manifest.sh`, `tools/sync-from-upstream.sh`,
-`tools/upstream-manifest.txt`.
+**Nine** files have no upstream counterpart. These are additions rather than
+divergences: `BOUNDARY.md`, `REVIEW.md`, `MANIFEST.sha256`,
+`MANIFEST.origin.tsv`, `.github/workflows/tests.yml`,
+`tests/boundary/test_no_game_dependency.py`, `tools/manifest.sh`,
+`tools/sync-from-upstream.sh`, `tools/upstream-manifest.txt`.
+
+`MANIFEST.origin.tsv` shows only **seven** of them as `origin=local`, because
+the two manifest files are excluded from the manifest: a file cannot contain its
+own hash. Nine files, seven rows. 249 + 2 + 9 = 260 tracked files.
 
 ## Machine-checkable origin manifest
 
@@ -247,20 +260,30 @@ Method: run the same suites in this repo and in an upstream checkout at
 then diff the failure sets. Anything failing here but passing there is an
 extraction defect.
 
+**The absolute failure count is not stable and must not be used as the check.**
+The publisher suite's inherited failures are dominated by tests that need
+PostgreSQL and outbound network. Across runs on one machine within an hour, the
+same suite produced 44, 43, and once 15 failures depending on network conditions.
+Comparing a run here against a number written down earlier proves nothing.
+
+**Compare failure sets, back to back, same session.** Latest, publisher suite
+with the one deselection, control run immediately before:
+
 | Run | Result |
 |---|---|
-| Upstream `fd02392d`, `scaffold/publisher/tests tests/thin` | 44 failed, 1230 passed |
-| Here, same suites plus `tests/boundary` | 45 failed, 1238 passed |
-| **Fails here, passes upstream** | **1**, the deselected CI-config guard above |
+| Upstream `fd02392d` | 43 failed, 1102 passed, 1 deselected |
+| Here | 43 failed, 1102 passed, 1 deselected |
+| **Fails here, passes upstream** | **0** |
 | Fails upstream, passes here | 0 |
+| Failure sets | **byte-identical** |
 
-With that one deselection applied, this repo is at exact failure parity with
-upstream: the publisher suite here reports **44 failed, 1101 passed, 1
-deselected**, against upstream's 44 failures over the same 1102 tests. The 44
-are inherited and pre-date the extraction; they come from running a suite that
-expects PostgreSQL and outbound network in an environment with neither.
+So the extraction introduces no failures at all in the publisher suite. The one
+extraction-induced failure that does exist, `test_required_ci_collection_gate_returns_zero`,
+is the deselected upstream-CI guard described above; without the deselection the
+counts are 44 here against 43 upstream.
 
-`tests/thin` and `tests/boundary` together: **137 passed** (128 and 9).
+`tests/thin` and `tests/boundary` together: **137 passed** (128 and 9). These are
+stable; they need no network.
 
 GitHub Actions on the initial commit: Python 3.11 success, Python 3.12 success,
 publisher advisory job 35 failed / 1088 passed / 22 skipped / 1 deselected on
@@ -299,27 +322,48 @@ Both distributions declare a `cathedral-validator` console script:
 | `cathedral` (from `cathedralconfidential`, pulled by the `provenance` extra) | `cathedral.neuron.validator:main` |
 
 Whichever is installed last wins, and nothing declares which that should be.
-Observed on Python 3.11:
 
-| Command | `cathedral-validator` resolves to |
-|---|---|
-| `pip install -e '.[provenance]'` | `scaffold.cli:main`, correct |
-| `uv pip install -e '.[provenance]'` | `cathedral.neuron.validator:main`, **wrong** |
-| `uv pip install -e '.[test,publisher,provenance]'` | `scaffold.cli:main`, correct |
+**With uv the outcome is not deterministic.** Repeated identical invocations
+into a fresh venv resolve differently run to run. Measured on Python 3.11.14,
+uv 0.9.9, pip 26.1.2, one clean venv per run:
 
-The middle row is the exact command in `VALIDATOR.md:111` and
-`docs/PROVENANCE.md:116`, run with uv instead of pip. It produces a
-`cathedral-validator` that is the work repo's neuron validator, which fails with
-an argparse error about unknown subcommands rather than anything that points at
-the real cause.
+| Command | Runs | `scaffold.cli:main` (correct) | `cathedral.neuron.validator:main` (**wrong**) |
+|---|---|---|---|
+| `pip install -e '.[provenance]'` | 3 | 3 | 0 |
+| `uv pip install -e '.[provenance]'` | 4 | 2 | 2 |
+| `uv pip install -e '.[test,publisher,provenance]'` | 9 | 5 | 4 |
 
-Check after installing:
+An earlier revision of this document claimed each command had a fixed outcome,
+with the all-extras uv form landing on the correct entry point. That was an
+artifact of a single observation each. It is wrong: uv's result varies across
+identical runs, and the extras set does not determine it. pip put the local
+editable project last in every run observed, but three runs is not a guarantee
+of ordering either.
+
+Non-determinism is worse than a consistent failure. A one-time check on one
+machine proves nothing about the next install, two operators running the same
+documented command can end up with different binaries, and an environment that
+worked can come back wrong after a rebuild.
+
+`uv pip install -e '.[provenance]'` is the exact command in `VALIDATOR.md:111`
+and `docs/PROVENANCE.md:116`. When it loses, `cathedral-validator` is the work
+repo's neuron validator and fails with an argparse error about unknown
+subcommands, which points nowhere near the real cause.
+
+**Required after every install**, not a fallback:
 
 ```sh
 grep 'import main' "$(dirname "$(command -v cathedral-validator)")/cathedral-validator"
 ```
 
-It should print `from scaffold.cli import main`.
+It must print `from scaffold.cli import main`. If it prints
+`from cathedral.neuron.validator import main`, reinstall this project last with
+`python -m pip install -e . --no-deps` and check again before running anything.
+
+The real fix belongs upstream: the two distributions need distinct console-script
+names, or the validator's entry point needs a name the work repo does not also
+claim. Until then this check is the only thing standing between an operator and
+a silently wrong binary.
 
 ## Re-sync procedure
 
@@ -335,20 +379,45 @@ git -C /tmp/cathedral-upstream checkout <new-sha>
 
 The script deletes each manifest path before recopying, so upstream deletions
 propagate. It touches nothing outside the manifest, so `README.md`,
-`BOUNDARY.md`, `pyproject.toml`, `.github/`, `tests/boundary/`, and `tools/`
-survive untouched.
+`BOUNDARY.md`, `pyproject.toml`, `.gitignore`, `.github/`, `tests/boundary/`,
+and `tools/` survive untouched.
 
-After a re-sync:
+### Three files sit outside the manifest and will silently drift
 
-1. Re-apply any `pyproject.toml` change upstream made, by hand. The manifest
-   deliberately does not carry `pyproject.toml`, so upstream edits to it are
-   invisible to the script. Diff it every time:
-   `git -C /tmp/cathedral-upstream show <sha>:pyproject.toml | diff - pyproject.toml`.
-   The provenance pin in particular moves with releases.
-2. Run `pytest tests/boundary`. It fails if the `game.arena` back-edge changed
-   shape.
-3. Run the full suite and compare the failure set against the same suite run
-   in the upstream checkout. A test that fails here but passes there is an
+The sync script cannot see upstream changes to these, because they are not
+manifest entries. **Diff all three by hand on every sync.**
+
+| File | Why it is outside | What to do |
+|---|---|---|
+| `pyproject.toml` | Deliberately divergent (entry points trimmed) | Diff and re-apply upstream's changes by hand. The provenance pin moves with releases, so this is the one that matters most |
+| `README.md` | Deliberately divergent (rewritten) | Update the derived-from SHA in the header |
+| `.gitignore` | **Byte-identical to upstream, but not a manifest entry** | Diff it. Because it is not carried by the script and not a declared divergence, an upstream change to it produces no signal anywhere. `manifest.sh verify` will still classify it `identical` against the *new* upstream and pass, so nothing catches the drift except this step |
+
+```sh
+for f in pyproject.toml README.md .gitignore; do
+  echo "--- $f"
+  git -C /tmp/cathedral-upstream show HEAD:"$f" | diff - "$f" || true
+done
+```
+
+`.gitignore` is the trap here. It is currently identical to upstream, so it looks
+like a carried file, but it is not in `tools/upstream-manifest.txt`. If upstream
+edits it, this repo keeps the old copy indefinitely and every check still passes.
+Either diff it each sync, or add it to the manifest and accept that the sync
+script will overwrite it.
+
+### After a re-sync
+
+1. Diff the three files above.
+2. `./tools/manifest.sh build /tmp/cathedral-upstream` then
+   `./tools/manifest.sh verify /tmp/cathedral-upstream`. The build refuses to
+   write a manifest containing an undeclared divergence, so a file that changed
+   here but not upstream stops the sync rather than being blessed.
+3. `./tools/manifest.sh selftest /tmp/cathedral-upstream` to confirm the gate
+   still rejects tampering.
+4. `pytest tests/boundary`. It fails if the `game.arena` back-edge changed shape.
+5. Run the full suite and compare the failure set against the same suite run in
+   the upstream checkout. A test that fails here but passes there is an
    extraction defect, normally a data file a test reads by repo-relative path
    that the manifest does not carry yet.
-4. Update the derived-from SHA at the top of this file and in `README.md`.
+6. Update the derived-from SHA at the top of this file and in `README.md`.
