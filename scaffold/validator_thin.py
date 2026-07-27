@@ -8636,6 +8636,10 @@ def _validate_runtime_contract(args: Any) -> None:
             not launch_gate
             and _sn39_launch_obligation(args)
             and not bool(getattr(args, "require_completed_launch_for_broadcast", False))
+            # Same beta waiver as _continuous_transition_required. Without it
+            # here the waiver is self-cancelling: clearing the gate flag to
+            # satisfy that branch trips this one instead.
+            and not bool(getattr(args, "beta_skip_launch_ceremony", False))
         ):
             raise wire.VectorError(
                 "SN39 broadcast from a weight-originating or launch-capable "
