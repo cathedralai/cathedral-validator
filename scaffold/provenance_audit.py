@@ -103,6 +103,14 @@ class ProvenanceSettings:
     # is restored by same-policy reissues at higher releases, never by
     # widening this ceiling.
     registry_max_age_secs: int = 86400
+    # How stale the anchored candidate block may be. Every "independent" chain
+    # cross-check below is queried AT candidate_set.block, a coordinate the
+    # producer chooses, so without a ceiling the oracle answers honestly about
+    # a moment the producer selected. Pinning the block to before a miner
+    # registered puts that miner outside the audited universe entirely, where
+    # no set-equality check can see the omission. None disables the ceiling and
+    # is refused in authority mode by validate_for_audit.
+    max_anchor_lag_blocks: int | None = None
 
     def validate_for_audit(self) -> None:
         if self.mode not in ("off", "shadow", "authority"):
@@ -149,12 +157,117 @@ class ProvenanceSettings:
                     "authority mode requires immutable pins and a raw-evidence "
                     "source: missing " + ", ".join(absent)
                 )
+            lag = self.max_anchor_lag_blocks
+            if (
+                lag is None
+                or isinstance(lag, bool)
+                or not isinstance(lag, int)
+                or lag <= 0
+            ):
+                raise ProvenanceAuditError(
+                    "authority mode requires --provenance-max-anchor-lag-blocks: "
+                    "without a ceiling the producer chooses the block every "
+                    "independent chain check is evaluated at"
+                )
+
+
+# Ranked assurance. The library's two-valued flag asks "was the whole epoch
+# proven", which on a 256-UID subnet with one participant is unanswerable: the
+# other 255 never submitted anything, so no replayable evidence about them can
+# exist. Worse, the whole-epoch level is unconstructible above 28 verified
+# candidates because the manifest caps receipts there, so the question and the
+# byte budget range over different sets.
+#
+# The rank below asks the answerable question instead: is everything that gets
+# PAID independently replayed, and does everything not replayed get exactly
+# zero. That is the property a weight vector actually depends on.
+#
+# Deliberately no "full" substring at rank 1: someone will read it in a log,
+# hear "full", and believe the epoch was proven.
+ASSURANCE_RANKS = {
+    "receipts_only": 0,
+    "rewarded_set_proven": 1,
+    "full_over_epoch": 2,
+    # The library's legacy spelling of the whole-epoch claim.
+    "full": 2,
+}
+
+
+def assurance_rank(level: str | None) -> int:
+    """Unknown levels rank -1 so an unrecognized claim never clears a gate."""
+    return ASSURANCE_RANKS.get(str(level or ""), -1)
+
+
+def _rank_assurance(
+    *,
+    library_level: str,
+    receipt_hotkeys: list[str],
+    raw_replayed: list[str],
+    recomputed: dict[str, float],
+    candidate_count: int,
+    anchored_block: int,
+    not_proven_reasons: list[str],
+) -> tuple[str, dict[str, Any]]:
+    """Decide the assurance level this validator is willing to claim.
+
+    Recomputed here rather than taken from the library on faith. The three
+    conditions are the ones a weight vector actually rests on:
+
+      paid implies replayed   every hotkey with a non-zero recomputed share was
+                              independently replayed from raw evidence
+      verified implies replayed
+                              no "verified" label rides on a receipt alone
+      non-empty               something was actually proven this epoch
+
+    Everything not replayed necessarily carries zero, which is what makes the
+    255 silent candidates harmless rather than disqualifying. The count and the
+    library's own reasons are carried in the scope so the claim states out loud
+    what it is silent about.
+    """
+    proven = {str(h) for h in raw_replayed}
+    verified = {str(h) for h in receipt_hotkeys}
+    rewarded = {
+        str(hotkey)
+        for hotkey, weight in recomputed.items()
+        if isinstance(weight, (int, float)) and float(weight) > 0.0
+    }
+    failures: list[str] = []
+    if verified != proven:
+        # A label with no replay behind it, or a replay the report never
+        # claimed. Either way the two views of "this miner earned" disagree.
+        failures.append(
+            f"verified set and raw-replayed set differ "
+            f"({len(verified - proven)} unreplayed, {len(proven - verified)} unclaimed)"
+        )
+    if not rewarded <= proven:
+        failures.append(
+            f"{len(rewarded - proven)} rewarded hotkey(s) were not raw-replayed"
+        )
+    if not proven:
+        failures.append("no positive raw replay in this epoch")
+    scope = {
+        "anchored_block": int(anchored_block),
+        "candidates": int(candidate_count),
+        "proven": sorted(proven),
+        "rewarded": sorted(rewarded),
+        "unproven_count": max(0, int(candidate_count) - len(proven)),
+        "library_level": str(library_level),
+        "library_reasons": [str(reason) for reason in not_proven_reasons],
+        "failures": failures,
+    }
+    if failures:
+        return "receipts_only", scope
+    # The library's whole-epoch claim, when it can make one, still outranks.
+    if assurance_rank(library_level) >= ASSURANCE_RANKS["full_over_epoch"]:
+        return "full_over_epoch", scope
+    return "rewarded_set_proven", scope
 
 
 @dataclass
 class ProvenanceAudit:
     status: str  # PASS | FAIL | NOT_PROVEN
-    assurance: str = "receipts_only"  # full | receipts_only
+    assurance: str = "receipts_only"  # receipts_only | rewarded_set_proven | ...
+    assurance_scope: dict[str, Any] = field(default_factory=dict)
     index_source_epoch: int | None = None
     index_manifest: str | None = None
     policy_digest: str | None = None
@@ -994,6 +1107,30 @@ def run_audit(
                     "independently verified",
                 )
             anchored_block = int(candidate_snapshot["block"])
+            # Anchor freshness. Every check below asks the chain about
+            # `anchored_block`, so an unbounded anchor lets the producer pick
+            # which moment gets audited: pin it before a miner registered and
+            # that miner is outside the candidate universe, where the
+            # bidirectional set-equality check cannot see the omission because
+            # it is not an omission at that block. A negative lag means the
+            # anchor claims a block the validator has not finalized yet.
+            lag_ceiling = settings.max_anchor_lag_blocks
+            if lag_ceiling is not None and current_block is not None:
+                lag = int(current_block) - anchored_block
+                if lag < 0:
+                    raise ProvenanceAuditError(
+                        f"anchored candidate block {anchored_block} is ahead of "
+                        f"the validator's finalized head {int(current_block)}"
+                    )
+                if lag > int(lag_ceiling):
+                    raise ProvenanceUnavailable(
+                        f"anchored candidate block {anchored_block} is {lag} "
+                        f"blocks behind the finalized head, over the "
+                        f"{int(lag_ceiling)}-block ceiling",
+                        "re-export the evidence against a recent candidate "
+                        "snapshot, or raise max_anchor_lag_blocks if the "
+                        "producer's export cadence genuinely needs it",
+                    )
             try:
                 independent_hash = _chain_lookup_bounded(
                     block_hash_lookup,
@@ -1093,9 +1230,28 @@ def run_audit(
                 ),
             )
 
+        # Both sets come from result.miners, the same source the audit fields
+        # below use. The library exposes no precomputed list for either, so
+        # reading one off the result object would silently yield nothing.
+        assurance_level, assurance_scope = _rank_assurance(
+            library_level=result.assurance_level,
+            receipt_hotkeys=[
+                miner.hotkey for miner in result.miners if miner.receipt_verified
+            ],
+            raw_replayed=[
+                miner.hotkey
+                for miner in result.miners
+                if getattr(miner, "raw_verified", False)
+            ],
+            recomputed=dict(result.recomputed_hotkey_weights),
+            candidate_count=len(manifest["candidate_set"]["candidates"]),
+            anchored_block=anchored_block,
+            not_proven_reasons=list(getattr(result, "not_proven_reasons", ()) or []),
+        )
         audit = ProvenanceAudit(
             status="PASS",
-            assurance=result.assurance_level,
+            assurance=assurance_level,
+            assurance_scope=assurance_scope,
             index_source_epoch=index_epoch,
             index_manifest=manifest_digest,
             policy_digest=result.policy_digest,

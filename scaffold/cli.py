@@ -75,6 +75,13 @@ _DEFAULTS = {
     "provenance_source_revision": None,
     "provenance_burn_hotkey": None,
     "provenance_index_max_age_secs": 3600.0,
+    # Anchor freshness ceiling. Mandatory in full/authority mode: every
+    # independent chain check runs at the producer-chosen candidate block,
+    # so an unbounded anchor lets the producer pick which moment is audited.
+    "provenance_max_anchor_lag_blocks": None,
+    # Lowest assurance full mode will submit on. "full_over_epoch" restores
+    # the pre-rank behaviour, which never submits on a populated subnet.
+    "min_assurance": "rewarded_set_proven",
     "jsonl": None,  # JSONL event stream file
     "status_jsonl": None,  # sanitized status projection a publisher may read
     # Beta escape: waive the one-shot launch ceremony. Correctness checks are
@@ -127,6 +134,8 @@ _CONFIG_MAP = {
     ("logs", "status_jsonl"): "status_jsonl",
     ("launch", "beta_skip_launch_ceremony"): "beta_skip_launch_ceremony",
     ("provenance", "feed_down_fallback"): "feed_down_fallback",
+    ("provenance", "max_anchor_lag_blocks"): "provenance_max_anchor_lag_blocks",
+    ("provenance", "min_assurance"): "min_assurance",
 }
 
 # env var -> our flat config key
@@ -155,6 +164,8 @@ _ENV_MAP = {
     "CATHEDRAL_PROVENANCE_VERIFIER_BINARY": "provenance_verifier_binary",
     "CATHEDRAL_PROVENANCE_SOURCE_REVISION": "provenance_source_revision",
     "CATHEDRAL_PROVENANCE_BURN_HOTKEY": "provenance_burn_hotkey",
+    "CATHEDRAL_PROVENANCE_MAX_ANCHOR_LAG_BLOCKS": "provenance_max_anchor_lag_blocks",
+    "CATHEDRAL_PROVENANCE_MIN_ASSURANCE": "min_assurance",
     "CATHEDRAL_VALIDATOR_JSONL": "jsonl",
     "CATHEDRAL_VALIDATOR_STATUS_JSONL": "status_jsonl",
 }
@@ -222,6 +233,8 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "provenance_verifier_binary",
         "provenance_source_revision",
         "provenance_burn_hotkey",
+        "provenance_max_anchor_lag_blocks",
+        "min_assurance",
         "jsonl",
         "status_jsonl",
         "beta_skip_launch_ceremony",
@@ -249,6 +262,10 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         cfg["require_completed_launch_for_broadcast"],
         field="require_completed_launch_for_broadcast",
     )
+    if cfg.get("provenance_max_anchor_lag_blocks") is not None:
+        cfg["provenance_max_anchor_lag_blocks"] = int(
+            cfg["provenance_max_anchor_lag_blocks"]
+        )
     cfg["feed_down_fallback"] = _parse_bool(
         cfg["feed_down_fallback"], field="feed_down_fallback"
     )
@@ -557,6 +574,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     sp.add_argument(
         "--provenance-verifier-binary", dest="provenance_verifier_binary", default=None
+    )
+    sp.add_argument(
+        "--provenance-max-anchor-lag-blocks",
+        dest="provenance_max_anchor_lag_blocks",
+        type=int,
+        default=None,
+        help="how stale the anchored candidate block may be; mandatory in full "
+        "mode because every independent chain check is evaluated at it",
+    )
+    sp.add_argument(
+        "--min-assurance",
+        dest="min_assurance",
+        default=None,
+        choices=("receipts_only", "rewarded_set_proven", "full_over_epoch"),
+        help="lowest assurance full mode will submit on",
     )
     sp.add_argument(
         "--provenance-source-revision", dest="provenance_source_revision", default=None

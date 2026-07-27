@@ -43,8 +43,10 @@ from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
 from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger, stable_error
 from .provenance_audit import (
+    ASSURANCE_RANKS,
     MECHANISM_DEFAULT,
     ProvenanceSettings,
+    assurance_rank,
     run_audit,
 )
 
@@ -862,6 +864,34 @@ def _authority_lane_transition_authorized(
     )
 
 
+def _assert_anchor_not_rewound(
+    current: dict[str, Any], updates: dict[str, Any]
+) -> None:
+    """Refuse a reservation whose anchored candidate block moved backwards.
+
+    The per-audit ceiling bounds how STALE an anchor may be against the live
+    head. This bounds it against history. Without both, a producer can walk the
+    anchor backwards epoch over epoch while every in-audit chain check still
+    passes, because each one is evaluated at whatever block it was handed.
+
+    Reusing the same anchor is legitimate (two exports inside one block). Only
+    a strict decrease is a rollback. A non-int, or a bool masquerading as one,
+    carries no ordering and is ignored here rather than silently compared.
+    """
+    new_anchor = updates.get("provenance_candidate_block")
+    stored_anchor = current.get("provenance_candidate_block")
+    if (
+        isinstance(new_anchor, int)
+        and not isinstance(new_anchor, bool)
+        and isinstance(stored_anchor, int)
+        and not isinstance(stored_anchor, bool)
+        and new_anchor < stored_anchor
+    ):
+        raise ValueError(
+            f"anchor rollback: candidate block {new_anchor} < reserved {stored_anchor}"
+        )
+
+
 def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
     """Atomic CHECK-AND-RESERVE under the state lock (authority path).
 
@@ -1132,6 +1162,7 @@ def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
                 raise ValueError(
                     "reservation equivocation: same source epoch, different report"
                 )
+        _assert_anchor_not_rewound(current, updates)
         # Append-only attempted-ID journals prevent A -> B -> A replay, not
         # merely immediate duplicate A -> A. They are intentionally unbounded:
         # deleting an old irreversible attempt would reopen its retry window.
@@ -1257,7 +1288,32 @@ def _provenance_settings(args) -> ProvenanceSettings:
         index_max_age_secs=float(
             getattr(args, "provenance_index_max_age_secs", 3600.0)
         ),
+        max_anchor_lag_blocks=(
+            None
+            if getattr(args, "provenance_max_anchor_lag_blocks", None) is None
+            else int(args.provenance_max_anchor_lag_blocks)
+        ),
     )
+
+
+def _minimum_assurance_rank(args: Any) -> int:
+    """The lowest assurance this runtime will submit on.
+
+    Defaults to rewarded_set_proven: every hotkey receiving weight was
+    independently replayed from raw evidence, and everything not replayed
+    carries exactly zero. Setting this to full_over_epoch reproduces the old
+    behaviour exactly, which on any subnet with more registered hotkeys than
+    the manifest's receipt cap means never submitting at all. That is the
+    rollback lever, and it needs no producer redeploy.
+    """
+    configured = getattr(args, "min_assurance", None) or "rewarded_set_proven"
+    rank = ASSURANCE_RANKS.get(str(configured))
+    if rank is None:
+        raise wire.VectorError(
+            f"min_assurance must be one of {', '.join(sorted(ASSURANCE_RANKS))}; "
+            f"got {configured!r}"
+        )
+    return rank
 
 
 def _runtime_modes(args: Any) -> tuple[str, str]:
@@ -1543,6 +1599,7 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
                         "provenance_index_manifest": audit.index_manifest,
                         "provenance_policy_release": audit.policy_release,
                         "provenance_policy_digest": audit.policy_digest,
+                        "provenance_candidate_block": audit.candidate_block,
                     },
                 )
         except ValueError as exc:
@@ -1631,19 +1688,41 @@ def _run_provenance_stage(
                 f"full-provenance authority audit did not PASS ({audit.status}): "
                 f"{audit.error or 'see events'}"
             )
-        if getattr(audit, "assurance", "receipts_only") != "full":
+        # Rank, not string equality. The old test demanded the whole-epoch
+        # claim, which cannot be constructed on a subnet with more registered
+        # hotkeys than the manifest's receipt cap, so authority could never
+        # submit. rewarded_set_proven is the answerable claim: everything paid
+        # was replayed, everything unreplayed gets zero.
+        minimum = _minimum_assurance_rank(args)
+        if assurance_rank(getattr(audit, "assurance", None)) < minimum:
             # A receipts-only PASS must not emit a PASS event or reserve.
+            # The audit already knows exactly which sub-claim it could not
+            # establish; dropping that and printing a fixed sentence left the
+            # operator diagnosing a refusal from its category alone. The
+            # shadow path has always rendered these (see _log_audit_events),
+            # so authority printing less than shadow was the defect.
+            reasons = list(getattr(audit, "not_proven_reasons", ()) or ())
+            replayed = list(getattr(audit, "raw_replayed_hotkeys", ()) or ())
+            scope = dict(getattr(audit, "assurance_scope", {}) or {})
+            detail = (
+                f"assurance {getattr(audit, 'assurance', 'unknown')!s} ranks below "
+                f"the configured minimum; {len(replayed)} miner(s) raw-replayed, "
+                f"{scope.get('unproven_count', '?')} candidate(s) not replayed"
+            )
+            for reason in list(scope.get("failures") or []) + reasons:
+                detail += f"; {reason}"
             _get_events(args).event(
                 "PROVENANCE_AUDIT_NOT_PROVEN",
                 stage="provenance",
                 status=NOT_PROVEN,
                 artifact=audit.manifest_digest,
-                detail="receipts-only recomputation cannot back authority",
+                detail=detail[:512],
                 remediation="provide the controlled package and verifier pins",
             )
+            _lifecycle("PROVENANCE not proven", detail)
             raise wire.VectorError(
-                "authority requires FULL assurance (raw-evidence replay); "
-                "receipts-only recomputation is NOT PROVEN and never submits"
+                "full mode requires every paid hotkey to be raw-replayed; this "
+                "epoch did not reach that and nothing was submitted"
             )
         # RESERVE FIRST, under ONE flock hold covering the index line, the
         # policy line, the report line, and the chain identity. Only a
@@ -1663,6 +1742,7 @@ def _run_provenance_stage(
                     "provenance_index_manifest": audit.index_manifest,
                     "provenance_policy_release": audit.policy_release,
                     "provenance_policy_digest": audit.policy_digest,
+                    "provenance_candidate_block": audit.candidate_block,
                 },
             )
         except (ValueError, OSError) as exc:
@@ -1786,6 +1866,7 @@ def _run_launch_rewarded_set_gate(
                     "provenance_index_manifest": audit.index_manifest,
                     "provenance_policy_release": audit.policy_release,
                     "provenance_policy_digest": audit.policy_digest,
+                    "provenance_candidate_block": audit.candidate_block,
                 },
             )
         except (ValueError, OSError) as exc:
@@ -3908,6 +3989,7 @@ def _chain_preflight_unbounded(
         immune_owner_uids_limit = int(
             getattr(owner_limit_value, "value", owner_limit_value)
         )
+
         # Pruning-score inputs. The runtime exposes no PruningScores map on
         # this chain, so eviction order is derived from the metrics a scalar
         # score is monotone in. Missing series are treated as all-zero, which
@@ -8939,7 +9021,9 @@ def run(args) -> int:
                 break
             except _RetryablePreSignHeadDrift as e:
                 if pre_sign_head_drift_retries >= SN39_PRE_SIGN_HEAD_DRIFT_RETRIES:
-                    render.outcome(False, f"head drift, retries exhausted: {stable_error(e)}")
+                    render.outcome(
+                        False, f"head drift, retries exhausted: {stable_error(e)}"
+                    )
                     _get_events(args).event(
                         "PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED",
                         stage="submit",
@@ -8974,7 +9058,9 @@ def run(args) -> int:
                 # mutable proof from the aborted attempt.
                 continue
             except _PostSignedSubmissionMismatch as e:
-                render.outcome(False, f"pending receipt contradiction: {stable_error(e)}")
+                render.outcome(
+                    False, f"pending receipt contradiction: {stable_error(e)}"
+                )
                 _get_events(args).event(
                     "PENDING_RECEIPT_CONTRADICTION",
                     stage="result",
