@@ -4840,13 +4840,20 @@ def _authorize_sn39_chain_submission(
         # exact durable reservation, UID/epoch/inclusion safety). Refuse a call
         # that nonetheless claims launch or recurring authority it cannot
         # present, so the relay path can never be used to smuggle one.
+        # The authority lane reaches here only on a runtime whose operator
+        # declared FULL mode under the beta waiver: no ceremony to re-prove, so
+        # nothing to smuggle. Every claim this branch actually guards against
+        # stays refused below for both lanes.
+        allowed_lanes = (
+            ("thin", "authority") if _operator_declared_authority(args) else ("thin",)
+        )
         if (
-            lane != "thin"
+            lane not in allowed_lanes
             or identity.get("continuous_authorization") is not None
             or getattr(args, "_continuous_submission_authorization", None) is not None
             or state.get("submission_pending_launch_attempt") is True
             or state.get("submission_pending_budget_scope")
-            not in (None, "thin_bounded")
+            not in (None, f"{lane}_bounded")
         ):
             raise wire.VectorError(
                 "SN39 relay chain call claims launch or recurring-write "
