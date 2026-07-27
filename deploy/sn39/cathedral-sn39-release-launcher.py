@@ -1,4 +1,4 @@
-#!/usr/bin/python3 -I
+#!/usr/bin/python3.12 -I
 """Verify and exec one immutable SN39 validator release.
 
 Install this file root-owned, mode 0755, at
@@ -20,7 +20,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-MANIFEST = Path("/etc/cathedral/sn39-release-manifest.json")
+INSTALL_ROOT = Path("/etc/cathedral-validator")
+MANIFEST = INSTALL_ROOT / "sn39-release-manifest.json"
 RELEASES = Path("/opt/cathedral-sn39/releases")
 VENVS = Path("/opt/cathedral-sn39/venvs")
 RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
@@ -28,10 +29,10 @@ JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
 FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
 RECURRING_AUTHORIZER_CONTEXT_ENV = "CATHEDRAL_SN39_RECURRING_AUTHORIZER_CONTEXT"
 CONFIGS = {
-    "preflight": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
-    "launch": Path("/etc/cathedral/validator-mainnet-sn39-launch.toml"),
-    "continuous": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
-    "reconcile": Path("/etc/cathedral/validator-mainnet-sn39.toml"),
+    "preflight": INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+    "launch": INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+    "continuous": INSTALL_ROOT / "validator-mainnet-sn39.toml",
+    "reconcile": INSTALL_ROOT / "validator-mainnet-sn39.toml",
 }
 MODES = frozenset({*CONFIGS, "status", "finalize", "authorize-recurring"})
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
@@ -40,7 +41,7 @@ LEGACY_SERVICE_UNIT = "cathedral-thin-validator.service"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ROOT_UID = 0
-BOOTSTRAP_PYTHON = Path("/usr/bin/python3")
+BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
 
 
 class InstallError(RuntimeError):
@@ -77,6 +78,8 @@ def _root_controlled(path: Path, *, directory: bool = False) -> None:
         or info.st_uid != ROOT_UID
         or (not directory and info.st_nlink != 1)
         or stat.S_IMODE(info.st_mode) & 0o022
+        or (directory and stat.S_IMODE(info.st_mode) & 0o005 != 0o005)
+        or (not directory and stat.S_IMODE(info.st_mode) & 0o004 != 0o004)
     ):
         raise InstallError(
             f"required path is not immutable and root-controlled: {path}"
@@ -114,13 +117,20 @@ def _immutable_tree_digest(root: Path) -> str:
                 )
             mode = f"{stat.S_IMODE(info.st_mode):04o}"
             if stat.S_ISREG(info.st_mode):
-                if info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
+                if (
+                    info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o004 != 0o004
+                ):
                     raise InstallError(
                         f"immutable tree has a mutable or unsupported entry: {path}"
                     )
                 _record_digest(tree, "file", relative, mode, _digest(path))
             elif stat.S_ISDIR(info.st_mode):
-                if stat.S_IMODE(info.st_mode) & 0o022:
+                if (
+                    stat.S_IMODE(info.st_mode) & 0o022
+                    or stat.S_IMODE(info.st_mode) & 0o005 != 0o005
+                ):
                     raise InstallError(
                         f"immutable tree has a mutable or unsupported entry: {path}"
                     )
@@ -133,24 +143,43 @@ def _immutable_tree_digest(root: Path) -> str:
                     raise InstallError(
                         f"immutable tree symlink cannot be resolved: {path}"
                     ) from exc
-                if (
+                if stat.S_ISDIR(target_info.st_mode) and target.is_relative_to(root):
+                    if (
+                        target_info.st_uid != ROOT_UID
+                        or stat.S_IMODE(target_info.st_mode) & 0o022
+                        or stat.S_IMODE(target_info.st_mode) & 0o005 != 0o005
+                    ):
+                        raise InstallError(
+                            f"immutable tree symlink has an unsafe target: {path}"
+                        )
+                    _record_digest(
+                        tree,
+                        "directory-symlink",
+                        relative,
+                        os.readlink(path),
+                        target.relative_to(root).as_posix(),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                    )
+                elif (
                     target_info.st_uid != ROOT_UID
                     or target_info.st_nlink != 1
                     or stat.S_IMODE(target_info.st_mode) & 0o022
+                    or stat.S_IMODE(target_info.st_mode) & 0o004 != 0o004
                     or not stat.S_ISREG(target_info.st_mode)
                 ):
                     raise InstallError(
                         f"immutable tree symlink has an unsafe target: {path}"
                     )
-                _record_digest(
-                    tree,
-                    "symlink",
-                    relative,
-                    os.readlink(path),
-                    str(target),
-                    f"{stat.S_IMODE(target_info.st_mode):04o}",
-                    _digest(target),
-                )
+                else:
+                    _record_digest(
+                        tree,
+                        "symlink",
+                        relative,
+                        os.readlink(path),
+                        str(target),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                        _digest(target),
+                    )
             else:
                 raise InstallError(
                     f"immutable tree has a mutable or unsupported entry: {path}"
@@ -303,7 +332,7 @@ def _check_digest_map(
 def _git_output(release: Path, *args: str) -> str:
     try:
         return subprocess.check_output(
-            ["/usr/bin/git", *args],
+            ["/usr/bin/git", "-c", f"safe.directory={release}", *args],
             cwd=release,
             text=True,
             stderr=subprocess.DEVNULL,
