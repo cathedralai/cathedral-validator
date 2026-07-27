@@ -268,17 +268,24 @@ ubuntu. The ubuntu failure set is smaller than the macOS one, consistent with
 these being environment-dependent. It has not been baselined against upstream on
 ubuntu; the like-for-like comparison above was done on macOS.
 
-CLI smoke, against the real production API:
+CLI smoke, run once on 2026-07-27:
 
 ```
 cathedral-validator serve --config config/validator-mainnet-sn39.toml --offline --once
 ```
 
-fetches the live signed vector from `https://api.cathedral.computer`, verifies
-the signature against the pinned `cathedral-weight-policy` key, and passes the
+fetched the live signed vector from `https://api.cathedral.computer`, verified
+the signature against the pinned `cathedral-weight-policy` key, and passed the
 freshness and rollback-fence checks before stopping at the synthetic UID map
 that `--offline` substitutes for chain state. `cathedral-validator --help` and
 `cathedral-candidate-snapshot --help` both work.
+
+That run was a **read-only HTTPS GET** against a public endpoint: no
+`--broadcast`, no chain write, no wallet or key material, no state changed
+anywhere. It is recorded here as evidence that the extracted tree verifies
+production evidence end to end. It is **not** part of the review procedure, and
+`REVIEW.md` does not ask anyone to repeat it. Reviewing this repo requires no
+network access beyond cloning upstream and installing packages.
 
 ## Console-script name collision with the work repo
 
