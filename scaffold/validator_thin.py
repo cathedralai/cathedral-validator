@@ -5736,6 +5736,24 @@ def _thin_tick_locked(args) -> bool:
             preflight=preflight,
             burn_uid=int(burn_uid) if burn_uid is not None else None,
         )
+    # The launch and authority paths both refuse a burn destination that is not
+    # the operator-pinned hotkey (see _revalidate_launch_after_rewarded_set_replay
+    # and _revalidate_authority_after_audit). The thin tick had no equivalent, so
+    # the recurring writer took the destination from the signed vector alone.
+    # The pin is already in process and _validate_resolved_chain_contract has
+    # already proven it is the live subnet owner, so anchoring the feed's
+    # destination to it costs nothing and removes a signed vector's ability to
+    # redirect the burn share on its own authority.
+    pinned_burn_hotkey = getattr(args, "provenance_burn_hotkey", None)
+    if (
+        isinstance(pinned_burn_hotkey, str)
+        and pinned_burn_hotkey
+        and burn_hotkey is not None
+        and burn_hotkey != pinned_burn_hotkey
+    ):
+        raise wire.VectorError(
+            "signed vector burn destination is not the pinned burn hotkey"
+        )
     burn_share = uid_weights.get(int(burn_uid), 0.0) if burn_uid is not None else 0.0
     _lifecycle(
         "MAP complete",
