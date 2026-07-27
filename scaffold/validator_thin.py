@@ -105,7 +105,15 @@ class _PostSignedSubmissionMismatch(wire.VectorError):
 
 
 EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
-SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 1
+# A full attempt (preflight, feed, gates, provenance audit) spends most of a
+# 12s Finney block between sampling the finalized head and reaching the
+# pre-sign equality check, so any single attempt loses that race more often
+# than it wins. Two attempts per tick therefore stalled recurring operation
+# behind the 25 minute tick interval. Every retry rebuilds the entire tick from
+# a fresh finalized head and re-proves signature, freshness, rollback fence,
+# contract, burn invariants and UID mapping safety, so this is a retry budget
+# only: the pre-sign check itself stays exact.
+SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 
 
 def _ms_iso_now() -> str:
