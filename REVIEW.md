@@ -191,11 +191,13 @@ as the re-sync input.
 ## Check 6: nothing operational leaked in
 
 ```sh
-grep -rn "BEGIN.*PRIVATE KEY" . --exclude-dir=.git --exclude-dir=.venv
+git ls-files | grep -v '^REVIEW\.md$' | xargs grep -l "BEGIN.*PRIVATE KEY"
 git ls-files | grep -iE '\.env$|\.pem$|id_rsa|\.key$'
 ```
 
-Expected: no output from either.
+Expected: no output from either. (This file is excluded from the first command
+because it contains the search pattern in the line above, which would otherwise
+match itself.)
 
 `config/` carries **public** key bundles and digests, which is what an
 independent validator needs in order to verify Cathedral's signatures. There is
