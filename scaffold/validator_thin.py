@@ -7854,7 +7854,10 @@ def _match_signed_public_release_to_launch(
         < broadcast_intent.get("era_reference_block", 0)
         + broadcast_intent.get("mortal_period_blocks", 0),
         full.get("scope") == "rewarded_set_full",
-        full.get("whole_epoch_assurance") in {"receipts_only", "full"},
+        # An accepted vocabulary, not a rank test: this validates a recorded
+        # launch approval, so it must keep parsing artifacts written before the
+        # ranked levels existed as well as ones written after.
+        full.get("whole_epoch_assurance") in set(ASSURANCE_RANKS),
         full.get("vector_agrees") is True,
         full.get("rewarded_hotkeys") == full.get("raw_replayed_hotkeys"),
         bool(full.get("rewarded_hotkeys")),
