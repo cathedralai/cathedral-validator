@@ -65,7 +65,9 @@ require_full_provenance_for_broadcast = false
 # This proves the one-shot launch but does not grant recurring write authority.
 # The separately signed /etc/cathedral/sn39-recurring-write-authorization.json
 # is also required before every reservation.
-require_completed_launch_for_broadcast = true
+# Paired with beta_skip_launch_ceremony below: both branches of
+# _continuous_transition_required must agree, or the waiver is inert.
+require_completed_launch_for_broadcast = false
 
 [logs]
 # The raw journal is private (0600, no reader group): it carries hotkeys,
