@@ -146,17 +146,18 @@ broken for real.
 
 ## Files that differ from upstream
 
-Two, plus files that have no upstream counterpart.
+Three, plus files that have no upstream counterpart.
 
 | File | Change |
 |---|---|
 | `pyproject.toml` | Trimmed. See below |
 | `README.md` | Rewritten for the derived repo |
+| `.gitignore` | Rewritten. Upstream's covers `game/arena/PROGRESS.md` and a list of internal planning docs that do not exist here; this one adds the SQLite artifacts the publisher tests leave behind |
 
 Every other file carried here is **byte-identical** to its `fd02392d`
-counterpart, verified with `cmp` across all 234 of them.
+counterpart: 250 of 258 tracked files, verified with `cmp`.
 
-New files with no upstream counterpart: `BOUNDARY.md`, `.gitignore`,
+New files with no upstream counterpart: `BOUNDARY.md`,
 `.github/workflows/tests.yml`, `tests/boundary/test_no_game_dependency.py`,
 `tools/sync-from-upstream.sh`, `tools/upstream-manifest.txt`.
 
