@@ -16,7 +16,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SOURCE = Path("/var/log/cathedral-validator/validator-events.jsonl")
+# The sanitized projection the validator writes. The raw journal is 0600
+# and is deliberately unreadable here: it carries hotkeys, receipts and
+# caller-supplied fields that must never reach the public tree.
+SOURCE = Path("/var/log/cathedral-validator/validator-status.jsonl")
 PUBLIC_ROOT = Path("/var/lib/cathedral-public-evidence")
 LOG_ROOT = PUBLIC_ROOT / "logs"
 INDEX = PUBLIC_ROOT / "index.json"

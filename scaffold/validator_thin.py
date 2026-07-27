@@ -1259,6 +1259,12 @@ def _get_events(args) -> EventLogger:
         mode=authority,
         jsonl_path=getattr(args, "jsonl", None) or None,
         jsonl_group=os.environ.get("CATHEDRAL_VALIDATOR_JSONL_GROUP") or None,
+        # The raw journal above stays private. A publisher reads this
+        # projection instead, so the reader group lands on the sanitized
+        # surface rather than on the record that carries hotkeys, receipts
+        # and caller-supplied fields.
+        status_path=getattr(args, "status_jsonl", None) or None,
+        status_group=os.environ.get("CATHEDRAL_VALIDATOR_STATUS_GROUP") or None,
         tty=sys.stdout,
     )
     try:

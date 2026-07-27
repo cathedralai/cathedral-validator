@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from datetime import UTC, datetime
+from collections.abc import Mapping
 from typing import IO, Any
 
 PASS = "PASS"
@@ -149,6 +150,80 @@ def _redact(value: str) -> str:
     return _neutralize(value)
 
 
+# The sanitized status stream carries operational shape only. It is a strict
+# allowlist rather than a denylist because the raw record accepts arbitrary
+# **fields from callers: a denylist would leak every field nobody thought to
+# name. `hotkey` is deliberately absent, as are all caller-supplied extras,
+# so receipts, evidence payloads, credentials and private provenance cannot
+# reach a group-readable file no matter what an emitter passes.
+STATUS_FIELDS = (
+    "ts",
+    "event",
+    "stage",
+    "mode",
+    "status",
+    "duration_ms",
+    "artifact",
+    "detail",
+    "remediation",
+)
+
+
+def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
+    """Append-only open that refuses symlinks and non-owner files.
+
+    Creates 0600. A reader group is permitted only when the service pins one
+    explicitly, and then the mode is forced to exactly 0640. Callers that pass
+    no group get a strictly private file.
+    """
+    import stat as _stat
+
+    group_gid = grp.getgrnam(group).gr_gid if group is not None else None
+    flags = (
+        os.O_WRONLY
+        | os.O_APPEND
+        | os.O_CREAT
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        opened_mode = _stat.S_IMODE(opened.st_mode)
+        if (
+            not _stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened_mode & 0o007
+            or opened_mode not in (0o600, 0o640)
+        ):
+            raise ValueError(f"{label} must be an owner-controlled regular file")
+        if group_gid is None:
+            if opened_mode & 0o070:
+                raise ValueError(
+                    f"{label} must be private (0600) without a reader group"
+                )
+        else:
+            os.fchown(descriptor, -1, group_gid)
+            os.fchmod(descriptor, 0o640)
+            secured = os.fstat(descriptor)
+            if secured.st_gid != group_gid or _stat.S_IMODE(secured.st_mode) != 0o640:
+                raise ValueError(f"{label} reader-group setup failed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return os.fdopen(descriptor, "a", encoding="utf-8")
+
+
+def sanitized_status_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one raw event onto the operational allowlist.
+
+    The raw journal stays private (0600, no reader group). This projection is
+    what a separate status publisher is permitted to read, so it must never
+    widen with the raw schema.
+    """
+    return {key: record[key] for key in STATUS_FIELDS if key in record}
+
+
 class EventLogger:
     def __init__(
         self,
@@ -157,60 +232,24 @@ class EventLogger:
         jsonl: IO[str] | None = None,
         jsonl_path: str | None = None,
         jsonl_group: str | None = None,
+        status_path: str | None = None,
+        status_group: str | None = None,
         tty: IO[str] | None = None,
         color: bool | None = None,
     ) -> None:
         self.mode = _neutralize(mode)[:32]
         self._jsonl = jsonl
         self._jsonl_file: IO[str] | None = None
+        self._status_file: IO[str] | None = None
         if jsonl_path:
-            group_gid = (
-                grp.getgrnam(jsonl_group).gr_gid if jsonl_group is not None else None
+            self._jsonl_file = _open_secure_append(jsonl_path, jsonl_group, "event log")
+        if status_path:
+            # The sanitized stream is the ONLY surface a reader group may see.
+            # It is projected through STATUS_FIELDS, so granting it a group is
+            # safe in a way granting one to the raw journal is not.
+            self._status_file = _open_secure_append(
+                status_path, status_group, "status log"
             )
-            # Secure append: refuse symlinks/non-regular files, create 0600,
-            # and permit 0640 only when an explicit reader group is pinned by
-            # the service. This lets a separate sanitizer read the private
-            # source without giving the validator access to the public tree.
-            flags = (
-                os.O_WRONLY
-                | os.O_APPEND
-                | os.O_CREAT
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-            )
-            descriptor = os.open(jsonl_path, flags, 0o600)
-            import stat as _stat
-
-            try:
-                opened = os.fstat(descriptor)
-                opened_mode = _stat.S_IMODE(opened.st_mode)
-                if (
-                    not _stat.S_ISREG(opened.st_mode)
-                    or opened.st_uid != os.geteuid()
-                    or opened_mode & 0o007
-                    or opened_mode not in (0o600, 0o640)
-                ):
-                    raise ValueError(
-                        "event log must be an owner-controlled regular file"
-                    )
-                if group_gid is None:
-                    if opened_mode & 0o070:
-                        raise ValueError(
-                            "event log must be private (0600) without a reader group"
-                        )
-                else:
-                    os.fchown(descriptor, -1, group_gid)
-                    os.fchmod(descriptor, 0o640)
-                    secured = os.fstat(descriptor)
-                    if (
-                        secured.st_gid != group_gid
-                        or _stat.S_IMODE(secured.st_mode) != 0o640
-                    ):
-                        raise ValueError("event log reader-group setup failed")
-            except BaseException:
-                os.close(descriptor)
-                raise
-            self._jsonl_file = os.fdopen(descriptor, "a", encoding="utf-8")
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
             color = (
@@ -225,6 +264,9 @@ class EventLogger:
         if self._jsonl_file is not None:
             self._jsonl_file.close()
             self._jsonl_file = None
+        if self._status_file is not None:
+            self._status_file.close()
+            self._status_file = None
 
     def event(
         self,
@@ -270,6 +312,12 @@ class EventLogger:
             if target is not None:
                 target.write(line + "\n")
                 target.flush()
+        if self._status_file is not None:
+            status_line = json.dumps(
+                sanitized_status_record(record), separators=(",", ":"), allow_nan=False
+            )
+            self._status_file.write(status_line + "\n")
+            self._status_file.flush()
         self._write_tty(record)
         return record
 

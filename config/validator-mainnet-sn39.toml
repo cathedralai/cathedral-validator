@@ -61,4 +61,8 @@ require_full_provenance_for_broadcast = false
 require_completed_launch_for_broadcast = true
 
 [logs]
+# The raw journal is private (0600, no reader group): it carries hotkeys,
+# receipts and caller-supplied fields. The status publisher reads the
+# sanitized projection below instead, which is group-readable by design.
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"
