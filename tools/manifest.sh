@@ -29,7 +29,20 @@ tracked() { git ls-files | grep -vE '^MANIFEST\.(sha256|origin\.tsv)$'; }
 
 # The only files permitted to differ from upstream. Anything else classified
 # `modified` is a defect, not a decision.
-ALLOWED_DIVERGENCE="pyproject.toml README.md"
+#
+# The event-log group split (commit 04d6b3b) is a deliberate correction, not
+# drift: upstream cannot hold, because its validator refuses a group-readable
+# journal while its status publisher reads that same journal through a shared
+# group. These seven carry the fix and are expected to differ until it is
+# upstreamed.
+ALLOWED_DIVERGENCE="pyproject.toml README.md \
+scaffold/events.py \
+scaffold/cli.py \
+scaffold/validator_thin.py \
+scripts/publish_sn39_validator_status.py \
+config/validator-mainnet-sn39.toml \
+deploy/sn39/cathedral-validator-sn39.service \
+deploy/sn39/cathedral-sn39-public-status.service"
 
 is_allowed_divergence() {
   local needle="$1" p
@@ -211,7 +224,9 @@ selftest)
     echo "FAIL  baseline copy does not verify; selftest is inconclusive" >&2; fail=1
   fi
 
-  printf '\n# tampered by selftest\n' >> "$work/scaffold/validator_thin.py"
+  # Tamper a file that is NOT a declared divergence, otherwise case 2 below is
+  # vacuous: build is supposed to accept declared divergences.
+  printf '\n# tampered by selftest\n' >> "$work/cathedral_thin/score_classes.py"
 
   # Case 1: tampered, manifest untouched. Local integrity must catch it.
   if ( cd "$work" && ./tools/manifest.sh verify "$up" >/dev/null 2>&1 ); then

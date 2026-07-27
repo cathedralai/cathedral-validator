@@ -2,6 +2,32 @@
 
 What this repo took from `cathedralai/cathedral`, what it left behind, and why.
 
+## Deliberate divergence: the event-log group split (commit 04d6b3b)
+
+This repo is no longer a pure byte-identical derivation. Seven upstream files
+carry a corrective fix, declared in `tools/manifest.sh` and confirmed by
+`manifest.sh verify` as divergences rather than drift.
+
+The upstream deploy contract cannot hold as shipped. `scaffold/events.py`
+refuses to open a group-readable event log, while
+`deploy/sn39/cathedral-sn39-public-status.service` reads that same journal
+through `SupplementaryGroups=cathedral-validator-log`. Satisfying either one
+breaks the other, and `config/validator-mainnet-sn39.toml` is pinned by the
+SN39 release manifest, so the path could not be adjusted in place.
+
+The fix keeps the raw journal private (0600, no reader group) because it
+carries hotkeys, receipts and arbitrary caller-supplied fields, and adds a
+sanitized projection through a strict allowlist for the publisher to read.
+The reader group moves to that surface. Files: `scaffold/events.py`,
+`scaffold/cli.py`, `scaffold/validator_thin.py`,
+`scripts/publish_sn39_validator_status.py`,
+`config/validator-mainnet-sn39.toml`,
+`deploy/sn39/cathedral-validator-sn39.service`,
+`deploy/sn39/cathedral-sn39-public-status.service`. Pinned by
+`tests/thin/test_status_sanitization.py`.
+
+This should be upstreamed; until then, a re-sync must preserve it.
+
 ## Derived-from
 
 | | |
