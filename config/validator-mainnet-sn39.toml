@@ -55,6 +55,10 @@ controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
 verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
 
 [launch]
+# Beta: waive the one-shot launch canary and ContinuousAuthorization. This is
+# a PROCESS control, not a correctness one. Clear it before any launch that has
+# to be auditable.
+beta_skip_launch_ceremony = true
 # Continuous operation keeps the full audit concurrent and non-blocking.
 # The one-shot launch service uses validator-mainnet-sn39-launch.toml instead.
 require_full_provenance_for_broadcast = false

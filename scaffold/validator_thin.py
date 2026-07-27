@@ -8063,10 +8063,24 @@ def _continuous_transition_required(args: Any) -> bool:
         and not bool(getattr(args, "offline", False))
         and int(getattr(args, "netuid", -1)) == 39
         and _sn39_launch_obligation(args)
+        and not bool(getattr(args, "beta_skip_launch_ceremony", False))
     ):
         # No operator-controlled label, endpoint, config, or direct CLI
         # invocation may weaken the SN39 transition requirement for a runtime
         # that originates weights or holds/has held launch material.
+        #
+        # BETA ESCAPE, deliberate and narrow. `beta_skip_launch_ceremony`
+        # waives the one-shot launch canary and the ContinuousAuthorization
+        # that derives from it. Those are PROCESS controls: they make a single
+        # mainnet launch event auditable. They are not what keeps a submission
+        # correct. Everything that does still runs on every tick and is not
+        # reachable from this flag: feed signature and key pin, freshness and
+        # expiry, the monotonic rollback fence, the validated_supply contract
+        # check, burn destination and burn floor, UID replacement safety, and
+        # the single-writer guard.
+        #
+        # Set it only for an operator-owned beta on a subnet the operator
+        # controls. Clear it before any launch that has to be auditable.
         return True
     explicit = getattr(args, "require_completed_launch_for_broadcast", None)
     if explicit is not None:

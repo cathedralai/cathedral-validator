@@ -77,6 +77,9 @@ _DEFAULTS = {
     "provenance_index_max_age_secs": 3600.0,
     "jsonl": None,  # JSONL event stream file
     "status_jsonl": None,  # sanitized status projection a publisher may read
+    # Beta escape: waive the one-shot launch ceremony. Correctness checks are
+    # unaffected. See _continuous_transition_required for the exact scope.
+    "beta_skip_launch_ceremony": False,
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -118,6 +121,7 @@ _CONFIG_MAP = {
     ("provenance", "burn_hotkey"): "provenance_burn_hotkey",
     ("logs", "jsonl"): "jsonl",
     ("logs", "status_jsonl"): "status_jsonl",
+    ("launch", "beta_skip_launch_ceremony"): "beta_skip_launch_ceremony",
 }
 
 # env var -> our flat config key
@@ -215,6 +219,7 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "provenance_burn_hotkey",
         "jsonl",
         "status_jsonl",
+        "beta_skip_launch_ceremony",
     ):
         v = getattr(ns, flat, None)
         if v is not None:
@@ -294,6 +299,14 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
     )
     if cfg.require_policy:
         print(f"  policy pin: {cfg.require_policy} (legacy/v3 vectors rejected)")
+        if getattr(cfg, "beta_skip_launch_ceremony", False):
+            # Never let a waived launch ceremony be invisible in the log.
+            print(
+                "  BETA: launch ceremony WAIVED (one-shot canary and "
+                "ContinuousAuthorization skipped). Correctness checks "
+                "unaffected: signature, freshness, rollback fence, contract, "
+                "burn invariants, UID replacement safety, single writer."
+            )
     authority_banner = {
         "off": "submission authority: THIN — provenance audit OFF",
         "shadow": "submission authority: THIN — provenance audits every tick "
