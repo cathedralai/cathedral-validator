@@ -46,8 +46,7 @@ deploy/sn39/cathedral-sn39-public-status.service \
 config/validator-mainnet-sn39-launch.toml \
 deploy/sn39/cathedral-sn39-release-launcher.py \
 deploy/sn39/cathedral-validator-sn39-launch.service \
-deploy/sn39/cathedral-validator-sn39-reconcile.service \
-deploy/sn39/cathedral-sn39-public-status.timer"
+deploy/sn39/cathedral-validator-sn39-reconcile.service"
 
 is_allowed_divergence() {
   local needle="$1" p
