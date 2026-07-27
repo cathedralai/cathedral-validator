@@ -80,6 +80,10 @@ _DEFAULTS = {
     # Beta escape: waive the one-shot launch ceremony. Correctness checks are
     # unaffected. See _continuous_transition_required for the exact scope.
     "beta_skip_launch_ceremony": False,
+    # Thin has nothing to submit when the signed vector is unreachable. When
+    # the raw-evidence path is provisioned, degrade UP into FULL instead of
+    # idling. Never the reverse.
+    "feed_down_fallback": True,
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -122,6 +126,7 @@ _CONFIG_MAP = {
     ("logs", "jsonl"): "jsonl",
     ("logs", "status_jsonl"): "status_jsonl",
     ("launch", "beta_skip_launch_ceremony"): "beta_skip_launch_ceremony",
+    ("provenance", "feed_down_fallback"): "feed_down_fallback",
 }
 
 # env var -> our flat config key
@@ -244,7 +249,24 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         cfg["require_completed_launch_for_broadcast"],
         field="require_completed_launch_for_broadcast",
     )
+    cfg["feed_down_fallback"] = _parse_bool(
+        cfg["feed_down_fallback"], field="feed_down_fallback"
+    )
+    cfg["beta_skip_launch_ceremony"] = _parse_bool(
+        cfg["beta_skip_launch_ceremony"], field="beta_skip_launch_ceremony"
+    )
     return SimpleNamespace(**cfg)
+
+
+# Operator-facing names for the submission authority, mapped onto the internal
+# vocabulary. "full" and "thin" are what these modes are called in practice.
+_MODE_ALIASES = {
+    "off": "off",
+    "thin": "shadow",
+    "shadow": "shadow",
+    "full": "authority",
+    "authority": "authority",
+}
 
 
 def _cmd_serve(ns: argparse.Namespace) -> int:
@@ -273,14 +295,21 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    provenance_mode = getattr(cfg, "provenance", "shadow") or "shadow"
-    if provenance_mode not in ("off", "shadow", "authority"):
+    # `full` and `thin` are what an operator actually calls these, so accept
+    # them as first-class names for the two modes anyone runs in practice. The
+    # internal vocabulary stays authority/shadow/off so nothing downstream has
+    # to learn a second spelling.
+    provenance_mode = _MODE_ALIASES.get(
+        (getattr(cfg, "provenance", "shadow") or "shadow").strip().lower()
+    )
+    if provenance_mode is None:
         print(
-            f"error: provenance must be off, shadow, or authority; got "
-            f"{provenance_mode!r}",
+            f"error: mode must be one of {', '.join(sorted(_MODE_ALIASES))}; got "
+            f"{getattr(cfg, 'provenance', None)!r}",
             file=sys.stderr,
         )
         return 2
+    cfg.provenance = provenance_mode
     try:
         validator_thin._validate_runtime_contract(cfg)
     except validator_thin.wire.VectorError as exc:
@@ -289,34 +318,58 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    mode = (
-        "BROADCAST (setting weights)" if cfg.broadcast else "DRY-RUN (no chain writes)"
-    )
-    print(f"cathedral-validator serve — netuid {cfg.netuid} on {cfg.network} — {mode}")
-    print(
-        f"  publisher={validator_thin._safe_endpoint_label(cfg.publisher_url)}  "
-        f"key_id={cfg.key_id}  pinned={cfg.public_key_hex[:16]}…"
-    )
-    if cfg.require_policy:
-        print(f"  policy pin: {cfg.require_policy} (legacy/v3 vectors rejected)")
-        if getattr(cfg, "beta_skip_launch_ceremony", False):
-            # Never let a waived launch ceremony be invisible in the log.
-            print(
-                "  BETA: launch ceremony WAIVED (one-shot canary and "
-                "ContinuousAuthorization skipped). Correctness checks "
-                "unaffected: signature, freshness, rollback fence, contract, "
-                "burn invariants, UID replacement safety, single writer."
-            )
-    authority_banner = {
-        "off": "submission authority: THIN — provenance audit OFF",
-        "shadow": "submission authority: THIN — provenance audits every tick "
-        "(FULL only with controlled raw evidence; shadow)",
-        "authority": "submission authority: FULL-PROVENANCE — the independent "
-        "recomputation is what gets submitted",
+    from . import render
+
+    authority = {
+        "off": (
+            f"{render.bold('thin')} · follows the signed vector, no provenance audit"
+        ),
+        "shadow": (
+            f"{render.bold('thin')} · follows the signed vector, "
+            f"audits provenance every tick"
+        ),
+        "authority": (
+            f"{render.bold('full')} · independent recomputation is what gets submitted"
+        ),
     }[provenance_mode]
-    print(f"  {authority_banner}")
+    rows = [
+        (
+            "mode",
+            render.green("writing weights")
+            if cfg.broadcast
+            else render.yellow("dry run · no chain writes"),
+        ),
+        ("authority", authority),
+        (
+            "feed",
+            f"{validator_thin._safe_endpoint_label(cfg.publisher_url)}"
+            f"{render.dim('  key ')}{cfg.key_id}",
+        ),
+    ]
+    if cfg.require_policy:
+        rows.append(
+            (
+                "policy",
+                f"{cfg.require_policy}{render.dim('  legacy and v3 vectors rejected')}",
+            )
+        )
+    if getattr(cfg, "beta_skip_launch_ceremony", False):
+        # Never let a waived launch ceremony be invisible in the log.
+        rows.append(
+            (
+                "beta",
+                f"{render.yellow('launch ceremony waived')}"
+                f"{render.dim(' · signature, freshness, rollback fence, contract, ')}"
+                f"{render.dim('burn, uid safety and single-writer all still enforced')}",
+            )
+        )
     if getattr(cfg, "jsonl", None):
-        print("  jsonl events → enabled (path withheld)")
+        rows.append(("journal", render.dim("enabled · path withheld")))
+    render.banner(
+        rows,
+        "SN39 validator",
+        f"{cfg.network} · netuid {cfg.netuid}",
+    )
     return validator_thin.run(cfg)
 
 
@@ -462,9 +515,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     sp.add_argument(
         "--provenance",
+        "--mode",
         dest="provenance",
         default=None,
-        choices=("off", "shadow", "authority"),
+        choices=tuple(sorted(_MODE_ALIASES)),
         help="full-provenance mode: shadow (default) audits published "
         "evidence concurrently; authority submits the independent "
         "recomputation; off disables the audit",

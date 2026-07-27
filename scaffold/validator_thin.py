@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import render
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
 from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger, stable_error
@@ -122,18 +123,15 @@ def _ms_iso_now() -> str:
 
 
 def _lifecycle(event: str, detail: str = "") -> None:
-    """Compact timestamped ASCII lifecycle event. No secrets.
+    """One human-facing lifecycle line per state transition. No secrets.
 
-    Format: ``<ts> <EVENT> <detail>`` — one line per state transition
-    (VECTOR accepted/rejected, MAP complete, WEIGHTS dry-run, CHAIN
-    submitted/failed).
+    Call sites pass ``<EVENT>`` plus a flat ``key=value`` detail string; the
+    renderer in `render.py` owns how that becomes something a person can read.
+    Keeping the call-site contract flat means presentation can change without
+    touching the tick logic, and the durable JSONL journal (the publisher's
+    actual contract) stays independent of anything decided here.
     """
-    from .events import _neutralize
-
-    line = f"{_ms_iso_now()} {_neutralize(event)}"
-    if detail:
-        line += f" {_neutralize(detail)}"
-    print(line)
+    render.lifecycle(event, detail, _ms_iso_now())
 
 
 def _feed_label(publisher_url: str) -> str:
@@ -804,6 +802,22 @@ def _authority_lane_transition_authorized(
     This check binds that authorization back to the durable launch journal.
     There is deliberately no automatic authority-to-thin transition.
     """
+    # Feed-down fallback. The launch journal proves a completed ceremony, which
+    # a beta runtime deliberately does not have, so that half is waived exactly
+    # as the rest of the ceremony is. What is NOT waived is chain identity: the
+    # transition still has to be for this hotkey, on this genesis and netuid, so
+    # a reservation cannot be replayed onto a different chain or wallet. This
+    # stays one-way by construction because only the thin path ever sets the
+    # marker, and it is only reachable when thin has no vector to follow.
+    if identity.get("feed_down_fallback") is True:
+        return bool(
+            identity.get("network") == "finney"
+            and identity.get("netuid") == 39
+            and identity.get("validator_hotkey")
+            == state.get("submission_validator_hotkey")
+            and state.get("submission_genesis_hash") == FINNEY_GENESIS_HASH
+            and state.get("provenance_netuid") == 39
+        )
     authorization = identity.get("continuous_authorization")
     if not isinstance(authorization, dict):
         return False
@@ -5536,12 +5550,52 @@ def tick(args) -> bool:
             # The public seal can require archive/network work. Refresh every
             # mutable chain fact after it, while still holding the shared lock.
             _prepare_tick_preflight(args)
-        return _thin_tick_locked(args)
+        try:
+            return _thin_tick_locked(args)
+        except _FeedUnavailableForThin as exc:
+            # Thin follows Cathedral's signed vector, so a dead feed leaves it
+            # with nothing to submit. FULL derives the same answer from raw
+            # evidence and does not need the feed at all, so a provisioned
+            # runtime degrades UP into the stronger claim instead of idling.
+            # The reverse (FULL degrading into thin) stays forbidden: that
+            # direction would let anyone who can break the evidence path force
+            # the validator back onto trusting the publisher.
+            if not bool(getattr(args, "feed_down_fallback", True)):
+                raise
+            if not _full_path_provisioned(args):
+                raise
+            fallback_reason = str(exc)
+    # Outside the thin lock: the authority tick takes its own.
+    _lifecycle("FEED unavailable", f"reason={fallback_reason} fallback=full")
+    args._feed_down_fallback_active = True
+    _prepare_tick_preflight(args)
+    return _authority_tick(args, None)
+
+
+class _FeedUnavailableForThin(wire.VectorError):
+    """The signed vector could not be fetched, so thin has nothing to follow."""
+
+
+def _full_path_provisioned(args: Any) -> bool:
+    """True when this runtime can actually recompute independently.
+
+    Falling back to FULL is only meaningful if the controlled raw evidence and
+    the pinned verifier are both present. Without them the fallback would swap
+    one unavailable input for another, so thin fails closed instead.
+    """
+    controlled = getattr(args, "provenance_controlled_dir", None)
+    verifier = getattr(args, "provenance_verifier_binary", None)
+    return bool(controlled) and bool(verifier) and Path(str(verifier)).exists()
 
 
 def _thin_tick_locked(args) -> bool:
     """Default thin/shadow tick under one cross-process submission lock."""
-    payload = fetch_vector(args.publisher_url)
+    try:
+        payload = fetch_vector(args.publisher_url)
+    except Exception as exc:  # noqa: BLE001 - classified, then handled by tick()
+        raise _FeedUnavailableForThin(
+            f"signed vector unavailable: {type(exc).__name__}"
+        ) from exc
     _lifecycle(
         "FEED fetched",
         f"id={str(payload.get('vector_id', ''))[:8]} "
@@ -6227,8 +6281,16 @@ def _reserve_common_submission(
             "_provisional_submission": True,
             "_allow_authority_lane_transition": bool(
                 lane == "authority"
-                and isinstance(authorization, ContinuousAuthorization)
-                and "authority" in authorization.lanes
+                and (
+                    (
+                        isinstance(authorization, ContinuousAuthorization)
+                        and "authority" in authorization.lanes
+                    )
+                    # A feed-down fallback has no ContinuousAuthorization to
+                    # carry lanes; _authority_lane_transition_authorized still
+                    # binds the transition to this chain, netuid and hotkey.
+                    or bool(getattr(args, "_feed_down_fallback_active", False))
+                )
             ),
             "_launch_attempt": launch_attempt,
             **({"_launch_budget_limit": max_submissions} if launch_attempt else {}),
@@ -8391,6 +8453,14 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
         identity = {
             "network": args.network,
             "netuid": args.netuid,
+            # Marks a tick that reached FULL because thin had no signed vector
+            # to follow. It is what authorizes the one-way thin-to-FULL lane
+            # transition on a runtime with no completed launch ceremony.
+            **(
+                {"feed_down_fallback": True}
+                if getattr(args, "_feed_down_fallback_active", False)
+                else {}
+            ),
             "mapping_block": current_block,
             "validator_hotkey": preflight.validator_hotkey,
             "validator_uid": preflight.validator_uid,
@@ -8798,7 +8868,7 @@ def run(args) -> int:
     try:
         recovered = _recover_pending_launch_receipt(args)
     except _PostSignedSubmissionMismatch as exc:
-        print(f"pending receipt contradiction: {stable_error(exc)}")
+        render.outcome(False, f"pending receipt contradiction: {stable_error(exc)}")
         _get_events(args).event(
             "PENDING_RECEIPT_CONTRADICTION",
             stage="result",
@@ -8812,7 +8882,7 @@ def run(args) -> int:
         )
         return 1
     except _PendingReceiptNotProven as exc:
-        print(f"pending receipt not proven: {stable_error(exc)}")
+        render.outcome(False, f"pending receipt not proven: {stable_error(exc)}")
         _get_events(args).event(
             "PENDING_RECEIPT_NOT_PROVEN",
             stage="result",
@@ -8869,7 +8939,7 @@ def run(args) -> int:
                 break
             except _RetryablePreSignHeadDrift as e:
                 if pre_sign_head_drift_retries >= SN39_PRE_SIGN_HEAD_DRIFT_RETRIES:
-                    print(f"pre-sign head drift retry exhausted: {stable_error(e)}")
+                    render.outcome(False, f"head drift, retries exhausted: {stable_error(e)}")
                     _get_events(args).event(
                         "PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED",
                         stage="submit",
@@ -8883,7 +8953,7 @@ def run(args) -> int:
                     )
                     break
                 pre_sign_head_drift_retries += 1
-                print(f"pre-sign head drift retry: {stable_error(e)}")
+                render.outcome(False, f"head drift, retrying: {stable_error(e)}")
                 _get_events(args).event(
                     "PRE_SIGN_HEAD_DRIFT_RETRY",
                     stage="submit",
@@ -8904,7 +8974,7 @@ def run(args) -> int:
                 # mutable proof from the aborted attempt.
                 continue
             except _PostSignedSubmissionMismatch as e:
-                print(f"pending receipt contradiction: {stable_error(e)}")
+                render.outcome(False, f"pending receipt contradiction: {stable_error(e)}")
                 _get_events(args).event(
                     "PENDING_RECEIPT_CONTRADICTION",
                     stage="result",
@@ -8919,7 +8989,7 @@ def run(args) -> int:
                 )
                 return 1
             except _PendingReceiptNotProven as e:
-                print(f"pending receipt not proven: {stable_error(e)}")
+                render.outcome(False, f"pending receipt not proven: {stable_error(e)}")
                 _get_events(args).event(
                     "PENDING_RECEIPT_NOT_PROVEN",
                     stage="result",
@@ -8934,7 +9004,7 @@ def run(args) -> int:
                 # tick can reserve or sign another submission.
                 return 1
             except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
-                print(f"tick failed: {stable_error(e)}")
+                render.outcome(False, f"tick failed: {stable_error(e)}")
                 _get_events(args).event(
                     "TICK_FAILED",
                     stage="result",
