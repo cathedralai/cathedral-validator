@@ -2843,6 +2843,11 @@ class ChainPreflight:
     subnet_max_uids: int | None = None
     subnet_registration_blocks: tuple[tuple[int, str, int], ...] = ()
     subnet_owned_hotkeys: tuple[str, ...] = ()
+    # (uid, hotkey, incentive, stake, emission) at the finalized head, published
+    # so a re-verifier can recompute eviction depth from the same raw inputs.
+    subnet_prune_metrics: tuple[tuple[int, str, float, float, float], ...] = ()
+    subnet_worst_case_evictions: int | None = None
+    subnet_eviction_depth: tuple[tuple[str, int], ...] = ()
     finalized_hash: str = ""
 
 
@@ -3245,10 +3250,14 @@ def _require_uid_mapping_stability(
             "submission cannot prove any UID mapping replacement-safe"
         )
     unsafe = sorted(set(uid_hotkeys.values()) - safe_hotkeys)
-    if unsafe:
+    # An unprovable target is excluded and its mass normalized to burn by the
+    # caller, not a reason to abort the whole vector: aborting pays nobody and
+    # lets one unprotected UID stall every other target. Hard failure is
+    # reserved for the cases where nothing can be paid safely.
+    if unsafe and len(unsafe) >= len(set(uid_hotkeys.values())):
         raise wire.VectorError(
-            "submission cannot prove UID mappings stable for the complete mortal "
-            f"era ({len(unsafe)} target hotkey(s) are not chain-immune)"
+            "submission cannot prove any UID mapping stable for the complete "
+            f"mortal era ({len(unsafe)} target hotkey(s) unprovable)"
         )
     # `set_mechanism_weights` binds only UIDs. A registered hotkey can be
     # replaced at the same UID by `swap_hotkey_v2` during the four-block mortal
@@ -3309,6 +3318,25 @@ def _require_uid_mapping_stability(
             ),
             "owner_immortal_hotkeys": sorted(preflight.subnet_owner_immortal_hotkeys),
             "replacement_safe_hotkeys": sorted(preflight.replacement_safe_hotkeys),
+            # Raw inputs for the eviction-depth proof, so a re-verifier or the
+            # public reproduction can recompute safety rather than trust it.
+            "worst_case_evictions": preflight.subnet_worst_case_evictions,
+            "prune_metrics": [
+                {
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "incentive": incentive,
+                    "stake": stake,
+                    "emission": emission,
+                }
+                for uid, hotkey, incentive, stake, emission in (
+                    preflight.subnet_prune_metrics
+                )
+            ],
+            "eviction_depth": [
+                {"hotkey": hotkey, "depth": depth}
+                for hotkey, depth in preflight.subnet_eviction_depth
+            ],
         }
         subtensor = preflight.subtensor
         substrate = getattr(subtensor, "substrate", None)
@@ -3461,6 +3489,8 @@ def _require_uid_mapping_stability(
         "stability_basis": "operator_controlled_coldkeys",
         "registration": registration_safety,
         "rotation": rotation_safety,
+        # Targets the caller must drop, normalizing their mass to burn.
+        "excluded_hotkeys": unsafe,
     }
 
 
@@ -3844,6 +3874,25 @@ def _chain_preflight_unbounded(
         immune_owner_uids_limit = int(
             getattr(owner_limit_value, "value", owner_limit_value)
         )
+        # Pruning-score inputs. The runtime exposes no PruningScores map on
+        # this chain, so eviction order is derived from the metrics a scalar
+        # score is monotone in. Missing series are treated as all-zero, which
+        # collapses every candidate into one tie group and is conservative.
+        def _metric_series(name: str) -> list[float]:
+            raw = getattr(metagraph, name, None)
+            if raw is None:
+                return [0.0] * len(uids)
+            values = [float(value) for value in raw]
+            if len(values) != len(uids):
+                raise ValueError(f"{name} does not cover the registered set")
+            return values
+
+        incentive_series = _metric_series("I")
+        stake_series = _metric_series("S")
+        emission_series = _metric_series("E")
+        prune_incentive = dict(zip(hotkeys, incentive_series))
+        prune_stake = dict(zip(hotkeys, stake_series))
+        prune_emission = dict(zip(hotkeys, emission_series))
     except (AttributeError, TypeError, ValueError) as exc:
         raise wire.VectorError(
             "subnet registration and immunity policy is unavailable at finalized head"
@@ -3915,11 +3964,69 @@ def _chain_preflight_unbounded(
         prunable_nonimmune_count
         > min_nonimmune_uids + max(0, maximum_era_registrations - free_uid_slots)
     )
+    # Registration immunity protects a NEW neuron from pruning. Requiring it of
+    # a reward target inverts the intent: a mature miner, whose immunity has
+    # long expired, becomes permanently unrewardable even when the runtime
+    # would never reach it. Weights bind UIDs, so what actually has to be
+    # proven is that no sequence of registrations inside the mortal era can
+    # reach this UID. That is an eviction-DEPTH question, so prove it directly
+    # and keep every existing protection as an independent sufficient
+    # condition.
+    #
+    # Worst case: every block of the era registers, each consuming a free slot
+    # first and then pruning one victim. The runtime will not prune below
+    # MinNonImmuneUids, which caps the reachable depth.
+    prunable_rows = [
+        (uid, hotkey, registered_at)
+        for uid, hotkey, registered_at in zip(uids, hotkeys, registration_blocks)
+        if registered_at + immunity_period <= finalized_block
+        and hotkey not in owner_immortal_hotkeys
+    ]
+    worst_case_evictions = min(
+        max(0, maximum_era_registrations - free_uid_slots),
+        max(0, len(prunable_rows) - min_nonimmune_uids),
+    )
+    metric_by_hotkey = {
+        hotkey: (
+            float(prune_incentive.get(hotkey, 0.0)),
+            float(prune_stake.get(hotkey, 0.0)),
+            float(prune_emission.get(hotkey, 0.0)),
+        )
+        for _, hotkey, _ in prunable_rows
+    }
+    # A candidate counts as ranking AHEAD of the target only when the runtime
+    # must reach it first under any scalar pruning score that is monotone in
+    # these metrics: strictly weaker on all three, or identical on all three
+    # with a lower UID. `get_neuron_to_prune` keeps the first minimum it sees,
+    # so an exact tie resolves to the lower UID. Anything else is counted as
+    # possibly ranking behind the target, which is the conservative direction.
+    eviction_depth: dict[str, int] = {}
+    for uid, hotkey, _ in prunable_rows:
+        target_metric = metric_by_hotkey[hotkey]
+        depth = 0
+        for other_uid, other_hotkey, _ in prunable_rows:
+            if other_hotkey == hotkey:
+                continue
+            other_metric = metric_by_hotkey[other_hotkey]
+            strictly_weaker = all(
+                other_value < target_value
+                for other_value, target_value in zip(other_metric, target_metric)
+            )
+            tied_lower_uid = other_metric == target_metric and other_uid < uid
+            if strictly_weaker or tied_lower_uid:
+                depth += 1
+        eviction_depth[hotkey] = depth
+    eviction_safe_hotkeys = {
+        hotkey
+        for hotkey, depth in eviction_depth.items()
+        if depth >= worst_case_evictions
+    }
     replacement_safe_hotkeys = (
         set(hotkeys)
         if capacity_protects_all
         else owner_immortal_hotkeys
         | (temporally_immune_hotkeys if nonimmune_buffer_protects_immunity else set())
+        | eviction_safe_hotkeys
     )
     if (
         not subnet_owner_hotkey
@@ -3971,6 +4078,18 @@ def _chain_preflight_unbounded(
         validator_blocks_since_last_update=raw_blocks_since_update,
         uid_mapping_stable_until_block=uid_mapping_stable_until_block,
         replacement_safe_hotkeys=frozenset(replacement_safe_hotkeys),
+        subnet_prune_metrics=tuple(
+            (
+                uid,
+                hotkey,
+                prune_incentive.get(hotkey, 0.0),
+                prune_stake.get(hotkey, 0.0),
+                prune_emission.get(hotkey, 0.0),
+            )
+            for uid, hotkey in zip(uids, hotkeys)
+        ),
+        subnet_worst_case_evictions=worst_case_evictions,
+        subnet_eviction_depth=tuple(sorted(eviction_depth.items())),
         subnet_free_uid_slots=free_uid_slots,
         subnet_max_regs_per_block=max_regs_per_block,
         subnet_min_nonimmune_uids=min_nonimmune_uids,
