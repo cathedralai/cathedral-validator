@@ -50,7 +50,7 @@ from a repo-relative path.
 | `fixtures/` | Publisher test fixtures |
 | `docs/` (13 of 20) | Validator docs |
 | `VALIDATOR.md` | Primary validator operator doc |
-| `weights_verify.py`, `postgres_verify.py`, `wire_compat.py`, `live_smoke.py` | Validator-owned root harnesses whose closure is satisfied here |
+| `weights_verify.py`, `wire_compat.py` | Validator-owned root harnesses. See the sorting below |
 
 `scaffold/` modules included: `__init__`, `chain`, `cli`, `contract`, `dimacs`,
 `events`, `grading`, `polaris`, `provenance_audit`, `sn39_continuous_authorization`,
@@ -71,6 +71,8 @@ from a repo-relative path.
 | `distillation_verify.py` | Distill lane harness |
 | `rc_verify.py` | Imports `scaffold.harness`, `lanes.arena_e2e`, `lanes.encoding`, `lanes.sat_challenge`: all SAT-lane modules not carried here |
 | `publisher_verify.py` | See the back-edge section below |
+| `live_smoke.py` | Miner-side. Drives the miner write path over HTTP against a **deployed** publisher: picks a challenge off the board, signs as `//SmokeMiner`, fetches the CNF, submits an assignment. It does not decide what goes on chain or verify what does, it exercises the SAT submission path, and it cannot run without a live host |
+| `postgres_verify.py` | Storage-layer integration gate. Needs a real PostgreSQL via `DATABASE_URL` and proves the Store's SQLite and Postgres backends agree. One step removed from the chain decision, and a sibling of the already-excluded `publisher_verify.py`, `tee_gpu_verify.py`, and `attest_verify.py` in upstream's `launch-readiness.yml` |
 | `launch_readiness_verify.py`, `launch_readiness_report.py` | Launch-program tooling; `scaffold.launch_readiness` is outside the closure |
 | `AUDIT_ARENA_V0.md`, `CATHEDRAL_V0_LANES.md`, `DISTILLATION_READINESS.md`, `LANE2_SECURE_COMPUTE_PLAN.md`, `LAUNCH_*.md`, `SOLVER_ATTESTATION_STATUS.md`, `TEE_GPU_CAPACITY.md` | Lane and launch planning docs |
 | `README.md` (upstream) | Replaced with a derived-repo README |
@@ -97,6 +99,29 @@ Excluded `docs/`: `FAST_PATH_MINER_GUIDE.md`, `SAT_FAST_10PCT.md`,
 `V2_BITSET_READY_FOR_TESTING.md`, `V2_MINER_E2E_GUIDE.md` (miner lane), and
 `THIN_SUBNET_FABLE_REVIEW.md`, `VERIFIED_POLICY_FABLE_REVIEW.md`,
 `VERIFYML_FABLE_REVIEW.md` (point-in-time review notes).
+
+### Sorting the root `*_verify.py` harnesses
+
+The split plan asks for these to be sorted by lane, with validator-owned ones
+kept. Applying the ownership test to all thirteen:
+
+| Harness | Kept | Why |
+|---|---|---|
+| `weights_verify.py` | yes | Smoke tests `scaffold.publisher.weights`. Weights are exactly what goes on chain. Runs offline against a generated test key |
+| `wire_compat.py` | yes | Proves `scaffold/wire.py` still matches what live SN39 validators verify. Offline by default against the shipped `fixtures/live-20260609/` capture, which is why `fixtures/` is carried |
+| `publisher_verify.py` | no | Module-scope `game.arena` import, see below |
+| `live_smoke.py` | no | Miner write path against a deployed host |
+| `postgres_verify.py` | no | Needs a live PostgreSQL; storage layer, not the chain decision |
+| `rc_verify.py` | no | Imports four SAT-lane modules not carried here |
+| `arena_runner_verify.py`, `audit_arena_verify.py` | no | Arena lane |
+| `assigned_lane_verify.py` | no | SAT lane assignment |
+| `attest_verify.py`, `tee_gpu_verify.py` | no | Lane 2 secure compute |
+| `distillation_verify.py` | no | Distill lane |
+| `launch_readiness_verify.py` | no | Launch-program tooling; `scaffold.launch_readiness` is outside the closure |
+
+None of the thirteen is referenced by any shipped test, so this sorting is a
+judgement call rather than something the test suite forces. The two kept are the
+two that verify chain-facing artifacts and run without external services.
 
 ## The `game.arena` back-edge
 
@@ -146,20 +171,40 @@ broken for real.
 
 ## Files that differ from upstream
 
-Three, plus files that have no upstream counterpart.
+Two.
 
 | File | Change |
 |---|---|
-| `pyproject.toml` | Trimmed. See below |
+| `pyproject.toml` | Entry points trimmed. See below. Name, version, dependencies, and all three extras including the provenance pin are untouched |
 | `README.md` | Rewritten for the derived repo |
-| `.gitignore` | Rewritten. Upstream's covers `game/arena/PROGRESS.md` and a list of internal planning docs that do not exist here; this one adds the SQLite artifacts the publisher tests leave behind |
 
-Every other file carried here is **byte-identical** to its `fd02392d`
-counterpart: 250 of 258 tracked files, verified with `cmp`.
+Every other carried file is **byte-identical** to its `fd02392d` counterpart:
+**249 files**. `.gitignore` was rewritten in an earlier pass and has since been
+restored to upstream's exact bytes, because upstream's already covers everything
+this repo generates.
 
-New files with no upstream counterpart: `BOUNDARY.md`,
+Files with no upstream counterpart, which are additions rather than divergences:
+`BOUNDARY.md`, `REVIEW.md`, `MANIFEST.sha256`, `MANIFEST.origin.tsv`,
 `.github/workflows/tests.yml`, `tests/boundary/test_no_game_dependency.py`,
-`tools/sync-from-upstream.sh`, `tools/upstream-manifest.txt`.
+`tools/manifest.sh`, `tools/sync-from-upstream.sh`,
+`tools/upstream-manifest.txt`.
+
+## Machine-checkable origin manifest
+
+`MANIFEST.origin.tsv` records, for every tracked file: its path, its sha256, an
+origin class (`identical`, `modified`, or `local`), its upstream path at
+`fd02392d`, and the upstream file's sha256. `MANIFEST.sha256` is the same hashes
+in `sha256sum` format so local integrity can be checked with a standard tool.
+
+The point is that byte-identity is verifiable without trusting this repo: clone
+upstream at `fd02392d`, hash it yourself, and compare.
+
+```sh
+./tools/manifest.sh verify /path/to/cathedral-upstream
+```
+
+Rebuild after any sync with `./tools/manifest.sh build /path/to/cathedral-upstream`.
+Both manifest files exclude themselves, since a file cannot contain its own hash.
 
 ### `pyproject.toml` diff from upstream
 
@@ -209,12 +254,13 @@ extraction defect.
 | **Fails here, passes upstream** | **1**, the deselected CI-config guard above |
 | Fails upstream, passes here | 0 |
 
-So with that one deselection applied, this repo is at failure parity with
-upstream. The 44 shared failures are inherited and pre-date the extraction; they
-come from running a suite that expects PostgreSQL and outbound network in an
-environment with neither.
+With that one deselection applied, this repo is at exact failure parity with
+upstream: the publisher suite here reports **44 failed, 1101 passed, 1
+deselected**, against upstream's 44 failures over the same 1102 tests. The 44
+are inherited and pre-date the extraction; they come from running a suite that
+expects PostgreSQL and outbound network in an environment with neither.
 
-`tests/thin` alone: 128 passed. `tests/boundary` alone: 9 passed.
+`tests/thin` and `tests/boundary` together: **137 passed** (128 and 9).
 
 GitHub Actions on the initial commit: Python 3.11 success, Python 3.12 success,
 publisher advisory job 35 failed / 1088 passed / 22 skipped / 1 deselected on

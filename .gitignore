@@ -1,20 +1,32 @@
+# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
+*$py.class
 .venv/
 venv/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+.env
 
-# Created by publisher tests and local runs.
+# transient data / logs
 data/
-*.sqlite3
-*.sqlite3.lock
-*.jsonl
+tmp/
+*.log
+*.egg-info/
+.pytest_cache/
+.wrangler/
+uv.lock
+game/arena/PROGRESS.md
 
+# OS / editor
 .DS_Store
+*.swp
+
+# Internal planning / agent working docs — keep out of the public repo
+RESUME.md
+STRATEGY.md
+SHIPPING.md
+KEYSTONE.md
+RELEASE_STATUS.md
+COMPAT.md
+V4-DESIGN.md
+V4-DESIGN.html
+ATTESTATION.md
