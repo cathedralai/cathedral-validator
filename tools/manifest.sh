@@ -42,7 +42,8 @@ scaffold/validator_thin.py \
 scripts/publish_sn39_validator_status.py \
 config/validator-mainnet-sn39.toml \
 deploy/sn39/cathedral-validator-sn39.service \
-deploy/sn39/cathedral-sn39-public-status.service"
+deploy/sn39/cathedral-sn39-public-status.service \
+config/validator-mainnet-sn39-launch.toml"
 
 is_allowed_divergence() {
   local needle="$1" p
