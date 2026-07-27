@@ -804,14 +804,18 @@ def _authority_lane_transition_authorized(
     This check binds that authorization back to the durable launch journal.
     There is deliberately no automatic authority-to-thin transition.
     """
-    # Feed-down fallback. The launch journal proves a completed ceremony, which
-    # a beta runtime deliberately does not have, so that half is waived exactly
-    # as the rest of the ceremony is. What is NOT waived is chain identity: the
-    # transition still has to be for this hotkey, on this genesis and netuid, so
-    # a reservation cannot be replayed onto a different chain or wallet. This
-    # stays one-way by construction because only the thin path ever sets the
-    # marker, and it is only reachable when thin has no vector to follow.
-    if identity.get("feed_down_fallback") is True:
+    # Operator-declared authority. The fence exists to stop the submission
+    # lane changing SILENTLY, and there are two non-silent ways it can change:
+    # the operator configures full mode outright, or thin loses its feed and
+    # degrades up. Both are one-way into FULL and both are the operator's
+    # decision, so both are the "explicit reconciliation" the fence asks for.
+    #
+    # The launch journal proves a completed ceremony, which a beta runtime
+    # deliberately does not have, so that half is waived exactly as the rest of
+    # the ceremony is. Chain identity is NOT waived: the transition still has to
+    # be for this hotkey, on this genesis and netuid, so a reservation cannot be
+    # replayed onto another chain or wallet.
+    if identity.get("operator_declared_authority") is True:
         return bool(
             identity.get("network") == "finney"
             and identity.get("netuid") == 39
@@ -1294,6 +1298,21 @@ def _provenance_settings(args) -> ProvenanceSettings:
             else int(args.provenance_max_anchor_lag_blocks)
         ),
     )
+
+
+def _operator_declared_authority(args: Any) -> bool:
+    """True when running FULL is the operator's stated intent, not a drift.
+
+    Either the runtime is configured for authority outright, or thin lost its
+    signed vector and degraded up. Both are one-way into FULL. Gated on the
+    beta waiver so the reviewed production path still demands the signed
+    ContinuousAuthorization instead of this.
+    """
+    if not bool(getattr(args, "beta_skip_launch_ceremony", False)):
+        return False
+    if bool(getattr(args, "_feed_down_fallback_active", False)):
+        return True
+    return (getattr(args, "provenance", "shadow") or "shadow") == "authority"
 
 
 def _minimum_assurance_rank(args: Any) -> int:
@@ -6371,10 +6390,10 @@ def _reserve_common_submission(
                         isinstance(authorization, ContinuousAuthorization)
                         and "authority" in authorization.lanes
                     )
-                    # A feed-down fallback has no ContinuousAuthorization to
-                    # carry lanes; _authority_lane_transition_authorized still
+                    # Operator-declared authority has no ContinuousAuthorization
+                    # to carry lanes; _authority_lane_transition_authorized still
                     # binds the transition to this chain, netuid and hotkey.
-                    or bool(getattr(args, "_feed_down_fallback_active", False))
+                    or _operator_declared_authority(args)
                 )
             ),
             "_launch_attempt": launch_attempt,
@@ -8543,12 +8562,13 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
         identity = {
             "network": args.network,
             "netuid": args.netuid,
-            # Marks a tick that reached FULL because thin had no signed vector
-            # to follow. It is what authorizes the one-way thin-to-FULL lane
-            # transition on a runtime with no completed launch ceremony.
+            # Authorizes the one-way thin-to-FULL lane transition on a runtime
+            # with no completed launch ceremony. Set when the operator declared
+            # full mode in config, or when thin degraded up because its feed
+            # was unreachable. Never set by an ordinary thin tick.
             **(
-                {"feed_down_fallback": True}
-                if getattr(args, "_feed_down_fallback_active", False)
+                {"operator_declared_authority": True}
+                if _operator_declared_authority(args)
                 else {}
             ),
             "mapping_block": current_block,

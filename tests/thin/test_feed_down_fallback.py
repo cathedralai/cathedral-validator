@@ -39,7 +39,7 @@ def _identity(**over):
         "network": "finney",
         "netuid": 39,
         "validator_hotkey": HOTKEY,
-        "feed_down_fallback": True,
+        "operator_declared_authority": True,
     }
     base.update(over)
     return base
@@ -48,14 +48,16 @@ def _identity(**over):
 # -- the lane transition ----------------------------------------------------
 
 
-def test_feed_down_fallback_authorizes_the_thin_to_full_transition():
+def test_operator_declared_authority_authorizes_the_thin_to_full_transition():
     assert vt._authority_lane_transition_authorized(_state(), _identity()) is True
 
 
 def test_fallback_transition_is_bound_to_this_validator_hotkey():
     # A reservation minted for one hotkey must not authorize another's lane
     # change, or a captured state file would be portable between wallets.
-    other = _identity(validator_hotkey="5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC")
+    other = _identity(
+        validator_hotkey="5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+    )
     assert vt._authority_lane_transition_authorized(_state(), other) is False
 
 
@@ -69,7 +71,9 @@ def test_fallback_transition_is_bound_to_netuid_39():
         vt._authority_lane_transition_authorized(_state(), _identity(netuid=7)) is False
     )
     assert (
-        vt._authority_lane_transition_authorized(_state(provenance_netuid=7), _identity())
+        vt._authority_lane_transition_authorized(
+            _state(provenance_netuid=7), _identity()
+        )
         is False
     )
 
@@ -79,13 +83,13 @@ def test_without_the_marker_the_launch_journal_is_still_required():
     # branch, which a beta runtime cannot satisfy. The waiver must not leak into
     # ordinary ticks.
     identity = _identity()
-    identity.pop("feed_down_fallback")
+    identity.pop("operator_declared_authority")
     assert vt._authority_lane_transition_authorized(_state(), identity) is False
 
 
 def test_a_falsey_marker_does_not_authorize():
     for value in (False, "true", 1, None):
-        identity = _identity(feed_down_fallback=value)
+        identity = _identity(operator_declared_authority=value)
         assert vt._authority_lane_transition_authorized(_state(), identity) is False
 
 
@@ -140,3 +144,38 @@ def test_the_classified_failure_is_still_a_vector_error():
     # Callers that only know about VectorError must keep failing closed rather
     # than seeing an unfamiliar exception escape the tick.
     assert issubclass(vt._FeedUnavailableForThin, vt.wire.VectorError)
+
+
+# -- who may declare authority ---------------------------------------------
+
+
+def test_configuring_full_mode_counts_as_the_operators_declaration():
+    # The fence exists to stop the lane changing SILENTLY. A config change is
+    # not silent, so it is the explicit reconciliation the fence asks for.
+    args = SimpleNamespace(beta_skip_launch_ceremony=True, provenance="authority")
+    assert vt._operator_declared_authority(args) is True
+
+
+def test_a_thin_runtime_does_not_declare_authority():
+    args = SimpleNamespace(beta_skip_launch_ceremony=True, provenance="shadow")
+    assert vt._operator_declared_authority(args) is False
+
+
+def test_a_thin_runtime_that_lost_its_feed_does_declare_authority():
+    args = SimpleNamespace(
+        beta_skip_launch_ceremony=True,
+        provenance="shadow",
+        _feed_down_fallback_active=True,
+    )
+    assert vt._operator_declared_authority(args) is True
+
+
+def test_without_the_beta_waiver_the_signed_authorization_is_still_required():
+    # The reviewed production path is unchanged: no waiver, no shortcut.
+    for mode in ("authority", "shadow"):
+        args = SimpleNamespace(
+            beta_skip_launch_ceremony=False,
+            provenance=mode,
+            _feed_down_fallback_active=True,
+        )
+        assert vt._operator_declared_authority(args) is False
