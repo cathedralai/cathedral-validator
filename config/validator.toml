@@ -1,0 +1,72 @@
+# Cathedral SN39 validator config (v4).
+# Dry-run:  cathedral-validator serve --config config/validator.toml --once
+# Broadcast: cathedral-validator serve --config config/validator.toml --broadcast
+# Security-critical SN39 launch and journal settings cannot be weakened by
+# ambient environment variables.
+
+[network]
+name = "finney"
+netuid = 39
+wallet_name = "validator"        # your coldkey wallet name
+validator_hotkey = "default"     # your validator hotkey
+# Connect to your own subtensor RPC node instead of the public finney
+# entrypoint. Set via env var (redirects only the connection — the "finney"
+# signing label is unchanged, so signed vectors still verify):
+#   export CATHEDRAL_CHAIN_ENDPOINT="wss://my-node.example:443"
+# Must be a bittensor-compatible ws/wss node on the same chain (genesis/UIDs).
+
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+# The key the orchestrator signs the weight vector with — pin it and the
+# validator refuses any vector not signed by exactly this key. Verify it
+# against https://api.cathedral.computer/.well-known/cathedral-jwks.json
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
+key_id = "cathedral-weight-policy"
+# Launch contract pin: 90% Intel TDX / >=10% burn. Supported SN39 mode.
+require_policy = "validated_supply_v1"
+# state_file = "~/.cathedral/thin_validator.json"   # rollback-fence persistence
+
+[runtime]
+# Shared single-flight lock and ambiguity journal for thin and FULL authority.
+# Create this absolute directory as the validator service account, mode 0700.
+root = "/var/lib/cathedral-validator"
+
+[weights]
+interval_secs = 1500
+
+[provenance]
+# Two-mode operation. "shadow" (default): thin mode submits the signed vector
+# while the full-provenance verifier independently re-verifies the published
+# evidence chain every tick and reports any divergence. "authority": the
+# validator submits its OWN recomputed vector (the signed vector is only used
+# for comparison and the burn destination). "off": no audit.
+mode = "shadow"
+# evidence_url = "https://api.cathedral.computer/v1/evidence"   # default: publisher + /v1/evidence
+# Trusted public-key pins (JSON files mapping key_id -> base64 32-byte key).
+# The exact SN39 launch public-key bundle now ships in
+# config/provenance/. Pin its bytes independently:
+# registry_keys = "config/provenance/registry-keys.json"
+# registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
+# report_keys = "config/provenance/report-keys.json"
+# report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
+# index_keys = "config/provenance/index-keys.json"
+# index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
+# The pinned Intel TDX verifier implementation digest (from the release notes):
+# verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+# The versioned reward mechanism this validator recomputes:
+mechanism = "validated_supply_v1"
+# FULL assurance (authority mode requires all of these): the controlled
+# envelope package, the pinned verifier binary, the expected source
+# revision, and the configured burn destination (never taken from the
+# signed vector):
+# controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
+# verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
+# source_revision = "655c264421a1f5f2e625a372a40f595aa1e114ab"
+# burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+
+[logs]
+# Stable machine-readable event stream (one JSON object per line).
+# Watch it:  tail -f ~/.cathedral/validator-events.jsonl | jq .
+# jsonl = "~/.cathedral/validator-events.jsonl"

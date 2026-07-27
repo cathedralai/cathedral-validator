@@ -1,0 +1,69 @@
+name = "cathedral-edge-router"
+main = "worker.mjs"
+compatibility_date = "2026-06-25"
+workers_dev = true
+preview_urls = true
+
+# Exact hot-path routes only. Do not use api.cathedral.computer/* or
+# /v1/synthetic-boolean/* until every monolith endpoint is explicitly classified.
+routes = [
+  { pattern = "api.cathedral.computer/health*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/.well-known/cathedral-jwks.json", zone_name = "cathedral.computer" },
+
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/challenge-broadcast*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/current-challenge*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/challenges/*", zone_name = "cathedral.computer" },
+
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-challenges*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/challenge-broadcast*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/current-challenge*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/active-cnf*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/challenges*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/cnf*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/status*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/synthetic-boolean/per-miner/summary*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/challenges/*", zone_name = "cathedral.computer" },
+
+  { pattern = "api.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "submit.cathedral.computer/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "submit.cathedral.computer/api/cathedral/v1/agents/submit*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/leaderboard/recent*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/leaderboard/top*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/leaderboard/explain*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/leaderboard/recent*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/leaderboard/top*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/leaderboard/explain*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/v1/validator/weights/next*", zone_name = "cathedral.computer" },
+  { pattern = "api.cathedral.computer/api/cathedral/v1/validator/weights/next*", zone_name = "cathedral.computer" },
+]
+
+[vars]
+READ_ORIGIN = "https://read.cathedral.computer"
+READ_ORIGIN_RESOLVE_OVERRIDE = ""
+WEIGHTS_ORIGIN = "https://api.github.com/repos/wallscaler/cathedral-weight-feed/contents"
+WEIGHTS_ORIGIN_SEARCH = "?ref=main"
+WEIGHTS_ORIGIN_ACCEPT = "application/vnd.github.raw"
+WEIGHTS_ORIGIN_USER_AGENT = "cathedral-edge-router"
+WEIGHTS_ORIGIN_RESOLVE_OVERRIDE = ""
+# Direct origin URL avoids a loop when submit.cathedral.computer is proxied through this Worker.
+SUBMIT_ORIGIN = "https://cathedral-submit-production.up.railway.app"
+READ_ORIGIN_TIMEOUT_MS = "10000"
+READ_HEALTH_ORIGIN_TIMEOUT_MS = "9000"
+
+# Default-off live submit mirroring. When enabled, POST /v1/agents/submit still
+# returns the authoritative current V1 response, while a cloned request is sent
+# via waitUntil() to the isolated V2 shadow mirror target.
+SHADOW_V1_MIRROR_ENABLED = "false"
+SHADOW_V1_MIRROR_ORIGIN = "https://v2-beta.cathedral.computer"
+# full = forward full V1 body to V2 shadow; meta = drop dimacs_solution and send tiny metadata only.
+SHADOW_V1_MIRROR_MODE = "meta"
+SHADOW_V1_MIRROR_SAMPLE_PERCENT = "0.1"
+SHADOW_V1_MIRROR_TIMEOUT_MS = "1000"
+SHADOW_V1_MIRROR_SOURCE = "edge-mirror-v1-0p1pct"

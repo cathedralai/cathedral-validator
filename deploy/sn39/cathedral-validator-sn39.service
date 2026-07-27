@@ -1,0 +1,50 @@
+[Unit]
+Description=Cathedral SN39 validated Intel TDX CPU validator
+After=network-online.target cathedral-thin-validator.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
+Wants=network-online.target
+Conflicts=cathedral-thin-validator.service cathedral-validator-sn39-launch.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
+ConditionPathIsReadWrite=/var/lib/cathedral-validator
+ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json
+ConditionPathExists=/etc/cathedral/sn39-recurring-write-authorization.json.sig
+
+[Service]
+Type=simple
+User=cathedral-validator
+# Primary group is cathedral-validator-log, NOT cathedral-validator, and the
+# difference from the launch and reconcile units is deliberate. LogsDirectory=
+# below creates /var/log/cathedral-validator 0750 owned by this process's
+# primary group, and cathedral-sn39-public-status.service reads
+# validator-events.jsonl out of it using SupplementaryGroups=cathedral-validator-log.
+# Setting this to cathedral-validator to match the one-shots would leave the
+# status publisher unable to read the stream it exists to publish. The one-shots
+# write their own LogsDirectory that nothing else reads, so they have no reason
+# to widen their primary group.
+Group=cathedral-validator-log
+Environment=HOME=/var/lib/cathedral-validator
+# Belt and braces. Conflicts= only acts on units systemd is asked to start;
+# it cannot stop a writer someone launched by hand. This refuses to start
+# at all while any known SN39 writer is active, because the legacy writer
+# uses its own state file and runtime root and therefore shares no
+# cross-process submission lock with this unit. Two writers on one hotkey
+# means nonce races and a second weight extrinsic.
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service'
+ExecStart=/usr/bin/python3 -I -E -s /usr/local/libexec/cathedral-sn39-release continuous
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+LogsDirectory=cathedral-validator
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/cathedral/controlled/sn39-launch /opt/cathedral-sn39/bin/cathedral-tdx-verifier
+ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

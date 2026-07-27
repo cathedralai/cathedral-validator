@@ -1,0 +1,100 @@
+# Validator include manifest, derived from cathedralai/cathedral.
+# Every entry is copied to the IDENTICAL path in the derived repo.
+# Lines are paths relative to the upstream repo root. '#' comments ignored.
+
+# --- validator core: scaffold modules in the import closure ---
+scaffold/__init__.py
+scaffold/chain.py
+scaffold/cli.py
+scaffold/contract.py
+scaffold/dimacs.py
+scaffold/events.py
+scaffold/grading.py
+scaffold/polaris.py
+scaffold/provenance_audit.py
+scaffold/sn39_continuous_authorization.py
+scaffold/sn39_public_reproduction.py
+scaffold/snapshot_candidates.py
+scaffold/solve_real.py
+scaffold/validator_thin.py
+scaffold/verify.py
+scaffold/wire.py
+scaffold/wire_vector.py
+
+# --- scaffold.lanes: only the two modules the closure reaches ---
+scaffold/lanes/__init__.py
+scaffold/lanes/sandbox.py
+scaffold/lanes/solver_arena.py
+
+# --- publisher (validator side per the split plan), including its tests ---
+scaffold/publisher/
+
+# --- thin validator package + its tests ---
+cathedral_thin/
+tests/thin/
+
+# --- deploy units ---
+deploy/sn39/
+deploy/thin/
+# edge router: asserted on by scaffold/publisher/tests/test_miner_error_contract.py
+deploy/edge-router/
+# golden ingress vector: asserted on by test_v2_bitset_ingress_contract.py and
+# test_v2_lean_ingress.py
+deploy/golden/
+
+# --- config: pinned provenance key bundles, validator configs, policy examples ---
+config/provenance/
+config/thin-score-policy.example.json
+config/thin-score-policy.registered-owner.example.json
+config/thin-score-policy.verified-policy.example.json
+config/thin-score-policy.verifyml.example.json
+config/validator-mainnet-sn39-launch.toml
+config/validator-mainnet-sn39.toml
+config/validator-thin-sn39-relay.toml
+config/validator.toml
+config/verified-policy-task.example.json
+
+# --- requirements: reproduction + build locks referenced by the shipped tests ---
+requirements/sn39-build.in
+requirements/sn39-build.lock
+requirements/sn39-reproduction.lock
+
+# --- validator-owned scripts (all referenced by the shipped tests) ---
+scripts/assert_sn39_public_reproduction.py
+scripts/build_sn39_release_manifest.py
+scripts/build_sn39_rotation_manifest.py
+scripts/confidential_cpu_publisher_canary.py
+scripts/finalize_sn39_public_release.py
+scripts/publish_sn39_validator_status.py
+scripts/run_sn39_public_reproduction.py
+scripts/sat_fast_score_poster.py
+scripts/sn39_hotkey_rotation_operator.py
+scripts/validator_release_gate.py
+scripts/verify_receipt.py
+
+# --- validator-owned root verify harnesses (closure satisfied by the above) ---
+# publisher_verify.py is deliberately NOT here: its audit-scanner bridge does a
+# module-scope `from game.arena import audit_scanner_smoke` at :632. See BOUNDARY.md.
+weights_verify.py
+postgres_verify.py
+wire_compat.py
+live_smoke.py
+
+# --- validator docs ---
+VALIDATOR.md
+docs/PROVENANCE.md
+docs/THIN_SUBNET_RUNBOOK.md
+docs/THIN_SCORE_CLASSES.md
+docs/THIN_SUBNET_DESIGN.md
+docs/THIN_SUBNET_EVIDENCE.md
+docs/SN39_MAINNET_RELEASE_20260724.md
+docs/SN39_LAUNCH_CUTOVER_20260726.md
+docs/VIOLET_EXTERNAL_SCORES.md
+docs/VERIFYML.md
+docs/VERIFIED_AGENT_WORK.md
+docs/MINER_ERROR_CONTRACT.md
+docs/CONFIDENTIAL_CPU_PUBLISHER_CANARY.md
+docs/evidence/
+
+# --- fixtures used by publisher tests ---
+fixtures/
