@@ -194,6 +194,79 @@ and runs the work repo's tests from a sibling `cathedralconfidential` checkout.
 This repo does not carry it, so the guard has nothing to guard and is deselected
 in CI. It is the only deselection.
 
+## Verification
+
+Method: run the same suites in this repo and in an upstream checkout at
+`fd02392d`, on the same machine, same Python 3.11.14, same resolved package set,
+then diff the failure sets. Anything failing here but passing there is an
+extraction defect.
+
+| Run | Result |
+|---|---|
+| Upstream `fd02392d`, `scaffold/publisher/tests tests/thin` | 44 failed, 1230 passed |
+| Here, same suites plus `tests/boundary` | 45 failed, 1238 passed |
+| **Fails here, passes upstream** | **1**, the deselected CI-config guard above |
+| Fails upstream, passes here | 0 |
+
+So with that one deselection applied, this repo is at failure parity with
+upstream. The 44 shared failures are inherited and pre-date the extraction; they
+come from running a suite that expects PostgreSQL and outbound network in an
+environment with neither.
+
+`tests/thin` alone: 128 passed. `tests/boundary` alone: 9 passed.
+
+GitHub Actions on the initial commit: Python 3.11 success, Python 3.12 success,
+publisher advisory job 35 failed / 1088 passed / 22 skipped / 1 deselected on
+ubuntu. The ubuntu failure set is smaller than the macOS one, consistent with
+these being environment-dependent. It has not been baselined against upstream on
+ubuntu; the like-for-like comparison above was done on macOS.
+
+CLI smoke, against the real production API:
+
+```
+cathedral-validator serve --config config/validator-mainnet-sn39.toml --offline --once
+```
+
+fetches the live signed vector from `https://api.cathedral.computer`, verifies
+the signature against the pinned `cathedral-weight-policy` key, and passes the
+freshness and rollback-fence checks before stopping at the synthetic UID map
+that `--offline` substitutes for chain state. `cathedral-validator --help` and
+`cathedral-candidate-snapshot --help` both work.
+
+## Console-script name collision with the work repo
+
+Not introduced here, but worth knowing before you install.
+
+Both distributions declare a `cathedral-validator` console script:
+
+| Distribution | Target |
+|---|---|
+| `cathedral-scaffold` (this repo, and upstream) | `scaffold.cli:main` |
+| `cathedral` (from `cathedralconfidential`, pulled by the `provenance` extra) | `cathedral.neuron.validator:main` |
+
+Whichever is installed last wins, and nothing declares which that should be.
+Observed on Python 3.11:
+
+| Command | `cathedral-validator` resolves to |
+|---|---|
+| `pip install -e '.[provenance]'` | `scaffold.cli:main`, correct |
+| `uv pip install -e '.[provenance]'` | `cathedral.neuron.validator:main`, **wrong** |
+| `uv pip install -e '.[test,publisher,provenance]'` | `scaffold.cli:main`, correct |
+
+The middle row is the exact command in `VALIDATOR.md:111` and
+`docs/PROVENANCE.md:116`, run with uv instead of pip. It produces a
+`cathedral-validator` that is the work repo's neuron validator, which fails with
+an argparse error about unknown subcommands rather than anything that points at
+the real cause.
+
+Check after installing:
+
+```sh
+grep 'import main' "$(dirname "$(command -v cathedral-validator)")/cathedral-validator"
+```
+
+It should print `from scaffold.cli import main`.
+
 ## Re-sync procedure
 
 One-way, upstream to here. Never the reverse: nothing in this repo is a source
