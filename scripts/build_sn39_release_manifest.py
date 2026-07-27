@@ -87,6 +87,34 @@ def immutable_tree_digest(root: Path) -> str:
             elif stat.S_ISLNK(info.st_mode):
                 target = path.resolve(strict=True)
                 target_info = target.stat()
+                if stat.S_ISDIR(target_info.st_mode):
+                    # `python3 -m venv` creates lib64 -> lib on 64-bit Linux.
+                    # It is the only directory symlink a stock venv contains,
+                    # and refusing it would reject every venv this project
+                    # builds. Accept exactly that shape, root-owned and not
+                    # group or other writable, resolving inside this venv, and
+                    # still commit to the link text, resolved path and target
+                    # mode so a swapped target changes the digest. Every other
+                    # directory symlink remains unsupported.
+                    if (
+                        relative != "lib64"
+                        or os.readlink(path) != "lib"
+                        or target != (root / "lib").resolve(strict=True)
+                        or target_info.st_uid != 0
+                        or stat.S_IMODE(target_info.st_mode) & 0o022
+                    ):
+                        raise SystemExit(
+                            f"versioned venv symlink target is unsupported: {path}"
+                        )
+                    record_digest(
+                        tree,
+                        "symlink-directory",
+                        relative,
+                        os.readlink(path),
+                        str(target),
+                        f"{stat.S_IMODE(target_info.st_mode):04o}",
+                    )
+                    continue
                 if not stat.S_ISREG(target_info.st_mode) or target_info.st_nlink != 1:
                     raise SystemExit(
                         f"versioned venv symlink target is unsupported: {path}"
