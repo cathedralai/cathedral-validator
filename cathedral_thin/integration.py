@@ -73,6 +73,7 @@ def preview_integrated_vector(
     now: datetime,
     now_iso: str,
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     expected_burn_hotkey: str | None = None,
     min_burn_version: int = 0,
     min_allocation_version: int = 0,
@@ -133,6 +134,7 @@ def preview_integrated_vector(
             source_epoch=source_epoch,
             now_iso=now_iso,
             gpu_attestation_verifier=gpu_attestation_verifier,
+            cpu_quote_verifier=cpu_quote_verifier,
         )
         _emit(
             events,

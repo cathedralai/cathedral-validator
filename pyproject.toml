@@ -62,6 +62,8 @@ integration = [
 # See BOUNDARY.md.
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
+# Non-writing Compute+Distill integration preview (needs the '.[integration]' extra).
+cathedral-validator-integration-preview = "cathedral_thin.integration_cli:main"
 cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
 cathedral-thin-validator = "cathedral_thin.validator:main"
 cathedral-thin-e2e = "cathedral_thin.e2e:main"
