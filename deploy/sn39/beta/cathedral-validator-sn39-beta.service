@@ -1,0 +1,55 @@
+[Unit]
+# SN39 beta validator: the sole mainnet weight writer while the launch
+# ceremony is waived. Additive unit; it does not modify or replace any
+# operator-staged unit or digest-pinned file. The waiver's exact surface is
+# printed at startup (waived / enforced / caveat) and pinned by tests.
+Description=Cathedral SN39 validator (BETA, launch ceremony waived)
+After=network-online.target
+Wants=network-online.target
+Conflicts=cathedral-thin-validator.service cathedral-validator-sn39.service cathedral-validator-sn39-launch.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
+ConditionPathIsReadWrite=/var/lib/cathedral-validator
+
+[Service]
+Type=simple
+User=cathedral-validator
+Group=cathedral-validator-log
+Environment=HOME=/var/lib/cathedral-validator
+# The release in force is whatever /opt/cathedral-sn39/releases/current points
+# at; deploy/sn39/beta/install.sh flips that symlink atomically and restarts.
+# The unit file itself never changes per release.
+Environment=PYTHONPATH=/opt/cathedral-sn39/releases/current
+# Reader group is granted to the SANITIZED status projection only. The raw
+# journal stays 0600; CATHEDRAL_VALIDATOR_JSONL_GROUP is deliberately unset.
+Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=cathedral-validator-log
+# Presentation only: the journal renders ANSI, and has no width to measure.
+Environment=CATHEDRAL_VALIDATOR_FORCE_COLOR=1
+Environment=COLUMNS=100
+# Conflicts= cannot stop a writer started by hand. Two writers on one hotkey
+# means nonce races and a duplicate weight extrinsic, so refuse to start.
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service cathedral-thin-validator.service cathedral-validator-sn39.service'
+# No submission ceiling: the validator is a permanent listener, and the real
+# fences are the chain's own rate limit, the durable attempt-id journal, and
+# the single-writer guard above. A lifetime cap only schedules an outage.
+ExecStart=/opt/cathedral-sn39/venvs/current/bin/python -m scaffold.cli serve --config /etc/cathedral-validator/validator-mainnet-sn39.toml --broadcast
+Restart=on-failure
+# The receipt-proof exit is a designed fail-safe (never assume a write landed);
+# it recovers on restart. 30s spacing keeps a flaky RPC from ever tripping
+# systemd's start-limit burst.
+RestartSec=30s
+TimeoutStopSec=30s
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+LogsDirectory=cathedral-validator
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/cathedral/controlled/sn39-launch /opt/cathedral-sn39/bin/cathedral-tdx-verifier
+ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
