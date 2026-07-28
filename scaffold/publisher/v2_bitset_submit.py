@@ -5,6 +5,7 @@ assignment bitset for per-miner SAT challenges, performs cheap validity checks
 (token, signature caller in app.py, assignment shape, SAT witness evaluation),
 and records only verified shadow events.
 """
+
 from __future__ import annotations
 
 import base64
@@ -92,7 +93,9 @@ def _secret_bytes(secret: str) -> bytes:
 
 
 def _token_payload_bytes(payload: dict[str, Any]) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
 
 
 def mint_submit_token(
@@ -133,7 +136,9 @@ def mint_submit_token(
     return f"{_TOKEN_VERSION}.{_b64url(body)}.{_b64url(sig)}"
 
 
-def verify_submit_token(token: str, *, secret: str, miner_hotkey: str, challenge_id: str) -> dict[str, Any]:
+def verify_submit_token(
+    token: str, *, secret: str, miner_hotkey: str, challenge_id: str
+) -> dict[str, Any]:
     parts = str(token or "").strip().split(".")
     if len(parts) != 3 or parts[0] != _TOKEN_VERSION:
         raise BitsetSubmitError("invalid_submit_token")
@@ -254,10 +259,14 @@ def normalize_submit_body(
 
 def canonical_submit_bytes(submit: dict[str, Any]) -> bytes:
     body = {k: submit[k] for k in sorted(submit)}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
 
 
-def decode_assignment_b64(assignment_b64: str, *, nvars: int) -> tuple[bytes, list[int]]:
+def decode_assignment_b64(
+    assignment_b64: str, *, nvars: int
+) -> tuple[bytes, list[int]]:
     try:
         raw = base64.b64decode(str(assignment_b64), validate=True)
     except Exception as exc:
@@ -305,7 +314,9 @@ def admit_verified_event(
     )
     rid = str(uuid.uuid4())
     assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
-    submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+    submit_token_id = hashlib.sha256(
+        str(submit["submit_token"]).encode("utf-8")
+    ).hexdigest()[:32]
 
     def _tx(conn):
         conn.execute(
@@ -386,7 +397,9 @@ def admit_received_event(
     )
     rid = str(uuid.uuid4())
     assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
-    submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+    submit_token_id = hashlib.sha256(
+        str(submit["submit_token"]).encode("utf-8")
+    ).hexdigest()[:32]
 
     def _tx(conn):
         conn.execute(
@@ -417,9 +430,9 @@ def admit_received_event(
                 None,  # verified_at_iso — set by the worker (nullable)
                 signature,
                 submit_token_id,
-                0.0,   # weighted_score — placeholder; the worker sets the real score
-                "",    # answer_hash — set by the worker
-                "",    # verifier_details_hash — set by the worker
+                0.0,  # weighted_score — placeholder; the worker sets the real score
+                "",  # answer_hash — set by the worker
+                "",  # verifier_details_hash — set by the worker
                 submit.get("solver_id"),
                 submit.get("solver_hash"),
                 submit.get("image_url"),
@@ -440,7 +453,9 @@ def admit_received_event(
 
 
 def get_receipt(store, receipt_id: str) -> dict[str, Any] | None:
-    rows = store.query("SELECT * FROM v2_submit_events WHERE id=? LIMIT 1", (receipt_id,))
+    rows = store.query(
+        "SELECT * FROM v2_submit_events WHERE id=? LIMIT 1", (receipt_id,)
+    )
     if not rows:
         return None
     row = rows[0]
@@ -450,7 +465,9 @@ def get_receipt(store, receipt_id: str) -> dict[str, Any] | None:
         return dict(row)
 
 
-def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
+def receipt_payload(
+    row: dict[str, Any], *, inserted: bool | None = None
+) -> dict[str, Any]:
     status = str(row.get("status") or STATUS_VERIFIED)
     terminal = status in {STATUS_VERIFIED, "rejected"}
     payload = {
@@ -495,5 +512,7 @@ def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dic
 
 
 def event_counts(store) -> dict[str, int]:
-    rows = store.query("SELECT status, COUNT(*) AS n FROM v2_submit_events GROUP BY status")
+    rows = store.query(
+        "SELECT status, COUNT(*) AS n FROM v2_submit_events GROUP BY status"
+    )
     return {str(r["status"]): int(r["n"] or 0) for r in rows}

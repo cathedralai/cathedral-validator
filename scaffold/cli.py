@@ -56,10 +56,13 @@ _DEFAULTS = {
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
-    # Two-mode operation: thin submits by default while the full-provenance
-    # audit runs concurrently in shadow. "authority" submits the independent
-    # recomputation instead; "off" disables the audit.
-    "provenance": "shadow",
+    # Full is the default: the independent recomputation from raw evidence is
+    # what gets submitted, and nobody's feed is a bottleneck. Operators without
+    # evidence access opt DOWN to thin explicitly (--mode thin), which follows
+    # the signed feed after verifying it. Startup fails closed with that hint
+    # when full's inputs are missing; there is deliberately no silent
+    # downgrade, because full -> thin is the forbidden direction.
+    "provenance": "authority",
     "evidence_url": None,  # default: <publisher_url>/v1/evidence
     "evidence_dir": None,
     "provenance_registry_keys": None,

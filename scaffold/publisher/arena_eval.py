@@ -24,6 +24,7 @@ caller-supplied `adapter_for(spec) -> SolverAdapter | None` so prod can plug a
 real container runner while the gate injects deterministic stubs. A solver with
 no resolvable adapter is skipped (no_eval_adapter), never crashes the tick.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +48,11 @@ AdapterResolver = Callable[[SolverSpec], "object | None"]
 
 def arena_eval_enabled() -> bool:
     return os.environ.get("CATHEDRAL_ARENA_EVAL_ENABLED", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _env_int(name: str, default: int) -> int:
@@ -100,16 +105,20 @@ def build_arena_rows(
         verifier_details_hash=vd,
         ran_at=ran_at,
         epoch_salt=epoch_salt,
-        solve_rank=1,            # the champion is rank 1 by definition
+        solve_rank=1,  # the champion is rank 1 by definition
         solved=True,
         private_key_hex=private_key_hex,
     )
 
 
 def _pending_solvers(store: Store) -> list[dict]:
-    return [dict(r) for r in store.query(
-        "SELECT source_sha256, source_url, container_digest, owner_hotkey "
-        "FROM arena_solvers WHERE status='pending' ORDER BY created_at_iso ASC")]
+    return [
+        dict(r)
+        for r in store.query(
+            "SELECT source_sha256, source_url, container_digest, owner_hotkey "
+            "FROM arena_solvers WHERE status='pending' ORDER BY created_at_iso ASC"
+        )
+    ]
 
 
 def arena_eval_tick(
@@ -138,19 +147,27 @@ def arena_eval_tick(
     falls = 0
     emitted_rows = 0
     for s in pending:
-        spec = SolverSpec(s["source_url"], s["container_digest"], s["source_sha256"],
-                          owner_hotkey=s["owner_hotkey"])
+        spec = SolverSpec(
+            s["source_url"],
+            s["container_digest"],
+            s["source_sha256"],
+            owner_hotkey=s["owner_hotkey"],
+        )
         adapter = adapter_for(spec)
         if adapter is None:
             log("arena_no_adapter", commitment=spec.commitment_id[:12])
             continue
         # wire the run capability for this commitment, then score it.
         lane.adapters[spec.commitment_id] = adapter
-        sub = Submission(problem.task_id, spec.owner_hotkey, {
-            "source_url": spec.source_url,
-            "container_digest": spec.container_digest,
-            "source_sha256": spec.source_sha256,
-        })
+        sub = Submission(
+            problem.task_id,
+            spec.owner_hotkey,
+            {
+                "source_url": spec.source_url,
+                "container_digest": spec.container_digest,
+                "source_sha256": spec.source_sha256,
+            },
+        )
         vr = lane.validate_submission(problem, hidden, sub)
         sr = lane.score(problem, vr)
         evaluated += 1
@@ -163,41 +180,68 @@ def arena_eval_tick(
         if fall is not None:
             falls += 1
             rows_out = build_arena_rows(
-                owner_hotkey=spec.owner_hotkey, commitment_id=spec.commitment_id,
-                tier=tier, weighted_score=sr.weighted_score,
+                owner_hotkey=spec.owner_hotkey,
+                commitment_id=spec.commitment_id,
+                tier=tier,
+                weighted_score=sr.weighted_score,
                 par2_ms=float(det.get("par2_ms", 0.0)),
                 champion_par2_ms=float(det.get("champion_par2_ms", float("inf"))),
-                ran_at=ran_at, epoch_salt=epoch_salt, private_key_hex=private_key_hex)
+                ran_at=ran_at,
+                epoch_salt=epoch_salt,
+                private_key_hex=private_key_hex,
+            )
 
             def _promote(conn, spec=spec, rows_out=rows_out):
                 # demote any prior champion, crown the new one.
-                conn.execute("UPDATE arena_solvers SET status='retired' "
-                             "WHERE status='champion'")
-                conn.execute("UPDATE arena_solvers SET status='champion' "
-                             "WHERE source_sha256=?", (spec.commitment_id,))
+                conn.execute(
+                    "UPDATE arena_solvers SET status='retired' WHERE status='champion'"
+                )
+                conn.execute(
+                    "UPDATE arena_solvers SET status='champion' WHERE source_sha256=?",
+                    (spec.commitment_id,),
+                )
                 for r in rows_out:
                     conn.execute(
                         "INSERT OR IGNORE INTO eval_runs "
                         "(id, ran_at, eval_output_schema_version, miner_hotkey, "
                         "task_type, row_json) VALUES (?, ?, ?, ?, ?, ?)",
-                        (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
-                         r["miner_hotkey"], r["task_type"], json.dumps(r)))
+                        (
+                            r["id"],
+                            r["ran_at"],
+                            int(r["eval_output_schema_version"]),
+                            r["miner_hotkey"],
+                            r["task_type"],
+                            json.dumps(r),
+                        ),
+                    )
+
             store.write(_promote)
             emitted_rows += len(rows_out)
-            log("arena_record_fall", new_champion=spec.commitment_id[:12],
-                owner=spec.owner_hotkey[:8], score=sr.weighted_score,
-                par2=det.get("par2_ms"))
+            log(
+                "arena_record_fall",
+                new_champion=spec.commitment_id[:12],
+                owner=spec.owner_hotkey[:8],
+                score=sr.weighted_score,
+                par2=det.get("par2_ms"),
+            )
         else:
             # certified-but-no-dethrone (or scored 0 / adversarial): the solver is
             # done being evaluated; move it out of pending so it isn't re-run.
             def _evald(conn, spec=spec):
-                conn.execute("UPDATE arena_solvers SET status='evaluated' "
-                             "WHERE source_sha256=? AND status='pending'",
-                             (spec.commitment_id,))
+                conn.execute(
+                    "UPDATE arena_solvers SET status='evaluated' "
+                    "WHERE source_sha256=? AND status='pending'",
+                    (spec.commitment_id,),
+                )
+
             store.write(_evald)
-    summary = {"evaluated": evaluated, "record_falls": falls,
-               "rows_emitted": emitted_rows, "pending_seen": len(pending),
-               "champion": lane.champion.champion.commitment_id}
+    summary = {
+        "evaluated": evaluated,
+        "record_falls": falls,
+        "rows_emitted": emitted_rows,
+        "pending_seen": len(pending),
+        "champion": lane.champion.champion.commitment_id,
+    }
     log("arena_eval_tick", summary=summary)
     return summary
 
@@ -220,24 +264,33 @@ async def arena_eval_loop(
     worker thread so the event loop is never blocked. Cancels cleanly. Each tick
     advances the seed so successive ticks draw FRESH hidden batches (competition
     conditions: a solver can't be tuned to a known batch)."""
-    interval = interval_seconds or _env_int("CATHEDRAL_ARENA_EVAL_INTERVAL_SECONDS",
-                                            _DEFAULT_INTERVAL_SECONDS)
+    interval = interval_seconds or _env_int(
+        "CATHEDRAL_ARENA_EVAL_INTERVAL_SECONDS", _DEFAULT_INTERVAL_SECONDS
+    )
     log("arena_eval_loop_start", interval=interval, tier=tier)
     n = 0
     try:
         while not (stop_event and stop_event.is_set()):
             try:
                 await asyncio.to_thread(
-                    arena_eval_tick, store, lane,
-                    adapter_for=adapter_for, private_key_hex=private_key_hex,
-                    epoch_salt=epoch_salt, seed=seed_base + n, tier=tier, log=log)
+                    arena_eval_tick,
+                    store,
+                    lane,
+                    adapter_for=adapter_for,
+                    private_key_hex=private_key_hex,
+                    epoch_salt=epoch_salt,
+                    seed=seed_base + n,
+                    tier=tier,
+                    log=log,
+                )
             except Exception as e:  # never let one bad tick kill the loop
                 log("arena_eval_error", error=str(e))
             n += 1
             try:
                 await asyncio.wait_for(
                     stop_event.wait() if stop_event else asyncio.sleep(interval),
-                    timeout=interval)
+                    timeout=interval,
+                )
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:

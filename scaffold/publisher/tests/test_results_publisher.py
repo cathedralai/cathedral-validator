@@ -12,6 +12,7 @@ Covers:
   * gate: publish_changed_miners is a no-op when
     CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED is not set
 """
+
 from __future__ import annotations
 
 import json
@@ -25,6 +26,7 @@ from scaffold.publisher.store import Store
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _now_iso() -> str:
     dt = datetime.now(timezone.utc)
@@ -45,9 +47,19 @@ class _FakeHip:
         return f"https://fake.hippius.example/{key}?sig=x"
 
 
-def _insert_event(store: Store, *, hotkey: str, epoch: int, challenge_id: str,
-                  tier: int, seq: int, status: str, weighted_score: float,
-                  verified_at_iso: str | None = None, challenge_kind: str = "sat") -> None:
+def _insert_event(
+    store: Store,
+    *,
+    hotkey: str,
+    epoch: int,
+    challenge_id: str,
+    tier: int,
+    seq: int,
+    status: str,
+    weighted_score: float,
+    verified_at_iso: str | None = None,
+    challenge_kind: str = "sat",
+) -> None:
     now = _now_iso()
     row_id = f"{hotkey}-{challenge_id}"
 
@@ -62,12 +74,28 @@ def _insert_event(store: Store, *, hotkey: str, epoch: int, challenge_id: str,
             "submitted_at, signature, submit_token_id) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                row_id, row_id, hotkey, challenge_id, "synthetic_boolean_v1",
-                epoch, tier, seq, "", "bitset/v1",
-                "", "", status,
-                weighted_score, "", "",
-                verified_at_iso, challenge_kind, now,
-                now, "", "",
+                row_id,
+                row_id,
+                hotkey,
+                challenge_id,
+                "synthetic_boolean_v1",
+                epoch,
+                tier,
+                seq,
+                "",
+                "bitset/v1",
+                "",
+                "",
+                status,
+                weighted_score,
+                "",
+                "",
+                verified_at_iso,
+                challenge_kind,
+                now,
+                now,
+                "",
+                "",
             ),
         )
 
@@ -78,17 +106,34 @@ def _insert_event(store: Store, *, hotkey: str, epoch: int, challenge_id: str,
 # publish_miner_results shape
 # ---------------------------------------------------------------------------
 
+
 def test_json_schema_and_shape(tmp_path):
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
     hk = "5FakeHotkey1111111111111111111111111111111111111"
     epoch = 42
     now = _now_iso()
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t1-e42-aaa",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=now)
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t2-e42-bbb",
-                  tier=2, seq=0, status="verified", weighted_score=1.5,
-                  verified_at_iso=now)
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t1-e42-aaa",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=now,
+    )
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t2-e42-bbb",
+        tier=2,
+        seq=0,
+        status="verified",
+        weighted_score=1.5,
+        verified_at_iso=now,
+    )
 
     hip = _FakeHip()
     url = results_publisher.publish_miner_results(store, hip, hk, epoch)
@@ -113,14 +158,38 @@ def test_only_verified_rows_contribute_to_total_score(tmp_path):
     hk = "5FakeHotkey2222222222222222222222222222222222222"
     epoch = 7
     now = _now_iso()
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t1-e7-v1",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=now)
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t1-e7-r1",
-                  tier=1, seq=1, status="rejected", weighted_score=0.0)
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t2-e7-v2",
-                  tier=2, seq=0, status="verified", weighted_score=1.5,
-                  verified_at_iso=now)
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t1-e7-v1",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=now,
+    )
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t1-e7-r1",
+        tier=1,
+        seq=1,
+        status="rejected",
+        weighted_score=0.0,
+    )
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t2-e7-v2",
+        tier=2,
+        seq=0,
+        status="verified",
+        weighted_score=1.5,
+        verified_at_iso=now,
+    )
 
     hip = _FakeHip()
     results_publisher.publish_miner_results(store, hip, hk, epoch)
@@ -140,8 +209,16 @@ def test_rejected_rows_have_zero_score_in_items(tmp_path):
     epoch = 3
     # rejected row with non-zero weighted_score in DB (defensive: should never
     # happen, but the publisher must not propagate it).
-    _insert_event(store, hotkey=hk, epoch=epoch, challenge_id="pm-t1-e3-r1",
-                  tier=1, seq=0, status="rejected", weighted_score=9.9)
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=epoch,
+        challenge_id="pm-t1-e3-r1",
+        tier=1,
+        seq=0,
+        status="rejected",
+        weighted_score=9.9,
+    )
 
     hip = _FakeHip()
     results_publisher.publish_miner_results(store, hip, hk, epoch)
@@ -155,9 +232,17 @@ def test_rejected_rows_have_zero_score_in_items(tmp_path):
 def test_publish_failure_is_swallowed_returns_none(tmp_path):
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
     hk = "5FakeHotkey4444444444444444444444444444444444444"
-    _insert_event(store, hotkey=hk, epoch=1, challenge_id="pm-t1-e1-x",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=_now_iso())
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=1,
+        challenge_id="pm-t1-e1-x",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=_now_iso(),
+    )
 
     hip = _FakeHip(boom=True)
     # must not raise
@@ -169,14 +254,23 @@ def test_publish_failure_is_swallowed_returns_none(tmp_path):
 # publish_changed_miners deduplication + gate
 # ---------------------------------------------------------------------------
 
+
 def test_publish_changed_miners_deduplicates(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED", "1")
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
     hk = "5FakeHotkey5555555555555555555555555555555555555"
     now = _now_iso()
-    _insert_event(store, hotkey=hk, epoch=5, challenge_id="pm-t1-e5-a",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=now)
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=5,
+        challenge_id="pm-t1-e5-a",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=now,
+    )
 
     hip = _FakeHip()
     # Three results for the same (hotkey, epoch) — should only produce one put.
@@ -193,14 +287,26 @@ def test_publish_changed_miners_noop_when_disabled(tmp_path, monkeypatch):
     monkeypatch.delenv("CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED", raising=False)
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
     hk = "5FakeHotkey6666666666666666666666666666666666666"
-    _insert_event(store, hotkey=hk, epoch=1, challenge_id="pm-t1-e1-y",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=_now_iso())
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=1,
+        challenge_id="pm-t1-e1-y",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=_now_iso(),
+    )
 
     hip = _FakeHip()
-    results_publisher.publish_changed_miners(store, hip, [
-        {"miner_hotkey": hk, "epoch": 1, "status": "verified"},
-    ])
+    results_publisher.publish_changed_miners(
+        store,
+        hip,
+        [
+            {"miner_hotkey": hk, "epoch": 1, "status": "verified"},
+        ],
+    )
     assert len(hip.calls) == 0
 
 
@@ -208,13 +314,25 @@ def test_publish_changed_miners_noop_when_hip_is_none(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED", "1")
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
     hk = "5FakeHotkey7777777777777777777777777777777777777"
-    _insert_event(store, hotkey=hk, epoch=1, challenge_id="pm-t1-e1-z",
-                  tier=1, seq=0, status="verified", weighted_score=1.0,
-                  verified_at_iso=_now_iso())
+    _insert_event(
+        store,
+        hotkey=hk,
+        epoch=1,
+        challenge_id="pm-t1-e1-z",
+        tier=1,
+        seq=0,
+        status="verified",
+        weighted_score=1.0,
+        verified_at_iso=_now_iso(),
+    )
 
-    results_publisher.publish_changed_miners(store, None, [
-        {"miner_hotkey": hk, "epoch": 1, "status": "verified"},
-    ])
+    results_publisher.publish_changed_miners(
+        store,
+        None,
+        [
+            {"miner_hotkey": hk, "epoch": 1, "status": "verified"},
+        ],
+    )
     # no assertion needed — just must not raise
 
 

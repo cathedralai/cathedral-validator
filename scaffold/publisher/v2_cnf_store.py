@@ -36,6 +36,7 @@ Storage: cnf_text is zlib-compressed before writing (v2_cnf_store.cnf_zlib is
 BLOB/BYTEA) — CNFs are plain-text DIMACS and compress well, and this keeps a
 backlog-sized cache from bloating the DB.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -100,7 +101,9 @@ def put(store: Store, challenge_id: str, cnf_text: str) -> bool:
         return False
 
 
-def get(store: Store, challenge_id: str, expected_sha256: str | None = None) -> str | None:
+def get(
+    store: Store, challenge_id: str, expected_sha256: str | None = None
+) -> str | None:
     """Return the cached cnf_text for challenge_id, or None on a miss.
 
     A miss occurs when: the read kill-switch is off, there is no row, the
@@ -152,7 +155,9 @@ def retention_hours() -> float:
     Env: CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS
     """
     try:
-        val = float(os.environ.get("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "4") or "4")
+        val = float(
+            os.environ.get("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", "4") or "4"
+        )
     except Exception:
         val = 4.0
     return max(2.0, val)
@@ -187,7 +192,9 @@ _purge_lock = threading.Lock()
 _last_purge_at = 0.0
 
 
-def maybe_purge_older_than(store: Store, hours: float = 24, min_interval_secs: float = 600.0) -> int:
+def maybe_purge_older_than(
+    store: Store, hours: float = 24, min_interval_secs: float = 600.0
+) -> int:
     global _last_purge_at
     try:
         now = time.time()

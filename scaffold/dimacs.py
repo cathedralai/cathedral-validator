@@ -4,13 +4,15 @@ verifier. Self-contained mirror of synthetic_boolean_v1/dimacs.py's verify path.
 REAL primitive. The witness check is the correctness gate Lane A and Lane B
 rely on: a faster-but-wrong solve scores 0 because this returns False.
 """
+
 from __future__ import annotations
 
 import random
 
 
-def gen_planted_3sat(seed: int, n_vars: int, n_clauses: int,
-                     method: str = "biased") -> tuple[str, list[int]]:
+def gen_planted_3sat(
+    seed: int, n_vars: int, n_clauses: int, method: str = "biased"
+) -> tuple[str, list[int]]:
     """Generate a random 3-SAT CNF guaranteed satisfiable by a planted
     assignment. Returns (dimacs_text, planted_assignment as signed literals).
 
@@ -98,7 +100,7 @@ def solve_cnf(cnf_text: str) -> list[int] | None:
     def dpll(assign: dict[int, bool]) -> dict[int, bool] | None:
         a = dict(assign)
         changed = True
-        while changed:                          # unit propagation
+        while changed:  # unit propagation
             changed = False
             for cl in clauses:
                 unassigned, sat = [], False
@@ -113,7 +115,7 @@ def solve_cnf(cnf_text: str) -> list[int] | None:
                 if sat:
                     continue
                 if not unassigned:
-                    return None                  # conflict
+                    return None  # conflict
                 if len(unassigned) == 1:
                     u = unassigned[0]
                     a[abs(u)] = u > 0
@@ -123,7 +125,7 @@ def solve_cnf(cnf_text: str) -> list[int] | None:
         score: dict[int, int] = {}
         for cl in clauses:
             if any(a.get(abs(lit)) == (lit > 0) for lit in cl):
-                continue                         # clause already satisfied
+                continue  # clause already satisfied
             for lit in cl:
                 if abs(lit) not in a:
                     score[lit] = score.get(lit, 0) + 1
@@ -155,14 +157,14 @@ def verify_witness(cnf_text: str, assignment: list[int]) -> bool:
     val: dict[int, bool] = {}
     for lit in assignment:
         if not isinstance(lit, int) or lit == 0:
-            return False                        # malformed token
+            return False  # malformed token
         v = abs(lit)
-        if v > n_vars:                          # out-of-range variable padding
+        if v > n_vars:  # out-of-range variable padding
             return False
-        if v in val and val[v] != (lit > 0):    # self-contradictory assignment
+        if v in val and val[v] != (lit > 0):  # self-contradictory assignment
             return False
         val[v] = lit > 0
-    if len(val) != n_vars:                       # must assign EXACTLY vars 1..n
+    if len(val) != n_vars:  # must assign EXACTLY vars 1..n
         return False
     for clause in clauses:
         if not any(val.get(abs(lit)) == (lit > 0) for lit in clause):

@@ -1,4 +1,5 @@
 """Focused contract tests for the confidential TDX global 10% blend."""
+
 from __future__ import annotations
 
 import json
@@ -46,8 +47,7 @@ class FakeStoreTDX:
             "complete": True,
             "generated_at": generated_at,
             "scores": [
-                {"miner_hotkey": hotkey, "score": score}
-                for hotkey, score in ext_scores
+                {"miner_hotkey": hotkey, "score": score} for hotkey, score in ext_scores
             ],
         }
         self._ext_scores = ext_scores
@@ -59,13 +59,15 @@ class FakeStoreTDX:
         if "FROM external_score_reports" in sql:
             if not self._ext_scores:
                 return []
-            return [{
-                "id": "tdx-report-1",
-                "epoch": 1,
-                "generated_at_iso": self._generated_at,
-                "received_at_iso": self._generated_at,
-                "report_json": json.dumps(self._report),
-            }]
+            return [
+                {
+                    "id": "tdx-report-1",
+                    "epoch": 1,
+                    "generated_at_iso": self._generated_at,
+                    "received_at_iso": self._generated_at,
+                    "report_json": json.dumps(self._report),
+                }
+            ]
         if "FROM external_score_entries" in sql:
             return [
                 {"miner_hotkey": hotkey, "score": score}
@@ -177,9 +179,7 @@ def test_overlap_is_additive(monkeypatch: pytest.MonkeyPatch) -> None:
     assert base_comp["overlap"] == pytest.approx(0.45)
     assert ext_comp["overlap"] == pytest.approx(0.05)
     assert out["overlap"] == pytest.approx(0.50)
-    assert out["overlap"] == pytest.approx(
-        base_comp["overlap"] + ext_comp["overlap"]
-    )
+    assert out["overlap"] == pytest.approx(base_comp["overlap"] + ext_comp["overlap"])
 
 
 @pytest.mark.parametrize(
@@ -282,7 +282,9 @@ def test_global_components_validate_after_json_round_trip(
     decoded = json.loads(json.dumps(entries))
     scores = {entry["miner_hotkey"]: entry["weight"] for entry in decoded}
     decoded_base = {entry["miner_hotkey"]: entry["base_component"] for entry in decoded}
-    decoded_ext = {entry["miner_hotkey"]: entry["external_component"] for entry in decoded}
+    decoded_ext = {
+        entry["miner_hotkey"]: entry["external_component"] for entry in decoded
+    }
     totals = weights._validate_confidential_tdx_components(
         scores, decoded_base, decoded_ext, FRACTION, context="json"
     )

@@ -6,6 +6,7 @@ seeded straight into `solution_manifests` / `v2_submit_events`) and the
 app.py, including that both are TTL-cached (a required guardrail — every
 DB-heavy public V2 endpoint must be, per the outages this fixes for).
 """
+
 from __future__ import annotations
 
 import base64
@@ -29,10 +30,19 @@ def _now_iso() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _insert_manifest_row(store: Store, *, rid: str, hotkey: str, challenge_id: str,
-                          epoch: int, tier: int = 1, seq: int = 0,
-                          status: str = "verified", solution_inline: bytes | None = b"abc123",
-                          received_at_iso: str | None = None) -> None:
+def _insert_manifest_row(
+    store: Store,
+    *,
+    rid: str,
+    hotkey: str,
+    challenge_id: str,
+    epoch: int,
+    tier: int = 1,
+    seq: int = 0,
+    status: str = "verified",
+    solution_inline: bytes | None = b"abc123",
+    received_at_iso: str | None = None,
+) -> None:
     received = received_at_iso or _now_iso()
 
     def _tx(conn):
@@ -46,15 +56,34 @@ def _insert_manifest_row(store: Store, *, rid: str, hotkey: str, challenge_id: s
             "rejection_reason, signature, manifest_json, solution_inline"
             ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                rid, f"idem-{rid}", hotkey, challenge_id, "synthetic_boolean_v1",
-                "bitset/v1", "hippius://fake-cid", hashlib.sha256(b"solution").hexdigest(), 3,
-                hashlib.sha256(b"cnf").hexdigest(), status, received, received,
+                rid,
+                f"idem-{rid}",
+                hotkey,
+                challenge_id,
+                "synthetic_boolean_v1",
+                "bitset/v1",
+                "hippius://fake-cid",
+                hashlib.sha256(b"solution").hexdigest(),
+                3,
+                hashlib.sha256(b"cnf").hexdigest(),
+                status,
+                received,
+                received,
                 received if status == "verified" else None,
-                epoch, tier, seq, 1.0, hashlib.sha256(b"answer").hexdigest(),
-                "some-worker-id-should-never-leak", received, None,
-                "internal error detail should never leak" if status != "verified" else None,
+                epoch,
+                tier,
+                seq,
+                1.0,
+                hashlib.sha256(b"answer").hexdigest(),
+                "some-worker-id-should-never-leak",
+                received,
+                None,
+                "internal error detail should never leak"
+                if status != "verified"
+                else None,
                 "solution_sha256_mismatch" if status != "verified" else None,
-                "0xminer-signature-" + rid, json.dumps({"schema": "cathedral.solution_manifest.v1"}),
+                "0xminer-signature-" + rid,
+                json.dumps({"schema": "cathedral.solution_manifest.v1"}),
                 solution_inline,
             ),
         )
@@ -62,10 +91,19 @@ def _insert_manifest_row(store: Store, *, rid: str, hotkey: str, challenge_id: s
     store.write(_tx)
 
 
-def _insert_bitset_row(store: Store, *, rid: str, hotkey: str, challenge_id: str,
-                        epoch: int, tier: int = 1, seq: int = 1,
-                        status: str = "verified", challenge_kind: str | None = "coloring",
-                        received_at_iso: str | None = None) -> None:
+def _insert_bitset_row(
+    store: Store,
+    *,
+    rid: str,
+    hotkey: str,
+    challenge_id: str,
+    epoch: int,
+    tier: int = 1,
+    seq: int = 1,
+    status: str = "verified",
+    challenge_kind: str | None = "coloring",
+    received_at_iso: str | None = None,
+) -> None:
     received = received_at_iso or _now_iso()
     assignment_b64 = base64.b64encode(b"\x01\x02\x03").decode()
 
@@ -80,18 +118,33 @@ def _insert_bitset_row(store: Store, *, rid: str, hotkey: str, challenge_id: str
             "solver_id, solver_hash, image_url, challenge_kind"
             ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                rid, f"idem-{rid}", hotkey, challenge_id, "synthetic_boolean_v1",
-                epoch, tier, seq, hashlib.sha256(b"cnf").hexdigest(), "bitset/v1",
-                hashlib.sha256(b"\x01\x02\x03").hexdigest(), assignment_b64,
+                rid,
+                f"idem-{rid}",
+                hotkey,
+                challenge_id,
+                "synthetic_boolean_v1",
+                epoch,
+                tier,
+                seq,
+                hashlib.sha256(b"cnf").hexdigest(),
+                "bitset/v1",
+                hashlib.sha256(b"\x01\x02\x03").hexdigest(),
+                assignment_b64,
                 status,
                 "witness_check_failed" if status != "verified" else None,
                 "unknown_beta",
-                received, received, received if status == "verified" else None,
+                received,
+                received,
+                received if status == "verified" else None,
                 "0xbitset-signature-" + rid,
-                "should-never-leak-submit-token-id", 1.0,
-                hashlib.sha256(b"bitset-answer").hexdigest(), hashlib.sha256(b"details").hexdigest(),
-                "cadical153", "sha256:" + hashlib.sha256(b"cadical153").hexdigest(),
-                "hippius://solver-image", challenge_kind,
+                "should-never-leak-submit-token-id",
+                1.0,
+                hashlib.sha256(b"bitset-answer").hexdigest(),
+                hashlib.sha256(b"details").hexdigest(),
+                "cadical153",
+                "sha256:" + hashlib.sha256(b"cadical153").hexdigest(),
+                "hippius://solver-image",
+                challenge_kind,
             ),
         )
 
@@ -102,12 +155,20 @@ def _build_store(tmp_path) -> Store:
     return Store(str(tmp_path / "receipts.sqlite"), prefer_env_database_url=False)
 
 
-def test_bundle_includes_verified_rows_from_both_sources_with_all_public_fields(tmp_path):
+def test_bundle_includes_verified_rows_from_both_sources_with_all_public_fields(
+    tmp_path,
+):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
-    _insert_bitset_row(store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
+    _insert_bitset_row(
+        store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5
+    )
 
-    bundle = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
+    bundle = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
 
     assert bundle["schema"] == "cathedral.v2.receipts.v1"
     assert bundle["epoch"] == 5
@@ -132,16 +193,25 @@ def test_bundle_includes_verified_rows_from_both_sources_with_all_public_fields(
     assert bitset_receipt["challenge_kind"] == "coloring"
     assert bitset_receipt["answer_b64"] == base64.b64encode(b"\x01\x02\x03").decode()
     assert bitset_receipt["solver_id"] == "cadical153"
-    assert bitset_receipt["solver_hash"] == "sha256:" + hashlib.sha256(b"cadical153").hexdigest()
+    assert (
+        bitset_receipt["solver_hash"]
+        == "sha256:" + hashlib.sha256(b"cadical153").hexdigest()
+    )
     assert bitset_receipt["image_url"] == "hippius://solver-image"
 
 
 def test_no_scrubbed_fields_anywhere_in_serialized_bundle(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
-    _insert_bitset_row(store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
+    _insert_bitset_row(
+        store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5
+    )
 
-    bundle = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
+    bundle = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
     serialized = json.dumps(bundle)
 
     for forbidden in _FORBIDDEN_SUBSTRINGS:
@@ -152,11 +222,19 @@ def test_no_scrubbed_fields_anywhere_in_serialized_bundle(tmp_path):
 
 def test_leaf_hash_matches_audit_bundle_for_same_row(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
-    _insert_bitset_row(store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
+    _insert_bitset_row(
+        store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def", epoch=5
+    )
 
-    receipts_bundle = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
-    audit_bundle = v2_pipeline.audit_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
+    receipts_bundle = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
+    audit_bundle = v2_pipeline.audit_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
 
     audit_leaves = set(audit_bundle["leaves"])
     for receipt in receipts_bundle["receipts"]:
@@ -165,30 +243,54 @@ def test_leaf_hash_matches_audit_bundle_for_same_row(tmp_path):
 
 def test_merkle_root_stable_across_calls(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
 
-    b1 = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
-    b2 = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
+    b1 = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
+    b2 = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
     assert b1["merkle_root"] == b2["merkle_root"]
 
 
 def test_unverified_rows_excluded(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc",
-                         epoch=5, status="rejected")
-    _insert_bitset_row(store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e5-def",
-                       epoch=5, status="rejected")
+    _insert_manifest_row(
+        store,
+        rid="m1",
+        hotkey="hkA",
+        challenge_id="pm-t1-e5-abc",
+        epoch=5,
+        status="rejected",
+    )
+    _insert_bitset_row(
+        store,
+        rid="b1",
+        hotkey="hkB",
+        challenge_id="pm-t1-e5-def",
+        epoch=5,
+        status="rejected",
+    )
 
-    bundle = v2_receipts.build_receipts_bundle(store, epoch=5, signing_key_hex=SIGNING_KEY_HEX)
+    bundle = v2_receipts.build_receipts_bundle(
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX
+    )
     assert bundle["count"] == 0
     assert bundle["receipts"] == []
 
 
 def test_unknown_epoch_returns_empty_but_valid_signed_envelope(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
 
-    bundle = v2_receipts.build_receipts_bundle(store, epoch=999, signing_key_hex=SIGNING_KEY_HEX)
+    bundle = v2_receipts.build_receipts_bundle(
+        store, epoch=999, signing_key_hex=SIGNING_KEY_HEX
+    )
     assert bundle["count"] == 0
     assert bundle["epoch"] == 999
     assert bundle.get("publisher_signature")
@@ -197,26 +299,32 @@ def test_unknown_epoch_returns_empty_but_valid_signed_envelope(tmp_path):
 
 def test_coldkey_resolver_success_populates_miner_coldkey(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
 
     def resolver(hotkey: str) -> str | None:
         return {"hkA": "coldkeyA"}.get(hotkey)
 
     bundle = v2_receipts.build_receipts_bundle(
-        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX, coldkey_resolver=resolver)
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX, coldkey_resolver=resolver
+    )
     assert bundle["coldkey_resolution"] == "live"
     assert bundle["receipts"][0]["miner_coldkey"] == "coldkeyA"
 
 
 def test_coldkey_resolver_raising_still_emits_receipts_with_null_coldkey(tmp_path):
     store = _build_store(tmp_path)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e5-abc", epoch=5
+    )
 
     def bad_resolver(hotkey: str) -> str | None:
         raise RuntimeError("metagraph is down")
 
     bundle = v2_receipts.build_receipts_bundle(
-        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX, coldkey_resolver=bad_resolver)
+        store, epoch=5, signing_key_hex=SIGNING_KEY_HEX, coldkey_resolver=bad_resolver
+    )
     assert bundle["count"] == 1
     assert bundle["receipts"][0]["miner_coldkey"] is None
 
@@ -246,7 +354,9 @@ def _build_app(tmp_path, monkeypatch):
 
 def test_receipts_epoch_endpoint_returns_bundle(tmp_path, monkeypatch):
     app, store = _build_app(tmp_path, monkeypatch)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e7-abc", epoch=7)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e7-abc", epoch=7
+    )
     client = TestClient(app)
 
     r = client.get("/v2/receipts/epochs/7")
@@ -259,10 +369,16 @@ def test_receipts_epoch_endpoint_returns_bundle(tmp_path, monkeypatch):
     assert "max-age=60" in r.headers["cache-control"]
 
 
-def test_receipts_latest_endpoint_resolves_most_recent_verified_epoch(tmp_path, monkeypatch):
+def test_receipts_latest_endpoint_resolves_most_recent_verified_epoch(
+    tmp_path, monkeypatch
+):
     app, store = _build_app(tmp_path, monkeypatch)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e3-abc", epoch=3)
-    _insert_bitset_row(store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e9-def", epoch=9)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e3-abc", epoch=3
+    )
+    _insert_bitset_row(
+        store, rid="b1", hotkey="hkB", challenge_id="pm-t1-e9-def", epoch=9
+    )
     client = TestClient(app)
 
     r = client.get("/v2/receipts/latest")
@@ -275,7 +391,9 @@ def test_receipts_latest_endpoint_resolves_most_recent_verified_epoch(tmp_path, 
 
 def test_receipts_endpoint_is_ttl_cached(tmp_path, monkeypatch):
     app, store = _build_app(tmp_path, monkeypatch)
-    _insert_manifest_row(store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e7-abc", epoch=7)
+    _insert_manifest_row(
+        store, rid="m1", hotkey="hkA", challenge_id="pm-t1-e7-abc", epoch=7
+    )
     client = TestClient(app)
 
     calls = {"n": 0}

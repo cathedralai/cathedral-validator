@@ -6,6 +6,7 @@ These tests pin *which rows would be retired* and verify that:
   * the hash columns (kept forever) survive compaction,
   * fresh rows / bodies are left alone.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -27,7 +28,9 @@ def _iso(dt: datetime) -> str:
     return retention._ms_iso(dt)
 
 
-def _add_witness(store: Store, cid: str, recorded_at: datetime, body: str = "p cnf 1 1\n1 0\n") -> None:
+def _add_witness(
+    store: Store, cid: str, recorded_at: datetime, body: str = "p cnf 1 1\n1 0\n"
+) -> None:
     def write(conn):
         conn.execute(
             "INSERT INTO per_miner_witnesses(challenge_id, miner_hotkey, epoch, "
@@ -79,7 +82,7 @@ def _clean_env(monkeypatch):
 
 def test_dry_run_reports_but_does_not_mutate(tmp_path):
     store = _store(tmp_path)
-    old = NOW - timedelta(hours=200)            # past 168h accepted-raw TTL
+    old = NOW - timedelta(hours=200)  # past 168h accepted-raw TTL
     _add_witness(store, "old", old)
     _add_eval_run(store, "old", NOW - timedelta(hours=100))  # past 48h eval TTL
 
@@ -102,9 +105,9 @@ def test_accepted_body_compacted_past_ttl_keeps_hashes(tmp_path):
 
     assert res["compacted"]["per_miner_witness_bodies"] == 1
     body, sha, ans = _witness_body(store, "old")
-    assert body == ""                 # raw body gone
-    assert sha == "sha-old"           # witness hash kept forever
-    assert ans == "ans-old"           # answer hash kept forever
+    assert body == ""  # raw body gone
+    assert sha == "sha-old"  # witness hash kept forever
+    assert ans == "ans-old"  # answer hash kept forever
 
 
 def test_fresh_accepted_body_is_retained(tmp_path):
@@ -136,8 +139,12 @@ def test_accepted_raw_hours_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_RETENTION_ACCEPTED_RAW_HOURS", "24")
 
     # default (168h) would NOT select a 30h-old body
-    assert retention.retention_tick(store, now=NOW, dry=True)[
-        "compacted"]["per_miner_witness_bodies"] == 1
+    assert (
+        retention.retention_tick(store, now=NOW, dry=True)["compacted"][
+            "per_miner_witness_bodies"
+        ]
+        == 1
+    )
 
 
 def test_dry_run_flag_from_env(tmp_path, monkeypatch):

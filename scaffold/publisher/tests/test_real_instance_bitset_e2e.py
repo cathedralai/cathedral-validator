@@ -15,6 +15,7 @@ per-miner challenge, solve it with the scaffold's own DPLL (`dimacs.solve_cnf`
 — there is no planted witness for real instances), encode the bitset at the
 REAL size, and submit. Also asserts the planted default is unchanged.
 """
+
 from __future__ import annotations
 
 import base64
@@ -44,6 +45,7 @@ def _now_iso() -> str:
 
 def _keypair(uri: str):
     from bittensor_wallet import Keypair
+
     return Keypair.create_from_uri(uri)
 
 
@@ -66,12 +68,19 @@ def _read_headers(kp, *, submitted_at: str | None = None) -> dict[str, str]:
     }
 
 
-def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, str]:
+def _bitset_headers(
+    kp, body: dict, *, submitted_at: str | None = None
+) -> dict[str, str]:
     ts = submitted_at or _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
-        body, miner_hotkey=kp.ss58_address, submitted_at=ts, card_id=_FAMILY,
+        body,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        card_id=_FAMILY,
     )
-    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+    sig = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
         "X-Cathedral-Signature": sig,
@@ -79,19 +88,25 @@ def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[
     }
 
 
-def _build(tmp_path, monkeypatch, *, source: str | None = None, kind: str | None = None):
+def _build(
+    tmp_path, monkeypatch, *, source: str | None = None, kind: str | None = None
+):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", "all")
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true")
-    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret"
+    )
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATHEDRAL_CNF_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ENABLED", "1")
-    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "real-instance-e2e-test-seed")
+    monkeypatch.setenv(
+        "CATHEDRAL_V2_PERMINER_SEED_SECRET", "real-instance-e2e-test-seed"
+    )
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T1", "2")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T2", "2")
     monkeypatch.setenv("CATHEDRAL_V2_DB_PATH", str(tmp_path / "v2.sqlite"))
@@ -131,11 +146,7 @@ def _solve_fixture_cnf(cnf_text: str) -> list[int] | None:
     for line in cnf_text.splitlines():
         if not line.startswith("c graph-coloring "):
             continue
-        parts = dict(
-            part.split("=", 1)
-            for part in line.split()
-            if "=" in part
-        )
+        parts = dict(part.split("=", 1) for part in line.split() if "=" in part)
         try:
             n_nodes = int(parts["n_nodes"])
             k_colors = int(parts["k_colors"])
@@ -239,7 +250,9 @@ def _submit_and_assert_verified(client, kp, item, *, expected_nvars: int, v2_sto
     return receipt
 
 
-def test_real_instance_combinatorial_bitset_e2e_verifies_at_real_shape(tmp_path, monkeypatch):
+def test_real_instance_combinatorial_bitset_e2e_verifies_at_real_shape(
+    tmp_path, monkeypatch
+):
     """CATHEDRAL_V2_CHALLENGE_SOURCE=combinatorial + coloring kind: tier1 CNFs
     are 8 nodes * 3 colors = 24 vars, tier2 are 11 * 3 = 33 vars — NOT the
     nominal shape_for(tier) (400 for both, by default). Before the fix, the
@@ -262,11 +275,15 @@ def test_real_instance_combinatorial_bitset_e2e_verifies_at_real_shape(tmp_path,
 
     kp1 = _keypair("//RealInstanceBitsetT1")
     item1 = _fetch_item(client, kp1, tier=1)
-    _submit_and_assert_verified(client, kp1, item1, expected_nvars=real_t1, v2_store=v2_store)
+    _submit_and_assert_verified(
+        client, kp1, item1, expected_nvars=real_t1, v2_store=v2_store
+    )
 
     kp2 = _keypair("//RealInstanceBitsetT2")
     item2 = _fetch_item(client, kp2, tier=2)
-    _submit_and_assert_verified(client, kp2, item2, expected_nvars=real_t2, v2_store=v2_store)
+    _submit_and_assert_verified(
+        client, kp2, item2, expected_nvars=real_t2, v2_store=v2_store
+    )
 
 
 def test_planted_default_source_still_mints_nominal_tier_shape(tmp_path, monkeypatch):
@@ -285,5 +302,6 @@ def test_planted_default_source_still_mints_nominal_tier_shape(tmp_path, monkeyp
     assert item["submit_token"]
 
     receipt = _submit_and_assert_verified(
-        client, kp, item, expected_nvars=pm.shape_for(1)[0], v2_store=v2_store)
+        client, kp, item, expected_nvars=pm.shape_for(1)[0], v2_store=v2_store
+    )
     assert receipt["weighted_score"] == item["difficulty_weight"]

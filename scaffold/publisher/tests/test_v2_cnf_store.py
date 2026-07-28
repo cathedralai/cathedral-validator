@@ -10,6 +10,7 @@ Covers:
     on a miss, falls back to the EXACT existing regeneration path and
     backfills the store so the next event for the same challenge_id hits.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -45,6 +46,7 @@ def _iso_hours_ago(hours: float) -> str:
 # ---------------------------------------------------------------------------
 # Pure store tests — no app, just Store + v2_cnf_store.
 # ---------------------------------------------------------------------------
+
 
 def test_put_get_roundtrip(tmp_path):
     store = Store(str(tmp_path / "s.sqlite"), prefer_env_database_url=False)
@@ -124,8 +126,13 @@ def test_purge_deletes_only_rows_older_than_cutoff(tmp_path):
 
     deleted = v2_cnf_store.purge_older_than(store, hours=24)
     assert deleted == 1
-    assert store.query("SELECT * FROM v2_cnf_store WHERE challenge_id=?", (old_cid,)) == []
-    assert len(store.query("SELECT * FROM v2_cnf_store WHERE challenge_id=?", (new_cid,))) == 1
+    assert (
+        store.query("SELECT * FROM v2_cnf_store WHERE challenge_id=?", (old_cid,)) == []
+    )
+    assert (
+        len(store.query("SELECT * FROM v2_cnf_store WHERE challenge_id=?", (new_cid,)))
+        == 1
+    )
 
 
 def test_maybe_purge_older_than_throttles_to_one_call(tmp_path, monkeypatch):
@@ -133,7 +140,8 @@ def test_maybe_purge_older_than_throttles_to_one_call(tmp_path, monkeypatch):
     monkeypatch.setattr(v2_cnf_store, "_last_purge_at", 0.0)
     calls = []
     monkeypatch.setattr(
-        v2_cnf_store, "purge_older_than",
+        v2_cnf_store,
+        "purge_older_than",
         lambda store, hours=24: (calls.append(1), 0)[1],
     )
     v2_cnf_store.maybe_purge_older_than(store, hours=24, min_interval_secs=600.0)
@@ -145,8 +153,10 @@ def test_maybe_purge_older_than_throttles_to_one_call(tmp_path, monkeypatch):
 # Verify-path integration — the real V2 verify worker against a built app.
 # ---------------------------------------------------------------------------
 
+
 def _keypair(uri: str):
     from bittensor_wallet import Keypair
+
     return Keypair.create_from_uri(uri)
 
 
@@ -156,8 +166,12 @@ def _build(tmp_path, monkeypatch, *, submit_bitset_enabled: bool):
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true")
     monkeypatch.setenv(
-        "CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true" if submit_bitset_enabled else "false")
-    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
+        "CATHEDRAL_V2_SUBMIT_BITSET_ENABLED",
+        "true" if submit_bitset_enabled else "false",
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret"
+    )
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
@@ -176,8 +190,12 @@ def _build(tmp_path, monkeypatch, *, submit_bitset_enabled: bool):
 def _read_headers(kp, *, submitted_at: str | None = None) -> dict[str, str]:
     ts = submitted_at or _now_iso()
     msg = canonical_claim_bytes(
-        bundle_hash=_EMPTY_BUNDLE, card_id=_FAMILY, miner_hotkey=kp.ss58_address,
-        submitted_at=ts, challenge_id="", dimacs_solution_sha256="",
+        bundle_hash=_EMPTY_BUNDLE,
+        card_id=_FAMILY,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        challenge_id="",
+        dimacs_solution_sha256="",
     )
     sig = base64.b64encode(kp.sign(msg)).decode("ascii")
     return {
@@ -204,8 +222,12 @@ def _upload_blob(client, kp, body: bytes) -> tuple[str, str]:
     sha = hashlib.sha256(body).hexdigest()
     submitted_at = _now_iso()
     msg = solution_manifest.canonical_blob_upload_bytes(
-        miner_hotkey=kp.ss58_address, submitted_at=submitted_at,
-        blob_sha256=sha, blob_bytes=len(body), kind="solution")
+        miner_hotkey=kp.ss58_address,
+        submitted_at=submitted_at,
+        blob_sha256=sha,
+        blob_bytes=len(body),
+        kind="solution",
+    )
     sig = base64.b64encode(kp.sign(msg)).decode("ascii")
     r = client.post(
         "/v2/blobs/solutions",
@@ -222,7 +244,9 @@ def _upload_blob(client, kp, body: bytes) -> tuple[str, str]:
     return r.json()["cid"], sha
 
 
-def _submit_manifest(client, kp, *, challenge_id, solution_cid, solution_sha256, cnf_sha256):
+def _submit_manifest(
+    client, kp, *, challenge_id, solution_cid, solution_sha256, cnf_sha256
+):
     submitted_at = _now_iso()
     body = {
         "schema": solution_manifest.SCHEMA,
@@ -234,7 +258,8 @@ def _submit_manifest(client, kp, *, challenge_id, solution_cid, solution_sha256,
         "cnf_sha256": cnf_sha256,
     }
     manifest = solution_manifest.normalize_manifest(
-        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY
+    )
     msg = solution_manifest.canonical_manifest_bytes(manifest)
     sig = base64.b64encode(kp.sign(msg)).decode("ascii")
     r = client.post(
@@ -261,23 +286,28 @@ def test_mint_time_and_bitset_verify_bake_wire_the_store(tmp_path, monkeypatch):
 
     with v2_pipeline.v2_pm_env():
         _cid, cnf_text, _assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
 
-    baked = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+    baked = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"]
+    )
     assert baked == cnf_text
 
     # Delete the row to isolate the bitset verify worker write site, then
     # re-derive an assignment and submit via the thin bitset path.
     def _wipe(conn):
         conn.execute(
-            "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],))
+            "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],)
+        )
 
     v2_store.write(_wipe)
     assert v2_cnf_store.get(v2_store, item["challenge_id"]) is None
 
     with v2_pipeline.v2_pm_env():
         _cid2, _cnf2, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
     assignment_b64 = base64.b64encode(
         v2_pipeline.encode_bitset_assignment(assignment)
     ).decode("ascii")
@@ -290,12 +320,17 @@ def test_mint_time_and_bitset_verify_bake_wire_the_store(tmp_path, monkeypatch):
         "assignment_b64": assignment_b64,
     }
     from scaffold.publisher import v2_bitset_submit
+
     submitted_at = _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
-        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
-    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY
+    )
+    sig = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     r = client.post(
-        "/v2/agents/submit-bitset", json=body,
+        "/v2/agents/submit-bitset",
+        json=body,
         headers={
             "X-Cathedral-Hotkey": kp.ss58_address,
             "X-Cathedral-Signature": sig,
@@ -308,11 +343,14 @@ def test_mint_time_and_bitset_verify_bake_wire_the_store(tmp_path, monkeypatch):
     assert v2_cnf_store.get(v2_store, item["challenge_id"]) is None
 
     results = v2_pipeline.process_bitset_batch(
-        v2_store, worker_id="test-bitset-bake", batch_size=8, lock_secs=60)
+        v2_store, worker_id="test-bitset-bake", batch_size=8, lock_secs=60
+    )
     assert len(results) == 1
     assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
 
-    rebaked = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+    rebaked = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"]
+    )
     assert rebaked == cnf_text
 
 
@@ -324,21 +362,34 @@ def test_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
 
     with v2_pipeline.v2_pm_env():
         _cid, cnf_text, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
 
-    baked = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+    baked = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"]
+    )
     assert baked == cnf_text  # confirm the store is actually populated
 
     solution_text = _dimacs_solution_text(assignment)
     cid_blob, sha = _upload_blob(client, kp, solution_text.encode("utf-8"))
     receipt = _submit_manifest(
-        client, kp, challenge_id=item["challenge_id"], solution_cid=cid_blob,
-        solution_sha256=sha, cnf_sha256=item["cnf_sha256"])
+        client,
+        kp,
+        challenge_id=item["challenge_id"],
+        solution_cid=cid_blob,
+        solution_sha256=sha,
+        cnf_sha256=item["cnf_sha256"],
+    )
     assert receipt["status"] == "received"
 
     before = v2_pipeline.cnf_store_metrics()
     results = v2_pipeline.process_batch(
-        v2_store, app.state.v2_blob_store, worker_id="test-hit", batch_size=8, lock_secs=60)
+        v2_store,
+        app.state.v2_blob_store,
+        worker_id="test-hit",
+        batch_size=8,
+        lock_secs=60,
+    )
     after = v2_pipeline.cnf_store_metrics()
 
     assert len(results) == 1
@@ -355,10 +406,12 @@ def test_bitset_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
 
     with v2_pipeline.v2_pm_env():
         _cid, cnf_text, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
 
     baked = v2_cnf_store.get(
-        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"]
+    )
     assert baked == cnf_text
 
     assignment_b64 = base64.b64encode(
@@ -373,12 +426,17 @@ def test_bitset_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
         "assignment_b64": assignment_b64,
     }
     from scaffold.publisher import v2_bitset_submit
+
     submitted_at = _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
-        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
-    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY
+    )
+    sig = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     r = client.post(
-        "/v2/agents/submit-bitset", json=body,
+        "/v2/agents/submit-bitset",
+        json=body,
         headers={
             "X-Cathedral-Hotkey": kp.ss58_address,
             "X-Cathedral-Signature": sig,
@@ -395,7 +453,8 @@ def test_bitset_verify_worker_hits_cache_when_prebaked(tmp_path, monkeypatch):
 
     before = v2_pipeline.cnf_store_metrics()
     results = v2_pipeline.process_bitset_batch(
-        v2_store, worker_id="test-bitset-hit", batch_size=8, lock_secs=60)
+        v2_store, worker_id="test-bitset-hit", batch_size=8, lock_secs=60
+    )
     after = v2_pipeline.cnf_store_metrics()
 
     assert len(results) == 1
@@ -415,20 +474,31 @@ def test_verify_worker_falls_back_and_backfills_on_cache_miss(tmp_path, monkeypa
 
     with v2_pipeline.v2_pm_env():
         cid, cnf_text, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
     assert cid == item["challenge_id"]
     cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
 
     solution_text = _dimacs_solution_text(assignment)
     cid_blob, sha = _upload_blob(client, kp, solution_text.encode("utf-8"))
     receipt = _submit_manifest(
-        client, kp, challenge_id=item["challenge_id"], solution_cid=cid_blob,
-        solution_sha256=sha, cnf_sha256=cnf_sha)
+        client,
+        kp,
+        challenge_id=item["challenge_id"],
+        solution_cid=cid_blob,
+        solution_sha256=sha,
+        cnf_sha256=cnf_sha,
+    )
     assert receipt["status"] == "received"
 
     before = v2_pipeline.cnf_store_metrics()
     results = v2_pipeline.process_batch(
-        v2_store, app.state.v2_blob_store, worker_id="test-miss", batch_size=8, lock_secs=60)
+        v2_store,
+        app.state.v2_blob_store,
+        worker_id="test-miss",
+        batch_size=8,
+        lock_secs=60,
+    )
     after = v2_pipeline.cnf_store_metrics()
 
     assert len(results) == 1
@@ -437,11 +507,15 @@ def test_verify_worker_falls_back_and_backfills_on_cache_miss(tmp_path, monkeypa
     assert after["cnf_store_hits"] == before["cnf_store_hits"]
 
     # Backfilled: the store now serves this challenge_id.
-    backfilled = v2_cnf_store.get(v2_store, item["challenge_id"], expected_sha256=cnf_sha)
+    backfilled = v2_cnf_store.get(
+        v2_store, item["challenge_id"], expected_sha256=cnf_sha
+    )
     assert backfilled == cnf_text
 
 
-def test_put_exception_at_verify_time_does_not_break_verification(tmp_path, monkeypatch):
+def test_put_exception_at_verify_time_does_not_break_verification(
+    tmp_path, monkeypatch
+):
     """A backfill write failure during the verify tick must never affect the
     verification result — cnf_store errors are always swallowed."""
     app, v2_store = _build(tmp_path, monkeypatch, submit_bitset_enabled=False)
@@ -451,14 +525,20 @@ def test_put_exception_at_verify_time_does_not_break_verification(tmp_path, monk
 
     with v2_pipeline.v2_pm_env():
         cid, cnf_text, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
     cnf_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
 
     solution_text = _dimacs_solution_text(assignment)
     cid_blob, sha = _upload_blob(client, kp, solution_text.encode("utf-8"))
     _submit_manifest(
-        client, kp, challenge_id=item["challenge_id"], solution_cid=cid_blob,
-        solution_sha256=sha, cnf_sha256=cnf_sha)
+        client,
+        kp,
+        challenge_id=item["challenge_id"],
+        solution_cid=cid_blob,
+        solution_sha256=sha,
+        cnf_sha256=cnf_sha,
+    )
 
     def _boom_put(store, challenge_id, cnf_text):
         raise RuntimeError("simulated store outage")
@@ -466,7 +546,12 @@ def test_put_exception_at_verify_time_does_not_break_verification(tmp_path, monk
     monkeypatch.setattr(v2_pipeline.v2_cnf_store, "put", _boom_put)
 
     results = v2_pipeline.process_batch(
-        v2_store, app.state.v2_blob_store, worker_id="test-put-boom", batch_size=8, lock_secs=60)
+        v2_store,
+        app.state.v2_blob_store,
+        worker_id="test-put-boom",
+        batch_size=8,
+        lock_secs=60,
+    )
     assert len(results) == 1
     assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
 
@@ -477,6 +562,7 @@ def test_put_exception_at_verify_time_does_not_break_verification(tmp_path, monk
 # cnf_sha256 equals sha256 of the exact bytes /cnf returns, on the cold
 # (generate) path AND the warm (cache-hit) path.
 # ---------------------------------------------------------------------------
+
 
 def _get_cnf(client, kp, item):
     r = client.get(
@@ -505,9 +591,13 @@ def test_page_token_sha_matches_cnf_body_cold_and_warm(tmp_path, monkeypatch):
 
     # The token itself binds the same sha the item reports.
     from scaffold.publisher import v2_bitset_submit
+
     payload = v2_bitset_submit.verify_submit_token(
-        cold["submit_token"], secret="test-v2-submit-token-secret",
-        miner_hotkey=kp.ss58_address, challenge_id=cold["challenge_id"])
+        cold["submit_token"],
+        secret="test-v2-submit-token-secret",
+        miner_hotkey=kp.ss58_address,
+        challenge_id=cold["challenge_id"],
+    )
     assert payload["cnf_sha256"] == cold["cnf_sha256"]
 
     # Warm: the row is baked now. Booby-trap generation: a warm page and a
@@ -526,8 +616,11 @@ def test_page_token_sha_matches_cnf_body_cold_and_warm(tmp_path, monkeypatch):
     assert r2.text == r1.text
     assert hashlib.sha256(r2.text.encode("utf-8")).hexdigest() == warm["cnf_sha256"]
     warm_payload = v2_bitset_submit.verify_submit_token(
-        warm["submit_token"], secret="test-v2-submit-token-secret",
-        miner_hotkey=kp.ss58_address, challenge_id=warm["challenge_id"])
+        warm["submit_token"],
+        secret="test-v2-submit-token-secret",
+        miner_hotkey=kp.ss58_address,
+        challenge_id=warm["challenge_id"],
+    )
     assert warm_payload["cnf_sha256"] == warm["cnf_sha256"]
 
 
@@ -539,17 +632,20 @@ def test_cnf_endpoint_bakes_on_miss_and_warms_the_page(tmp_path, monkeypatch):
     kp = _keypair("//CnfEndpointBakes")
 
     item = _fetch_item(client, kp)
+
     # Wipe the mint-time bake so /cnf sees a genuinely cold store.
     def _wipe(conn):
         conn.execute(
-            "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],))
+            "DELETE FROM v2_cnf_store WHERE challenge_id=?", (item["challenge_id"],)
+        )
 
     v2_store.write(_wipe)
     assert v2_cnf_store.get(v2_store, item["challenge_id"]) is None
 
     r = _get_cnf(client, kp, item)
     baked = v2_cnf_store.get(
-        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"])
+        v2_store, item["challenge_id"], expected_sha256=item["cnf_sha256"]
+    )
     assert baked == r.text
 
     def _boom(*args, **kwargs):
@@ -568,11 +664,12 @@ def test_submit_bitset_accepts_token_minted_from_warm_page(tmp_path, monkeypatch
     kp = _keypair("//CnfReadThroughWarmSubmit")
 
     _cold = _fetch_item(client, kp)  # bakes the row
-    warm = _fetch_item(client, kp)   # minted from the store
+    warm = _fetch_item(client, kp)  # minted from the store
 
     with v2_pipeline.v2_pm_env():
         cid, _cnf, assignment = pm.generate_instance(
-            kp.ss58_address, int(warm["epoch"]), int(warm["tier"]), int(warm["seq"]))
+            kp.ss58_address, int(warm["epoch"]), int(warm["tier"]), int(warm["seq"])
+        )
     assert cid == warm["challenge_id"]
 
     assignment_b64 = base64.b64encode(
@@ -587,12 +684,17 @@ def test_submit_bitset_accepts_token_minted_from_warm_page(tmp_path, monkeypatch
         "assignment_b64": assignment_b64,
     }
     from scaffold.publisher import v2_bitset_submit
+
     submitted_at = _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
-        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY)
-    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY
+    )
+    sig = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     r = client.post(
-        "/v2/agents/submit-bitset", json=body,
+        "/v2/agents/submit-bitset",
+        json=body,
         headers={
             "X-Cathedral-Hotkey": kp.ss58_address,
             "X-Cathedral-Signature": sig,
@@ -623,7 +725,8 @@ def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch
     def _poison(conn):
         conn.execute(
             "UPDATE v2_cnf_store SET cnf_sha256=?, cnf_zlib=? WHERE challenge_id=?",
-            (poison_sha, zlib.compress(poison.encode("utf-8")), cold["challenge_id"]))
+            (poison_sha, zlib.compress(poison.encode("utf-8")), cold["challenge_id"]),
+        )
 
     v2_store.write(_poison)
 
@@ -637,6 +740,7 @@ def test_read_kill_switch_restores_always_generate_on_page(tmp_path, monkeypatch
 
 
 # ---- retention_hours (env knob, 2026-07-09 disk-full incident) -------------
+
 
 def test_retention_hours_default_is_4(monkeypatch):
     monkeypatch.delenv("CATHEDRAL_V2_CNF_STORE_RETENTION_HOURS", raising=False)

@@ -6,6 +6,7 @@ itself timed out (edge 000/520) while the origin was admitting fine. These
 tests pin the new contract: the DB ping runs off-loop, at most one probe is
 in flight, results are briefly cached, and failures surface as a clean 503.
 """
+
 from __future__ import annotations
 
 import threading
@@ -19,8 +20,13 @@ from scaffold.publisher.app import build_app
 SIGNING_KEY_HEX = "11" * 32
 
 
-def _build(tmp_path, monkeypatch, *, ready_cache_secs: str = "2.0",
-           ready_timeout_secs: str = "3.0"):
+def _build(
+    tmp_path,
+    monkeypatch,
+    *,
+    ready_cache_secs: str = "2.0",
+    ready_timeout_secs: str = "3.0",
+):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", "all")
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_READY_CACHE_SECS", ready_cache_secs)
@@ -73,8 +79,9 @@ def test_ready_result_is_cached_within_ttl(tmp_path, monkeypatch):
 
 
 def test_ready_slow_probe_times_out_instead_of_hanging(tmp_path, monkeypatch):
-    app = _build(tmp_path, monkeypatch, ready_cache_secs="0.5",
-                 ready_timeout_secs="0.5")
+    app = _build(
+        tmp_path, monkeypatch, ready_cache_secs="0.5", ready_timeout_secs="0.5"
+    )
     client = TestClient(app)
     release = threading.Event()
 
@@ -98,6 +105,7 @@ def test_ready_slow_probe_times_out_instead_of_hanging(tmp_path, monkeypatch):
 # Postgres dies ungracefully at 0 bytes free (WAL PANIC -> crash -> 8.5h
 # outage). Readiness must go red while headroom remains so the edge watcher
 # auto-aborts an open window BEFORE the DB is damaged.
+
 
 def test_ready_disk_low_returns_503(tmp_path, monkeypatch):
     # Threshold no filesystem can satisfy -> deterministic DiskLow.

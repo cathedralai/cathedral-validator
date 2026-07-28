@@ -11,6 +11,7 @@ The limiter runs in the middleware BEFORE signature verification, so we can driv
 it with unsigned requests — we only assert on the rejection reason header, never
 on accept semantics.
 """
+
 from __future__ import annotations
 
 import pytest

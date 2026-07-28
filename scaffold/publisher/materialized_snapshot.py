@@ -23,6 +23,7 @@ register snapshots once and start_all(...) wires them to their builders in one
 line. The serialized payload + ETag are also exposed so an edge worker can mirror
 them to KV as a last-known-good (see deploy/edge-router/board-failover/).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -64,7 +65,8 @@ def enabled() -> bool:
 def _slow_build_log_secs() -> float:
     try:
         return float(
-            os.environ.get("CATHEDRAL_MATERIALIZED_SNAPSHOT_SLOW_LOG_SECS", "2.0") or "0"
+            os.environ.get("CATHEDRAL_MATERIALIZED_SNAPSHOT_SLOW_LOG_SECS", "2.0")
+            or "0"
         )
     except ValueError:
         return 2.0
@@ -188,9 +190,7 @@ class MaterializedSnapshot:
         ok = False
         try:
             payload = self._builder()
-            body = json.dumps(
-                payload, sort_keys=True, separators=(",", ":")
-            ).encode()
+            body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
             etag = 'W/"' + hashlib.sha256(body).hexdigest()[:32] + '"'
             with self._lock:
                 self._payload = payload
@@ -202,7 +202,9 @@ class MaterializedSnapshot:
         except Exception as exc:  # never crash the timer; keep last good snapshot
             with self._lock:
                 self._build_errors += 1
-            print(f"[materialized_snapshot] {self._name} build error (keeping last good): {exc!r}")
+            print(
+                f"[materialized_snapshot] {self._name} build error (keeping last good): {exc!r}"
+            )
         finally:
             elapsed = time.monotonic() - started
             threshold = _slow_build_log_secs()

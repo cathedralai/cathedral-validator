@@ -154,8 +154,10 @@ class ProvenanceSettings:
             absent = [flag for name, flag in required if not getattr(self, name)]
             if absent:
                 raise ProvenanceAuditError(
-                    "authority mode requires immutable pins and a raw-evidence "
-                    "source: missing " + ", ".join(absent)
+                    "full mode requires immutable pins and a raw-evidence "
+                    "source: missing " + ", ".join(absent) + ". Running "
+                    "without evidence access? Follow the signed feed instead "
+                    "with --mode thin."
                 )
             lag = self.max_anchor_lag_blocks
             if (

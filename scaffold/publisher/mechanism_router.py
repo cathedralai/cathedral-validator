@@ -31,11 +31,13 @@ ScoreVector = dict[int, float]
 
 @dataclass(frozen=True)
 class MechanismSpec:
-    mechanism_id: str          # unique slug
-    owner_pubkey: str          # ss58; the key allowed to post this mechanism's scores
-    weight_fraction: float     # 0..1 — THE ONE KNOB
-    tier: str                  # "signed" (claims) | "artifact" (proof-backed)
-    owner_uid: int | None = None  # UID controlled by the owner, for self-weight blocking
+    mechanism_id: str  # unique slug
+    owner_pubkey: str  # ss58; the key allowed to post this mechanism's scores
+    weight_fraction: float  # 0..1 — THE ONE KNOB
+    tier: str  # "signed" (claims) | "artifact" (proof-backed)
+    owner_uid: int | None = (
+        None  # UID controlled by the owner, for self-weight blocking
+    )
     enabled: bool = True
 
 
@@ -44,21 +46,26 @@ class ScoreVectorMeta:
     mechanism_id: str
     signed_at_ms: int
     sig_ok: bool
-    source: str                # "signed_post" | "sat_adapter" | ...
+    source: str  # "signed_post" | "sat_adapter" | ...
 
 
 class MechanismStore(Protocol):
     def list_specs(self) -> list[MechanismSpec]: ...
     def get_spec(self, mechanism_id: str) -> MechanismSpec | None: ...
     def upsert_spec(self, spec: MechanismSpec) -> None: ...
-    def put_scores(self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta) -> None: ...
+    def put_scores(
+        self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta
+    ) -> None: ...
     # returns latest (scores, meta) or None; caller decides staleness from meta.signed_at_ms
-    def get_scores(self, mechanism_id: str) -> tuple[ScoreVector, ScoreVectorMeta] | None: ...
+    def get_scores(
+        self, mechanism_id: str
+    ) -> tuple[ScoreVector, ScoreVectorMeta] | None: ...
 
 
 # ---------------------------------------------------------------------------
 # compose — the deterministic scored→weights kernel
 # ---------------------------------------------------------------------------
+
 
 def compose(
     specs: list[MechanismSpec],
@@ -108,7 +115,10 @@ def compose(
             vec, meta = entry
             if not meta.sig_ok:
                 fallback_reason = "sig_bad"
-            elif max_score_age_ms is not None and (now_ms - int(meta.signed_at_ms)) > max_score_age_ms:
+            elif (
+                max_score_age_ms is not None
+                and (now_ms - int(meta.signed_at_ms)) > max_score_age_ms
+            ):
                 fallback_reason = "stale"
 
         if fallback_reason is not None:
@@ -187,7 +197,10 @@ _DEFAULT_DB_PATH = "./data/mechanisms.sqlite3"
 
 
 def default_db_path() -> str:
-    return os.environ.get("CATHEDRAL_MECH_DB_PATH", _DEFAULT_DB_PATH).strip() or _DEFAULT_DB_PATH
+    return (
+        os.environ.get("CATHEDRAL_MECH_DB_PATH", _DEFAULT_DB_PATH).strip()
+        or _DEFAULT_DB_PATH
+    )
 
 
 class SqliteMechanismStore:
@@ -200,7 +213,7 @@ class SqliteMechanismStore:
     """
 
     def __init__(self, db_path: str | None = None) -> None:
-        self._path = (db_path if db_path is not None else default_db_path())
+        self._path = db_path if db_path is not None else default_db_path()
         self._lock = threading.Lock()
         self._memory_conn: sqlite3.Connection | None = None
         if self._path != ":memory:":
@@ -308,9 +321,13 @@ class SqliteMechanismStore:
             finally:
                 self._close(conn)
 
-    def put_scores(self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta) -> None:
+    def put_scores(
+        self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta
+    ) -> None:
         # JSON keys are strings; store canonically and restore ints on read.
-        scores_json = json.dumps({str(int(k)): float(v) for k, v in scores.items()}, sort_keys=True)
+        scores_json = json.dumps(
+            {str(int(k)): float(v) for k, v in scores.items()}, sort_keys=True
+        )
         with self._lock:
             conn = self._connect()
             try:
@@ -337,7 +354,9 @@ class SqliteMechanismStore:
             finally:
                 self._close(conn)
 
-    def get_scores(self, mechanism_id: str) -> tuple[ScoreVector, ScoreVectorMeta] | None:
+    def get_scores(
+        self, mechanism_id: str
+    ) -> tuple[ScoreVector, ScoreVectorMeta] | None:
         with self._lock:
             conn = self._connect()
             try:
@@ -378,6 +397,7 @@ class SqliteMechanismStore:
 # pattern from app.py (env CATHEDRAL_PUBLISHER_ADMIN_TOKEN, bearer, constant-time
 # compare). Default OFF: unset token => 503.
 # ---------------------------------------------------------------------------
+
 
 def _bearer_value(authorization: str | None) -> str:
     supplied = (authorization or "").strip()

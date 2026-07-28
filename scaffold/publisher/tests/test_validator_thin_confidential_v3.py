@@ -1,4 +1,5 @@
 """Post-signing drift safety for confidential global-cap v3 vectors."""
+
 from __future__ import annotations
 
 import math
@@ -40,11 +41,13 @@ def _v3_payload(
 
 
 def test_full_map_preserves_exact_mixed_union_vector() -> None:
-    payload = _v3_payload([
-        _row("base", 0.45, 0.0),
-        _row("overlap", 0.45, 0.05),
-        _row("compute", 0.0, 0.05),
-    ])
+    payload = _v3_payload(
+        [
+            _row("base", 0.45, 0.0),
+            _row("overlap", 0.45, 0.05),
+            _row("compute", 0.0, 0.05),
+        ]
+    )
 
     result = validator_thin.vector_to_uid_weights(
         payload, {"base": 10, "overlap": 11, "compute": 12}
@@ -54,11 +57,13 @@ def test_full_map_preserves_exact_mixed_union_vector() -> None:
 
 
 def test_missing_base_hotkey_rebuilds_from_mapped_base_components() -> None:
-    payload = _v3_payload([
-        _row("missing-base", 0.45, 0.0),
-        _row("overlap", 0.45, 0.05),
-        _row("compute", 0.0, 0.05),
-    ])
+    payload = _v3_payload(
+        [
+            _row("missing-base", 0.45, 0.0),
+            _row("overlap", 0.45, 0.05),
+            _row("compute", 0.0, 0.05),
+        ]
+    )
 
     result = validator_thin.vector_to_uid_weights(
         payload, {"overlap": 11, "compute": 12}
@@ -68,15 +73,15 @@ def test_missing_base_hotkey_rebuilds_from_mapped_base_components() -> None:
 
 
 def test_missing_compute_hotkey_drops_all_external_mass() -> None:
-    payload = _v3_payload([
-        _row("base", 0.45, 0.0),
-        _row("overlap", 0.45, 0.05),
-        _row("compute", 0.0, 0.05),
-    ])
-
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"base": 10, "overlap": 11}
+    payload = _v3_payload(
+        [
+            _row("base", 0.45, 0.0),
+            _row("overlap", 0.45, 0.05),
+            _row("compute", 0.0, 0.05),
+        ]
     )
+
+    result = validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 11})
 
     assert result == {10: 0.5, 11: 0.5}
 
@@ -92,31 +97,31 @@ def test_incomplete_v3_fallback_applies_existing_burn_to_base_only() -> None:
         forced_burn_percentage=20.0,
     )
 
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"base": 10, "overlap": 11}
-    )
+    result = validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 11})
 
     assert result == {10: 0.4, 11: 0.4, 99: 0.2}
 
 
 def test_compute_only_row_is_retained_within_valid_base_union() -> None:
-    payload = _v3_payload([
-        _row("base", 0.9, 0.0),
-        _row("compute", 0.0, 0.10),
-    ])
-
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"base": 10, "compute": 12}
+    payload = _v3_payload(
+        [
+            _row("base", 0.9, 0.0),
+            _row("compute", 0.0, 0.10),
+        ]
     )
+
+    result = validator_thin.vector_to_uid_weights(payload, {"base": 10, "compute": 12})
 
     assert result == {10: 0.9, 12: 0.1}
 
 
 def test_duplicate_uid_fails_for_v3_even_when_rows_overlap() -> None:
-    payload = _v3_payload([
-        _row("base", 0.5, 0.0),
-        _row("overlap", 0.4, 0.1),
-    ])
+    payload = _v3_payload(
+        [
+            _row("base", 0.5, 0.0),
+            _row("overlap", 0.4, 0.1),
+        ]
+    )
 
     with pytest.raises(validator_thin.wire.VectorError, match="duplicate UID"):
         validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 10})
@@ -141,10 +146,12 @@ def test_base_empty_v3_vector_fails_before_normalization() -> None:
 
 
 def test_duplicate_signed_hotkey_fails_before_uid_mapping() -> None:
-    payload = _v3_payload([
-        _row("same", 0.9, 0.0),
-        _row("same", 0.0, 0.1),
-    ])
+    payload = _v3_payload(
+        [
+            _row("same", 0.9, 0.0),
+            _row("same", 0.0, 0.1),
+        ]
+    )
 
     with pytest.raises(validator_thin.wire.VectorError, match="duplicate hotkey"):
         validator_thin.vector_to_uid_weights(payload, {"same": 12})
@@ -164,8 +171,9 @@ def test_malformed_v3_attribution_fails(rows: list[dict[str, object]]) -> None:
     payload = _v3_payload(rows)
 
     with pytest.raises(validator_thin.wire.VectorError):
-        validator_thin.vector_to_uid_weights(payload, {"missing": 1, "nan": 1,
-                                                        "negative": 1, "mismatch": 1})
+        validator_thin.vector_to_uid_weights(
+            payload, {"missing": 1, "nan": 1, "negative": 1, "mismatch": 1}
+        )
 
 
 def test_legacy_vector_keeps_skip_and_duplicate_merge_behavior() -> None:
@@ -178,8 +186,6 @@ def test_legacy_vector_keeps_skip_and_duplicate_merge_behavior() -> None:
         "burn_snapshot": {"burn_uid": None, "forced_burn_percentage": 0.0},
     }
 
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"first": 7, "second": 7}
-    )
+    result = validator_thin.vector_to_uid_weights(payload, {"first": 7, "second": 7})
 
     assert result == {7: 1.0}

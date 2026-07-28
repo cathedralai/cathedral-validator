@@ -19,6 +19,7 @@ testable but FAILS CLOSED (every signature rejected) with a clear TODO — it mu
 never silently accept. Golden test vectors (//Alice) are pinned in
 publisher_verify.py so a drift in canonicalization is caught.
 """
+
 from __future__ import annotations
 
 import base64
@@ -55,7 +56,9 @@ def canonical_claim_bytes(
         payload["challenge_id"] = challenge_id or ""
         payload["dimacs_solution_sha256"] = dimacs_solution_sha256 or ""
     body = {k: v for k, v in payload.items() if k != "signature"}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
 
 
 def sha256_hex(text: str) -> str:

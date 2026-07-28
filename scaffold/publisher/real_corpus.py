@@ -26,6 +26,7 @@ challenge_id miners see is still produced by per_miner.instance_id(), which
 IS hotkey-HMAC'd, so token binding / the wire id format is unchanged — only
 the CNF payload's source differs in the new modes.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -36,6 +37,7 @@ import random
 # --------------------------------------------------------------------------
 # Flags / config
 # --------------------------------------------------------------------------
+
 
 def challenge_source() -> str:
     """CATHEDRAL_V2_CHALLENGE_SOURCE — default 'planted' (current behaviour)."""
@@ -91,6 +93,7 @@ def _forced_kind() -> str | None:
 # Deterministic seed / id derivation — keyed by (epoch, tier, seq) only
 # --------------------------------------------------------------------------
 
+
 def real_seed(epoch: int, tier: int, seq: int, salt: str = "") -> int:
     """Deterministic 63-bit seed. No secret mixed in: these instances carry no
     hidden witness worth protecting, and (per the module docstring) they are
@@ -104,7 +107,9 @@ def kind_for(epoch: int, tier: int, seq: int, salt: str = "") -> str:
     forced = _forced_kind()
     if forced:
         return forced
-    return "coloring" if real_seed(epoch, tier, seq, "kind:" + salt) % 2 == 0 else "latin"
+    return (
+        "coloring" if real_seed(epoch, tier, seq, "kind:" + salt) % 2 == 0 else "latin"
+    )
 
 
 def content_id_for(epoch: int, tier: int, seq: int, kind: str) -> str:
@@ -118,7 +123,10 @@ def content_id_for(epoch: int, tier: int, seq: int, kind: str) -> str:
 # Graph k-coloring
 # --------------------------------------------------------------------------
 
-def _find_coloring(n_nodes: int, k_colors: int, edges: list[tuple[int, int]]) -> list[int] | None:
+
+def _find_coloring(
+    n_nodes: int, k_colors: int, edges: list[tuple[int, int]]
+) -> list[int] | None:
     """Small deterministic backtracking search for a proper k-coloring. Used
     only to CONFIRM satisfiability at generation time (so we can regenerate a
     denser/sparser random graph if the draw happens to be uncolorable) — the
@@ -143,8 +151,9 @@ def _find_coloring(n_nodes: int, k_colors: int, edges: list[tuple[int, int]]) ->
     return color if bt(0) else None
 
 
-def gen_graph_coloring(seed: int, n_nodes: int, k_colors: int, *,
-                       max_attempts: int = 500) -> str:
+def gen_graph_coloring(
+    seed: int, n_nodes: int, k_colors: int, *, max_attempts: int = 500
+) -> str:
     """Deterministic, genuinely satisfiable k-coloring instance encoded as
     DIMACS CNF. The random graph draw is retried (deterministically, via a
     seeded RNG advancing across attempts) until it is k-colorable; the CNF
@@ -156,8 +165,12 @@ def gen_graph_coloring(seed: int, n_nodes: int, k_colors: int, *,
     p = min(0.6, max(0.1, (k_colors - 1) / max(1, n_nodes) + 0.15))
     edges: list[tuple[int, int]] = []
     for _attempt in range(max(1, max_attempts)):
-        candidate = [(i, j) for i in range(n_nodes) for j in range(i + 1, n_nodes)
-                     if rng.random() < p]
+        candidate = [
+            (i, j)
+            for i in range(n_nodes)
+            for j in range(i + 1, n_nodes)
+            if rng.random() < p
+        ]
         if _find_coloring(n_nodes, k_colors, candidate) is not None:
             edges = candidate
             break
@@ -169,16 +182,18 @@ def gen_graph_coloring(seed: int, n_nodes: int, k_colors: int, *,
 
     clauses: list[list[int]] = []
     for v in range(n_nodes):
-        clauses.append([var(v, c) for c in range(k_colors)])       # >=1 color
+        clauses.append([var(v, c) for c in range(k_colors)])  # >=1 color
         for c1 in range(k_colors):
             for c2 in range(c1 + 1, k_colors):
-                clauses.append([-var(v, c1), -var(v, c2)])          # <=1 color
+                clauses.append([-var(v, c1), -var(v, c2)])  # <=1 color
     for u, w in edges:
         for c in range(k_colors):
-            clauses.append([-var(u, c), -var(w, c)])                # adjacent != same color
+            clauses.append([-var(u, c), -var(w, c)])  # adjacent != same color
 
     n_vars = n_nodes * k_colors
-    header = f"c graph-coloring n_nodes={n_nodes} k_colors={k_colors} edges={len(edges)}\n"
+    header = (
+        f"c graph-coloring n_nodes={n_nodes} k_colors={k_colors} edges={len(edges)}\n"
+    )
     header += f"p cnf {n_vars} {len(clauses)}\n"
     body = "".join(" ".join(map(str, cl)) + " 0\n" for cl in clauses)
     return header + body
@@ -188,15 +203,21 @@ def gen_graph_coloring(seed: int, n_nodes: int, k_colors: int, *,
 # Latin-square / Sudoku-style completion
 # --------------------------------------------------------------------------
 
+
 def _full_latin_square(seed: int, n: int) -> list[list[int]]:
     """A genuine random Latin square: a cyclic base square with independently
     shuffled row/column/symbol permutations applied."""
     rng = random.Random(seed)
     base = [[(r + c) % n for c in range(n)] for r in range(n)]
-    row_perm = list(range(n)); rng.shuffle(row_perm)
-    col_perm = list(range(n)); rng.shuffle(col_perm)
-    sym_perm = list(range(n)); rng.shuffle(sym_perm)
-    return [[sym_perm[base[row_perm[r]][col_perm[c]]] for c in range(n)] for r in range(n)]
+    row_perm = list(range(n))
+    rng.shuffle(row_perm)
+    col_perm = list(range(n))
+    rng.shuffle(col_perm)
+    sym_perm = list(range(n))
+    rng.shuffle(sym_perm)
+    return [
+        [sym_perm[base[row_perm[r]][col_perm[c]]] for c in range(n)] for r in range(n)
+    ]
 
 
 def gen_latin_square(seed: int, n: int, *, mask_fraction: float = 0.45) -> str:
@@ -223,18 +244,20 @@ def gen_latin_square(seed: int, n: int, *, mask_fraction: float = 0.45) -> str:
     clauses: list[list[int]] = []
     for r in range(n):
         for c in range(n):
-            clauses.append([var(r, c, v) for v in range(n)])        # cell has >=1 value
+            clauses.append([var(r, c, v) for v in range(n)])  # cell has >=1 value
             for v1 in range(n):
                 for v2 in range(v1 + 1, n):
-                    clauses.append([-var(r, c, v1), -var(r, c, v2)])  # cell has <=1 value
+                    clauses.append(
+                        [-var(r, c, v1), -var(r, c, v2)]
+                    )  # cell has <=1 value
     for r in range(n):
         for v in range(n):
-            clauses.append([var(r, c, v) for c in range(n)])        # value appears in row
+            clauses.append([var(r, c, v) for c in range(n)])  # value appears in row
     for c in range(n):
         for v in range(n):
-            clauses.append([var(r, c, v) for r in range(n)])        # value appears in column
+            clauses.append([var(r, c, v) for r in range(n)])  # value appears in column
     for (r, c), v in clues.items():
-        clauses.append([var(r, c, v)])                               # given clue
+        clauses.append([var(r, c, v)])  # given clue
 
     n_vars = n * n * n
     header = f"c latin-square n={n} clues={len(clues)}\n"
@@ -247,7 +270,10 @@ def gen_latin_square(seed: int, n: int, *, mask_fraction: float = 0.45) -> str:
 # Public generator: combinatorial (in-process, no external files)
 # --------------------------------------------------------------------------
 
-def generate_combinatorial_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str]:
+
+def generate_combinatorial_instance(
+    epoch: int, tier: int, seq: int, salt: str = ""
+) -> tuple[str, str]:
     """Deterministic in (epoch, tier, seq, salt). Returns (content_id, dimacs_text).
     No planted/known solution is returned or embedded — genuinely unplanted.
     `salt` (the miner hotkey on the live per-miner path) makes the instance
@@ -269,19 +295,23 @@ def generate_combinatorial_instance(epoch: int, tier: int, seq: int, salt: str =
 # Public generator: on-disk corpus (SAT Competition / SATLIB style .cnf files)
 # --------------------------------------------------------------------------
 
+
 def _corpus_files(directory: str) -> list[str]:
     try:
         names = sorted(
-            f for f in os.listdir(directory)
-            if f.lower().endswith((".cnf", ".dimacs")) and
-            os.path.isfile(os.path.join(directory, f))
+            f
+            for f in os.listdir(directory)
+            if f.lower().endswith((".cnf", ".dimacs"))
+            and os.path.isfile(os.path.join(directory, f))
         )
     except OSError:
         return []
     return names
 
 
-def load_corpus_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str] | None:
+def load_corpus_instance(
+    epoch: int, tier: int, seq: int, salt: str = ""
+) -> tuple[str, str] | None:
     """Deterministically select and load a real .cnf file from
     CATHEDRAL_V2_CORPUS_DIR. Returns None if the dir is unset/empty/missing —
     callers should fall back to generate_combinatorial_instance().
@@ -300,7 +330,9 @@ def load_corpus_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tup
     return f"corpus-{fname}-e{int(epoch)}-t{int(tier)}-s{int(seq)}", text
 
 
-def generate_real_instance(epoch: int, tier: int, seq: int, salt: str = "") -> tuple[str, str]:
+def generate_real_instance(
+    epoch: int, tier: int, seq: int, salt: str = ""
+) -> tuple[str, str]:
     """Top-level dispatcher used by per_miner.generate_instance for the
     'combinatorial' and 'corpus' sources. Returns (content_id, dimacs_text).
     `salt` (miner hotkey on the live path) makes the instance per-miner."""

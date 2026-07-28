@@ -30,6 +30,7 @@ Env-gated by CATHEDRAL_ARENA_PAYOUT_ENABLED (default OFF). Certificate checking
 is NOT re-implemented — it rides solver_arena.run_batch, the same referee Lane S
 uses, so a forged closer cert can never trigger a payout.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,7 +41,12 @@ from typing import Callable
 
 from ..contract import Outcome
 from ..lanes.solver_arena import (
-    Instance, PAR_K, SolverArenaLane, SolverSpec, par2_ms, run_batch,
+    Instance,
+    PAR_K,
+    SolverArenaLane,
+    SolverSpec,
+    par2_ms,
+    run_batch,
 )
 from . import rows
 from .store import Store, new_uuid
@@ -58,7 +64,11 @@ AdapterResolver = Callable[[SolverSpec], "object | None"]
 
 def arena_payout_enabled() -> bool:
     return os.environ.get("CATHEDRAL_ARENA_PAYOUT_ENABLED", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _env_float(name: str, default: float) -> float:
@@ -82,8 +92,13 @@ def _now_iso() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def lane_i_price(champion_par2_ms: float, best_closer_par2_ms: float,
-                 timeout_ms: float, round_no: int, base: float = _DEFAULT_BASE) -> float:
+def lane_i_price(
+    champion_par2_ms: float,
+    best_closer_par2_ms: float,
+    timeout_ms: float,
+    round_no: int,
+    base: float = _DEFAULT_BASE,
+) -> float:
     """payment = base × max(0,(champ_par2 − closer_par2)/TIMEOUT) × 0.97^round.
 
     The separation factor is clamped to [0,1] so base is the ceiling: with the
@@ -96,8 +111,9 @@ def lane_i_price(champion_par2_ms: float, best_closer_par2_ms: float,
     return round(base * sep * (_DECAY ** max(0, round_no)), 6)
 
 
-def _batch_min_score(lane: SolverArenaLane, adapter, *, seed: int, tier: int,
-                     batch_size: int) -> float:
+def _batch_min_score(
+    lane: SolverArenaLane, adapter, *, seed: int, tier: int, batch_size: int
+) -> float:
     """Fraction of the standard Lane S batch this closer certifiably solves —
     the MIN_BATCH_SCORE gate input. Uses the same fresh-batch + run_batch referee
     as Lane S so a closer can't fake breadth."""
@@ -115,7 +131,7 @@ def settle_instance(
     *,
     champion_spec: SolverSpec,
     champion_adapter,
-    closers: list[tuple[SolverSpec, object, int]],   # (spec, adapter, registered_round)
+    closers: list[tuple[SolverSpec, object, int]],  # (spec, adapter, registered_round)
     current_round: int,
     private_key_hex: str,
     epoch_salt: str,
@@ -144,7 +160,11 @@ def settle_instance(
     # 1. the champion must TIME OUT (host-observed) on this instance.
     champ_res = run_batch(champion_adapter, [inst])
     if not champ_res or champ_res[0].outcome != Outcome.TIMEOUT:
-        return {"instance_id": iid, "paid": False, "reason": "champion_did_not_time_out"}
+        return {
+            "instance_id": iid,
+            "paid": False,
+            "reason": "champion_did_not_time_out",
+        }
     champ_par2 = par2_ms(champ_res, tmap)  # = PAR_K × timeout_ms
 
     # 2. find the best quarantine-clear, broadly-competitive closer that closes it.
@@ -155,15 +175,23 @@ def settle_instance(
         if spec.commitment_id == champion_spec.commitment_id:
             continue  # the champion can't be its own disagreement evidence
         if reg_round > quarantine_cutoff:
-            log("lane_i_closer_quarantined", closer=spec.commitment_id[:12],
-                reg_round=reg_round, cutoff=quarantine_cutoff)
+            log(
+                "lane_i_closer_quarantined",
+                closer=spec.commitment_id[:12],
+                reg_round=reg_round,
+                cutoff=quarantine_cutoff,
+            )
             continue
         # MIN_BATCH_SCORE: solve ≥50% of the standard batch (broad competitor).
-        bscore = _batch_min_score(lane, adapter, seed=current_round, tier=tier,
-                                  batch_size=batch_size)
+        bscore = _batch_min_score(
+            lane, adapter, seed=current_round, tier=tier, batch_size=batch_size
+        )
         if bscore < _MIN_BATCH_SCORE:
-            log("lane_i_closer_too_specialized", closer=spec.commitment_id[:12],
-                batch_score=round(bscore, 3))
+            log(
+                "lane_i_closer_too_specialized",
+                closer=spec.commitment_id[:12],
+                batch_score=round(bscore, 3),
+            )
             continue
         # does it actually CLOSE this instance with a valid cert?
         res = run_batch(adapter, [inst])
@@ -180,25 +208,40 @@ def settle_instance(
     # 3. price + emit a signed row to the INSTANCE owner.
     price = lane_i_price(champ_par2, best_par2, timeout_ms, current_round, base=base)
     if price <= 0.0:
-        return {"instance_id": iid, "paid": False, "reason": "zero_price",
-                "champion_par2": champ_par2, "best_closer_par2": best_par2}
+        return {
+            "instance_id": iid,
+            "paid": False,
+            "reason": "zero_price",
+            "champion_par2": champ_par2,
+            "best_closer_par2": best_par2,
+        }
 
     ran_at = _now_iso()
     row_uuid = new_uuid()
     answer_hash = (rows._hash16(f"lanei:{iid}:{best_closer.commitment_id}") * 4)[:64]
     vd = (rows._hash16(f"sep:{champ_par2}:{best_par2}:r{current_round}") * 4)[:64]
     emitted = rows.build_solve_rows(
-        row_uuid=row_uuid, miner_hotkey=instance["owner_hotkey"],
-        agent_id=new_uuid(), challenge_id=f"lanei:{iid}", tier=tier,
-        weighted_score=price, answer_hash=answer_hash, verifier_details_hash=vd,
-        ran_at=ran_at, epoch_salt=epoch_salt, solve_rank=1, solved=True,
-        private_key_hex=private_key_hex)
+        row_uuid=row_uuid,
+        miner_hotkey=instance["owner_hotkey"],
+        agent_id=new_uuid(),
+        challenge_id=f"lanei:{iid}",
+        tier=tier,
+        weighted_score=price,
+        answer_hash=answer_hash,
+        verifier_details_hash=vd,
+        ran_at=ran_at,
+        epoch_salt=epoch_salt,
+        solve_rank=1,
+        solved=True,
+        private_key_hex=private_key_hex,
+    )
 
     def _pay(conn):
         cur = conn.execute(
             "UPDATE arena_instances SET status='paid', last_paid_round=?, paid_at_iso=? "
             "WHERE instance_id=? AND (last_paid_round IS NULL OR last_paid_round <> ?)",
-            (current_round, ran_at, iid, current_round))
+            (current_round, ran_at, iid, current_round),
+        )
         if int(cur.rowcount or 0) != 1:
             return False
         for r in emitted:
@@ -206,23 +249,47 @@ def settle_instance(
                 "INSERT OR IGNORE INTO eval_runs "
                 "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (r["id"], r["ran_at"], int(r["eval_output_schema_version"]),
-                 r["miner_hotkey"], r["task_type"], json.dumps(r)))
+                (
+                    r["id"],
+                    r["ran_at"],
+                    int(r["eval_output_schema_version"]),
+                    r["miner_hotkey"],
+                    r["task_type"],
+                    json.dumps(r),
+                ),
+            )
         return True
+
     paid = store.write(_pay)
     if not paid:
         return {"instance_id": iid, "paid": False, "reason": "already_paid_this_round"}
-    log("lane_i_paid", instance=iid[:12], owner=instance["owner_hotkey"][:8],
-        price=price, closer=best_closer.commitment_id[:12], round=current_round)
-    return {"instance_id": iid, "paid": True, "price": price,
-            "champion_par2": champ_par2, "best_closer_par2": best_par2,
-            "closer": best_closer.commitment_id, "rows_emitted": len(emitted)}
+    log(
+        "lane_i_paid",
+        instance=iid[:12],
+        owner=instance["owner_hotkey"][:8],
+        price=price,
+        closer=best_closer.commitment_id[:12],
+        round=current_round,
+    )
+    return {
+        "instance_id": iid,
+        "paid": True,
+        "price": price,
+        "champion_par2": champ_par2,
+        "best_closer_par2": best_par2,
+        "closer": best_closer.commitment_id,
+        "rows_emitted": len(emitted),
+    }
 
 
 def _pending_instances(store: Store) -> list[dict]:
-    return [dict(r) for r in store.query(
-        "SELECT * FROM arena_instances WHERE status IN ('pending','paid') "
-        "ORDER BY created_at_iso ASC")]
+    return [
+        dict(r)
+        for r in store.query(
+            "SELECT * FROM arena_instances WHERE status IN ('pending','paid') "
+            "ORDER BY created_at_iso ASC"
+        )
+    ]
 
 
 def arena_payout_tick(
@@ -240,18 +307,35 @@ def arena_payout_tick(
     log=lambda *a, **k: None,
 ) -> dict:
     """Settle every eligible pending instance for `current_round`."""
-    base = _env_float("CATHEDRAL_ARENA_PAYOUT_BASE", _DEFAULT_BASE) if base is None else base
+    base = (
+        _env_float("CATHEDRAL_ARENA_PAYOUT_BASE", _DEFAULT_BASE)
+        if base is None
+        else base
+    )
     verdicts = []
     for inst in _pending_instances(store):
         v = settle_instance(
-            store, lane, inst, champion_spec=champion_spec,
-            champion_adapter=champion_adapter, closers=closers,
-            current_round=current_round, private_key_hex=private_key_hex,
-            epoch_salt=epoch_salt, base=base, tier=tier, log=log)
+            store,
+            lane,
+            inst,
+            champion_spec=champion_spec,
+            champion_adapter=champion_adapter,
+            closers=closers,
+            current_round=current_round,
+            private_key_hex=private_key_hex,
+            epoch_salt=epoch_salt,
+            base=base,
+            tier=tier,
+            log=log,
+        )
         verdicts.append(v)
     paid = sum(1 for v in verdicts if v.get("paid"))
-    summary = {"round": current_round, "instances_seen": len(verdicts), "paid": paid,
-               "verdicts": verdicts}
+    summary = {
+        "round": current_round,
+        "instances_seen": len(verdicts),
+        "paid": paid,
+        "verdicts": verdicts,
+    }
     log("arena_payout_tick", round=current_round, paid=paid, seen=len(verdicts))
     return summary
 
@@ -274,8 +358,9 @@ async def arena_payout_loop(
     when arena_payout_enabled()). The champion + closers + current round are
     pulled via providers each tick (so a newly-crowned champion / newly-cleared
     closer is picked up). Runs in a worker thread; cancels cleanly."""
-    interval = interval_seconds or _env_int("CATHEDRAL_ARENA_PAYOUT_INTERVAL_SECONDS",
-                                            _DEFAULT_INTERVAL_SECONDS)
+    interval = interval_seconds or _env_int(
+        "CATHEDRAL_ARENA_PAYOUT_INTERVAL_SECONDS", _DEFAULT_INTERVAL_SECONDS
+    )
     log("arena_payout_loop_start", interval=interval, tier=tier)
     try:
         while not (stop_event and stop_event.is_set()):
@@ -284,17 +369,25 @@ async def arena_payout_loop(
                 if champ is not None:
                     spec, adapter = champ
                     await asyncio.to_thread(
-                        arena_payout_tick, store, lane,
-                        champion_spec=spec, champion_adapter=adapter,
-                        closers=closers_provider(), current_round=round_source(),
-                        private_key_hex=private_key_hex, epoch_salt=epoch_salt,
-                        tier=tier, log=log)
+                        arena_payout_tick,
+                        store,
+                        lane,
+                        champion_spec=spec,
+                        champion_adapter=adapter,
+                        closers=closers_provider(),
+                        current_round=round_source(),
+                        private_key_hex=private_key_hex,
+                        epoch_salt=epoch_salt,
+                        tier=tier,
+                        log=log,
+                    )
             except Exception as e:
                 log("arena_payout_error", error=str(e))
             try:
                 await asyncio.wait_for(
                     stop_event.wait() if stop_event else asyncio.sleep(interval),
-                    timeout=interval)
+                    timeout=interval,
+                )
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:

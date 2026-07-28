@@ -36,7 +36,7 @@ max_submissions = 0
 root = "/var/lib/cathedral-validator"
 
 [provenance]
-mode = "shadow"
+mode = "authority"
 evidence_url = "https://api.cathedral.computer/v1/evidence"
 registry_keys = "/etc/cathedral-validator/provenance/registry-keys.json"
 registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"

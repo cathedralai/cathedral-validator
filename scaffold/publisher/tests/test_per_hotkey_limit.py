@@ -10,6 +10,7 @@ Covers:
   * a missing/empty hotkey is never throttled here (that is the global gate's job);
   * Retry-After hint config is honoured and floored at 1s.
 """
+
 from __future__ import annotations
 
 import pytest

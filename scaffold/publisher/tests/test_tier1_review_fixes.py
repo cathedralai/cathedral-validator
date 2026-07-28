@@ -4,6 +4,7 @@
 - weights._try_adopt_persisted recovers freshness on refresh timeout, bounded so
   it can't re-wedge the loop.
 """
+
 import time
 
 import pytest
@@ -15,12 +16,13 @@ from scaffold.publisher.store import Store
 
 def test_hung_builder_respawns_after_max_inflight():
     import threading
+
     gate = threading.Event()
     calls = {"n": 0}
 
     def hung():
         calls["n"] += 1
-        gate.wait(10.0)   # never returns within the test window
+        gate.wait(10.0)  # never returns within the test window
         return {"v": 1}
 
     c = _SoftTtlCache("t", ttl_secs=0.01, retry_backoff_secs=0.0)
@@ -40,8 +42,9 @@ def test_hung_builder_respawns_after_max_inflight():
 
 
 def test_try_adopt_persisted_caches(monkeypatch):
-    monkeypatch.setattr(weights, "_load_persisted_vector",
-                        lambda store: {"vector_id": "persisted"})
+    monkeypatch.setattr(
+        weights, "_load_persisted_vector", lambda store: {"vector_id": "persisted"}
+    )
     captured = {}
     monkeypatch.setattr(weights, "_cache_write", lambda vec: captured.update(vec))
     weights._try_adopt_persisted(None, weights._bg_generation, timeout=1.0)
@@ -55,12 +58,13 @@ def test_try_adopt_persisted_bounded_on_hang(monkeypatch):
 
     monkeypatch.setattr(weights, "_load_persisted_vector", hang)
     wrote = {"n": 0}
-    monkeypatch.setattr(weights, "_cache_write",
-                        lambda vec: wrote.__setitem__("n", wrote["n"] + 1))
+    monkeypatch.setattr(
+        weights, "_cache_write", lambda vec: wrote.__setitem__("n", wrote["n"] + 1)
+    )
     start = time.monotonic()
     weights._try_adopt_persisted(None, weights._bg_generation, timeout=0.2)
-    assert time.monotonic() - start < 2.0   # returned at timeout, not after 5s
-    assert wrote["n"] == 0                   # nothing cached on a timed-out load
+    assert time.monotonic() - start < 2.0  # returned at timeout, not after 5s
+    assert wrote["n"] == 0  # nothing cached on a timed-out load
 
 
 def test_perminer_window_scores_aggregate_in_sql(tmp_path):
@@ -75,14 +79,14 @@ def test_perminer_window_scores_aggregate_in_sql(tmp_path):
                 ") VALUES (?, ?, 1, 1, 0, ?, 1, ?)",
                 (challenge_id, hotkey, weight, "2026-06-29T00:00:00.000Z"),
             )
+
         store.write(write)
 
     add("pm-a", "hk-a", 1.0)
     add("pm-b", "hk-a", 3.0)
     add("pm-c", "hk-b", 2.0)
 
-    scores = weights._perminer_window_scores(
-        store, since="2026-06-28T00:00:00.000Z")
+    scores = weights._perminer_window_scores(store, since="2026-06-28T00:00:00.000Z")
 
     assert scores == {"hk-a": 1.0, "hk-b": 0.5}
 
@@ -107,4 +111,5 @@ def test_pm_primary_score_query_failure_does_not_fall_back_to_public(monkeypatch
 
     with pytest.raises(RuntimeError, match="pm query failed"):
         weights._perminer_compose_scores(
-            BrokenStore(), since="2026-06-28T00:00:00.000Z")
+            BrokenStore(), since="2026-06-28T00:00:00.000Z"
+        )

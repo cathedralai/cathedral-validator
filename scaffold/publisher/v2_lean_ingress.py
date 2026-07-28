@@ -11,6 +11,7 @@ accepts only token/signature/shape-valid tiny bitset events and returns a durabl
 `received` receipt. This keeps the ACK path off Railway/Postgres while preserving
 idempotency and auditability.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -102,7 +103,9 @@ class LeanIngressPressureError(RuntimeError):
 class LeanIngressStore:
     """Tiny SQLite WAL-backed local durable event log."""
 
-    def __init__(self, path: str | os.PathLike[str], *, enforce_single_process: bool = True):
+    def __init__(
+        self, path: str | os.PathLike[str], *, enforce_single_process: bool = True
+    ):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._process_lock_handle = None
@@ -222,9 +225,12 @@ class LeanIngressStore:
         max_unflushed_age_secs: int = 0,
     ) -> str | None:
         if max_unflushed_events > 0:
-            unflushed = int(conn.execute(
-                "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
-            ).fetchone()["n"] or 0)
+            unflushed = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
+                ).fetchone()["n"]
+                or 0
+            )
             if unflushed >= int(max_unflushed_events):
                 return "ingress_backlog_full"
         if max_storage_bytes > 0 and self.storage_bytes() >= int(max_storage_bytes):
@@ -282,7 +288,9 @@ class LeanIngressStore:
         )
         rid = _receipt_id()
         assignment_sha = hashlib.sha256(assignment_raw).hexdigest()
-        submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+        submit_token_id = hashlib.sha256(
+            str(submit["submit_token"]).encode("utf-8")
+        ).hexdigest()[:32]
         event = {
             "schema": "cathedral.v2.lean_ingress_event.v1",
             "receipt_id": rid,
@@ -313,7 +321,10 @@ class LeanIngressStore:
                 (idem,),
             ).fetchone()
             existing_row = dict(existing) if existing is not None else None
-            if existing_row is not None and str(existing_row.get("status") or "") != "rejected":
+            if (
+                existing_row is not None
+                and str(existing_row.get("status") or "") != "rejected"
+            ):
                 conn.execute("COMMIT")
                 return existing_row, False
             if existing_row is not None:
@@ -422,16 +433,26 @@ class LeanIngressStore:
             reject_rows = conn.execute(
                 "SELECT reason, SUM(count) AS n FROM reject_rollups_local GROUP BY reason"
             ).fetchall()
-            unflushed = int(conn.execute(
-                "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
-            ).fetchone()["n"] or 0)
-            total = int(conn.execute("SELECT COUNT(*) AS n FROM submit_events_local").fetchone()["n"] or 0)
+            unflushed = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM submit_events_local WHERE flushed_at_iso IS NULL"
+                ).fetchone()["n"]
+                or 0
+            )
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM submit_events_local"
+                ).fetchone()["n"]
+                or 0
+            )
             oldest_row = conn.execute(
                 "SELECT MIN(received_at_iso) AS oldest FROM submit_events_local WHERE flushed_at_iso IS NULL"
             ).fetchone()
         oldest = str(oldest_row["oldest"] or "") if oldest_row else ""
         oldest_ts = v2_bitset_submit.parse_iso(oldest) if oldest else None
-        oldest_age = max(0.0, time.time() - oldest_ts) if oldest_ts is not None else None
+        oldest_age = (
+            max(0.0, time.time() - oldest_ts) if oldest_ts is not None else None
+        )
         return {
             "schema": "cathedral.v2.lean_ingress_metrics.v1",
             "events": {str(r["status"]): int(r["n"] or 0) for r in status_rows},
@@ -439,13 +460,17 @@ class LeanIngressStore:
             "total_events": total,
             "unflushed_events": unflushed,
             "oldest_unflushed_at": oldest or None,
-            "oldest_unflushed_age_secs": round(oldest_age, 3) if oldest_age is not None else None,
+            "oldest_unflushed_age_secs": round(oldest_age, 3)
+            if oldest_age is not None
+            else None,
             "storage_bytes": self.storage_bytes(),
             "disk_free_bytes": self.disk_free_bytes(),
         }
 
 
-def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
+def receipt_payload(
+    row: dict[str, Any], *, inserted: bool | None = None
+) -> dict[str, Any]:
     payload = {
         "schema": "cathedral.v2.submit_bitset_receipt.v1",
         "shadow": True,
@@ -496,37 +521,69 @@ def build_ingress_app(
     app = FastAPI(title="Cathedral V2 Lean Ingress", version="0.1.0")
     app.state.store = store or LeanIngressStore(
         os.environ.get("CATHEDRAL_V2_INGRESS_DB_PATH", "./data/v2-ingress.sqlite3"),
-        enforce_single_process=not _env_bool("CATHEDRAL_V2_INGRESS_DISABLE_PROCESS_LOCK", False),
+        enforce_single_process=not _env_bool(
+            "CATHEDRAL_V2_INGRESS_DISABLE_PROCESS_LOCK", False
+        ),
     )
     app.state.verifier = verifier or default_verifier()
-    app.state.submit_token_secret = submit_token_secret or os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "")
-    app.state.max_body_bytes = int(max_body_bytes or _env_int(
-        "CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES
-    ))
-    app.state.timestamp_skew_secs = int(timestamp_skew_secs if timestamp_skew_secs is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_TIMESTAMP_SKEW_SECS", DEFAULT_SKEW_SECS
-    ))
-    app.state.max_unflushed_events = int(max_unflushed_events if max_unflushed_events is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_EVENTS", DEFAULT_MAX_UNFLUSHED_EVENTS
-    ))
-    app.state.max_storage_bytes = int(max_storage_bytes if max_storage_bytes is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_MAX_STORAGE_BYTES", DEFAULT_MAX_STORAGE_BYTES
-    ))
-    app.state.min_free_disk_bytes = int(min_free_disk_bytes if min_free_disk_bytes is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES
-    ))
-    app.state.max_unflushed_age_secs = int(max_unflushed_age_secs if max_unflushed_age_secs is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS", DEFAULT_MAX_UNFLUSHED_AGE_SECS
-    ))
-    app.state.metrics_token = (metrics_token if metrics_token is not None else os.environ.get(
-        "CATHEDRAL_V2_INGRESS_METRICS_TOKEN", ""
-    )).strip()
-    app.state.metrics_ttl_secs = float(metrics_ttl_secs if metrics_ttl_secs is not None else _env_float(
-        "CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS", DEFAULT_METRICS_TTL_SECS
-    ))
-    app.state.ip_rpm = int(ip_rpm if ip_rpm is not None else _env_int(
-        "CATHEDRAL_V2_INGRESS_IP_RPM", DEFAULT_IP_RPM
-    ))
+    app.state.submit_token_secret = submit_token_secret or os.environ.get(
+        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", ""
+    )
+    app.state.max_body_bytes = int(
+        max_body_bytes
+        or _env_int("CATHEDRAL_V2_SUBMIT_BITSET_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES)
+    )
+    app.state.timestamp_skew_secs = int(
+        timestamp_skew_secs
+        if timestamp_skew_secs is not None
+        else _env_int("CATHEDRAL_V2_INGRESS_TIMESTAMP_SKEW_SECS", DEFAULT_SKEW_SECS)
+    )
+    app.state.max_unflushed_events = int(
+        max_unflushed_events
+        if max_unflushed_events is not None
+        else _env_int(
+            "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_EVENTS", DEFAULT_MAX_UNFLUSHED_EVENTS
+        )
+    )
+    app.state.max_storage_bytes = int(
+        max_storage_bytes
+        if max_storage_bytes is not None
+        else _env_int(
+            "CATHEDRAL_V2_INGRESS_MAX_STORAGE_BYTES", DEFAULT_MAX_STORAGE_BYTES
+        )
+    )
+    app.state.min_free_disk_bytes = int(
+        min_free_disk_bytes
+        if min_free_disk_bytes is not None
+        else _env_int(
+            "CATHEDRAL_V2_INGRESS_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES
+        )
+    )
+    app.state.max_unflushed_age_secs = int(
+        max_unflushed_age_secs
+        if max_unflushed_age_secs is not None
+        else _env_int(
+            "CATHEDRAL_V2_INGRESS_MAX_UNFLUSHED_AGE_SECS",
+            DEFAULT_MAX_UNFLUSHED_AGE_SECS,
+        )
+    )
+    app.state.metrics_token = (
+        metrics_token
+        if metrics_token is not None
+        else os.environ.get("CATHEDRAL_V2_INGRESS_METRICS_TOKEN", "")
+    ).strip()
+    app.state.metrics_ttl_secs = float(
+        metrics_ttl_secs
+        if metrics_ttl_secs is not None
+        else _env_float(
+            "CATHEDRAL_V2_INGRESS_METRICS_TTL_SECS", DEFAULT_METRICS_TTL_SECS
+        )
+    )
+    app.state.ip_rpm = int(
+        ip_rpm
+        if ip_rpm is not None
+        else _env_int("CATHEDRAL_V2_INGRESS_IP_RPM", DEFAULT_IP_RPM)
+    )
     app.state._metrics_cache = {"ts": 0.0, "payload": None}
     app.state._metrics_lock = threading.Lock()
     app.state._reject_counts: dict[str, int] = {}
@@ -549,7 +606,9 @@ def build_ingress_app(
     def _record_reject_memory(reason: str) -> None:
         with app.state._reject_lock:
             key = str(reason)[:128]
-            app.state._reject_counts[key] = int(app.state._reject_counts.get(key, 0)) + 1
+            app.state._reject_counts[key] = (
+                int(app.state._reject_counts.get(key, 0)) + 1
+            )
 
     def reject(reason: str, status_code: int = 400) -> None:
         # Public junk traffic must not contend on the SQLite write lock. Keep
@@ -562,7 +621,9 @@ def build_ingress_app(
         with app.state._metrics_lock:
             cached = app.state._metrics_cache.get("payload")
             cached_ts = float(app.state._metrics_cache.get("ts") or 0.0)
-            if cached is not None and now - cached_ts <= max(0.0, float(app.state.metrics_ttl_secs)):
+            if cached is not None and now - cached_ts <= max(
+                0.0, float(app.state.metrics_ttl_secs)
+            ):
                 return dict(cached)
             payload = app.state.store.metrics()
             with app.state._reject_lock:
@@ -590,6 +651,7 @@ def build_ingress_app(
         # origin. request.scope carries the raw ASGI headers + client peer.
         # See ratelimit._client_ip_from_scope and issue #333.
         from . import ratelimit
+
         return ratelimit._client_ip_from_scope(request.scope)
 
     def _check_ip_rate(request: Request) -> None:
@@ -598,6 +660,7 @@ def build_ingress_app(
             return
         ip = _client_ip(request)
         from . import ratelimit
+
         if ip == ratelimit.UNRESOLVED_IP:
             return  # fail open: no trustworthy IP to bucket on
         bucket = int(time.time() // 60)
@@ -617,7 +680,9 @@ def build_ingress_app(
             "kind": "live",
             "service_role": "v2-lean-ingress",
             "db": "sqlite-wal",
-            "submit_token_secret": "set" if app.state.submit_token_secret else "missing",
+            "submit_token_secret": "set"
+            if app.state.submit_token_secret
+            else "missing",
             "limits": _limits(),
         }
 
@@ -627,13 +692,27 @@ def build_ingress_app(
         reason = None
         if not app.state.submit_token_secret:
             reason = "v2_submit_token_secret_missing"
-        elif app.state.max_unflushed_events > 0 and metrics["unflushed_events"] >= app.state.max_unflushed_events:
+        elif (
+            app.state.max_unflushed_events > 0
+            and metrics["unflushed_events"] >= app.state.max_unflushed_events
+        ):
             reason = "ingress_backlog_full"
-        elif app.state.max_storage_bytes > 0 and metrics["storage_bytes"] >= app.state.max_storage_bytes:
+        elif (
+            app.state.max_storage_bytes > 0
+            and metrics["storage_bytes"] >= app.state.max_storage_bytes
+        ):
             reason = "ingress_storage_limit"
-        elif app.state.min_free_disk_bytes > 0 and metrics.get("disk_free_bytes") is not None and metrics["disk_free_bytes"] < app.state.min_free_disk_bytes:
+        elif (
+            app.state.min_free_disk_bytes > 0
+            and metrics.get("disk_free_bytes") is not None
+            and metrics["disk_free_bytes"] < app.state.min_free_disk_bytes
+        ):
             reason = "ingress_disk_pressure"
-        elif app.state.max_unflushed_age_secs > 0 and metrics.get("oldest_unflushed_age_secs") is not None and metrics["oldest_unflushed_age_secs"] > app.state.max_unflushed_age_secs:
+        elif (
+            app.state.max_unflushed_age_secs > 0
+            and metrics.get("oldest_unflushed_age_secs") is not None
+            and metrics["oldest_unflushed_age_secs"] > app.state.max_unflushed_age_secs
+        ):
             reason = "ingress_flush_lag"
         payload = {
             "status": "ok" if reason is None else "degraded",
@@ -693,14 +772,18 @@ def build_ingress_app(
             reject("submitted_at outside acceptable clock-skew window", 400)
 
         msg = v2_bitset_submit.canonical_submit_bytes(submit)
-        if not app.state.verifier.verify(x_cathedral_hotkey, msg, x_cathedral_signature):
+        if not app.state.verifier.verify(
+            x_cathedral_hotkey, msg, x_cathedral_signature
+        ):
             reject("invalid hotkey signature", 401)
 
         # Exact signed replays should remain cheap and available even if the
         # short-lived submit token has expired. This does not admit new work: it
         # only returns an existing non-rejected row for the same hotkey,
         # challenge, and submit-token hash.
-        submit_token_id = hashlib.sha256(str(submit["submit_token"]).encode("utf-8")).hexdigest()[:32]
+        submit_token_id = hashlib.sha256(
+            str(submit["submit_token"]).encode("utf-8")
+        ).hexdigest()[:32]
         replay_row = app.state.store.get_replay_candidate(
             miner_hotkey=x_cathedral_hotkey,
             challenge_id=submit["challenge_id"],
@@ -710,7 +793,10 @@ def build_ingress_app(
             return JSONResponse(
                 receipt_payload(replay_row, inserted=False),
                 status_code=200,
-                headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+                headers={
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*",
+                },
             )
 
         try:

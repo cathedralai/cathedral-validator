@@ -11,6 +11,7 @@ This module is intentionally narrow for phase 1/2:
 - durably store an idempotent receipt row
 - no blob fetch / no scoring yet
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -45,8 +46,14 @@ def _now_iso_ms() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _clean_str(body: dict[str, Any], key: str, *, required: bool = True,
-               max_len: int = 1024, default: str = "") -> str:
+def _clean_str(
+    body: dict[str, Any],
+    key: str,
+    *,
+    required: bool = True,
+    max_len: int = 1024,
+    default: str = "",
+) -> str:
     value = body.get(key, default)
     if value is None:
         value = default
@@ -92,37 +99,43 @@ def normalize_manifest(
     if not isinstance(body, dict):
         raise ManifestError("invalid_json_manifest")
 
-    body_schema = _clean_str(body, "schema", required=False, max_len=128, default=SCHEMA)
+    body_schema = _clean_str(
+        body, "schema", required=False, max_len=128, default=SCHEMA
+    )
     if body_schema != SCHEMA:
         raise ManifestError("unsupported_manifest_schema")
 
-    body_card = _clean_str(body, "card_id", required=False, max_len=128, default=card_id)
+    body_card = _clean_str(
+        body, "card_id", required=False, max_len=128, default=card_id
+    )
     if body_card != card_id:
         raise ManifestError("unsupported_card_id")
 
-    body_hotkey = _clean_str(body, "miner_hotkey", required=False, max_len=128, default=miner_hotkey)
+    body_hotkey = _clean_str(
+        body, "miner_hotkey", required=False, max_len=128, default=miner_hotkey
+    )
     if body_hotkey != miner_hotkey:
         raise ManifestError("hotkey_mismatch")
 
-    body_ts = _clean_str(body, "submitted_at", required=False, max_len=64, default=submitted_at)
+    body_ts = _clean_str(
+        body, "submitted_at", required=False, max_len=64, default=submitted_at
+    )
     if body_ts != submitted_at:
         raise ManifestError("submitted_at_mismatch")
 
-    challenge_id = _clean_str(
-        body, "challenge_id", max_len=_MAX_CHALLENGE_ID_LEN)
-    solution_cid = _clean_str(
-        body, "solution_cid", max_len=_MAX_CID_LEN)
+    challenge_id = _clean_str(body, "challenge_id", max_len=_MAX_CHALLENGE_ID_LEN)
+    solution_cid = _clean_str(body, "solution_cid", max_len=_MAX_CID_LEN)
     solution_sha256 = _clean_str(body, "solution_sha256", max_len=64)
     if not _HEX64_RE.match(solution_sha256):
         raise ManifestError("invalid_solution_sha256")
 
     assignment_encoding = _clean_str(
-        body, "assignment_encoding", max_len=_MAX_ENCODING_LEN)
+        body, "assignment_encoding", max_len=_MAX_ENCODING_LEN
+    )
     if assignment_encoding not in SUPPORTED_ENCODINGS:
         raise ManifestError("unsupported_assignment_encoding")
 
-    cnf_sha256 = _clean_str(
-        body, "cnf_sha256", required=False, max_len=64, default="")
+    cnf_sha256 = _clean_str(body, "cnf_sha256", required=False, max_len=64, default="")
     if cnf_sha256 and not _HEX64_RE.match(cnf_sha256):
         raise ManifestError("invalid_cnf_sha256")
 
@@ -147,12 +160,19 @@ def normalize_manifest(
 def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     """Canonical bytes signed by miner hotkeys for V2 manifest admission."""
     body = {k: manifest[k] for k in sorted(manifest)}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
 
 
-def canonical_blob_upload_bytes(*, miner_hotkey: str, submitted_at: str,
-                                blob_sha256: str, blob_bytes: int,
-                                kind: str = "solution") -> bytes:
+def canonical_blob_upload_bytes(
+    *,
+    miner_hotkey: str,
+    submitted_at: str,
+    blob_sha256: str,
+    blob_bytes: int,
+    kind: str = "solution",
+) -> bytes:
     """Canonical bytes for optional Cathedral-hosted/local beta blob uploads."""
     body = {
         "schema": "cathedral.blob_upload.v1",
@@ -162,11 +182,15 @@ def canonical_blob_upload_bytes(*, miner_hotkey: str, submitted_at: str,
         "blob_sha256": str(blob_sha256).lower(),
         "blob_bytes": int(blob_bytes),
     }
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
 
 
 def idempotency_key(manifest: dict[str, Any]) -> str:
-    return hashlib.sha256(b"cathedral:v2:manifest:\0" + canonical_manifest_bytes(manifest)).hexdigest()
+    return hashlib.sha256(
+        b"cathedral:v2:manifest:\0" + canonical_manifest_bytes(manifest)
+    ).hexdigest()
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -238,13 +262,17 @@ def admit_manifest(
 
 
 def get_manifest_receipt(store, receipt_id: str) -> dict[str, Any] | None:
-    rows = store.query("SELECT * FROM solution_manifests WHERE id=? LIMIT 1", (receipt_id,))
+    rows = store.query(
+        "SELECT * FROM solution_manifests WHERE id=? LIMIT 1", (receipt_id,)
+    )
     if not rows:
         return None
     return _row_to_dict(rows[0])
 
 
-def receipt_payload(row: dict[str, Any], *, inserted: bool | None = None) -> dict[str, Any]:
+def receipt_payload(
+    row: dict[str, Any], *, inserted: bool | None = None
+) -> dict[str, Any]:
     status = str(row.get("status") or STATUS_RECEIVED)
     terminal = status in {"verified", "rejected"}
     payload = {

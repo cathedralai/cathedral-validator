@@ -33,6 +33,7 @@ Safety
   reclaimable by another worker; the terminal accept transaction is idempotent on
   the signature/solve uniqueness, so a reclaim cannot double-pay.
 """
+
 from __future__ import annotations
 
 import json
@@ -43,8 +44,8 @@ from .auth import sha256_hex
 # Attempt lifecycle states (the `status` column).
 STATUS_PENDING = "pending"
 STATUS_VERIFYING = "verifying"
-STATUS_RANKED = "ranked"          # accepted (matches legacy vocabulary)
-STATUS_REJECTED = "rejected"      # terminal reject (matches legacy vocabulary)
+STATUS_RANKED = "ranked"  # accepted (matches legacy vocabulary)
+STATUS_REJECTED = "rejected"  # terminal reject (matches legacy vocabulary)
 STATUS_FAILED_RETRYABLE = "failed_retryable"
 
 # A pending/verifying row whose idempotency replay should return "still working".
@@ -85,7 +86,8 @@ def shadow_idempotency_key(
     ``shadow:`` prefix in the hashed material guarantees the shadow twin can never
     collide with — or be matched by — the live admission lookup."""
     return sha256_hex(
-        f"shadow\x00{miner_hotkey}\x00{challenge_id}\x00{dimacs_solution_sha256}")
+        f"shadow\x00{miner_hotkey}\x00{challenge_id}\x00{dimacs_solution_sha256}"
+    )
 
 
 def challenge_kind(challenge_id: str | None) -> str:
@@ -100,6 +102,7 @@ def challenge_kind(challenge_id: str | None) -> str:
 def receipt_from_row(row: Any) -> dict[str, Any]:
     """Build the public receipt JSON from a per_miner_attempts row (sqlite3.Row or
     DictRow). Only durable, non-sensitive fields are exposed — never the raw body."""
+
     def g(key: str, default: Any = None) -> Any:
         try:
             v = row[key]
@@ -184,9 +187,11 @@ def admit_pending(
                 now_iso=received_at_iso,
                 max_pending=int(queue_backpressure.get("max_pending") or 0),
                 max_worker_lag_secs=float(
-                    queue_backpressure.get("max_worker_lag_secs") or 0.0),
+                    queue_backpressure.get("max_worker_lag_secs") or 0.0
+                ),
                 worker_stale_secs=float(
-                    queue_backpressure.get("worker_stale_secs") or 120.0),
+                    queue_backpressure.get("worker_stale_secs") or 120.0
+                ),
             )
             if pressure["limited"]:
                 return ("backpressure", pressure)
@@ -197,9 +202,22 @@ def admit_pending(
             "idempotency_key, received_at_iso, challenge_kind, solution_body, "
             "assignment_identity, attempt_count) "
             "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (receipt_id, challenge_id, miner_hotkey, epoch, STATUS_PENDING,
-             dimacs_solution_sha256, submitted_at, received_at_iso, signature,
-             idem_key, received_at_iso, kind, dimacs_solution, assignment_identity),
+            (
+                receipt_id,
+                challenge_id,
+                miner_hotkey,
+                epoch,
+                STATUS_PENDING,
+                dimacs_solution_sha256,
+                submitted_at,
+                received_at_iso,
+                signature,
+                idem_key,
+                received_at_iso,
+                kind,
+                dimacs_solution,
+                assignment_identity,
+            ),
         )
         if not cur.rowcount:
             # Lost an admission race on the UNIQUE idempotency_key. Re-read the
@@ -245,11 +263,7 @@ def queue_backpressure_decision(
         reason = None
     elif max_pending > 0 and pending >= max_pending:
         reason = "submit_queue_pending_limit"
-    elif (
-        max_worker_lag_secs > 0.0
-        and lag is not None
-        and lag >= max_worker_lag_secs
-    ):
+    elif max_worker_lag_secs > 0.0 and lag is not None and lag >= max_worker_lag_secs:
         reason = "submit_queue_worker_lag_limit"
     return {
         "limited": reason is not None,
@@ -267,8 +281,7 @@ def queue_backpressure_decision(
 def _active_worker_count(conn, now_iso: str, stale_secs: float) -> int:
     try:
         rows = conn.execute(
-            "SELECT last_seen_at_iso FROM async_verify_workers "
-            "WHERE running=1"
+            "SELECT last_seen_at_iso FROM async_verify_workers WHERE running=1"
         ).fetchall()
     except Exception:
         return 0
@@ -285,23 +298,26 @@ def _fetch_by_idem(conn, idem_key: str, *, exclude_shadow: bool = False):
         cur = conn.execute(
             "SELECT * FROM per_miner_attempts WHERE idempotency_key=? "
             "AND (challenge_kind IS NULL OR challenge_kind != ?) LIMIT 1",
-            (idem_key, KIND_PER_MINER_SHADOW))
+            (idem_key, KIND_PER_MINER_SHADOW),
+        )
         return cur.fetchone()
     cur = conn.execute(
-        "SELECT * FROM per_miner_attempts WHERE idempotency_key=? LIMIT 1",
-        (idem_key,))
+        "SELECT * FROM per_miner_attempts WHERE idempotency_key=? LIMIT 1", (idem_key,)
+    )
     return cur.fetchone()
 
 
 def _fetch_by_id(conn, receipt_id: str):
     cur = conn.execute(
-        "SELECT * FROM per_miner_attempts WHERE id=? LIMIT 1", (receipt_id,))
+        "SELECT * FROM per_miner_attempts WHERE id=? LIMIT 1", (receipt_id,)
+    )
     return cur.fetchone()
 
 
 def get_receipt(store, receipt_id: str) -> dict[str, Any] | None:
     rows = store.query(
-        "SELECT * FROM per_miner_attempts WHERE id=? LIMIT 1", (receipt_id,))
+        "SELECT * FROM per_miner_attempts WHERE id=? LIMIT 1", (receipt_id,)
+    )
     if not rows:
         return None
     return receipt_from_row(rows[0])
@@ -311,7 +327,11 @@ def get_receipt(store, receipt_id: str) -> dict[str, Any] | None:
 # Worker claim: take the oldest pending attempts (fairness = received_at order).
 # ---------------------------------------------------------------------------
 def claim_pending(
-    store, *, worker_id: str, now_iso: str, lock_deadline_iso: str,
+    store,
+    *,
+    worker_id: str,
+    now_iso: str,
+    lock_deadline_iso: str,
     batch_size: int = 1,
 ) -> list[Any]:
     """Atomically move up to `batch_size` claimable attempts to `verifying` and
@@ -336,20 +356,38 @@ def claim_pending(
                 "  ORDER BY received_at_iso, id "
                 "  LIMIT ? FOR UPDATE SKIP LOCKED"
                 ") RETURNING *",
-                (STATUS_VERIFYING, worker_id, lock_deadline_iso, now_iso,
-                 STATUS_PENDING, STATUS_FAILED_RETRYABLE, STATUS_VERIFYING,
-                 now_iso, now_iso, batch_size),
+                (
+                    STATUS_VERIFYING,
+                    worker_id,
+                    lock_deadline_iso,
+                    now_iso,
+                    STATUS_PENDING,
+                    STATUS_FAILED_RETRYABLE,
+                    STATUS_VERIFYING,
+                    now_iso,
+                    now_iso,
+                    batch_size,
+                ),
             )
             return list(cur.fetchall())
         # SQLite: select then update under the single write lock.
-        rows = list(conn.execute(
-            "SELECT id FROM per_miner_attempts "
-            "WHERE status IN (?, ?, ?) "
-            "  AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
-            "  AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
-            "ORDER BY received_at_iso, id LIMIT ?",
-            (STATUS_PENDING, STATUS_FAILED_RETRYABLE, STATUS_VERIFYING,
-             now_iso, now_iso, batch_size)))
+        rows = list(
+            conn.execute(
+                "SELECT id FROM per_miner_attempts "
+                "WHERE status IN (?, ?, ?) "
+                "  AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
+                "  AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
+                "ORDER BY received_at_iso, id LIMIT ?",
+                (
+                    STATUS_PENDING,
+                    STATUS_FAILED_RETRYABLE,
+                    STATUS_VERIFYING,
+                    now_iso,
+                    now_iso,
+                    batch_size,
+                ),
+            )
+        )
         claimed = []
         for r in rows:
             rid = r["id"]
@@ -357,9 +395,11 @@ def claim_pending(
                 "UPDATE per_miner_attempts SET status=?, locked_by=?, "
                 "locked_until_iso=?, attempt_count=attempt_count+1, "
                 "verified_at_iso=NULL WHERE id=?",
-                (STATUS_VERIFYING, worker_id, lock_deadline_iso, rid))
+                (STATUS_VERIFYING, worker_id, lock_deadline_iso, rid),
+            )
             got = conn.execute(
-                "SELECT * FROM per_miner_attempts WHERE id=?", (rid,)).fetchone()
+                "SELECT * FROM per_miner_attempts WHERE id=?", (rid,)
+            ).fetchone()
             claimed.append(got)
         return claimed
 
@@ -398,22 +438,31 @@ def finalize_attempt(
         # No durable body — cannot verify. Mark terminal-rejected so the receipt
         # resolves rather than looping forever.
         _mark_rejected(store, receipt_id, "missing_solution_body", now_iso)
-        return {"receipt_id": receipt_id, "outcome": "rejected",
-                "reason": "missing_solution_body"}
+        return {
+            "receipt_id": receipt_id,
+            "outcome": "rejected",
+            "reason": "missing_solution_body",
+        }
 
     cnf_text = load_cnf(challenge_id)
     if cnf_text is None:
         _mark_rejected(store, receipt_id, "challenge_not_active", now_iso)
-        return {"receipt_id": receipt_id, "outcome": "rejected",
-                "reason": "challenge_not_active"}
+        return {
+            "receipt_id": receipt_id,
+            "outcome": "rejected",
+            "reason": "challenge_not_active",
+        }
 
     check = verify_dimacs(cnf_text, body)
     if not check.ok:
         _mark_rejected(store, receipt_id, check.rejection_reason, now_iso)
         if record_event is not None:
             record_event("rejected", check.rejection_reason, challenge_id=challenge_id)
-        return {"receipt_id": receipt_id, "outcome": "rejected",
-                "reason": check.rejection_reason}
+        return {
+            "receipt_id": receipt_id,
+            "outcome": "rejected",
+            "reason": check.rejection_reason,
+        }
 
     err, rank, ws, eval_run_id = accept_public(receipt_id, row, check, now_iso)
     if err is not None:
@@ -426,8 +475,12 @@ def finalize_attempt(
 
     if record_event is not None:
         record_event("accepted", "ranked", challenge_id=challenge_id)
-    return {"receipt_id": receipt_id, "outcome": "ranked", "rank": rank,
-            "weighted_score": ws}
+    return {
+        "receipt_id": receipt_id,
+        "outcome": "ranked",
+        "rank": rank,
+        "weighted_score": ws,
+    }
 
 
 def _mark_rejected(store, receipt_id: str, reason: str, now_iso: str) -> None:
@@ -436,7 +489,9 @@ def _mark_rejected(store, receipt_id: str, reason: str, now_iso: str) -> None:
             "UPDATE per_miner_attempts SET status=?, rejection_reason=?, "
             "verified_at_iso=?, recorded_at_iso=?, locked_by=NULL, "
             "locked_until_iso=NULL WHERE id=?",
-            (STATUS_REJECTED, reason, now_iso, now_iso, receipt_id))
+            (STATUS_REJECTED, reason, now_iso, now_iso, receipt_id),
+        )
+
     store.write(_do)
 
 
@@ -475,8 +530,11 @@ def finalize_pm_attempt(
 
     if row["solution_body"] is None:
         _mark_rejected(store, receipt_id, "missing_solution_body", now_iso)
-        return {"receipt_id": receipt_id, "outcome": "rejected",
-                "reason": "missing_solution_body"}
+        return {
+            "receipt_id": receipt_id,
+            "outcome": "rejected",
+            "reason": "missing_solution_body",
+        }
 
     ok, reason, check = resolve_and_verify(row)
     if not ok:
@@ -536,17 +594,32 @@ def finalize_pm_shadow(
             "UPDATE per_miner_attempts SET shadow_status=?, shadow_rejection_reason=?, "
             "status=?, verified_at_iso=?, recorded_at_iso=?, solution_body=NULL, "
             "locked_by=NULL, locked_until_iso=NULL WHERE id=?",
-            (shadow_status, shadow_reason, STATUS_RANKED if shadow_status == STATUS_RANKED
-             else STATUS_REJECTED, now_iso, now_iso, receipt_id))
+            (
+                shadow_status,
+                shadow_reason,
+                STATUS_RANKED if shadow_status == STATUS_RANKED else STATUS_REJECTED,
+                now_iso,
+                now_iso,
+                receipt_id,
+            ),
+        )
+
     store.write(_do)
 
     if diverged and log_divergence is not None:
         log_divergence(
-            challenge_id=challenge_id, receipt_id=receipt_id,
+            challenge_id=challenge_id,
+            receipt_id=receipt_id,
             inline_status=str(row["rejection_reason"] or "ranked"),
-            async_status=shadow_status, async_reason=shadow_reason)
-    return {"receipt_id": receipt_id, "outcome": "shadow",
-            "shadow_status": shadow_status, "diverged": diverged}
+            async_status=shadow_status,
+            async_reason=shadow_reason,
+        )
+    return {
+        "receipt_id": receipt_id,
+        "outcome": "shadow",
+        "shadow_status": shadow_status,
+        "diverged": diverged,
+    }
 
 
 def _shadow_diverges(row: Any, async_status: str, async_reason: str | None) -> bool:
@@ -568,7 +641,9 @@ def _shadow_diverges(row: Any, async_status: str, async_reason: str | None) -> b
 # ---------------------------------------------------------------------------
 # Queue visibility (admin metrics).
 # ---------------------------------------------------------------------------
-def queue_metrics(store, *, now_iso: str, kinds: tuple[str, ...] | None = None) -> dict[str, Any]:
+def queue_metrics(
+    store, *, now_iso: str, kinds: tuple[str, ...] | None = None
+) -> dict[str, Any]:
     """Pending-queue snapshot for the submit-metrics admin surface.
 
     Returns pending count, the oldest pending received_at, and worker lag (seconds
@@ -582,9 +657,11 @@ def queue_metrics(store, *, now_iso: str, kinds: tuple[str, ...] | None = None) 
     rows = store.query(
         "SELECT challenge_kind AS kind, status, COUNT(*) AS pending, "
         "MIN(received_at_iso) AS oldest "
-        "FROM per_miner_attempts WHERE status IN (?, ?, ?)" + where_kind +
-        " GROUP BY challenge_kind, status",
-        tuple(params))
+        "FROM per_miner_attempts WHERE status IN (?, ?, ?)"
+        + where_kind
+        + " GROUP BY challenge_kind, status",
+        tuple(params),
+    )
     by_kind: dict[str, Any] = {}
     total_pending = 0
     by_status = {status: 0 for status in _OPEN_STATES}
@@ -616,7 +693,9 @@ def queue_metrics(store, *, now_iso: str, kinds: tuple[str, ...] | None = None) 
         bucket["by_status"][status] = int(bucket["by_status"].get(status, 0)) + pending
         bucket["oldest_by_status"][status] = oldest
         cur_bucket_oldest = bucket["oldest_received_at"]
-        if oldest is not None and (cur_bucket_oldest is None or oldest < cur_bucket_oldest):
+        if oldest is not None and (
+            cur_bucket_oldest is None or oldest < cur_bucket_oldest
+        ):
             bucket["oldest_received_at"] = oldest
             bucket["worker_lag_secs"] = _age_secs(oldest, now_iso)
     for bucket in by_kind.values():
@@ -673,7 +752,8 @@ def queue_rates(store, *, since_iso: str, window_secs: float) -> dict[str, Any]:
             else:
                 live_rejected += n
     live_admitted = sum(
-        n for kind, n in admitted.items() if kind != KIND_PER_MINER_SHADOW)
+        n for kind, n in admitted.items() if kind != KIND_PER_MINER_SHADOW
+    )
     shadow_admitted = admitted.get(KIND_PER_MINER_SHADOW, 0)
     return {
         "window_secs": win,
@@ -738,9 +818,20 @@ def record_worker_heartbeat(
             "processed_total=async_verify_workers.processed_total + excluded.processed_total, "
             "last_batch_size=excluded.last_batch_size, "
             "running=excluded.running",
-            (worker_id, service_role, now_iso, now_iso, last_tick_at,
-             last_processed_at, error, processed, processed, running),
+            (
+                worker_id,
+                service_role,
+                now_iso,
+                now_iso,
+                last_tick_at,
+                last_processed_at,
+                error,
+                processed,
+                processed,
+                running,
+            ),
         )
+
     store.write(_do)
 
 
@@ -751,7 +842,8 @@ def worker_metrics(store, *, now_iso: str, stale_secs: float = 120.0) -> dict[st
             "SELECT worker_id, service_role, started_at_iso, last_seen_at_iso, "
             "last_tick_at_iso, last_processed_at_iso, last_error, "
             "processed_total, last_batch_size, running "
-            "FROM async_verify_workers ORDER BY last_seen_at_iso DESC")
+            "FROM async_verify_workers ORDER BY last_seen_at_iso DESC"
+        )
     except Exception:
         return {"active_workers": 0, "workers": [], "stale_after_secs": stale_secs}
     workers = []
@@ -760,20 +852,22 @@ def worker_metrics(store, *, now_iso: str, stale_secs: float = 120.0) -> dict[st
         lag = _age_secs(r["last_seen_at_iso"], now_iso)
         is_active = bool(r["running"]) and lag is not None and lag <= stale_secs
         active += 1 if is_active else 0
-        workers.append({
-            "worker_id": str(r["worker_id"]),
-            "service_role": str(r["service_role"] or ""),
-            "started_at": r["started_at_iso"],
-            "last_seen_at": r["last_seen_at_iso"],
-            "last_tick_at": r["last_tick_at_iso"],
-            "last_processed_at": r["last_processed_at_iso"],
-            "last_seen_lag_secs": lag,
-            "active": is_active,
-            "running": bool(r["running"]),
-            "processed_total": int(r["processed_total"] or 0),
-            "last_batch_size": int(r["last_batch_size"] or 0),
-            "last_error": r["last_error"],
-        })
+        workers.append(
+            {
+                "worker_id": str(r["worker_id"]),
+                "service_role": str(r["service_role"] or ""),
+                "started_at": r["started_at_iso"],
+                "last_seen_at": r["last_seen_at_iso"],
+                "last_tick_at": r["last_tick_at_iso"],
+                "last_processed_at": r["last_processed_at_iso"],
+                "last_seen_lag_secs": lag,
+                "active": is_active,
+                "running": bool(r["running"]),
+                "processed_total": int(r["processed_total"] or 0),
+                "last_batch_size": int(r["last_batch_size"] or 0),
+                "last_error": r["last_error"],
+            }
+        )
     return {
         "active_workers": active,
         "workers": workers,
@@ -793,6 +887,7 @@ def _age_secs(then_iso: str | None, now_iso: str) -> float | None:
 
 def _parse_iso(ts: str) -> float | None:
     from datetime import datetime, timezone
+
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:

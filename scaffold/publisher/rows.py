@@ -12,6 +12,7 @@ Signing uses scaffold.wire.sign_row with the SAME key the live publisher uses
 Post-signing fields (output_card, merkle_epoch) are added AFTER signing and are
 excluded from the canonical payload, so they don't break verification.
 """
+
 from __future__ import annotations
 
 import base64
@@ -39,8 +40,14 @@ def _jwk_from_key(private_key_hex: str, *, kid: str, purpose: str) -> dict[str, 
     )
     x_b64url = base64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode("ascii")
     return {
-        "kid": kid, "use": "sig", "alg": "EdDSA", "kty": "OKP", "crv": "Ed25519",
-        "x": x_b64url, "public_key_hex": pub_raw.hex(), "purpose": purpose,
+        "kid": kid,
+        "use": "sig",
+        "alg": "EdDSA",
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": x_b64url,
+        "public_key_hex": pub_raw.hex(),
+        "purpose": purpose,
     }
 
 
@@ -63,14 +70,14 @@ def jwks_from_key(
         private_key_hex,
         kid=kid,
         purpose="Cathedral signs every EvalRun projection served from "
-                "/v1/leaderboard/recent. Pin this key in your validator config.",
+        "/v1/leaderboard/recent. Pin this key in your validator config.",
     )
     keys = [eval_key]
     weight_policy_key = _jwk_from_key(
         weight_policy_private_key_hex or private_key_hex,
         kid=weight_policy_kid,
         purpose="Cathedral signs weight-policy vectors served from "
-                "/v1/validator/weights/next. Pin this key in your validator config.",
+        "/v1/validator/weights/next. Pin this key in your validator config.",
     )
     identity = (weight_policy_key["kid"], weight_policy_key["public_key_hex"])
     if identity != (eval_key["kid"], eval_key["public_key_hex"]):
@@ -83,9 +90,11 @@ def public_key_hex(private_key_hex: str) -> str:
     from cryptography.hazmat.primitives import serialization
 
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_key_hex.strip()))
-    return sk.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    ).hex()
+    return (
+        sk.public_key()
+        .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        .hex()
+    )
 
 
 def build_solve_rows(
@@ -132,14 +141,16 @@ def build_solve_rows(
     }
 
     v6 = dict(common)
-    v6.update({
-        "id": row_uuid,
-        "eval_output_schema_version": 6,
-        "challenge_value": float(weighted_score),
-        "solve_rank": int(solve_rank),
-        "solved": bool(solved),
-        "operator": miner_hotkey,
-    })
+    v6.update(
+        {
+            "id": row_uuid,
+            "eval_output_schema_version": 6,
+            "challenge_value": float(weighted_score),
+            "solve_rank": int(solve_rank),
+            "solved": bool(solved),
+            "operator": miner_hotkey,
+        }
+    )
     v6["cathedral_signature"] = wire.sign_row(v6, private_key_hex)
     # post-signing fields (excluded from canonical payload, mirror live shape)
     v6["output_card"] = {

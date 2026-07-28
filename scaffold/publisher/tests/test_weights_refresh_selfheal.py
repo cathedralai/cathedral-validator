@@ -9,6 +9,7 @@ leader's persisted vector next cycle).
 These tests exercise the timeout machinery directly with a stubbed
 ``_refresh_once`` so they need no DB and run in well under a second.
 """
+
 import threading
 import time
 
@@ -23,17 +24,20 @@ def _reset_refresh_state():
     weights._refresh_attempt = None
     with weights._refresh_health_lock:
         weights._refresh_health.update(
-            last_ok_ts=0.0, last_status="init", last_error=None,
-            last_timeout_ts=0.0, consecutive_failures=0,
+            last_ok_ts=0.0,
+            last_status="init",
+            last_error=None,
+            last_timeout_ts=0.0,
+            consecutive_failures=0,
         )
     yield
 
 
 def test_fast_refresh_returns_vector(monkeypatch):
-    monkeypatch.setattr(weights, "_refresh_once",
-                        lambda store, *, signing_key_hex: {"vector_id": "v1"})
-    out = weights._refresh_once_with_timeout(
-        None, signing_key_hex="ab", timeout=1.0)
+    monkeypatch.setattr(
+        weights, "_refresh_once", lambda store, *, signing_key_hex: {"vector_id": "v1"}
+    )
+    out = weights._refresh_once_with_timeout(None, signing_key_hex="ab", timeout=1.0)
     assert out == {"vector_id": "v1"}
 
 
@@ -78,8 +82,9 @@ def test_exception_is_reraised(monkeypatch):
 
 
 def test_cycle_never_raises_and_marks_health(monkeypatch):
-    monkeypatch.setattr(weights, "_refresh_once",
-                        lambda store, *, signing_key_hex: {"vector_id": "ok"})
+    monkeypatch.setattr(
+        weights, "_refresh_once", lambda store, *, signing_key_hex: {"vector_id": "ok"}
+    )
     monkeypatch.setattr(weights, "_cache_write", lambda vec: None)
     status = weights._run_refresh_cycle(None, "ab", weights._bg_generation)
     assert status == "ok"
@@ -93,8 +98,10 @@ def test_cycle_reports_timeout_without_raising(monkeypatch):
     monkeypatch.setattr(weights, "_REFRESH_TIMEOUT_SECS", 0.2)
     release = threading.Event()
     monkeypatch.setattr(
-        weights, "_refresh_once",
-        lambda store, *, signing_key_hex: (release.wait(5.0), {"v": 1})[1])
+        weights,
+        "_refresh_once",
+        lambda store, *, signing_key_hex: (release.wait(5.0), {"v": 1})[1],
+    )
     status = weights._run_refresh_cycle(None, "ab", weights._bg_generation)
     assert status == "timeout"
     h = weights.refresh_health()
@@ -105,9 +112,11 @@ def test_cycle_reports_timeout_without_raising(monkeypatch):
 
 
 def test_cycle_reports_error_without_raising(monkeypatch):
-    monkeypatch.setattr(weights, "_refresh_once",
-                        lambda store, *, signing_key_hex: (_ for _ in ()).throw(
-                            ValueError("nope")))
+    monkeypatch.setattr(
+        weights,
+        "_refresh_once",
+        lambda store, *, signing_key_hex: (_ for _ in ()).throw(ValueError("nope")),
+    )
     status = weights._run_refresh_cycle(None, "ab", weights._bg_generation)
     assert status == "error"
     assert weights.refresh_health()["last_status"] == "error"

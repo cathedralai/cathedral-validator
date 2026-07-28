@@ -14,6 +14,7 @@ attestation, auth, or billing. Three real surfaces it calls:
 runs fully offline. Set live=True + base_url + api_key to hit a real Polaris.
 The httpx path is intentionally tiny — the value is the SEAM, not the transport.
 """
+
 from __future__ import annotations
 
 import base64
@@ -25,12 +26,12 @@ from dataclasses import dataclass
 @dataclass
 class AttestResult:
     intel_verified: bool
-    report_data: bytes        # 64B from the TDX quote (lo[0:32]=nonce|pubkey bind,
-                              #                          hi[32:64]=image|result bind)
-    image_digest: str         # resolved image content digest ("sha256:...") run in the box
-    stdout: str               # the workload's output (its sha256 is bound into report_data)
+    report_data: bytes  # 64B from the TDX quote (lo[0:32]=nonce|pubkey bind,
+    #                          hi[32:64]=image|result bind)
+    image_digest: str  # resolved image content digest ("sha256:...") run in the box
+    stdout: str  # the workload's output (its sha256 is bound into report_data)
     cost_usd: float
-    stub: bool                # True when produced offline (not a real quote)
+    stub: bool  # True when produced offline (not a real quote)
 
 
 class PolarisClient:
@@ -47,8 +48,15 @@ class PolarisClient:
         return self._get("/api/keys/whoami").get("ok", False)
 
     # ---- POST /v1/attest -------------------------------------------------
-    def attest(self, *, nonce: str, e2e_pubkey_b64: str, image: str,
-               workload: str, measured_elapsed_ms: float | None = None) -> AttestResult:
+    def attest(
+        self,
+        *,
+        nonce: str,
+        e2e_pubkey_b64: str,
+        image: str,
+        workload: str,
+        measured_elapsed_ms: float | None = None,
+    ) -> AttestResult:
         """Run `image` (a Docker image) in an attested TDX box; the box pulls it,
         runs `workload`, and binds BOTH bindings into the hardware quote's
         report_data (verified against Intel's chain, measured 2026-06-04):
@@ -77,22 +85,35 @@ class PolarisClient:
             # mirroring what the box returns, so the SAME digest-aware checks run
             resolved = "sha256:" + hashlib.sha256((image or "?").encode()).hexdigest()
             stdout = "[offline-stub] " + (workload or "")
-            if measured_elapsed_ms is not None:     # bound into the quote via stdout
+            if measured_elapsed_ms is not None:  # bound into the quote via stdout
                 stdout += f" elapsed_ms={int(measured_elapsed_ms)}"
             lo = hashlib.sha256((nonce + e2e_pubkey_b64).encode()).digest()
             hi = hashlib.sha256(
-                (resolved + hashlib.sha256(stdout.encode()).hexdigest()).encode()).digest()
-            return AttestResult(intel_verified=ok, report_data=lo + hi,
-                                image_digest=resolved, stdout=stdout,
-                                cost_usd=0.0, stub=True)
-        body = {"nonce": nonce, "e2e_pubkey_b64": e2e_pubkey_b64,
-                "image": image, "workload": workload}
+                (resolved + hashlib.sha256(stdout.encode()).hexdigest()).encode()
+            ).digest()
+            return AttestResult(
+                intel_verified=ok,
+                report_data=lo + hi,
+                image_digest=resolved,
+                stdout=stdout,
+                cost_usd=0.0,
+                stub=True,
+            )
+        body = {
+            "nonce": nonce,
+            "e2e_pubkey_b64": e2e_pubkey_b64,
+            "image": image,
+            "workload": workload,
+        }
         r = self._post("/v1/attest", body)
         quote = base64.b64decode(r["tee_attestation"]["quote_b64"])
         return AttestResult(
             intel_verified=r.get("verification", {}).get("intel_verified", False),
-            report_data=quote[568:632], image_digest=r.get("image_digest", ""),
-            stdout=r.get("stdout", ""), cost_usd=r.get("cost_usd", 0.0), stub=False,
+            report_data=quote[568:632],
+            image_digest=r.get("image_digest", ""),
+            stdout=r.get("stdout", ""),
+            cost_usd=r.get("cost_usd", 0.0),
+            stub=False,
         )
 
     # ---- /api/billing ledger --------------------------------------------
@@ -110,18 +131,28 @@ class PolarisClient:
 
     # ---- tiny transport (stdlib only; used when live) -------------------
     def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
-                "User-Agent": "curl/8.5.0", "Accept": "*/*"}
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "curl/8.5.0",
+            "Accept": "*/*",
+        }
 
     def _post(self, path: str, body: dict) -> dict:
         import urllib.request  # stdlib — keeps the offline scaffold dep-free
-        req = urllib.request.Request(self.base_url + path, method="POST",
-                                     data=json.dumps(body).encode(), headers=self._headers())
+
+        req = urllib.request.Request(
+            self.base_url + path,
+            method="POST",
+            data=json.dumps(body).encode(),
+            headers=self._headers(),
+        )
         with urllib.request.urlopen(req, timeout=240.0) as r:
             return json.loads(r.read().decode())
 
     def _get(self, path: str) -> dict:
         import urllib.request
+
         req = urllib.request.Request(self.base_url + path, headers=self._headers())
         with urllib.request.urlopen(req, timeout=30.0) as r:
             return json.loads(r.read().decode())

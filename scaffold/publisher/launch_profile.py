@@ -20,6 +20,7 @@ Fail-closed: contradictory explicit env under a profile is a boot error, not a
 silent precedence rule. Dangerous combos (split V2 DB with the payout bridge,
 missing submit-token secret) refuse to boot.
 """
+
 from __future__ import annotations
 
 import os
@@ -44,7 +45,8 @@ def validate_env(*, signing_key_hex_provided: bool = False) -> list[str]:
     p = profile()
     if p not in _KNOWN_PROFILES:
         errors.append(
-            f"unknown {PROFILE_ENV}={p!r}; known: {sorted(_KNOWN_PROFILES - {''})}")
+            f"unknown {PROFILE_ENV}={p!r}; known: {sorted(_KNOWN_PROFILES - {''})}"
+        )
         return errors
     if not converged():
         return errors
@@ -61,31 +63,43 @@ def validate_env(*, signing_key_hex_provided: bool = False) -> list[str]:
         if _explicit_off(name):
             errors.append(
                 f"{name} is explicitly off but {PROFILE_ENV}={V2_CONVERGED} "
-                "implies it on; remove the override or drop the profile")
+                "implies it on; remove the override or drop the profile"
+            )
     if not os.environ.get("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "").strip():
         errors.append(
-            f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_V2_SUBMIT_TOKEN_SECRET")
-    if (not signing_key_hex_provided
-            and not os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()):
+            f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_V2_SUBMIT_TOKEN_SECRET"
+        )
+    if (
+        not signing_key_hex_provided
+        and not os.environ.get("CATHEDRAL_EVAL_SIGNING_KEY", "").strip()
+    ):
         errors.append(
             f"{PROFILE_ENV}={V2_CONVERGED} requires CATHEDRAL_EVAL_SIGNING_KEY; "
             "do not launch with a generated dev key because validators pin the "
-            "weight-signing identity")
-    if not (os.environ.get("CATHEDRAL_V2_PERMINER_SEED_SECRET", "").strip()
-            or os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()):
+            "weight-signing identity"
+        )
+    if not (
+        os.environ.get("CATHEDRAL_V2_PERMINER_SEED_SECRET", "").strip()
+        or os.environ.get("CATHEDRAL_PERMINER_SEED_SECRET", "").strip()
+    ):
         errors.append(
             f"{PROFILE_ENV}={V2_CONVERGED} requires a stable per-miner seed "
             "(CATHEDRAL_V2_PERMINER_SEED_SECRET or CATHEDRAL_PERMINER_SEED_SECRET); "
             "an ephemeral per-process seed would fork instance derivation across "
-            "processes and epochs")
+            "processes and epochs"
+        )
     if _explicit_off("CATHEDRAL_V2_PERMINER_ENABLED"):
         errors.append(
             f"CATHEDRAL_V2_PERMINER_ENABLED is explicitly off but "
-            f"{PROFILE_ENV}={V2_CONVERGED} implies the per-miner surface on")
-    if (os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
-            or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()):
+            f"{PROFILE_ENV}={V2_CONVERGED} implies the per-miner surface on"
+        )
+    if (
+        os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
+        or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
+    ):
         errors.append(
             f"{PROFILE_ENV}={V2_CONVERGED} implies the payout bridge, which "
             "requires V2 to share the main store; unset "
-            "CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH")
+            "CATHEDRAL_V2_DATABASE_URL/CATHEDRAL_V2_DB_PATH"
+        )
     return errors

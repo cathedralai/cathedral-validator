@@ -31,6 +31,7 @@ Every destructive step is gated: it only runs when retention is enabled AND
 not in dry-run mode. Dry-run reports the row/body counts that *would* be
 retired without changing anything.
 """
+
 from __future__ import annotations
 
 import os
@@ -157,7 +158,11 @@ def _delete_by_id_batch(
 
 
 def _compact_witness_bodies_batch(
-    store: Store, cutoff_iso: str, limit: int, *, apply: bool,
+    store: Store,
+    cutoff_iso: str,
+    limit: int,
+    *,
+    apply: bool,
 ) -> int:
     """Blank the raw accepted DIMACS body once it ages past the accepted-raw TTL.
 
@@ -171,7 +176,8 @@ def _compact_witness_bodies_batch(
     )
     if not apply:
         return _count(
-            store, f"SELECT COUNT(*) FROM ({select}) sub", (cutoff_iso, limit))
+            store, f"SELECT COUNT(*) FROM ({select}) sub", (cutoff_iso, limit)
+        )
     sql = (
         "UPDATE per_miner_witnesses SET dimacs_solution = '' "
         "WHERE (challenge_id, miner_hotkey) IN (" + select + ")"
@@ -185,7 +191,11 @@ def _compact_witness_bodies_batch(
 
 
 def _delete_lane_solves_batch(
-    store: Store, cutoff_iso: str, limit: int, *, apply: bool,
+    store: Store,
+    cutoff_iso: str,
+    limit: int,
+    *,
+    apply: bool,
 ) -> int:
     select = (
         "SELECT challenge_id, miner_hotkey FROM lane_challenge_solves "
@@ -193,7 +203,8 @@ def _delete_lane_solves_batch(
     )
     if not apply:
         return _count(
-            store, f"SELECT COUNT(*) FROM ({select}) sub", (cutoff_iso, limit))
+            store, f"SELECT COUNT(*) FROM ({select}) sub", (cutoff_iso, limit)
+        )
     sql = (
         "DELETE FROM lane_challenge_solves "
         "WHERE (challenge_id, miner_hotkey) IN (" + select + ")"
@@ -207,17 +218,16 @@ def _delete_lane_solves_batch(
 
 
 def _delete_pm_assignments_batch(
-    store: Store, min_epoch: int, limit: int, *, apply: bool,
+    store: Store,
+    min_epoch: int,
+    limit: int,
+    *,
+    apply: bool,
 ) -> int:
-    select = (
-        "SELECT challenge_id FROM per_miner_assignments WHERE epoch < ? LIMIT ?"
-    )
+    select = "SELECT challenge_id FROM per_miner_assignments WHERE epoch < ? LIMIT ?"
     if not apply:
-        return _count(
-            store, f"SELECT COUNT(*) FROM ({select}) sub", (min_epoch, limit))
-    sql = (
-        "DELETE FROM per_miner_assignments WHERE challenge_id IN (" + select + ")"
-    )
+        return _count(store, f"SELECT COUNT(*) FROM ({select}) sub", (min_epoch, limit))
+    sql = "DELETE FROM per_miner_assignments WHERE challenge_id IN (" + select + ")"
 
     def _do(conn):
         cur = conn.execute(sql, (min_epoch, limit))
@@ -227,7 +237,10 @@ def _delete_pm_assignments_batch(
 
 
 def retention_tick(
-    store: Store, *, now: datetime | None = None, dry: bool | None = None,
+    store: Store,
+    *,
+    now: datetime | None = None,
+    dry: bool | None = None,
 ) -> dict[str, Any]:
     """Run one bounded retention pass and return deletion/compaction counts.
 
@@ -259,19 +272,39 @@ def retention_tick(
     }
 
     result["deleted"]["eval_runs"] = _delete_by_id_batch(
-        store, "eval_runs", "id", "ran_at", result["cutoffs"]["eval_runs"],
-        limit, apply=apply)
+        store,
+        "eval_runs",
+        "id",
+        "ran_at",
+        result["cutoffs"]["eval_runs"],
+        limit,
+        apply=apply,
+    )
     result["deleted"]["lane_challenge_solves"] = _delete_lane_solves_batch(
-        store, solve_cutoff, limit, apply=apply)
+        store, solve_cutoff, limit, apply=apply
+    )
     result["deleted"]["per_miner_attempts"] = _delete_by_id_batch(
-        store, "per_miner_attempts", "id", "recorded_at_iso",
-        result["cutoffs"]["pm_attempts"], limit, apply=apply)
+        store,
+        "per_miner_attempts",
+        "id",
+        "recorded_at_iso",
+        result["cutoffs"]["pm_attempts"],
+        limit,
+        apply=apply,
+    )
     result["deleted"]["per_miner_solves"] = _delete_by_id_batch(
-        store, "per_miner_solves", "challenge_id", "solved_at_iso",
-        solve_cutoff, limit, apply=apply)
+        store,
+        "per_miner_solves",
+        "challenge_id",
+        "solved_at_iso",
+        solve_cutoff,
+        limit,
+        apply=apply,
+    )
 
     result["compacted"]["per_miner_witness_bodies"] = _compact_witness_bodies_batch(
-        store, accepted_raw_cutoff, limit, apply=apply)
+        store, accepted_raw_cutoff, limit, apply=apply
+    )
 
     try:
         from . import per_miner as pm
@@ -279,7 +312,8 @@ def retention_tick(
         keep_from_epoch = int(pm.current_epoch()) - pm_keep_epochs() + 1
         result["cutoffs"]["per_miner_assignments_min_epoch"] = keep_from_epoch
         result["deleted"]["per_miner_assignments"] = _delete_pm_assignments_batch(
-            store, keep_from_epoch, limit, apply=apply)
+            store, keep_from_epoch, limit, apply=apply
+        )
     except Exception as exc:
         result["per_miner_assignments_error"] = type(exc).__name__
         result["deleted"]["per_miner_assignments"] = 0

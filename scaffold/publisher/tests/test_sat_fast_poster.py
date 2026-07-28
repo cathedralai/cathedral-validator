@@ -21,7 +21,9 @@ from scaffold.publisher import external_scores
 # Load the script module by path (scripts/ is not an importable package),
 # same pattern as test_validator_release_gate.py.
 _POSTER_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ),
     "scripts",
     "sat_fast_score_poster.py",
 )
@@ -43,10 +45,16 @@ SAMPLE_SCOREBOARD = {
     "policy_reason": "v2_shadow_verified_receipts_24h",
     "policy_metadata": {"shadow": True},
     "weights": [
-        {"miner_hotkey": "5D7XHj7p8q1mbByu4iN5HraJGBHraxC9aRkuDKZW6NQp24p4",
-         "weight": 1.0, "raw_score": 24.0},
-        {"miner_hotkey": "5FakeSecond0000000000000000000000000000000000",
-         "weight": 0.5, "raw_score": 12.0},
+        {
+            "miner_hotkey": "5D7XHj7p8q1mbByu4iN5HraJGBHraxC9aRkuDKZW6NQp24p4",
+            "weight": 1.0,
+            "raw_score": 24.0,
+        },
+        {
+            "miner_hotkey": "5FakeSecond0000000000000000000000000000000000",
+            "weight": 0.5,
+            "raw_score": 12.0,
+        },
     ],
     "signature": "deadbeef==",
 }
@@ -67,21 +75,25 @@ def test_normalize_scores_falls_back_to_weight_when_raw_score_missing():
 
 
 def test_normalize_scores_skips_empty_hotkey_and_nonpositive_values():
-    out = poster.normalize_scores([
-        {"miner_hotkey": "", "raw_score": 5.0},
-        {"miner_hotkey": "5Zero", "raw_score": 0.0},
-        {"miner_hotkey": "5Neg", "raw_score": -1.0},
-        {"miner_hotkey": "5NaN", "raw_score": float("nan")},
-        {"miner_hotkey": None, "raw_score": 5.0},
-    ])
+    out = poster.normalize_scores(
+        [
+            {"miner_hotkey": "", "raw_score": 5.0},
+            {"miner_hotkey": "5Zero", "raw_score": 0.0},
+            {"miner_hotkey": "5Neg", "raw_score": -1.0},
+            {"miner_hotkey": "5NaN", "raw_score": float("nan")},
+            {"miner_hotkey": None, "raw_score": 5.0},
+        ]
+    )
     assert out == []
 
 
 def test_normalize_scores_dedupes_by_hotkey():
-    out = poster.normalize_scores([
-        {"miner_hotkey": "5Dup", "raw_score": 1.0},
-        {"miner_hotkey": "5Dup", "raw_score": 99.0},
-    ])
+    out = poster.normalize_scores(
+        [
+            {"miner_hotkey": "5Dup", "raw_score": 1.0},
+            {"miner_hotkey": "5Dup", "raw_score": 99.0},
+        ]
+    )
     assert out == [("5Dup", 1.0)]
 
 
@@ -92,7 +104,9 @@ def test_build_report_normalizes_to_0_1_by_max():
     assert report["source"] == "cathedral_sat_fast"
     assert report["mechanism"] == "cathedral_sat_fast"
     scores = {s["miner_hotkey"]: s["score"] for s in report["scores"]}
-    assert scores["5D7XHj7p8q1mbByu4iN5HraJGBHraxC9aRkuDKZW6NQp24p4"] == pytest.approx(1.0)
+    assert scores["5D7XHj7p8q1mbByu4iN5HraJGBHraxC9aRkuDKZW6NQp24p4"] == pytest.approx(
+        1.0
+    )
     assert scores["5FakeSecond0000000000000000000000000000000000"] == pytest.approx(0.5)
     for s in report["scores"]:
         assert 0.0 <= s["score"] <= 1.0
@@ -101,7 +115,10 @@ def test_build_report_normalizes_to_0_1_by_max():
 def test_build_report_carries_upstream_metadata():
     report = poster.build_report(SAMPLE_SCOREBOARD, now=NOW)
     assert report["metadata"]["upstream_vector_id"] == SAMPLE_SCOREBOARD["vector_id"]
-    assert report["metadata"]["upstream_policy_version"] == SAMPLE_SCOREBOARD["policy_version"]
+    assert (
+        report["metadata"]["upstream_policy_version"]
+        == SAMPLE_SCOREBOARD["policy_version"]
+    )
 
 
 def test_build_report_empty_weights_returns_none():
@@ -111,10 +128,12 @@ def test_build_report_empty_weights_returns_none():
 
 
 def test_build_report_all_zero_scores_returns_none():
-    degraded = {"weights": [
-        {"miner_hotkey": "5A", "raw_score": 0.0, "weight": 0.0},
-        {"miner_hotkey": "5B", "raw_score": -1.0},
-    ]}
+    degraded = {
+        "weights": [
+            {"miner_hotkey": "5A", "raw_score": 0.0, "weight": 0.0},
+            {"miner_hotkey": "5B", "raw_score": -1.0},
+        ]
+    }
     assert poster.build_report(degraded, now=NOW) is None
 
 
@@ -129,7 +148,9 @@ def test_report_accepted_by_normalize_report():
     this is the whole point of reusing the hardened blend rather than
     building a new one."""
     report = poster.build_report(SAMPLE_SCOREBOARD, now=NOW)
-    normalized = external_scores.normalize_report(report, default_source="violet_audio", now=NOW)
+    normalized = external_scores.normalize_report(
+        report, default_source="violet_audio", now=NOW
+    )
     assert normalized["source"] == "cathedral_sat_fast"
     assert normalized["source"] in external_scores.ALLOWED_ENDPOINT_SOURCES
     assert len(normalized["scores"]) == len(report["scores"])
@@ -168,8 +189,15 @@ class _Args:
 
 
 def test_run_once_dry_run_never_posts(monkeypatch, capsys):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": 200, "body": SAMPLE_SCOREBOARD, "error": None})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {
+            "status": 200,
+            "body": SAMPLE_SCOREBOARD,
+            "error": None,
+        },
+    )
 
     def _boom(*a, **kw):
         raise AssertionError("post_report must not be called in --dry-run")
@@ -183,8 +211,15 @@ def test_run_once_dry_run_never_posts(monkeypatch, capsys):
 
 
 def test_run_once_empty_scoreboard_posts_nothing_exits_0(monkeypatch):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": 200, "body": {"weights": []}, "error": None})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {
+            "status": 200,
+            "body": {"weights": []},
+            "error": None,
+        },
+    )
 
     def _boom(*a, **kw):
         raise AssertionError("post_report must not be called for an empty scoreboard")
@@ -196,16 +231,26 @@ def test_run_once_empty_scoreboard_posts_nothing_exits_0(monkeypatch):
 
 
 def test_run_once_fetch_error_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": None, "body": None, "error": "boom"})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {"status": None, "body": None, "error": "boom"},
+    )
     args = _Args()
     rc = poster.run_once(args)
     assert rc != 0
 
 
 def test_run_once_posts_normalized_report_on_success(monkeypatch):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": 200, "body": SAMPLE_SCOREBOARD, "error": None})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {
+            "status": 200,
+            "body": SAMPLE_SCOREBOARD,
+            "error": None,
+        },
+    )
 
     posted = {}
 
@@ -229,20 +274,44 @@ def test_run_once_posts_normalized_report_on_success(monkeypatch):
 
 
 def test_run_once_post_failure_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": 200, "body": SAMPLE_SCOREBOARD, "error": None})
-    monkeypatch.setattr(poster, "post_report",
-                         lambda *a, **kw: {"status": None, "body": None, "error": "connection refused"})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {
+            "status": 200,
+            "body": SAMPLE_SCOREBOARD,
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        poster,
+        "post_report",
+        lambda *a, **kw: {"status": None, "body": None, "error": "connection refused"},
+    )
     args = _Args()
     rc = poster.run_once(args)
     assert rc != 0
 
 
 def test_run_once_post_rejected_status_exits_nonzero(monkeypatch):
-    monkeypatch.setattr(poster, "fetch_scoreboard",
-                         lambda url, timeout=10.0: {"status": 200, "body": SAMPLE_SCOREBOARD, "error": None})
-    monkeypatch.setattr(poster, "post_report",
-                         lambda *a, **kw: {"status": 401, "body": {"detail": "invalid_external_scores_token"}, "error": None})
+    monkeypatch.setattr(
+        poster,
+        "fetch_scoreboard",
+        lambda url, timeout=10.0: {
+            "status": 200,
+            "body": SAMPLE_SCOREBOARD,
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        poster,
+        "post_report",
+        lambda *a, **kw: {
+            "status": 401,
+            "body": {"detail": "invalid_external_scores_token"},
+            "error": None,
+        },
+    )
     args = _Args()
     rc = poster.run_once(args)
     assert rc != 0

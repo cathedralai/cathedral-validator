@@ -15,6 +15,7 @@ Everything is default-OFF and testnet-only:
   - the weight-set stage refuses finney/mainnet and dry-runs by default
 Nothing here can affect real V1 rewards or on-chain mainnet weights.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,16 +30,18 @@ from .mechanism_weightset import build_router as build_weightset_router
 
 def build_mechanism_app(*, store: SqliteMechanismStore | None = None) -> FastAPI:
     app = FastAPI(title="Cathedral Mechanism Router", version="0.1.0")
-    store = store or SqliteMechanismStore(os.environ.get("CATHEDRAL_MECH_DB_PATH") or None)
+    store = store or SqliteMechanismStore(
+        os.environ.get("CATHEDRAL_MECH_DB_PATH") or None
+    )
     app.state.store = store
 
     # wire the injected dependencies the intake router expects
     mechanism_intake.set_mechanism_store(store)
     mechanism_intake.set_hotkey_verifier(default_verifier())
 
-    app.include_router(mechanism_intake.router)      # POST /mechanisms/{id}/scores
-    app.include_router(create_router(store))         # PUT  /mechanisms/{id}  (admin)
-    app.include_router(build_weightset_router())     # GET  /mechanisms/weights/next
+    app.include_router(mechanism_intake.router)  # POST /mechanisms/{id}/scores
+    app.include_router(create_router(store))  # PUT  /mechanisms/{id}  (admin)
+    app.include_router(build_weightset_router())  # GET  /mechanisms/weights/next
 
     @app.get("/health/live")
     def health_live():
@@ -47,8 +50,12 @@ def build_mechanism_app(*, store: SqliteMechanismStore | None = None) -> FastAPI
             "kind": "live",
             "service_role": "mechanism-router",
             "db": "sqlite",
-            "intake_enabled": bool(os.environ.get(mechanism_intake.INTAKE_ENABLED_ENV, "")),
-            "admin_token_set": bool(os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", "")),
+            "intake_enabled": bool(
+                os.environ.get(mechanism_intake.INTAKE_ENABLED_ENV, "")
+            ),
+            "admin_token_set": bool(
+                os.environ.get("CATHEDRAL_PUBLISHER_ADMIN_TOKEN", "")
+            ),
         }
 
     return app

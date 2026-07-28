@@ -29,13 +29,19 @@ def _plus_iso(secs: int) -> str:
 
 def _keypair(uri: str = "//V2LeanIngressTest"):
     from bittensor_wallet import Keypair
+
     return Keypair.create_from_uri(uri)
 
 
-def _client(tmp_path, *, secret: str = SECRET, skew: int = 300,
-            max_unflushed_events: int = 100_000,
-            metrics_token: str = "",
-            ip_rpm: int = 6000) -> TestClient:
+def _client(
+    tmp_path,
+    *,
+    secret: str = SECRET,
+    skew: int = 300,
+    max_unflushed_events: int = 100_000,
+    metrics_token: str = "",
+    ip_rpm: int = 6000,
+) -> TestClient:
     store = LeanIngressStore(tmp_path / "ingress.sqlite3")
     app = build_ingress_app(
         store=store,
@@ -53,8 +59,13 @@ def _client(tmp_path, *, secret: str = SECRET, skew: int = 300,
     return TestClient(app)
 
 
-def _submit_body(kp, *, secret: str = SECRET, submitted_at: str | None = None,
-                 challenge_id: str = "pm-t2-e495232-s7-test"):
+def _submit_body(
+    kp,
+    *,
+    secret: str = SECRET,
+    submitted_at: str | None = None,
+    challenge_id: str = "pm-t2-e495232-s7-test",
+):
     ts = submitted_at or _now_iso()
     assignment = [1, -2, 3, -4, 5, -6, 7, -8, 9, -10]
     raw = v2_pipeline.encode_bitset_assignment(assignment)
@@ -85,7 +96,9 @@ def _submit_body(kp, *, secret: str = SECRET, submitted_at: str | None = None,
         submitted_at=ts,
         card_id="synthetic_boolean_v1",
     )
-    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+    sig = base64.b64encode(
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     headers = {
         "X-Cathedral-Hotkey": kp.ss58_address,
         "X-Cathedral-Signature": sig,
@@ -146,7 +159,9 @@ def test_lean_ingress_rejects_bad_token_before_event(tmp_path):
     assert metrics["total_events"] == 0
     assert metrics["rejects"]["invalid_submit_token"] == 1
     with client.app.state.store._connect() as conn:
-        db_rejects = conn.execute("SELECT COUNT(*) AS n FROM reject_rollups_local").fetchone()["n"]
+        db_rejects = conn.execute(
+            "SELECT COUNT(*) AS n FROM reject_rollups_local"
+        ).fetchone()["n"]
     assert db_rejects == 0
 
 
@@ -178,6 +193,7 @@ def test_lean_ingress_rejects_multi_worker_env(tmp_path, monkeypatch):
     store = LeanIngressStore(tmp_path / "ingress.sqlite3")
     try:
         import pytest
+
         with pytest.raises(RuntimeError, match="WEB_CONCURRENCY=2"):
             build_ingress_app(store=store, submit_token_secret=SECRET)
     finally:
@@ -279,7 +295,9 @@ def test_lean_ingress_body_cap_before_json_parse(tmp_path):
         "X-Cathedral-Submitted-At": _now_iso(),
         "Content-Type": "application/json",
     }
-    r = client.post("/v2/agents/submit-bitset", content=b"{" + b"x" * 2000, headers=headers)
+    r = client.post(
+        "/v2/agents/submit-bitset", content=b"{" + b"x" * 2000, headers=headers
+    )
     assert r.status_code == 413
     assert r.json()["detail"] == "submit_bitset_body_too_large"
 

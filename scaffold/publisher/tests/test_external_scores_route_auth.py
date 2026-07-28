@@ -3,6 +3,7 @@
 These tests verify the actual HTTP route behavior: parsing source, enforcing
 dedicated vs. shared token boundaries, and proper 401/503 error codes.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -276,8 +277,7 @@ def test_confidential_route_persists_exact_body_digest_and_signs_it(
         now=datetime.now(timezone.utc),
     )
     assert (
-        vector["policy_metadata"]["external_scores"]["latest_body_sha256"]
-        == expected
+        vector["policy_metadata"]["external_scores"]["latest_body_sha256"] == expected
     )
 
 
@@ -343,7 +343,7 @@ def test_route_rejects_missing_bearer_when_shared_token_required(client, monkeyp
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_token"
@@ -360,18 +360,25 @@ def test_route_accepts_shared_token_for_source_without_dedicated(client, monkeyp
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_accepts_dedicated_token_for_source(client, monkeypatch):
     """Dedicated token for a source authorizes only that source."""
     import hmac
     import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret")
+
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -382,19 +389,26 @@ def test_route_accepts_dedicated_token_for_source(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-secret",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_rejects_shared_token_when_dedicated_exists(client, monkeypatch):
     """Shared token does NOT authorize a source with a dedicated token."""
     import hmac
     import hashlib
+
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-secret")
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -405,7 +419,7 @@ def test_route_rejects_shared_token_when_dedicated_exists(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_token"
@@ -413,8 +427,12 @@ def test_route_rejects_shared_token_when_dedicated_exists(client, monkeypatch):
 
 def test_route_rejects_wrong_dedicated_token(client, monkeypatch):
     """A source's dedicated token does not authorize a different source."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret")
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret"
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-secret"
+    )
     report = _sample_report("cathedral_sat_fast")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
@@ -423,7 +441,7 @@ def test_route_rejects_wrong_dedicated_token(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-secret",  # Wrong token for this source
-        }
+        },
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_token"
@@ -434,13 +452,15 @@ def test_route_fails_503_when_blending_enabled_but_no_credential(client, monkeyp
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", "1")
     # No shared token and no dedicated token for this source.
     monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", raising=False)
-    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", raising=False)
+    monkeypatch.delenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", raising=False
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
     # Token check happens before HMAC check, so fails with token_required error.
     assert resp.status_code == 503
@@ -451,11 +471,16 @@ def test_route_accepts_dedicated_token_when_blending_enabled(client, monkeypatch
     """When blending is enabled, dedicated token + dedicated HMAC alone (no shared) authorizes."""
     import hmac
     import hashlib
+
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", "1")
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-secret"
+    )
     monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", raising=False)
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -466,14 +491,18 @@ def test_route_accepts_dedicated_token_when_blending_enabled(client, monkeypatch
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-secret",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_accepts_x_token_header_for_bearer(client, monkeypatch):
     """X-Cathedral-External-Token header works as alternative to Authorization bearer."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-secret"
+    )
     report = _sample_report("cathedral_sat_fast")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
@@ -482,9 +511,11 @@ def test_route_accepts_x_token_header_for_bearer(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "X-Cathedral-External-Token": "sat-secret",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_rejects_invalid_source_before_auth(client, monkeypatch):
@@ -498,7 +529,7 @@ def test_route_rejects_invalid_source_before_auth(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert "source" in resp.json()["detail"].lower()
@@ -514,7 +545,7 @@ def test_route_rejects_json_array(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_report_contract"
@@ -530,7 +561,7 @@ def test_route_rejects_json_null(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_report_contract"
@@ -546,7 +577,7 @@ def test_route_rejects_json_scalar_string(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_report_contract"
@@ -562,7 +593,7 @@ def test_route_rejects_json_scalar_number(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_report_contract"
@@ -578,7 +609,7 @@ def test_route_rejects_json_scalar_boolean(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-secret",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_report_contract"
@@ -586,11 +617,19 @@ def test_route_rejects_json_scalar_boolean(client, monkeypatch):
 
 # ---- Source-specific HMAC tests (cathedral_confidential_tdx) -----
 
-def test_route_fails_503_when_cathedral_confidential_tdx_missing_dedicated_hmac_secret(client, monkeypatch):
+
+def test_route_fails_503_when_cathedral_confidential_tdx_missing_dedicated_hmac_secret(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, 503 if the dedicated HMAC secret is not configured."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     # No dedicated HMAC secret configured.
-    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", raising=False)
+    monkeypatch.delenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX",
+        raising=False,
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
@@ -600,16 +639,23 @@ def test_route_fails_503_when_cathedral_confidential_tdx_missing_dedicated_hmac_
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": "sha256=abc123",
-        }
+        },
     )
     assert resp.status_code == 503
     assert resp.json()["detail"] == "external_scores_hmac_secret_required"
 
 
-def test_route_fails_401_when_cathedral_confidential_tdx_missing_signature(client, monkeypatch):
+def test_route_fails_401_when_cathedral_confidential_tdx_missing_signature(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, 401 if signature is missing but secret is configured."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-hmac-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX",
+        "tdx-hmac-secret",
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
@@ -618,16 +664,23 @@ def test_route_fails_401_when_cathedral_confidential_tdx_missing_signature(clien
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
-        }
+        },
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_signature"
 
 
-def test_route_fails_401_when_cathedral_confidential_tdx_bad_signature(client, monkeypatch):
+def test_route_fails_401_when_cathedral_confidential_tdx_bad_signature(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, 401 if signature doesn't match the HMAC."""
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-hmac-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX",
+        "tdx-hmac-secret",
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     resp = client.post(
@@ -637,19 +690,26 @@ def test_route_fails_401_when_cathedral_confidential_tdx_bad_signature(client, m
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        }
+        },
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_signature"
 
 
-def test_route_accepts_cathedral_confidential_tdx_with_correct_signature(client, monkeypatch):
+def test_route_accepts_cathedral_confidential_tdx_with_correct_signature(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, 202 when signature is valid."""
     import hmac
     import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -660,24 +720,36 @@ def test_route_accepts_cathedral_confidential_tdx_with_correct_signature(client,
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": f"sha256={expected_sig}",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
-def test_route_global_hmac_does_not_substitute_for_cathedral_confidential_tdx(client, monkeypatch):
+def test_route_global_hmac_does_not_substitute_for_cathedral_confidential_tdx(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, global HMAC secret cannot substitute for dedicated one."""
     import hmac
     import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     global_secret = "global-hmac-secret"
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", global_secret)
     # No dedicated HMAC secret.
-    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", raising=False)
+    monkeypatch.delenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX",
+        raising=False,
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     # Sign with global secret (should fail since dedicated is missing).
-    global_sig = hmac.new(global_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    global_sig = hmac.new(
+        global_secret.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
     resp = client.post(
         "/v1/external-scores/violet",
         content=body,
@@ -685,20 +757,27 @@ def test_route_global_hmac_does_not_substitute_for_cathedral_confidential_tdx(cl
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": f"sha256={global_sig}",
-        }
+        },
     )
     # Expect 503 (missing dedicated secret) regardless of valid global signature.
     assert resp.status_code == 503
     assert resp.json()["detail"] == "external_scores_hmac_secret_required"
 
 
-def test_route_cathedral_confidential_tdx_accepts_hex_without_sha256_prefix(client, monkeypatch):
+def test_route_cathedral_confidential_tdx_accepts_hex_without_sha256_prefix(
+    client, monkeypatch
+):
     """For cathedral_confidential_tdx, signature can be bare hex without sha256= prefix."""
     import hmac
     import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     body = json.dumps(report).encode("utf-8")
     expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -709,18 +788,25 @@ def test_route_cathedral_confidential_tdx_accepts_hex_without_sha256_prefix(clie
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": expected_sig,  # Bare hex
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_body_tampering_fails_for_cathedral_confidential_tdx(client, monkeypatch):
     """For cathedral_confidential_tdx, 401 when request body is tampered with."""
     import hmac
     import hashlib
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     report = _sample_report("cathedral_confidential_tdx")
     original_body = json.dumps(report).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), original_body, hashlib.sha256).hexdigest()
@@ -735,17 +821,20 @@ def test_route_body_tampering_fails_for_cathedral_confidential_tdx(client, monke
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
     # Signature was computed over original body, tampering should fail.
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_signature"
 
 
-def test_route_other_sources_remain_backward_compatible_with_optional_hmac(client, monkeypatch):
+def test_route_other_sources_remain_backward_compatible_with_optional_hmac(
+    client, monkeypatch
+):
     """For non-mandatory sources (e.g., violet_audio), global HMAC remains optional."""
     import hmac
     import hashlib
+
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
     global_secret = "global-hmac-secret"
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", global_secret)
@@ -760,9 +849,11 @@ def test_route_other_sources_remain_backward_compatible_with_optional_hmac(clien
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_other_sources_fail_401_with_bad_global_hmac(client, monkeypatch):
@@ -778,7 +869,7 @@ def test_route_other_sources_fail_401_with_bad_global_hmac(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
             "X-Cathedral-External-Signature": "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        }
+        },
     )
     assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_external_scores_signature"
@@ -797,12 +888,15 @@ def test_route_other_sources_pass_when_no_global_hmac_configured(client, monkeyp
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 # ---- Bounded body consumption tests (CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES) -----
+
 
 def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
     """Declared Content-Length over cap is rejected with 413 before reading."""
@@ -817,7 +911,7 @@ def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
             "Content-Length": str(2048),
-        }
+        },
     )
     assert resp.status_code == 413
     assert resp.json()["detail"] == "external_scores_body_too_large"
@@ -826,7 +920,13 @@ def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
 def test_route_accepts_exact_cap_boundary(client, monkeypatch):
     """Payload exactly at cap is accepted."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    report = {"source": "violet_audio", "generated_at": _now_iso(), "scores": [], "complete": True, "epoch": 1}
+    report = {
+        "source": "violet_audio",
+        "generated_at": _now_iso(),
+        "scores": [],
+        "complete": True,
+        "epoch": 1,
+    }
     body = json.dumps(report).encode("utf-8")
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", str(len(body)))
     resp = client.post(
@@ -836,15 +936,23 @@ def test_route_accepts_exact_cap_boundary(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
             "Content-Length": str(len(body)),
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202 at exact cap, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202 at exact cap, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_rejects_one_byte_over_cap(client, monkeypatch):
     """Payload one byte over cap is rejected with 413."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    report = {"source": "violet_audio", "generated_at": _now_iso(), "scores": [], "complete": True, "epoch": 1}
+    report = {
+        "source": "violet_audio",
+        "generated_at": _now_iso(),
+        "scores": [],
+        "complete": True,
+        "epoch": 1,
+    }
     body = json.dumps(report).encode("utf-8")
     cap = len(body) - 1
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", str(cap))
@@ -854,7 +962,7 @@ def test_route_rejects_one_byte_over_cap(client, monkeypatch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
-        }
+        },
     )
     assert resp.status_code == 413
     assert resp.json()["detail"] == "external_scores_body_too_large"
@@ -872,7 +980,7 @@ def test_route_rejects_negative_content_length_with_400(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer shared-token",
             "Content-Length": "-123",
-        }
+        },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid_content_length_negative"
@@ -933,18 +1041,20 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
     Uses cathedral_confidential_tdx with dedicated bearer and HMAC secret.
     A modified body or signature will fail verification, proving HMAC is active.
     """
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token")
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX", "tdx-token"
+    )
     secret = "tdx-hmac-secret"
-    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret)
+    monkeypatch.setenv(
+        "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX", secret
+    )
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "10M")
     generated_at = _now_iso()
     body = (
         b'{\n  "scores": [{"score": 0.5, "miner_hotkey": "5Alice"}],\n'
         b'  "epoch": 1,\n  "source": "cathedral_confidential_tdx",\n'
         b'  "network": "finney",\n  "netuid": 39,\n  "complete": true,\n'
-        b'  "generated_at": "'
-        + generated_at.encode("utf-8")
-        + b'"\n}'
+        b'  "generated_at": "' + generated_at.encode("utf-8") + b'"\n}'
     )
     assert json.dumps(json.loads(body)).encode("utf-8") != body
     sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -955,9 +1065,11 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
             "Content-Type": "application/json",
             "Authorization": "Bearer tdx-token",
             "X-Cathedral-External-Signature": f"sha256={sig}",
-        }
+        },
     )
-    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 202, (
+        f"Expected 202, got {resp.status_code}: {resp.json()}"
+    )
 
 
 def test_route_accepts_exact_authenticated_tdx_retry_after_report_ages_out(
@@ -979,7 +1091,14 @@ def test_route_accepts_exact_authenticated_tdx_retry_after_report_ages_out(
     assert resp.status_code == 202
     assert resp.json()["idempotent"] is True
     assert resp.json().keys() == accepted_tdx_report["response"].keys()
-    for key in ("status", "report_id", "source", "epoch", "score_count", "report_sha256"):
+    for key in (
+        "status",
+        "report_id",
+        "source",
+        "epoch",
+        "score_count",
+        "report_sha256",
+    ):
         assert resp.json()[key] == accepted_tdx_report["response"][key]
 
 

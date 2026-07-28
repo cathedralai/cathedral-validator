@@ -8,6 +8,7 @@ the config from the environment. Run with:
 The DB path comes from CATHEDRAL_DB_PATH (default ./publisher.db). The refill
 loop starts on app startup iff CATHEDRAL_REFILL_ENABLED is truthy (see refill.py).
 """
+
 from __future__ import annotations
 
 import os

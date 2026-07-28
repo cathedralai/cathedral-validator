@@ -22,6 +22,7 @@ Covers:
     continues (no unhandled exception, no dead task) and recovers; the
     heartbeat row is written and updated on tick.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -42,6 +43,7 @@ SIGNING_KEY_HEX = "22" * 32
 # translated INSERT OR REPLACE path other code in this codebase already uses)
 # ---------------------------------------------------------------------------
 
+
 def _sqlite_store(tmp_path: Path) -> Store:
     return Store(str(tmp_path / "test.db"), prefer_env_database_url=False)
 
@@ -56,13 +58,17 @@ def test_migration_0044_creates_heartbeat_table(tmp_path):
 
 def test_write_v2_worker_heartbeat_upserts(tmp_path):
     store = _sqlite_store(tmp_path)
-    store.write_v2_worker_heartbeat("cathedral:v2:verify", "worker-a", "2026-07-05T00:00:00.000Z")
+    store.write_v2_worker_heartbeat(
+        "cathedral:v2:verify", "worker-a", "2026-07-05T00:00:00.000Z"
+    )
     rows = store.query("SELECT key, worker_id, beat_at_iso FROM v2_worker_heartbeat")
     assert len(rows) == 1
     assert rows[0]["worker_id"] == "worker-a"
 
     # Second beat replaces (upsert) -- does not accumulate rows per worker.
-    store.write_v2_worker_heartbeat("cathedral:v2:verify", "worker-b", "2026-07-05T00:01:00.000Z")
+    store.write_v2_worker_heartbeat(
+        "cathedral:v2:verify", "worker-b", "2026-07-05T00:01:00.000Z"
+    )
     rows = store.query("SELECT key, worker_id, beat_at_iso FROM v2_worker_heartbeat")
     assert len(rows) == 1
     assert rows[0]["worker_id"] == "worker-b"
@@ -77,13 +83,16 @@ def test_write_v2_worker_heartbeat_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "write", _boom)
     # Must not raise -- a heartbeat write failure can never stall verification.
-    store.write_v2_worker_heartbeat("cathedral:v2:verify", "worker-a", "2026-07-05T00:00:00.000Z")
+    store.write_v2_worker_heartbeat(
+        "cathedral:v2:verify", "worker-a", "2026-07-05T00:00:00.000Z"
+    )
 
 
 # ---------------------------------------------------------------------------
 # steal_stale_advisory_lock: always a no-op on SQLite (single process -- a
 # lock can never go stale across processes there).
 # ---------------------------------------------------------------------------
+
 
 def test_steal_stale_advisory_lock_is_noop_on_sqlite(tmp_path):
     store = _sqlite_store(tmp_path)
@@ -93,6 +102,7 @@ def test_steal_stale_advisory_lock_is_noop_on_sqlite(tmp_path):
 # ---------------------------------------------------------------------------
 # Postgres-path SQL shape, via a fake pool/cursor (no real Postgres needed).
 # ---------------------------------------------------------------------------
+
 
 class _FakeCursor:
     def __init__(self, fetch_result):
@@ -210,6 +220,7 @@ def test_steal_stale_advisory_lock_never_raises_on_db_error():
 # stuck lock" failure mode.
 # ---------------------------------------------------------------------------
 
+
 class _ConfigurableConn:
     """Like _FakeConn, but each cursor().execute() call can be told (by
     position) to raise instead of succeeding, so unlock-specifically can be
@@ -229,7 +240,10 @@ class _ConfigurableConn:
             def execute(_self, sql, params=()):
                 idx = outer._call_index
                 outer._call_index += 1
-                if idx < len(outer._side_effects) and outer._side_effects[idx] is not None:
+                if (
+                    idx < len(outer._side_effects)
+                    and outer._side_effects[idx] is not None
+                ):
                     raise outer._side_effects[idx]
                 _self.sql = sql
                 _self.params = params
@@ -289,6 +303,7 @@ def test_advisory_lock_discards_connection_when_unlock_fails():
 # heartbeat kept fresh).
 # ---------------------------------------------------------------------------
 
+
 def _build_worker_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", "all")
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
@@ -322,7 +337,9 @@ def _poll_metrics(client, predicate, timeout=6.0, interval=0.05):
     return metrics
 
 
-def test_v2_verify_worker_crash_containment_restarts_and_recovers(tmp_path, monkeypatch):
+def test_v2_verify_worker_crash_containment_restarts_and_recovers(
+    tmp_path, monkeypatch
+):
     app = _build_worker_app(tmp_path, monkeypatch)
     v2_store = app.state.v2_store
     real_advisory_lock = v2_store.advisory_lock
@@ -341,10 +358,14 @@ def test_v2_verify_worker_crash_containment_restarts_and_recovers(tmp_path, monk
     with TestClient(app) as client:
         metrics = _poll_metrics(
             client,
-            lambda m: int(m.get("worker_restarts") or 0) >= 1 and m.get("lock_held_by_self"),
+            lambda m: (
+                int(m.get("worker_restarts") or 0) >= 1 and m.get("lock_held_by_self")
+            ),
         )
 
-    assert calls["n"] >= 2, "advisory_lock should have been retried after the simulated crash"
+    assert calls["n"] >= 2, (
+        "advisory_lock should have been retried after the simulated crash"
+    )
     assert int(metrics.get("worker_restarts") or 0) >= 1
     assert metrics.get("last_worker_error")
     assert "simulated crash" in metrics["last_worker_error"]
@@ -363,7 +384,8 @@ def test_v2_verify_worker_heartbeat_updates_on_tick(tmp_path, monkeypatch):
         first_beat = None
         while time.time() < deadline and first_beat is None:
             rows = v2_store.query(
-                "SELECT beat_at_iso FROM v2_worker_heartbeat WHERE key=?", (lock_name,))
+                "SELECT beat_at_iso FROM v2_worker_heartbeat WHERE key=?", (lock_name,)
+            )
             if rows:
                 first_beat = rows[0]["beat_at_iso"]
             else:
@@ -373,6 +395,7 @@ def test_v2_verify_worker_heartbeat_updates_on_tick(tmp_path, monkeypatch):
         # Wait for at least one more tick and confirm the beat moved forward.
         time.sleep(0.3)
         rows = v2_store.query(
-            "SELECT beat_at_iso FROM v2_worker_heartbeat WHERE key=?", (lock_name,))
+            "SELECT beat_at_iso FROM v2_worker_heartbeat WHERE key=?", (lock_name,)
+        )
         assert rows
         assert rows[0]["beat_at_iso"] >= first_beat

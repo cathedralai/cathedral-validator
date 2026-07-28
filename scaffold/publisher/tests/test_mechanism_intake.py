@@ -10,7 +10,11 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from scaffold.publisher import mechanism_intake
-from scaffold.publisher.mechanism_router import MechanismSpec, ScoreVector, ScoreVectorMeta
+from scaffold.publisher.mechanism_router import (
+    MechanismSpec,
+    ScoreVector,
+    ScoreVectorMeta,
+)
 
 
 class FakeMechanismStore:
@@ -29,7 +33,9 @@ class FakeMechanismStore:
     def upsert_spec(self, spec: MechanismSpec) -> None:
         self.specs[spec.mechanism_id] = spec
 
-    def put_scores(self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta) -> None:
+    def put_scores(
+        self, mechanism_id: str, scores: ScoreVector, meta: ScoreVectorMeta
+    ) -> None:
         self.puts.append((mechanism_id, dict(scores), meta))
 
     def get_scores(self, mechanism_id: str):
@@ -53,12 +59,18 @@ def _spec(owner=OWNER) -> MechanismSpec:
     )
 
 
-def _body(*, mechanism_id: str = MECHANISM_ID, scores: dict[str, float] | None = None,
-          signed_at_ms: int | None = None) -> dict:
+def _body(
+    *,
+    mechanism_id: str = MECHANISM_ID,
+    scores: dict[str, float] | None = None,
+    signed_at_ms: int | None = None,
+) -> dict:
     return {
         "mechanism_id": mechanism_id,
         "scores": scores if scores is not None else {"7": 1.5, "12": 0.0},
-        "signed_at_ms": signed_at_ms if signed_at_ms is not None else int(time.time() * 1000),
+        "signed_at_ms": signed_at_ms
+        if signed_at_ms is not None
+        else int(time.time() * 1000),
     }
 
 

@@ -13,6 +13,7 @@ A lane decides the Outcome + raw_metric in verify; this turns that into a
 bounded, speed-aware score. Keeping it here means no lane re-implements the
 speed curve or the attest policy.
 """
+
 from __future__ import annotations
 
 import math
@@ -77,12 +78,17 @@ def grade(
     if not math.isfinite(verifier.raw_metric):
         return ScoreResult(0.0, "non_finite_metric")
     base = max(0.0, min(1.0, verifier.raw_metric))
-    bonus = speed_bonus(wall_ms, reference_ms if reference_ms is not None else time_limit_ms)
+    bonus = speed_bonus(
+        wall_ms, reference_ms if reference_ms is not None else time_limit_ms
+    )
     if speed_aware:
         score = round(0.5 * base + 0.5 * base * bonus, 6)
     else:
         score = base
     score = max(0.0, min(1.0, score))
     reason = verifier.rejection_reason if score == 0.0 else None
-    return ScoreResult(weighted_score=score, rejection_reason=reason,
-                       score_parts={"base": base, "speed": bonus})
+    return ScoreResult(
+        weighted_score=score,
+        rejection_reason=reason,
+        score_parts={"base": base, "speed": bonus},
+    )

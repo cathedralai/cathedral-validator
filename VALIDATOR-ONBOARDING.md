@@ -15,7 +15,7 @@ cryptographically before every write and refuses anything it cannot prove.
 git clone <repo-url> cathedral-validator && cd cathedral-validator
 python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python -m scaffold.cli serve \
-  --config config/validator.toml \
+  --config config/validator.toml --mode thin \
   --wallet-name <your-wallet> --wallet-hotkey <your-hotkey>
 ```
 
@@ -56,6 +56,8 @@ rule, not an error. The validator runs continuously and paces itself.
 
 ## Questions
 
-Contact Fred. The full-provenance mode (independent recomputation from raw
-TDX evidence) exists for operators with evidence access; thin is the intended
-mode for everyone else and carries every verification listed above.
+Contact Fred. Full mode (independent recomputation from raw TDX evidence)
+is the default for operators with evidence access; `--mode thin` is the
+explicit choice for everyone else and carries every verification listed
+above. Public evidence sufficient for anyone to run full is planned; until
+then thin is the on-ramp.

@@ -16,6 +16,7 @@ Rules carried over from cathedral's contract (kept deliberately, not re-derived)
 This module is stdlib-only (dataclasses) so the scaffold runs with zero
 third-party deps. Cathedral's real contract uses pydantic v2; the shapes match.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -27,8 +28,8 @@ class Outcome(str, Enum):
     """The three-outcome grade shared across every lane (shared logic, not
     per-lane copies — see grading.py)."""
 
-    SAT = "sat"          # a satisfying witness was produced and self-verified
-    UNSAT = "unsat"      # an unsatisfiability proof cert was produced + checked
+    SAT = "sat"  # a satisfying witness was produced and self-verified
+    UNSAT = "unsat"  # an unsatisfiability proof cert was produced + checked
     TIMEOUT = "timeout"  # neither closed within the lane's time limit
     INVALID = "invalid"  # malformed / rejected submission
 
@@ -80,7 +81,7 @@ class VerifierResult:
 
     parsed_ok: bool
     outcome: Outcome
-    raw_metric: float                       # lane-defined quality, typically [0,1]
+    raw_metric: float  # lane-defined quality, typically [0,1]
     rejection_reason: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
@@ -89,7 +90,7 @@ class VerifierResult:
 class ScoreResult:
     """Final bounded score the validator writes + folds into weights."""
 
-    weighted_score: float                   # [0.0, 1.0]
+    weighted_score: float  # [0.0, 1.0]
     rejection_reason: str | None = None
     score_parts: dict[str, float] = field(default_factory=dict)
 
@@ -102,13 +103,14 @@ class Lane(Protocol):
     family_id: str
     schema_version: int
 
-    def mint_challenge(self, ctx: GenerateCtx) -> tuple[PublicProblem, HiddenMetadata]:
-        ...
+    def mint_challenge(
+        self, ctx: GenerateCtx
+    ) -> tuple[PublicProblem, HiddenMetadata]: ...
 
     def validate_submission(
         self, problem: PublicProblem, hidden: HiddenMetadata, submission: Submission
-    ) -> VerifierResult:
-        ...
+    ) -> VerifierResult: ...
 
-    def score(self, problem: PublicProblem, verifier: VerifierResult) -> ScoreResult:
-        ...
+    def score(
+        self, problem: PublicProblem, verifier: VerifierResult
+    ) -> ScoreResult: ...

@@ -8,14 +8,19 @@ The actual per-attempt work lives in submit_admission.finalize_attempt; this
 module is only the loop/lifecycle wrapper so the heavy logic stays unit-testable
 without a running event loop.
 """
+
 from __future__ import annotations
 
 import os
 
 
 def async_verify_enabled() -> bool:
-    return os.environ.get(
-        "CATHEDRAL_ASYNC_VERIFY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("CATHEDRAL_ASYNC_VERIFY_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def pm_async_enabled() -> bool:
@@ -27,8 +32,12 @@ def pm_async_enabled() -> bool:
     same way the public lane already does. SHADOW mode (below) lets the async
     path run in parallel without changing payout, to prove parity before cutover.
     """
-    return os.environ.get(
-        "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def pm_async_shadow() -> bool:
@@ -37,13 +46,19 @@ def pm_async_shadow() -> bool:
     accept/reject divergence is logged so go-live can prove parity first. No payout
     change while shadow is on (the worker writes its terminal status to a shadow
     column, never to the live solve/payout ledger)."""
-    return os.environ.get(
-        "CATHEDRAL_PM_ASYNC_SHADOW", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("CATHEDRAL_PM_ASYNC_SHADOW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def poll_secs() -> float:
     try:
-        return max(0.05, float(os.environ.get("CATHEDRAL_ASYNC_VERIFY_POLL_SECS", "0.5")))
+        return max(
+            0.05, float(os.environ.get("CATHEDRAL_ASYNC_VERIFY_POLL_SECS", "0.5"))
+        )
     except ValueError:
         return 0.5
 

@@ -5,6 +5,7 @@ Cathedral-signed vector from /v1/validator/weights/next; external mechanisms
 such as Violet can submit scored hotkeys here for Cathedral to verify, store,
 blend, sign, and relay.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -89,7 +90,9 @@ def configured_score_audience(source: str) -> tuple[str, int] | None:
     return network, netuid
 
 
-def _report_audience(payload: dict[str, Any], source: str) -> tuple[str | None, int | None]:
+def _report_audience(
+    payload: dict[str, Any], source: str
+) -> tuple[str | None, int | None]:
     """Validate and preserve an exact report audience."""
 
     expected = configured_score_audience(source)
@@ -193,7 +196,9 @@ def _canonical(obj: Any) -> bytes:
 def _audience_lock_key(source: str, network: str | None, netuid: int | None) -> int:
     """Stable signed 64-bit key for one source/audience epoch fence."""
 
-    material = f"external-score-epoch\0{source}\0{network or ''}\0{netuid}".encode("utf-8")
+    material = f"external-score-epoch\0{source}\0{network or ''}\0{netuid}".encode(
+        "utf-8"
+    )
     return int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
 
 
@@ -229,7 +234,7 @@ def _bearer_supplied(authorization: str | None, x_token: str | None) -> str:
     if authorization:
         prefix = "Bearer "
         if authorization.startswith(prefix):
-            supplied = authorization[len(prefix):].strip()
+            supplied = authorization[len(prefix) :].strip()
     if not supplied and x_token:
         supplied = x_token.strip()
     return supplied
@@ -268,12 +273,14 @@ def verify_hmac(body: bytes, signature: str | None) -> bool:
         return False
     supplied = signature.strip()
     if supplied.startswith("sha256="):
-        supplied = supplied[len("sha256="):]
+        supplied = supplied[len("sha256=") :]
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(supplied, expected)
 
 
-def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> tuple[bool, bool]:
+def verify_hmac_for_source(
+    source: str, body: bytes, signature: str | None
+) -> tuple[bool, bool]:
     """Verify raw-body HMAC with source-specific enforcement.
 
     Returns (is_valid: bool, should_fail_503: bool) where:
@@ -301,7 +308,7 @@ def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> t
             return False, False  # 401: signature required but missing
         supplied = signature.strip()
         if supplied.startswith("sha256="):
-            supplied = supplied[len("sha256="):]
+            supplied = supplied[len("sha256=") :]
         expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         is_valid = hmac.compare_digest(supplied, expected)
         return is_valid, False
@@ -314,7 +321,7 @@ def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> t
             return False, False  # 401: signature required but missing
         supplied = signature.strip()
         if supplied.startswith("sha256="):
-            supplied = supplied[len("sha256="):]
+            supplied = supplied[len("sha256=") :]
         expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         is_valid = hmac.compare_digest(supplied, expected)
         return is_valid, False
@@ -323,7 +330,9 @@ def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> t
 def max_report_age_secs() -> float:
     """Maximum allowed age (in seconds) of a report's generated_at."""
     try:
-        return max(0.0, float(os.environ.get(MAX_REPORT_AGE_SECS_ENV, "3600") or "3600"))
+        return max(
+            0.0, float(os.environ.get(MAX_REPORT_AGE_SECS_ENV, "3600") or "3600")
+        )
     except ValueError:
         return 3600.0
 
@@ -331,7 +340,9 @@ def max_report_age_secs() -> float:
 def max_report_future_secs() -> float:
     """Maximum seconds a report's generated_at may be ahead of now."""
     try:
-        return max(0.0, float(os.environ.get(MAX_REPORT_FUTURE_SECS_ENV, "120") or "120"))
+        return max(
+            0.0, float(os.environ.get(MAX_REPORT_FUTURE_SECS_ENV, "120") or "120")
+        )
     except ValueError:
         return 120.0
 
@@ -354,7 +365,9 @@ def _normalize_report(
     if not isinstance(payload, dict):
         raise ExternalScoreError("invalid_report")
 
-    source = _source(payload.get("source") or payload.get("mechanism"), default=default_source)
+    source = _source(
+        payload.get("source") or payload.get("mechanism"), default=default_source
+    )
     generated_at = _normalize_iso(payload.get("generated_at"), "generated_at")
     network, netuid = _report_audience(payload, source)
 
@@ -411,17 +424,19 @@ def _normalize_report(
         validity = _float_01(raw.get("validity"), f"validity_{idx}")
         confidence = _float_01(raw.get("confidence"), f"confidence_{idx}")
         tasks_scored = _int_nonnegative(raw.get("tasks_scored"), f"tasks_scored_{idx}")
-        scores.append({
-            "miner_hotkey": hotkey,
-            "uid": uid,
-            "score": round(score, 9),
-            "quality": None if quality is None else round(quality, 9),
-            "latency": None if latency is None else round(latency, 9),
-            "validity": None if validity is None else round(validity, 9),
-            "tasks_scored": tasks_scored,
-            "confidence": None if confidence is None else round(confidence, 9),
-            "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
-        })
+        scores.append(
+            {
+                "miner_hotkey": hotkey,
+                "uid": uid,
+                "score": round(score, 9),
+                "quality": None if quality is None else round(quality, 9),
+                "latency": None if latency is None else round(latency, 9),
+                "validity": None if validity is None else round(validity, 9),
+                "tasks_scored": tasks_scored,
+                "confidence": None if confidence is None else round(confidence, 9),
+                "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
+            }
+        )
 
     try:
         epoch = int(payload.get("epoch", 0) or 0)
@@ -435,7 +450,9 @@ def _normalize_report(
         "netuid": netuid,
         "generated_at": generated_at,
         "scores": scores,
-        "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        "metadata": payload.get("metadata")
+        if isinstance(payload.get("metadata"), dict)
+        else {},
     }
     if network is not None:
         normalized["network"] = network
@@ -598,7 +615,9 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
                 report_json,
             ),
         )
-        conn.execute("DELETE FROM external_score_entries WHERE report_id=?", (report_id,))
+        conn.execute(
+            "DELETE FROM external_score_entries WHERE report_id=?", (report_id,)
+        )
         for s in scores:
             conn.execute(
                 "INSERT OR REPLACE INTO external_score_entries"
@@ -620,7 +639,9 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
                     s.get("confidence"),
                     report["generated_at"],
                     received_at,
-                    json.dumps(s.get("meta") or {}, sort_keys=True, separators=(",", ":")),
+                    json.dumps(
+                        s.get("meta") or {}, sort_keys=True, separators=(",", ":")
+                    ),
                 ),
             )
         return True  # newly stored
@@ -709,9 +730,10 @@ def latest_snapshot_scores(
         report_obj = json.loads(report_row["report_json"])
     except Exception:
         return None
-    if audience is not None and (
-        report_obj.get("network"), report_obj.get("netuid")
-    ) != audience:
+    if (
+        audience is not None
+        and (report_obj.get("network"), report_obj.get("netuid")) != audience
+    ):
         raise ExternalScoreError("invalid_stored_score_audience")
     if not report_obj.get("complete"):
         # For live external sources, require complete=true.
@@ -733,7 +755,8 @@ def latest_snapshot_scores(
                 raise ExternalScoreError("invalid_stored_confidential_score")
             continue
         if source in COMPLETE_REQUIRED_SOURCES and (
-                not math.isfinite(score) or not 0.0 <= score <= 1.0):
+            not math.isfinite(score) or not 0.0 <= score <= 1.0
+        ):
             raise ExternalScoreError("invalid_stored_confidential_score")
         if math.isfinite(score) and score > 0.0:
             scores[hk] = min(1.0, max(0.0, score))

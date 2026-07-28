@@ -29,6 +29,7 @@ The publisher-side verifier (open-source; pure-python, trust nothing):
 Env-gated by CATHEDRAL_ATTEST_ENABLED (default OFF). A missing/forged/replayed
 attestation NEVER crashes and NEVER upgrades the row — it stays at base rate.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -47,17 +48,23 @@ from typing import Protocol
 from .. import wire
 from .store import Store, new_uuid
 
-_DEFAULT_MULTIPLIER = 2.0   # Q5 (open): calibrate m against attest cost; placeholder.
+_DEFAULT_MULTIPLIER = 2.0  # Q5 (open): calibrate m against attest cost; placeholder.
 
 
 def attest_enabled() -> bool:
     return os.environ.get("CATHEDRAL_ATTEST_ENABLED", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def attested_multiplier() -> float:
     try:
-        return float(os.environ.get("CATHEDRAL_ATTEST_MULTIPLIER", str(_DEFAULT_MULTIPLIER)))
+        return float(
+            os.environ.get("CATHEDRAL_ATTEST_MULTIPLIER", str(_DEFAULT_MULTIPLIER))
+        )
     except ValueError:
         return _DEFAULT_MULTIPLIER
 
@@ -124,7 +131,11 @@ class CommandIntelVerifier:
 
     def verify_intel(self, quote: bytes, collateral: dict | None) -> bool:
         self.last_result = None
-        if not self.command or not isinstance(quote, (bytes, bytearray)) or len(quote) < 632:
+        if (
+            not self.command
+            or not isinstance(quote, (bytes, bytearray))
+            or len(quote) < 632
+        ):
             return False
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -132,7 +143,9 @@ class CommandIntelVerifier:
             collateral_path = root / "collateral.json"
             result_path = root / "verify.json"
             quote_path.write_bytes(bytes(quote))
-            collateral_path.write_text(json.dumps(collateral or {}, separators=(",", ":")))
+            collateral_path.write_text(
+                json.dumps(collateral or {}, separators=(",", ":"))
+            )
             report_data_hex = bytes(quote[568:632]).hex()
             argv = _verifier_argv(
                 self.command,
@@ -143,8 +156,12 @@ class CommandIntelVerifier:
             )
             try:
                 proc = subprocess.run(
-                    argv, capture_output=True, text=True, timeout=self.timeout_s,
-                    check=False)
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_s,
+                    check=False,
+                )
             except (OSError, subprocess.TimeoutExpired) as e:
                 self.last_result = {"error": str(e)}
                 return False
@@ -162,7 +179,12 @@ class CommandIntelVerifier:
 
 
 def _verifier_argv(command: str, **values: str) -> list[str]:
-    placeholders = {"{quote_path}", "{collateral_path}", "{report_data_hex}", "{result_path}"}
+    placeholders = {
+        "{quote_path}",
+        "{collateral_path}",
+        "{report_data_hex}",
+        "{result_path}",
+    }
     has_placeholder = any(p in command for p in placeholders)
     argv = shlex.split(command, posix=(os.name != "nt"))
     if has_placeholder:
@@ -199,13 +221,18 @@ def configured_intel_verifier() -> IntelCollateralVerifier | None:
     )
     if cmd:
         try:
-            timeout_s = float(os.environ.get("CATHEDRAL_ATTEST_DCAP_TIMEOUT_SECS", "120"))
+            timeout_s = float(
+                os.environ.get("CATHEDRAL_ATTEST_DCAP_TIMEOUT_SECS", "120")
+            )
         except ValueError:
             timeout_s = 120.0
         return CommandIntelVerifier(cmd, timeout_s=timeout_s)
-    allow_stub = os.environ.get(
-        "CATHEDRAL_ATTEST_ALLOW_STUB", "").strip().lower() in {
-            "1", "true", "yes", "on"}
+    allow_stub = os.environ.get("CATHEDRAL_ATTEST_ALLOW_STUB", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if allow_stub:
         if _production_mode():
             return None
@@ -215,14 +242,22 @@ def configured_intel_verifier() -> IntelCollateralVerifier | None:
 
 def _production_mode() -> bool:
     env = (
-        os.environ.get("CATHEDRAL_ENV", "")
-        or os.environ.get("ENV", "")
-        or os.environ.get("APP_ENV", "")
-    ).strip().lower()
+        (
+            os.environ.get("CATHEDRAL_ENV", "")
+            or os.environ.get("ENV", "")
+            or os.environ.get("APP_ENV", "")
+        )
+        .strip()
+        .lower()
+    )
     if env in {"prod", "production", "mainnet"}:
         return True
     return os.environ.get("CATHEDRAL_PRODUCTION", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -238,19 +273,35 @@ def issue_nonce(
     miner_pubkey_b64: str = "",
     ttl_secs: int = 300,
 ) -> str:
-    raw = hmac.new(secret, f"{miner_hotkey}:{challenge_id}:{new_uuid()}".encode(),
-                   hashlib.sha256).hexdigest()
+    raw = hmac.new(
+        secret, f"{miner_hotkey}:{challenge_id}:{new_uuid()}".encode(), hashlib.sha256
+    ).hexdigest()
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(seconds=max(1, int(ttl_secs)))
-    issued_iso = issued_at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{issued_at.microsecond // 1000:03d}Z"
-    expires_iso = expires_at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{expires_at.microsecond // 1000:03d}Z"
+    issued_iso = (
+        issued_at.strftime("%Y-%m-%dT%H:%M:%S.")
+        + f"{issued_at.microsecond // 1000:03d}Z"
+    )
+    expires_iso = (
+        expires_at.strftime("%Y-%m-%dT%H:%M:%S.")
+        + f"{expires_at.microsecond // 1000:03d}Z"
+    )
 
     def _do(conn):
         conn.execute(
             "INSERT OR IGNORE INTO attest_nonces"
             "(nonce, miner_hotkey, challenge_id, miner_pubkey_b64, issued_at_iso, expires_at_iso) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (raw, miner_hotkey, challenge_id, miner_pubkey_b64, issued_iso, expires_iso))
+            (
+                raw,
+                miner_hotkey,
+                challenge_id,
+                miner_pubkey_b64,
+                issued_iso,
+                expires_iso,
+            ),
+        )
+
     store.write(_do)
     return raw
 
@@ -263,8 +314,9 @@ class AttestVerifyResult:
     eval_run_id: str | None = None
 
 
-def _recompute_report_data(nonce_hex: str, miner_pubkey_b64: str,
-                           solver_digest: str, receipt: str) -> bytes:
+def _recompute_report_data(
+    nonce_hex: str, miner_pubkey_b64: str, solver_digest: str, receipt: str
+) -> bytes:
     lo = hashlib.sha256((nonce_hex + miner_pubkey_b64).encode()).digest()
     receipt_sha = hashlib.sha256(receipt.encode()).hexdigest()
     hi = hashlib.sha256((solver_digest + receipt_sha).encode()).digest()
@@ -295,6 +347,7 @@ def verify_attestation(
     mult = attested_multiplier() if multiplier is None else multiplier
     try:
         import base64
+
         quote = base64.b64decode(payload.get("quote_b64", ""), validate=False)
     except Exception:
         return AttestVerifyResult(False, "malformed_quote_b64")
@@ -325,7 +378,8 @@ def verify_attestation(
     nrow = store.query(
         "SELECT miner_hotkey, challenge_id, miner_pubkey_b64, used_at_iso, expires_at_iso "
         "FROM attest_nonces WHERE nonce=?",
-        (nonce,))
+        (nonce,),
+    )
     if not nrow:
         return AttestVerifyResult(False, "unknown_nonce")
     if nrow[0]["used_at_iso"] is not None:
@@ -358,8 +412,10 @@ def verify_attestation(
         return AttestVerifyResult(False, "receipt_answer_mismatch")
 
     # 3c. the base-rate row must EXIST (we pay the multiplier on real work only).
-    erow = store.query("SELECT row_json, miner_hotkey, attested FROM eval_runs WHERE id=?",
-                       (eval_run_id,))
+    erow = store.query(
+        "SELECT row_json, miner_hotkey, attested FROM eval_runs WHERE id=?",
+        (eval_run_id,),
+    )
     if not erow:
         return AttestVerifyResult(False, "unknown_eval_run")
     if int(erow[0]["attested"] or 0):
@@ -374,7 +430,8 @@ def verify_attestation(
     except Exception:
         return AttestVerifyResult(False, "eval_run_challenge_unbound")
     expected_task_public = hashlib.sha256(
-        f"{challenge_id}:{tier}".encode("utf-8")).hexdigest()[:16]
+        f"{challenge_id}:{tier}".encode("utf-8")
+    ).hexdigest()[:16]
     if row.get("task_id_public") != expected_task_public:
         return AttestVerifyResult(False, "eval_run_challenge_mismatch")
 
@@ -383,11 +440,14 @@ def verify_attestation(
     #     unless its REGISTERED digest matches what actually ran in the box).
     sdigest_rows = store.query(
         "SELECT 1 FROM arena_solvers WHERE owner_hotkey=? AND container_digest=?",
-        (row.get("miner_hotkey", ""), solver_digest))
+        (row.get("miner_hotkey", ""), solver_digest),
+    )
     # solver registration is optional for Lane A community work; only enforce the
     # match when the owner HAS registered solvers (Lane S/title path).
-    has_any = store.query("SELECT 1 FROM arena_solvers WHERE owner_hotkey=? LIMIT 1",
-                          (row.get("miner_hotkey", ""),))
+    has_any = store.query(
+        "SELECT 1 FROM arena_solvers WHERE owner_hotkey=? LIMIT 1",
+        (row.get("miner_hotkey", ""),),
+    )
     if has_any and not sdigest_rows:
         return AttestVerifyResult(False, "solver_digest_not_registered")
 
@@ -414,20 +474,33 @@ def verify_attestation(
     def _upgrade(conn):
         cur = conn.execute(
             "UPDATE eval_runs SET row_json=?, attested=1 WHERE id=? AND attested=0",
-            (json.dumps(row), eval_run_id))
+            (json.dumps(row), eval_run_id),
+        )
         if cur.rowcount != 1:
             return False
-        conn.execute("UPDATE attest_nonces SET used_at_iso=? WHERE nonce=?",
-                     (_now_iso(), nonce))
+        conn.execute(
+            "UPDATE attest_nonces SET used_at_iso=? WHERE nonce=?", (_now_iso(), nonce)
+        )
         conn.execute(
             "INSERT OR IGNORE INTO attestations(id, eval_run_id, miner_hotkey, "
             "challenge_id, solver_digest, multiplier, verified_at_iso, "
             "quote_digest, receipt_digest, verifier_backend) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (att_id, eval_run_id, row.get("miner_hotkey", ""), challenge_id,
-             solver_digest, mult, _now_iso(), quote_digest, receipt_digest,
-             verifier_backend))
+            (
+                att_id,
+                eval_run_id,
+                row.get("miner_hotkey", ""),
+                challenge_id,
+                solver_digest,
+                mult,
+                _now_iso(),
+                quote_digest,
+                receipt_digest,
+                verifier_backend,
+            ),
+        )
         return True
+
     if not store.write(_upgrade):
         return AttestVerifyResult(False, "already_attested")
     return AttestVerifyResult(True, None, multiplier=mult, eval_run_id=eval_run_id)

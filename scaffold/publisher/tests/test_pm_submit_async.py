@@ -19,6 +19,7 @@ hard guarantees the orchestrator named:
 * Queue visibility metrics populate (pending count, oldest age, worker lag,
   accepted/sec, rejected/sec).
 """
+
 from __future__ import annotations
 
 import base64
@@ -42,17 +43,26 @@ _SEED_SECRET = "pm-async-test-stable-seed"
 
 def _keypair(uri="//PMAsyncMiner"):
     from bittensor_wallet import Keypair
+
     return Keypair.create_from_uri(uri)
 
 
 def _now_iso():
     from datetime import datetime, timezone
+
     dt = datetime.now(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _pm_env(monkeypatch, *, pm_async=False, shadow=False, verify_on=True,
-            service_role="all", require_worker=False):
+def _pm_env(
+    monkeypatch,
+    *,
+    pm_async=False,
+    shadow=False,
+    verify_on=True,
+    service_role="all",
+    require_worker=False,
+):
     """Enable per-miner + (optionally) pm-async / shadow. The submit-async flag is
     the public gate the pm flag rides on top of, so it is always set when pm-async
     is requested."""
@@ -68,14 +78,18 @@ def _pm_env(monkeypatch, *, pm_async=False, shadow=False, verify_on=True,
     # on the public submit-async flag, so that is set too.
     pm_chain_on = pm_async or shadow
     monkeypatch.setenv(
-        "CATHEDRAL_SUBMIT_ASYNC_ENABLED", "true" if pm_chain_on else "false")
+        "CATHEDRAL_SUBMIT_ASYNC_ENABLED", "true" if pm_chain_on else "false"
+    )
     monkeypatch.setenv(
-        "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "true" if pm_chain_on else "false")
+        "CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED", "true" if pm_chain_on else "false"
+    )
     monkeypatch.setenv("CATHEDRAL_PM_ASYNC_SHADOW", "true" if shadow else "false")
-    monkeypatch.setenv("CATHEDRAL_ASYNC_VERIFY_ENABLED", "true" if verify_on else "false")
     monkeypatch.setenv(
-        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER",
-        "true" if require_worker else "false")
+        "CATHEDRAL_ASYNC_VERIFY_ENABLED", "true" if verify_on else "false"
+    )
+    monkeypatch.setenv(
+        "CATHEDRAL_SUBMIT_ASYNC_REQUIRE_WORKER", "true" if require_worker else "false"
+    )
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", service_role)
 
 
@@ -107,13 +121,19 @@ def _bad_solution_for(kp, *, tier=1, seq=0):
     return cid, body
 
 
-def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
-            submitted_at=None):
+def _submit(
+    client, kp, *, challenge_id, solution, extra_headers=None, submitted_at=None
+):
     sol_sha = sha256_hex(solution)
     ts = submitted_at or _now_iso()
     msg = canonical_claim_bytes(
-        bundle_hash=_EMPTY_BUNDLE, card_id=_FAMILY, miner_hotkey=kp.ss58_address,
-        submitted_at=ts, challenge_id=challenge_id, dimacs_solution_sha256=sol_sha)
+        bundle_hash=_EMPTY_BUNDLE,
+        card_id=_FAMILY,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        challenge_id=challenge_id,
+        dimacs_solution_sha256=sol_sha,
+    )
     sig = base64.b64encode(kp.sign(msg)).decode("ascii")
     headers = {
         "X-Cathedral-Hotkey": kp.ss58_address,
@@ -124,8 +144,12 @@ def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
         headers.update(extra_headers)
     return client.post(
         "/v1/agents/submit",
-        data={"card_id": _FAMILY, "challenge_id": challenge_id,
-              "dimacs_solution": solution, "submitted_at": ts},
+        data={
+            "card_id": _FAMILY,
+            "challenge_id": challenge_id,
+            "dimacs_solution": solution,
+            "submitted_at": ts,
+        },
         headers=headers,
     )
 
@@ -133,8 +157,13 @@ def _submit(client, kp, *, challenge_id, solution, extra_headers=None,
 def _pm_read_headers(kp, *, submitted_at=None):
     ts = submitted_at or _now_iso()
     msg = canonical_claim_bytes(
-        bundle_hash=_EMPTY_BUNDLE, card_id=_FAMILY, miner_hotkey=kp.ss58_address,
-        submitted_at=ts, challenge_id="", dimacs_solution_sha256="")
+        bundle_hash=_EMPTY_BUNDLE,
+        card_id=_FAMILY,
+        miner_hotkey=kp.ss58_address,
+        submitted_at=ts,
+        challenge_id="",
+        dimacs_solution_sha256="",
+    )
     sig = base64.b64encode(kp.sign(msg)).decode("ascii")
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
@@ -146,7 +175,8 @@ def _pm_read_headers(kp, *, submitted_at=None):
 def _metrics(client):
     r = client.get(
         "/v1/admin/synthetic-boolean/submit-metrics",
-        headers={"Authorization": "Bearer test-admin-token"})
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -154,12 +184,15 @@ def _metrics(client):
 def _solves(store, cid, hotkey):
     return store.query(
         "SELECT COUNT(*) AS n FROM per_miner_solves "
-        "WHERE challenge_id=? AND miner_hotkey=?", (cid, hotkey))[0]["n"]
+        "WHERE challenge_id=? AND miner_hotkey=?",
+        (cid, hotkey),
+    )[0]["n"]
 
 
 def _feed_pairs(store, hotkey):
     return store.query(
-        "SELECT COUNT(*) AS n FROM eval_runs WHERE miner_hotkey=?", (hotkey,))[0]["n"]
+        "SELECT COUNT(*) AS n FROM eval_runs WHERE miner_hotkey=?", (hotkey,)
+    )[0]["n"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +213,13 @@ def test_pm_legacy_sync_path_unchanged_when_pm_async_off(tmp_path, monkeypatch):
     # inline path records the solve directly (one distinct-solver claim)
     assert _solves(store, cid, kp.ss58_address) == 1
     # inline path never creates a durable async receipt row
-    assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
-                       "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
+    assert (
+        store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_attempts "
+            "WHERE idempotency_key IS NOT NULL"
+        )[0]["n"]
+        == 0
+    )
 
 
 def test_pm_legacy_reject_contract_unchanged_when_off(tmp_path, monkeypatch):
@@ -193,13 +231,16 @@ def test_pm_legacy_reject_contract_unchanged_when_off(tmp_path, monkeypatch):
         r = _submit(client, kp, challenge_id=cid, solution=bad)
     assert r.status_code == 400, r.text
     assert r.headers.get("X-Cathedral-Rejection-Reason") in {
-        "solution_unsatisfied", "witness_check_failed"}
+        "solution_unsatisfied",
+        "witness_check_failed",
+    }
     assert _solves(store, cid, kp.ss58_address) == 0
     assert _feed_pairs(store, kp.ss58_address) == 0
 
 
 def test_pm_cnf_fetch_recovers_without_assignment_row_or_legacy_scan_flag(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     app, store = _build(tmp_path, monkeypatch, pm_async=False)
     monkeypatch.setenv("CATHEDRAL_PERMINER_LEGACY_ID_SCAN", "0")
     kp = _keypair("//PMFetchNoAssignment")
@@ -213,8 +254,7 @@ def test_pm_cnf_fetch_recovers_without_assignment_row_or_legacy_scan_flag(
         assert listed.status_code == 200, listed.text
         item = listed.json()["items"][-1]
         before = store.query(
-            "SELECT COUNT(*) AS n FROM per_miner_assignments "
-            "WHERE challenge_id=?",
+            "SELECT COUNT(*) AS n FROM per_miner_assignments WHERE challenge_id=?",
             (item["challenge_id"],),
         )[0]["n"]
 
@@ -248,9 +288,12 @@ def test_pm_async_admission_returns_202_then_worker_ranks(tmp_path, monkeypatch)
         r = _submit(client, kp, challenge_id=cid, solution=body)
         assert r.status_code == 202, r.text
         rec = r.json()
-        store.write(lambda conn: conn.execute(
-            "UPDATE per_miner_attempts SET received_at_iso=? WHERE id=?",
-            (received_at, rec["receipt_id"])))
+        store.write(
+            lambda conn: conn.execute(
+                "UPDATE per_miner_attempts SET received_at_iso=? WHERE id=?",
+                (received_at, rec["receipt_id"]),
+            )
+        )
         assert rec["schema"] == "cathedral.submit_receipt.v2"
         assert rec["status"] == "pending"
         assert rec["receipt_id"].startswith("sub_")
@@ -267,17 +310,19 @@ def test_pm_async_admission_returns_202_then_worker_ranks(tmp_path, monkeypatch)
     assert _solves(store, cid, kp.ss58_address) == 1
     assert _feed_pairs(store, kp.ss58_address) == 2
     solved_at = store.query(
-        "SELECT solved_at_iso FROM per_miner_solves WHERE challenge_id=?",
-        (cid,))[0]["solved_at_iso"]
+        "SELECT solved_at_iso FROM per_miner_solves WHERE challenge_id=?", (cid,)
+    )[0]["solved_at_iso"]
     assert solved_at == received_at
-    feed_rows = store.query("SELECT row_json FROM eval_runs WHERE miner_hotkey=?",
-                            (kp.ss58_address,))
+    feed_rows = store.query(
+        "SELECT row_json FROM eval_runs WHERE miner_hotkey=?", (kp.ss58_address,)
+    )
     assert {json.loads(r["row_json"])["ran_at"] for r in feed_rows} == {received_at}
 
 
 def test_pm_async_falls_back_to_sync_without_worker_heartbeat(tmp_path, monkeypatch):
     app, store = _build(
-        tmp_path, monkeypatch, pm_async=True, verify_on=False, require_worker=True)
+        tmp_path, monkeypatch, pm_async=True, verify_on=False, require_worker=True
+    )
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
     with TestClient(app) as client:
@@ -285,12 +330,19 @@ def test_pm_async_falls_back_to_sync_without_worker_heartbeat(tmp_path, monkeypa
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ranked"
     assert r.json()["solve_rank"] == 1
-    assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
-                       "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
+    assert (
+        store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_attempts "
+            "WHERE idempotency_key IS NOT NULL"
+        )[0]["n"]
+        == 0
+    )
     assert _solves(store, cid, kp.ss58_address) == 1
 
 
-def test_pm_async_idempotent_replay_same_receipt_no_second_attempt(tmp_path, monkeypatch):
+def test_pm_async_idempotent_replay_same_receipt_no_second_attempt(
+    tmp_path, monkeypatch
+):
     app, store = _build(tmp_path, monkeypatch, pm_async=True)
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
@@ -302,8 +354,9 @@ def test_pm_async_idempotent_replay_same_receipt_no_second_attempt(tmp_path, mon
         r2 = _submit(client, kp, challenge_id=cid, solution=body)
         assert r2.status_code == 200, r2.text
         assert r2.json()["receipt_id"] == rid
-    n = store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
-                    "WHERE idempotency_key IS NOT NULL")[0]["n"]
+    n = store.query(
+        "SELECT COUNT(*) AS n FROM per_miner_attempts WHERE idempotency_key IS NOT NULL"
+    )[0]["n"]
     assert n == 1
 
 
@@ -364,8 +417,13 @@ def test_pm_async_oversized_body_is_413_never_queued(tmp_path, monkeypatch):
     assert r.status_code == 413, r.text
     assert r.headers.get("X-Cathedral-Rejection-Reason") == "solution_too_large"
     # never persisted, never queued
-    assert store.query("SELECT COUNT(*) AS n FROM per_miner_attempts "
-                       "WHERE idempotency_key IS NOT NULL")[0]["n"] == 0
+    assert (
+        store.query(
+            "SELECT COUNT(*) AS n FROM per_miner_attempts "
+            "WHERE idempotency_key IS NOT NULL"
+        )[0]["n"]
+        == 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,14 +441,21 @@ def test_pm_async_claim_orders_by_received_at(tmp_path, monkeypatch):
                 "solution_body, assignment_identity, attempt_count) "
                 "VALUES (?, 'pm-t1-e1-x', 'hk', 0, 'pending', 'sha', ?, ?, ?, ?, ?, "
                 "'per_miner', 'body', 'hk', 0)",
-                (rid, recv, recv, "sig-" + rid, "idem-" + rid, recv))
+                (rid, recv, recv, "sig-" + rid, "idem-" + rid, recv),
+            )
+
         store.write(_do)
+
     ins("b", "2026-06-27T00:00:02.000Z")
     ins("a", "2026-06-27T00:00:01.000Z")
     ins("c", "2026-06-27T00:00:03.000Z")
     claimed = submit_admission.claim_pending(
-        store, worker_id="w", now_iso="2026-06-27T01:00:00.000Z",
-        lock_deadline_iso="2026-06-27T01:02:00.000Z", batch_size=3)
+        store,
+        worker_id="w",
+        now_iso="2026-06-27T01:00:00.000Z",
+        lock_deadline_iso="2026-06-27T01:02:00.000Z",
+        batch_size=3,
+    )
     assert [row["id"] for row in claimed] == ["a", "b", "c"]
     for row in claimed:
         assert row["status"] == "verifying"
@@ -401,7 +466,8 @@ def test_pm_async_claim_orders_by_received_at(tmp_path, monkeypatch):
 # SHADOW mode: inline authoritative, worker re-verifies into shadow_* only.
 # ---------------------------------------------------------------------------
 def test_pm_shadow_inline_authoritative_and_worker_writes_shadow_only(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     app, store = _build(tmp_path, monkeypatch, shadow=True)
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
@@ -416,14 +482,16 @@ def test_pm_shadow_inline_authoritative_and_worker_writes_shadow_only(
         # a shadow twin was queued (kind=per_miner_shadow)
         shadow = store.query(
             "SELECT * FROM per_miner_attempts WHERE challenge_kind=?",
-            ("per_miner_shadow",))
+            ("per_miner_shadow",),
+        )
         assert len(shadow) == 1
         assert shadow[0]["status"] == "pending"
         # worker drains the shadow twin
         assert app.state.async_verify_tick(worker_id="t", batch_size=8) == 1
         after = store.query(
             "SELECT * FROM per_miner_attempts WHERE challenge_kind=?",
-            ("per_miner_shadow",))
+            ("per_miner_shadow",),
+        )
     # shadow verdict recorded in shadow_* columns
     assert after[0]["shadow_status"] == "ranked"
     assert after[0]["shadow_rejection_reason"] is None
@@ -432,7 +500,9 @@ def test_pm_shadow_inline_authoritative_and_worker_writes_shadow_only(
     assert _feed_pairs(store, kp.ss58_address) == inline_pairs
 
 
-def test_pm_shadow_logs_divergence_without_changing_payout(tmp_path, monkeypatch, capsys):
+def test_pm_shadow_logs_divergence_without_changing_payout(
+    tmp_path, monkeypatch, capsys
+):
     # Force an inline-vs-async divergence by stamping the shadow twin's inline
     # marker as a reject while the (valid) solution will async-verify to ranked.
     app, store = _build(tmp_path, monkeypatch, shadow=True)
@@ -444,9 +514,12 @@ def test_pm_shadow_logs_divergence_without_changing_payout(tmp_path, monkeypatch
         before_solves = _solves(store, cid, kp.ss58_address)
         before_pairs = _feed_pairs(store, kp.ss58_address)
         # rewrite the shadow twin so its stamped inline verdict is "rejected"
-        store.write(lambda conn: conn.execute(
-            "UPDATE per_miner_attempts SET rejection_reason='solution_unsatisfied' "
-            "WHERE challenge_kind='per_miner_shadow'"))
+        store.write(
+            lambda conn: conn.execute(
+                "UPDATE per_miner_attempts SET rejection_reason='solution_unsatisfied' "
+                "WHERE challenge_kind='per_miner_shadow'"
+            )
+        )
         capsys.readouterr()  # clear
         app.state.async_verify_tick(worker_id="t", batch_size=8)
     out = capsys.readouterr().out
@@ -471,7 +544,8 @@ def test_pm_shadow_excluded_from_attempt_reason_stats(tmp_path, monkeypatch):
     non_shadow = store.query(
         "SELECT COUNT(*) AS n FROM per_miner_attempts "
         "WHERE miner_hotkey=? AND (challenge_kind IS NULL OR challenge_kind!='per_miner_shadow')",
-        (kp.ss58_address,))[0]["n"]
+        (kp.ss58_address,),
+    )[0]["n"]
     shadow_rows = store.query(
         "SELECT COUNT(*) AS n FROM per_miner_attempts WHERE challenge_kind='per_miner_shadow'"
     )[0]["n"]
@@ -539,8 +613,11 @@ def test_queue_metrics_worker_lag_grows_with_oldest_pending(tmp_path, monkeypatc
                 "solution_body, assignment_identity, attempt_count) "
                 "VALUES (?, 'pm-t1-e1-x', 'hk', 0, 'pending', 'sha', ?, ?, ?, ?, ?, "
                 "'per_miner', 'body', 'hk', 0)",
-                (rid, recv, recv, "sig-" + rid, "idem-" + rid, recv))
+                (rid, recv, recv, "sig-" + rid, "idem-" + rid, recv),
+            )
+
         store.write(_do)
+
     # an old pending row -> large positive worker lag
     ins("old", "2020-01-01T00:00:00.000Z")
     now = "2020-01-01T00:01:00.000Z"
@@ -611,7 +688,8 @@ def test_shadow_and_live_idempotency_keys_are_namespaced():
 
 
 def test_admit_pending_with_namespaced_shadow_row_present_creates_fresh_live(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     # With the fix, the shadow twin lives under the NAMESPACED shadow key, so it
     # coexists with the live key in the UNIQUE idempotency_key index. A live
     # admission for the SAME (miner, challenge, solution) uses the live key, finds
@@ -633,15 +711,25 @@ def test_admit_pending_with_namespaced_shadow_row_present_creates_fresh_live(
             "VALUES ('shd_old', ?, ?, 0, 'ranked', ?, '2026-01-01T00:00:00.000Z', "
             "'2026-01-01T00:00:00.000Z', 'sig-shadow', ?, "
             "'2026-01-01T00:00:00.000Z', ?, NULL, ?, 0)",
-            (cid, hk, sha, shadow_key, submit_admission.KIND_PER_MINER_SHADOW, hk))
+            (cid, hk, sha, shadow_key, submit_admission.KIND_PER_MINER_SHADOW, hk),
+        )
+
     store.write(_ins_shadow)
 
     outcome, row = submit_admission.admit_pending(
-        store, receipt_id="sub_live", idem_key=live_key, miner_hotkey=hk,
-        challenge_id=cid, dimacs_solution_sha256=sha, dimacs_solution="body",
+        store,
+        receipt_id="sub_live",
+        idem_key=live_key,
+        miner_hotkey=hk,
+        challenge_id=cid,
+        dimacs_solution_sha256=sha,
+        dimacs_solution="body",
         submitted_at="2026-06-27T00:00:00.000Z",
-        received_at_iso="2026-06-27T00:00:00.000Z", signature="sig-live",
-        epoch=0, assignment_identity=hk)
+        received_at_iso="2026-06-27T00:00:00.000Z",
+        signature="sig-live",
+        epoch=0,
+        assignment_identity=hk,
+    )
     # NOT a replay of the shadow row: a fresh live receipt was created.
     assert outcome == "created"
     assert row["id"] == "sub_live"
@@ -649,12 +737,15 @@ def test_admit_pending_with_namespaced_shadow_row_present_creates_fresh_live(
     # both rows coexist; the shadow twin was never touched
     rows = store.query(
         "SELECT id, challenge_kind FROM per_miner_attempts WHERE miner_hotkey=? "
-        "ORDER BY id", (hk,))
+        "ORDER BY id",
+        (hk,),
+    )
     assert {r["id"] for r in rows} == {"shd_old", "sub_live"}
 
 
 def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     # End-to-end cutover: a drained shadow twin for (miner, challenge, solution) is
     # present in the ledger (as it would be after running shadow mode), but the LIVE
     # lane has NOT yet paid this solution. After disabling shadow / enabling live,
@@ -669,8 +760,7 @@ def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
     kp = _keypair()
     cid, body = _pm_solution_for(kp)
     sol_sha = sha256_hex(body)
-    shadow_key = submit_admission.shadow_idempotency_key(
-        kp.ss58_address, cid, sol_sha)
+    shadow_key = submit_admission.shadow_idempotency_key(kp.ss58_address, cid, sol_sha)
 
     # Seed the drained shadow twin (namespaced shadow key, kind=shadow) — exactly
     # what survives in the ledger after shadow mode is run and turned off.
@@ -685,8 +775,16 @@ def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
             "'2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', "
             "'2026-01-01T00:00:00.000Z', 'sig-shadow', ?, "
             "'2026-01-01T00:00:00.000Z', ?, NULL, ?, 0)",
-            (cid, kp.ss58_address, sol_sha, shadow_key,
-             submit_admission.KIND_PER_MINER_SHADOW, kp.ss58_address))
+            (
+                cid,
+                kp.ss58_address,
+                sol_sha,
+                shadow_key,
+                submit_admission.KIND_PER_MINER_SHADOW,
+                kp.ss58_address,
+            ),
+        )
+
     store.write(_seed_shadow)
     assert _solves(store, cid, kp.ss58_address) == 0  # live lane has not paid
 
@@ -706,8 +804,7 @@ def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
     # exactly one solve from the LIVE lane (no double pay)
     assert _solves(store, cid, kp.ss58_address) == 1
     # the original shadow twin is untouched and was never replayed
-    still_shadow = store.query(
-        "SELECT id FROM per_miner_attempts WHERE id='shd_old'")
+    still_shadow = store.query("SELECT id FROM per_miner_attempts WHERE id='shd_old'")
     assert len(still_shadow) == 1
 
 
@@ -715,7 +812,8 @@ def test_same_payload_retry_after_shadow_cutover_creates_live_ranked_receipt(
 # Startup WARNING: pm-async on but no drain worker configured.
 # ---------------------------------------------------------------------------
 def test_startup_warns_when_pm_async_on_but_verify_worker_disabled(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     app, _ = _build(tmp_path, monkeypatch, pm_async=True, verify_on=False)
     with TestClient(app):
         pass

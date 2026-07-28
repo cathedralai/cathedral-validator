@@ -23,8 +23,16 @@ from scaffold.publisher.mechanism_router import (
 NOW = 1_000_000
 
 
-def _meta(mid: str, *, signed_at_ms: int = NOW, sig_ok: bool = True, source: str = "signed_post"):
-    return ScoreVectorMeta(mechanism_id=mid, signed_at_ms=signed_at_ms, sig_ok=sig_ok, source=source)
+def _meta(
+    mid: str,
+    *,
+    signed_at_ms: int = NOW,
+    sig_ok: bool = True,
+    source: str = "signed_post",
+):
+    return ScoreVectorMeta(
+        mechanism_id=mid, signed_at_ms=signed_at_ms, sig_ok=sig_ok, source=source
+    )
 
 
 def _spec(mid: str, frac: float, *, owner_uid=None, enabled=True, tier="artifact"):
@@ -46,9 +54,13 @@ def _approx_sums_to_one(weights: dict[int, float]) -> bool:
 # compose
 # ---------------------------------------------------------------------------
 
+
 def test_zero_mechanisms_returns_empty_caller_keeps_v1():
     weights, dbg = compose(
-        [], {}, registered_uids={1, 2, 3}, now_ms=NOW,
+        [],
+        {},
+        registered_uids={1, 2, 3},
+        now_ms=NOW,
     )
     assert weights == {}
     assert dbg["n_final_uids"] == 0
@@ -64,7 +76,11 @@ def test_two_mechanisms_convex_combo_exact():
         "m2": ({2: 3.0, 3: 1.0}, _meta("m2")),
     }
     weights, dbg = compose(
-        specs, scores, registered_uids={1, 2, 3}, block_self_weight=True, now_ms=NOW,
+        specs,
+        scores,
+        registered_uids={1, 2, 3},
+        block_self_weight=True,
+        now_ms=NOW,
     )
     # Hand-computed convex combination (fractions already sum to 1 so no renorm shift):
     #   uid1 = 0.6*0.25                     = 0.15
@@ -102,7 +118,11 @@ def test_missing_sigbad_and_stale_each_contribute_zero_others_unaffected():
         "stale": ({1: 9.0}, _meta("stale", signed_at_ms=NOW - 10_000)),
     }
     weights, dbg = compose(
-        specs, scores, registered_uids={1, 2}, max_score_age_ms=1_000, now_ms=NOW,
+        specs,
+        scores,
+        registered_uids={1, 2},
+        max_score_age_ms=1_000,
+        now_ms=NOW,
     )
     # Only "good" contributes: normalized [0.5, 0.5], renormalized still [0.5,0.5]
     assert math.isclose(weights[1], 0.5, abs_tol=1e-12)
@@ -120,7 +140,11 @@ def test_block_self_weight_zeros_owner_uid():
     specs = [_spec("m1", 1.0, owner_uid=2)]
     scores = {"m1": ({1: 1.0, 2: 100.0, 3: 1.0}, _meta("m1"))}
     weights, dbg = compose(
-        specs, scores, registered_uids={1, 2, 3}, block_self_weight=True, now_ms=NOW,
+        specs,
+        scores,
+        registered_uids={1, 2, 3},
+        block_self_weight=True,
+        now_ms=NOW,
     )
     assert 2 not in weights  # owner_uid removed before normalize
     # remaining raw [1,1] -> [0.5, 0.5]
@@ -130,7 +154,11 @@ def test_block_self_weight_zeros_owner_uid():
 
     # With blocking disabled, owner_uid keeps its (dominant) weight.
     weights_off, _ = compose(
-        specs, scores, registered_uids={1, 2, 3}, block_self_weight=False, now_ms=NOW,
+        specs,
+        scores,
+        registered_uids={1, 2, 3},
+        block_self_weight=False,
+        now_ms=NOW,
     )
     assert 2 in weights_off
     assert weights_off[2] > weights_off[1]
@@ -184,6 +212,7 @@ def test_compose_is_deterministic():
 # SqliteMechanismStore
 # ---------------------------------------------------------------------------
 
+
 def test_store_roundtrip(tmp_path):
     db = tmp_path / "mech.sqlite3"
     store = SqliteMechanismStore(str(db))
@@ -230,6 +259,7 @@ def test_store_env_default_path(monkeypatch, tmp_path):
 # Admin-gated PUT /mechanisms/{id}
 # ---------------------------------------------------------------------------
 
+
 def _client(store):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -239,7 +269,12 @@ def _client(store):
     return TestClient(app)
 
 
-_BODY = {"owner_pubkey": "pk_x", "weight_fraction": 0.5, "tier": "artifact", "owner_uid": 3}
+_BODY = {
+    "owner_pubkey": "pk_x",
+    "weight_fraction": 0.5,
+    "tier": "artifact",
+    "owner_uid": 3,
+}
 
 
 def test_put_mechanism_requires_configured_token(monkeypatch, tmp_path):

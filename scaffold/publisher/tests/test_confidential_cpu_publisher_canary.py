@@ -1,4 +1,5 @@
 """End-to-end acceptance tests for the confidential CPU reward path."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -9,7 +10,9 @@ from datetime import datetime, timezone
 import pytest
 
 _CANARY_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ),
     "scripts",
     "confidential_cpu_publisher_canary.py",
 )
@@ -66,9 +69,7 @@ def test_exact_report_reaches_pinned_validator_then_zero_revokes() -> None:
 
     assert summary["status"] == "passed"
     assert summary["positive"]["uid_weights"] == {7: 1.0}
-    assert summary["positive"]["filtered_unregistered_hotkeys"] == [
-        UNREGISTERED_HOTKEY
-    ]
+    assert summary["positive"]["filtered_unregistered_hotkeys"] == [UNREGISTERED_HOTKEY]
     assert summary["revoke"]["uid_weights"] == {0: 1.0}
     assert summary["revoke"]["old_report_replay"] == {
         "http_status": 409,
@@ -76,10 +77,7 @@ def test_exact_report_reaches_pinned_validator_then_zero_revokes() -> None:
         "reason": "epoch_too_old",
     }
     assert summary["revoke"]["old_vector_rollback_rejected"] is True
-    assert (
-        summary["revoke"]["policy_version"]
-        > summary["positive"]["policy_version"]
-    )
+    assert summary["revoke"]["policy_version"] > summary["positive"]["policy_version"]
     isolation = dict(summary["isolation"])
     assert isolation.pop("os_network_sandbox") in {
         "sandbox-exec-deny-network",
@@ -193,7 +191,9 @@ def test_inherited_publisher_environment_cannot_escape_isolation(
         ("revoke", "netuid", None, "revoke report netuid"),
     ],
 )
-def test_reports_are_bound_to_exact_target_subnet(target, field, value, message) -> None:
+def test_reports_are_bound_to_exact_target_subnet(
+    target, field, value, message
+) -> None:
     reports = {
         "positive": json.loads(
             _body(41, [{"miner_hotkey": WORKER_HOTKEY, "score": 1.0}])
@@ -223,9 +223,7 @@ def test_reports_are_bound_to_exact_target_subnet(target, field, value, message)
     ],
 )
 def test_report_epoch_contract_is_exact(value, missing, message) -> None:
-    positive = json.loads(
-        _body(41, [{"miner_hotkey": WORKER_HOTKEY, "score": 1.0}])
-    )
+    positive = json.loads(_body(41, [{"miner_hotkey": WORKER_HOTKEY, "score": 1.0}]))
     if missing:
         positive.pop("epoch")
     else:

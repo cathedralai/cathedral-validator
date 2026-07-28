@@ -38,6 +38,7 @@ Tables
 Cursor: rows are pulled by the strict tuple (ran_at, id) > (since_ran_at,
 since_id) ordering — the exact semantics released validators use.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -77,7 +78,9 @@ def _postgres_statement_timeout_ms() -> int:
 # Never edit an applied migration — append.
 # ---------------------------------------------------------------------------
 _MIGRATIONS: list[tuple[str, str]] = [
-    ("0001_eval_runs", """
+    (
+        "0001_eval_runs",
+        """
         CREATE TABLE IF NOT EXISTS eval_runs (
             id TEXT PRIMARY KEY,
             ran_at TEXT NOT NULL,
@@ -87,8 +90,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             row_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
-    """),
-    ("0002_lane_challenges", """
+    """,
+    ),
+    (
+        "0002_lane_challenges",
+        """
         CREATE TABLE IF NOT EXISTS lane_challenges (
             challenge_id TEXT PRIMARY KEY,
             family_id TEXT NOT NULL,
@@ -104,8 +110,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             designated_solver_digest TEXT,
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0003_agent_submissions", """
+    """,
+    ),
+    (
+        "0003_agent_submissions",
+        """
         CREATE TABLE IF NOT EXISTS agent_submissions (
             id TEXT PRIMARY KEY,
             miner_hotkey TEXT NOT NULL,
@@ -119,8 +128,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_sub_hotkey_chal
             ON agent_submissions(miner_hotkey, sat_challenge_id);
-    """),
-    ("0004_arena_solvers", """
+    """,
+    ),
+    (
+        "0004_arena_solvers",
+        """
         CREATE TABLE IF NOT EXISTS arena_solvers (
             source_sha256 TEXT PRIMARY KEY,
             source_url TEXT NOT NULL,
@@ -130,8 +142,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             status TEXT NOT NULL DEFAULT 'pending',
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0005_arena_instances", """
+    """,
+    ),
+    (
+        "0005_arena_instances",
+        """
         CREATE TABLE IF NOT EXISTS arena_instances (
             instance_id TEXT PRIMARY KEY,
             owner_hotkey TEXT NOT NULL,
@@ -142,56 +157,86 @@ _MIGRATIONS: list[tuple[str, str]] = [
             status TEXT NOT NULL DEFAULT 'pending',
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0006_replay_dedup", """
+    """,
+    ),
+    (
+        "0006_replay_dedup",
+        """
         CREATE TABLE IF NOT EXISTS submit_signatures (
             signature TEXT PRIMARY KEY,
             seen_at TEXT NOT NULL
         );
-    """),
-    ("0007_seed_state", """
+    """,
+    ),
+    (
+        "0007_seed_state",
+        """
         CREATE TABLE IF NOT EXISTS seed_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-    """),
-    ("0008_lane_challenges_source", """
+    """,
+    ),
+    (
+        "0008_lane_challenges_source",
+        """
         ALTER TABLE lane_challenges ADD COLUMN cnf_source TEXT NOT NULL DEFAULT 'local';
-    """),
-    ("0009_lane_challenges_cnf_url", """
+    """,
+    ),
+    (
+        "0009_lane_challenges_cnf_url",
+        """
         ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
-    """),
-    ("0010_lane_challenge_solves", """
+    """,
+    ),
+    (
+        "0010_lane_challenge_solves",
+        """
         CREATE TABLE IF NOT EXISTS lane_challenge_solves (
             challenge_id TEXT NOT NULL,
             miner_hotkey TEXT NOT NULL,
             solved_at_iso TEXT NOT NULL,
             PRIMARY KEY (challenge_id, miner_hotkey)
         );
-    """),
-    ("0011_lane_challenges_updated_at", """
+    """,
+    ),
+    (
+        "0011_lane_challenges_updated_at",
+        """
         ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
-    """),
-    ("0012_arena_instances_payout", """
+    """,
+    ),
+    (
+        "0012_arena_instances_payout",
+        """
         ALTER TABLE arena_instances ADD COLUMN cnf_text TEXT NOT NULL DEFAULT '';
         ALTER TABLE arena_instances ADD COLUMN last_paid_round INTEGER;
         ALTER TABLE arena_instances ADD COLUMN paid_at_iso TEXT;
-    """),
-    ("0013_weight_policy_state", """
+    """,
+    ),
+    (
+        "0013_weight_policy_state",
+        """
         CREATE TABLE IF NOT EXISTS weight_policy_state (
             id INTEGER PRIMARY KEY,
             last_policy_version INTEGER NOT NULL,
             updated_at_iso TEXT NOT NULL
         );
-    """),
-    ("0015_eval_runs_miner_idx", """
+    """,
+    ),
+    (
+        "0015_eval_runs_miner_idx",
+        """
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
-    """),
+    """,
+    ),
     # 0016: per-miner unique challenges (CATHEDRAL_PERMINER_ENABLED).
     # Safe to apply unconditionally — the table is never read/written when the
     # flag is off (flag-off = zero behaviour change).
-    ("0016_per_miner_solves", """
+    (
+        "0016_per_miner_solves",
+        """
         CREATE TABLE IF NOT EXISTS per_miner_solves (
             challenge_id TEXT NOT NULL,
             miner_hotkey TEXT NOT NULL,
@@ -205,19 +250,25 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
             ON per_miner_solves(epoch, miner_hotkey);
-    """),
+    """,
+    ),
     # 0017: index on lane_challenge_solves.solved_at_iso so compose_scores
     # (SELECT DISTINCT miner_hotkey, challenge_id WHERE solved_at_iso > ?)
     # uses an index scan instead of a full table scan. Without this index the
     # weight-vector build takes 3-5s on large tables (full scan every 60s TTL).
-    ("0017_lane_challenge_solves_solved_at_idx", """
+    (
+        "0017_lane_challenge_solves_solved_at_idx",
+        """
         CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
             ON lane_challenge_solves(solved_at_iso);
-    """),
+    """,
+    ),
     # 0018: per-miner evidence ledgers. Attempts are every accepted/rejected
     # assigned submission; witnesses keep the accepted solution body so audit
     # family assignments can be decoded/replayed later.
-    ("0018_per_miner_evidence", """
+    (
+        "0018_per_miner_evidence",
+        """
         CREATE TABLE IF NOT EXISTS per_miner_attempts (
             id TEXT PRIMARY KEY,
             challenge_id TEXT NOT NULL,
@@ -259,11 +310,14 @@ _MIGRATIONS: list[tuple[str, str]] = [
             recorded_at_iso TEXT NOT NULL,
             PRIMARY KEY (challenge_id, miner_hotkey)
         );
-    """),
+    """,
+    ),
     # 0019: operator-side metadata for structured audit CNFs. These rows are not
     # public board data; they bind a live CNF to its decode map/manifest hash so
     # accepted witnesses can be replayed by an operator process.
-    ("0019_audit_challenge_manifests", """
+    (
+        "0019_audit_challenge_manifests",
+        """
         CREATE TABLE IF NOT EXISTS audit_challenge_manifests (
             challenge_id TEXT PRIMARY KEY,
             cnf_sha256 TEXT NOT NULL,
@@ -272,8 +326,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             source_path TEXT,
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0020_eval_runs_legacy_columns", """
+    """,
+    ),
+    (
+        "0020_eval_runs_legacy_columns",
+        """
         ALTER TABLE eval_runs ADD COLUMN id TEXT;
         ALTER TABLE eval_runs ADD COLUMN ran_at TEXT NOT NULL DEFAULT '';
         ALTER TABLE eval_runs ADD COLUMN eval_output_schema_version INTEGER NOT NULL DEFAULT 0;
@@ -282,8 +339,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE eval_runs ADD COLUMN row_json TEXT NOT NULL DEFAULT '{}';
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
-    """),
-    ("0021_coldkey_map", """
+    """,
+    ),
+    (
+        "0021_coldkey_map",
+        """
         CREATE TABLE IF NOT EXISTS coldkey_map (
             hotkey TEXT PRIMARY KEY,
             coldkey TEXT NOT NULL,
@@ -291,10 +351,13 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_coldkey_map_coldkey
             ON coldkey_map(coldkey);
-    """),
+    """,
+    ),
     # Off-chain TEE GPU capacity intake for provider handoff. These tables are
     # intentionally not scoring inputs: validators never read them.
-    ("0022_tee_gpu_capacity", """
+    (
+        "0022_tee_gpu_capacity",
+        """
         CREATE TABLE IF NOT EXISTS tee_gpu_capacity (
             capacity_id TEXT PRIMARY KEY,
             provider_ref TEXT NOT NULL DEFAULT '',
@@ -335,8 +398,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON tee_gpu_capacity(status);
         CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner
             ON tee_gpu_capacity(owner_hotkey);
-    """),
-    ("0023_tee_gpu_capacity_events", """
+    """,
+    ),
+    (
+        "0023_tee_gpu_capacity_events",
+        """
         CREATE TABLE IF NOT EXISTS tee_gpu_capacity_events (
             id TEXT PRIMARY KEY,
             capacity_id TEXT NOT NULL,
@@ -347,14 +413,20 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_events_capacity
             ON tee_gpu_capacity_events(capacity_id, created_at_iso);
-    """),
-    ("0024_tee_gpu_capacity_authorization", """
+    """,
+    ),
+    (
+        "0024_tee_gpu_capacity_authorization",
+        """
         ALTER TABLE tee_gpu_capacity ADD COLUMN operator_use_authorized INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_version TEXT NOT NULL DEFAULT '';
         ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_digest TEXT NOT NULL DEFAULT '';
         ALTER TABLE tee_gpu_capacity ADD COLUMN authorization_json TEXT NOT NULL DEFAULT '{}';
-    """),
-    ("0025_solver_attestation", """
+    """,
+    ),
+    (
+        "0025_solver_attestation",
+        """
         CREATE TABLE IF NOT EXISTS attest_nonces (
             nonce TEXT PRIMARY KEY,
             miner_hotkey TEXT NOT NULL,
@@ -382,17 +454,26 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_attestations_miner_challenge
             ON attestations(miner_hotkey, challenge_id);
         ALTER TABLE eval_runs ADD COLUMN attested INTEGER NOT NULL DEFAULT 0;
-    """),
-    ("0026_attest_nonce_pubkey", """
+    """,
+    ),
+    (
+        "0026_attest_nonce_pubkey",
+        """
         ALTER TABLE attest_nonces ADD COLUMN miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
-    """),
-    ("0027_per_miner_time_indexes", """
+    """,
+    ),
+    (
+        "0027_per_miner_time_indexes",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_solved_at
             ON per_miner_solves(solved_at_iso);
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
             ON per_miner_attempts(recorded_at_iso);
-    """),
-    ("0028_metagraph_hotkeys", """
+    """,
+    ),
+    (
+        "0028_metagraph_hotkeys",
+        """
         CREATE TABLE IF NOT EXISTS metagraph_hotkeys (
             network TEXT NOT NULL,
             netuid INTEGER NOT NULL,
@@ -405,8 +486,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
-    """),
-    ("0029_signed_weight_vectors", """
+    """,
+    ),
+    (
+        "0029_signed_weight_vectors",
+        """
         CREATE TABLE IF NOT EXISTS signed_weight_vectors (
             id TEXT PRIMARY KEY,
             generated_at_iso TEXT NOT NULL,
@@ -416,7 +500,8 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
             ON signed_weight_vectors(updated_at_iso);
-    """),
+    """,
+    ),
     # 0030: durable submit admission (RELIABILITY_UPGRADE_PLAN Phase 4/5). Extend
     # the EXISTING per_miner_attempts ledger in place (do NOT stand up a parallel
     # submit_attempts table). All columns are additive + nullable/defaulted so the
@@ -427,7 +512,9 @@ _MIGRATIONS: list[tuple[str, str]] = [
     #   verified_at_iso  = worker completion time (NOT the fairness clock)
     #   solution_body    = raw DIMACS held until verified (retention job compacts)
     #   lock_*/attempt_count = FOR UPDATE SKIP LOCKED worker claim bookkeeping
-    ("0030_submit_admission", """
+    (
+        "0030_submit_admission",
+        """
         ALTER TABLE per_miner_attempts ADD COLUMN idempotency_key TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN received_at_iso TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN verified_at_iso TEXT;
@@ -444,7 +531,8 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON per_miner_attempts(idempotency_key);
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
             ON per_miner_attempts(status, received_at_iso);
-    """),
+    """,
+    ),
     # 0031: per-miner (pm-*) durable async admission (TRACK 1). The pm-* submit
     # lane regenerates its own CNF deterministically from the miner's mapped
     # scoring identity (NOT the raw hotkey, which may be a delegated child key),
@@ -453,18 +541,23 @@ _MIGRATIONS: list[tuple[str, str]] = [
     # writers never set it, and the public lane never needs it. shadow_* hold the
     # terminal verdict the SHADOW worker WOULD have written (the live ledger is
     # untouched in shadow) so go-live can prove async-vs-inline parity.
-    ("0031_pm_submit_admission", """
+    (
+        "0031_pm_submit_admission",
+        """
         ALTER TABLE per_miner_attempts ADD COLUMN assignment_identity TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN shadow_status TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN shadow_rejection_reason TEXT;
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
             ON per_miner_attempts(challenge_kind, status, received_at_iso);
-    """),
+    """,
+    ),
     # 0032: repair old live SQLite volumes whose schema_migrations table says
     # 0002_lane_challenges was applied, but whose lane_challenges table predates
     # the current miner-facing shape. Duplicate-column errors are ignored by
     # _sqlite_exec_migration, so this is safe on healthy databases too.
-    ("0032_lane_challenges_shape_repair", """
+    (
+        "0032_lane_challenges_shape_repair",
+        """
         ALTER TABLE lane_challenges ADD COLUMN family_id TEXT NOT NULL DEFAULT 'synthetic_boolean_v1';
         ALTER TABLE lane_challenges ADD COLUMN tier INTEGER NOT NULL DEFAULT 1;
         ALTER TABLE lane_challenges ADD COLUMN cnf_text TEXT NOT NULL DEFAULT '';
@@ -480,8 +573,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE lane_challenges ADD COLUMN cnf_source TEXT NOT NULL DEFAULT 'local';
         ALTER TABLE lane_challenges ADD COLUMN cnf_url TEXT;
         ALTER TABLE lane_challenges ADD COLUMN updated_at_iso TEXT;
-    """),
-    ("0033_async_verify_workers", """
+    """,
+    ),
+    (
+        "0033_async_verify_workers",
+        """
         CREATE TABLE IF NOT EXISTS async_verify_workers (
             worker_id TEXT PRIMARY KEY,
             service_role TEXT NOT NULL DEFAULT '',
@@ -496,20 +592,29 @@ _MIGRATIONS: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
             ON async_verify_workers(last_seen_at_iso);
-    """),
-    ("0034_per_miner_score_window_index", """
+    """,
+    ),
+    (
+        "0034_per_miner_score_window_index",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_verified_time_hotkey
             ON per_miner_solves(verified, solved_at_iso, miner_hotkey);
-    """),
-    ("0035_per_miner_miner_window_index", """
+    """,
+    ),
+    (
+        "0035_per_miner_miner_window_index",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
-    """),
+    """,
+    ),
     # 0036: V2 off-chain solution manifest intake. Miners submit a tiny signed
     # manifest pointing at a decentralized/blob solution artifact; workers verify
     # the blob asynchronously in later phases. This table is isolated from the
     # current payout ledger so phase 1/2 can be tested without reward impact.
-    ("0036_solution_manifests", """
+    (
+        "0036_solution_manifests",
+        """
         CREATE TABLE IF NOT EXISTS solution_manifests (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -545,8 +650,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON solution_manifests(status, received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
             ON solution_manifests(miner_hotkey, challenge_id);
-    """),
-    ("0037_v2_shadow_v1_submits", """
+    """,
+    ),
+    (
+        "0037_v2_shadow_v1_submits",
+        """
         CREATE TABLE IF NOT EXISTS v2_shadow_v1_submits (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -571,8 +679,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON v2_shadow_v1_submits(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
             ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
-    """),
-    ("0038_v2_shadow_v1_submit_meta", """
+    """,
+    ),
+    (
+        "0038_v2_shadow_v1_submit_meta",
+        """
         CREATE TABLE IF NOT EXISTS v2_shadow_v1_submit_meta (
             id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL DEFAULT '',
@@ -595,8 +706,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON v2_shadow_v1_submit_meta(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
             ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
-    """),
-    ("0039_v2_submit_events", """
+    """,
+    ),
+    (
+        "0039_v2_submit_events",
+        """
         CREATE TABLE IF NOT EXISTS v2_submit_events (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -628,21 +742,33 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON v2_submit_events(miner_hotkey, challenge_id);
         CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
             ON v2_submit_events(epoch, status);
-    """),
-    ("0040_v2_submit_events_solver_meta", """
+    """,
+    ),
+    (
+        "0040_v2_submit_events_solver_meta",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN solver_id TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN solver_hash TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN image_url TEXT;
-    """),
-    ("0041_v2_submit_events_challenge_kind", """
+    """,
+    ),
+    (
+        "0041_v2_submit_events_challenge_kind",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN challenge_kind TEXT;
-    """),
-    ("0041b_v2_submit_events_async_verify", """
+    """,
+    ),
+    (
+        "0041b_v2_submit_events_async_verify",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN locked_by TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN locked_until_iso TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN last_error TEXT;
-    """),
-    ("0042_v2_cnf_store", """
+    """,
+    ),
+    (
+        "0042_v2_cnf_store",
+        """
         CREATE TABLE IF NOT EXISTS v2_cnf_store (
             challenge_id TEXT PRIMARY KEY,
             cnf_sha256 TEXT NOT NULL,
@@ -650,18 +776,27 @@ _MIGRATIONS: list[tuple[str, str]] = [
             created_at_iso TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
-    """),
-    ("0043_solution_manifests_inline", """
+    """,
+    ),
+    (
+        "0043_solution_manifests_inline",
+        """
         ALTER TABLE solution_manifests ADD COLUMN solution_inline BLOB;
-    """),
-    ("0044_v2_worker_heartbeat", """
+    """,
+    ),
+    (
+        "0044_v2_worker_heartbeat",
+        """
         CREATE TABLE IF NOT EXISTS v2_worker_heartbeat (
             key TEXT PRIMARY KEY,
             worker_id TEXT,
             beat_at_iso TEXT
         );
-    """),
-    ("0045_external_score_reports", """
+    """,
+    ),
+    (
+        "0045_external_score_reports",
+        """
         CREATE TABLE IF NOT EXISTS external_score_reports (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -696,8 +831,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ON external_score_entries(source, received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
             ON external_score_entries(miner_hotkey, received_at_iso);
-    """),
-    ("0046_v2_cnf_artifacts", """
+    """,
+    ),
+    (
+        "0046_v2_cnf_artifacts",
+        """
         CREATE TABLE IF NOT EXISTS v2_cnf_artifacts (
             challenge_id TEXT PRIMARY KEY,
             epoch INTEGER NOT NULL,
@@ -725,8 +863,11 @@ _MIGRATIONS: list[tuple[str, str]] = [
             ready INTEGER NOT NULL DEFAULT 0,
             updated_at_iso TEXT NOT NULL
         );
-    """),
-    ("0047_external_score_audience", """
+    """,
+    ),
+    (
+        "0047_external_score_audience",
+        """
         ALTER TABLE external_score_reports ADD COLUMN network TEXT;
         ALTER TABLE external_score_reports ADD COLUMN netuid INTEGER;
         CREATE INDEX IF NOT EXISTS idx_external_score_reports_audience_epoch
@@ -734,14 +875,17 @@ _MIGRATIONS: list[tuple[str, str]] = [
         CREATE UNIQUE INDEX IF NOT EXISTS uq_external_score_reports_audience_epoch
             ON external_score_reports(source, network, netuid, epoch)
             WHERE network IS NOT NULL AND netuid IS NOT NULL;
-    """),
+    """,
+    ),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
 # ADD COLUMN guarded by IF NOT EXISTS (Postgres supports it), executescript-style
 # multi-statement blocks split on ';'. Indexes IF NOT EXISTS.
 _MIGRATIONS_PG: list[tuple[str, str]] = [
-    ("0001_eval_runs", """
+    (
+        "0001_eval_runs",
+        """
         CREATE TABLE IF NOT EXISTS eval_runs (
             id TEXT PRIMARY KEY,
             ran_at TEXT NOT NULL,
@@ -751,8 +895,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             row_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
-    """),
-    ("0002_lane_challenges", """
+    """,
+    ),
+    (
+        "0002_lane_challenges",
+        """
         CREATE TABLE IF NOT EXISTS lane_challenges (
             challenge_id TEXT PRIMARY KEY,
             family_id TEXT NOT NULL,
@@ -768,8 +915,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             designated_solver_digest TEXT,
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0003_agent_submissions", """
+    """,
+    ),
+    (
+        "0003_agent_submissions",
+        """
         CREATE TABLE IF NOT EXISTS agent_submissions (
             id TEXT PRIMARY KEY,
             miner_hotkey TEXT NOT NULL,
@@ -783,8 +933,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_sub_hotkey_chal
             ON agent_submissions(miner_hotkey, sat_challenge_id);
-    """),
-    ("0004_arena_solvers", """
+    """,
+    ),
+    (
+        "0004_arena_solvers",
+        """
         CREATE TABLE IF NOT EXISTS arena_solvers (
             source_sha256 TEXT PRIMARY KEY,
             source_url TEXT NOT NULL,
@@ -794,8 +947,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             status TEXT NOT NULL DEFAULT 'pending',
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0005_arena_instances", """
+    """,
+    ),
+    (
+        "0005_arena_instances",
+        """
         CREATE TABLE IF NOT EXISTS arena_instances (
             instance_id TEXT PRIMARY KEY,
             owner_hotkey TEXT NOT NULL,
@@ -806,57 +962,90 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             status TEXT NOT NULL DEFAULT 'pending',
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0006_replay_dedup", """
+    """,
+    ),
+    (
+        "0006_replay_dedup",
+        """
         CREATE TABLE IF NOT EXISTS submit_signatures (
             signature TEXT PRIMARY KEY,
             seen_at TEXT NOT NULL
         );
-    """),
-    ("0007_seed_state", """
+    """,
+    ),
+    (
+        "0007_seed_state",
+        """
         CREATE TABLE IF NOT EXISTS seed_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-    """),
-    ("0008_lane_challenges_source", """
+    """,
+    ),
+    (
+        "0008_lane_challenges_source",
+        """
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_source TEXT NOT NULL DEFAULT 'local';
-    """),
-    ("0009_lane_challenges_cnf_url", """
+    """,
+    ),
+    (
+        "0009_lane_challenges_cnf_url",
+        """
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_url TEXT;
-    """),
-    ("0010_lane_challenge_solves", """
+    """,
+    ),
+    (
+        "0010_lane_challenge_solves",
+        """
         CREATE TABLE IF NOT EXISTS lane_challenge_solves (
             challenge_id TEXT NOT NULL,
             miner_hotkey TEXT NOT NULL,
             solved_at_iso TEXT NOT NULL,
             PRIMARY KEY (challenge_id, miner_hotkey)
         );
-    """),
-    ("0011_lane_challenges_updated_at", """
+    """,
+    ),
+    (
+        "0011_lane_challenges_updated_at",
+        """
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS updated_at_iso TEXT;
-    """),
-    ("0012_arena_instances_payout", """
+    """,
+    ),
+    (
+        "0012_arena_instances_payout",
+        """
         ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '';
         ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS last_paid_round INTEGER;
         ALTER TABLE arena_instances ADD COLUMN IF NOT EXISTS paid_at_iso TEXT;
-    """),
-    ("0013_weight_policy_state", """
+    """,
+    ),
+    (
+        "0013_weight_policy_state",
+        """
         CREATE TABLE IF NOT EXISTS weight_policy_state (
             id INTEGER PRIMARY KEY,
             last_policy_version INTEGER NOT NULL,
             updated_at_iso TEXT NOT NULL
         );
-    """),
-    ("0014_weight_policy_version_bigint", """
+    """,
+    ),
+    (
+        "0014_weight_policy_version_bigint",
+        """
         ALTER TABLE weight_policy_state ALTER COLUMN last_policy_version TYPE BIGINT;
-    """),
-    ("0015_eval_runs_miner_idx", """
+    """,
+    ),
+    (
+        "0015_eval_runs_miner_idx",
+        """
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
-    """),
+    """,
+    ),
     # 0016: per-miner unique challenges (CATHEDRAL_PERMINER_ENABLED).
-    ("0016_per_miner_solves", """
+    (
+        "0016_per_miner_solves",
+        """
         CREATE TABLE IF NOT EXISTS per_miner_solves (
             challenge_id TEXT NOT NULL,
             miner_hotkey TEXT NOT NULL,
@@ -870,15 +1059,21 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_epoch_hotkey
             ON per_miner_solves(epoch, miner_hotkey);
-    """),
+    """,
+    ),
     # 0017: index on lane_challenge_solves.solved_at_iso so compose_scores
     # (SELECT DISTINCT miner_hotkey, challenge_id WHERE solved_at_iso > ?)
     # uses an index scan instead of a full table scan.
-    ("0017_lane_challenge_solves_solved_at_idx", """
+    (
+        "0017_lane_challenge_solves_solved_at_idx",
+        """
         CREATE INDEX IF NOT EXISTS idx_lane_challenge_solves_solved_at
             ON lane_challenge_solves(solved_at_iso);
-    """),
-    ("0018_per_miner_evidence", """
+    """,
+    ),
+    (
+        "0018_per_miner_evidence",
+        """
         CREATE TABLE IF NOT EXISTS per_miner_attempts (
             id TEXT PRIMARY KEY,
             challenge_id TEXT NOT NULL,
@@ -920,8 +1115,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             recorded_at_iso TEXT NOT NULL,
             PRIMARY KEY (challenge_id, miner_hotkey)
         );
-    """),
-    ("0019_audit_challenge_manifests", """
+    """,
+    ),
+    (
+        "0019_audit_challenge_manifests",
+        """
         CREATE TABLE IF NOT EXISTS audit_challenge_manifests (
             challenge_id TEXT PRIMARY KEY,
             cnf_sha256 TEXT NOT NULL,
@@ -930,8 +1128,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             source_path TEXT,
             created_at_iso TEXT NOT NULL
         );
-    """),
-    ("0020_eval_runs_legacy_columns", """
+    """,
+    ),
+    (
+        "0020_eval_runs_legacy_columns",
+        """
         ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS id TEXT;
         ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS ran_at TEXT NOT NULL DEFAULT '';
         ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS eval_output_schema_version INTEGER NOT NULL DEFAULT 0;
@@ -940,8 +1141,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS row_json TEXT NOT NULL DEFAULT '{}';
         CREATE INDEX IF NOT EXISTS idx_eval_runs_cursor ON eval_runs(ran_at, id);
         CREATE INDEX IF NOT EXISTS idx_eval_runs_miner_ran_at ON eval_runs(miner_hotkey, ran_at);
-    """),
-    ("0021_coldkey_map", """
+    """,
+    ),
+    (
+        "0021_coldkey_map",
+        """
         CREATE TABLE IF NOT EXISTS coldkey_map (
             hotkey TEXT PRIMARY KEY,
             coldkey TEXT NOT NULL,
@@ -949,10 +1153,13 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_coldkey_map_coldkey
             ON coldkey_map(coldkey);
-    """),
+    """,
+    ),
     # Off-chain TEE GPU capacity intake for provider handoff. These tables are
     # intentionally not scoring inputs: validators never read them.
-    ("0022_tee_gpu_capacity", """
+    (
+        "0022_tee_gpu_capacity",
+        """
         CREATE TABLE IF NOT EXISTS tee_gpu_capacity (
             capacity_id TEXT PRIMARY KEY,
             provider_ref TEXT NOT NULL DEFAULT '',
@@ -993,8 +1200,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON tee_gpu_capacity(status);
         CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_owner
             ON tee_gpu_capacity(owner_hotkey);
-    """),
-    ("0023_tee_gpu_capacity_events", """
+    """,
+    ),
+    (
+        "0023_tee_gpu_capacity_events",
+        """
         CREATE TABLE IF NOT EXISTS tee_gpu_capacity_events (
             id TEXT PRIMARY KEY,
             capacity_id TEXT NOT NULL,
@@ -1005,14 +1215,20 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_tee_gpu_capacity_events_capacity
             ON tee_gpu_capacity_events(capacity_id, created_at_iso);
-    """),
-    ("0024_tee_gpu_capacity_authorization", """
+    """,
+    ),
+    (
+        "0024_tee_gpu_capacity_authorization",
+        """
         ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS operator_use_authorized INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_version TEXT NOT NULL DEFAULT '';
         ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_digest TEXT NOT NULL DEFAULT '';
         ALTER TABLE tee_gpu_capacity ADD COLUMN IF NOT EXISTS authorization_json TEXT NOT NULL DEFAULT '{}';
-    """),
-    ("0025_solver_attestation", """
+    """,
+    ),
+    (
+        "0025_solver_attestation",
+        """
         CREATE TABLE IF NOT EXISTS attest_nonces (
             nonce TEXT PRIMARY KEY,
             miner_hotkey TEXT NOT NULL,
@@ -1040,17 +1256,26 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_attestations_miner_challenge
             ON attestations(miner_hotkey, challenge_id);
         ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS attested INTEGER NOT NULL DEFAULT 0;
-    """),
-    ("0026_attest_nonce_pubkey", """
+    """,
+    ),
+    (
+        "0026_attest_nonce_pubkey",
+        """
         ALTER TABLE attest_nonces ADD COLUMN IF NOT EXISTS miner_pubkey_b64 TEXT NOT NULL DEFAULT '';
-    """),
-    ("0027_per_miner_time_indexes", """
+    """,
+    ),
+    (
+        "0027_per_miner_time_indexes",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_solved_at
             ON per_miner_solves(solved_at_iso);
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_recorded_at
             ON per_miner_attempts(recorded_at_iso);
-    """),
-    ("0028_metagraph_hotkeys", """
+    """,
+    ),
+    (
+        "0028_metagraph_hotkeys",
+        """
         CREATE TABLE IF NOT EXISTS metagraph_hotkeys (
             network TEXT NOT NULL,
             netuid INTEGER NOT NULL,
@@ -1063,8 +1288,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_metagraph_hotkeys_fresh
             ON metagraph_hotkeys(network, netuid, updated_at_iso);
-    """),
-    ("0029_signed_weight_vectors", """
+    """,
+    ),
+    (
+        "0029_signed_weight_vectors",
+        """
         CREATE TABLE IF NOT EXISTS signed_weight_vectors (
             id TEXT PRIMARY KEY,
             generated_at_iso TEXT NOT NULL,
@@ -1074,11 +1302,14 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_signed_weight_vectors_updated_at
             ON signed_weight_vectors(updated_at_iso);
-    """),
+    """,
+    ),
     # 0030: durable submit admission — see SQLite 0030. NULL idempotency_key on
     # legacy rows is fine: Postgres unique indexes treat NULLs as distinct, so the
     # inline writers that never set the column never collide.
-    ("0030_submit_admission", """
+    (
+        "0030_submit_admission",
+        """
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS received_at_iso TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS verified_at_iso TEXT;
@@ -1095,18 +1326,24 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON per_miner_attempts(idempotency_key);
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_status_received
             ON per_miner_attempts(status, received_at_iso);
-    """),
+    """,
+    ),
     # 0031: per-miner (pm-*) durable async admission - see SQLite 0031. Columns
     # are additive + nullable so the inline pm writers (which never name them)
     # keep working; the async pm lane is purely opt-in (CATHEDRAL_PM_SUBMIT_ASYNC_ENABLED).
-    ("0031_pm_submit_admission", """
+    (
+        "0031_pm_submit_admission",
+        """
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS assignment_identity TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS shadow_status TEXT;
         ALTER TABLE per_miner_attempts ADD COLUMN IF NOT EXISTS shadow_rejection_reason TEXT;
         CREATE INDEX IF NOT EXISTS idx_per_miner_attempts_kind_status_received
             ON per_miner_attempts(challenge_kind, status, received_at_iso);
-    """),
-    ("0032_lane_challenges_shape_repair", """
+    """,
+    ),
+    (
+        "0032_lane_challenges_shape_repair",
+        """
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS family_id TEXT NOT NULL DEFAULT 'synthetic_boolean_v1';
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1;
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_text TEXT NOT NULL DEFAULT '';
@@ -1122,8 +1359,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_source TEXT NOT NULL DEFAULT 'local';
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS cnf_url TEXT;
         ALTER TABLE lane_challenges ADD COLUMN IF NOT EXISTS updated_at_iso TEXT;
-    """),
-    ("0033_async_verify_workers", """
+    """,
+    ),
+    (
+        "0033_async_verify_workers",
+        """
         CREATE TABLE IF NOT EXISTS async_verify_workers (
             worker_id TEXT PRIMARY KEY,
             service_role TEXT NOT NULL DEFAULT '',
@@ -1138,16 +1378,25 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_async_verify_workers_seen
             ON async_verify_workers(last_seen_at_iso);
-    """),
-    ("0034_per_miner_score_window_index", """
+    """,
+    ),
+    (
+        "0034_per_miner_score_window_index",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_verified_time_hotkey
             ON per_miner_solves(verified, solved_at_iso, miner_hotkey);
-    """),
-    ("0035_per_miner_miner_window_index", """
+    """,
+    ),
+    (
+        "0035_per_miner_miner_window_index",
+        """
         CREATE INDEX IF NOT EXISTS idx_per_miner_solves_hotkey_verified_time
             ON per_miner_solves(miner_hotkey, verified, solved_at_iso);
-    """),
-    ("0036_solution_manifests", """
+    """,
+    ),
+    (
+        "0036_solution_manifests",
+        """
         CREATE TABLE IF NOT EXISTS solution_manifests (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -1183,8 +1432,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON solution_manifests(status, received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_solution_manifests_hotkey_challenge
             ON solution_manifests(miner_hotkey, challenge_id);
-    """),
-    ("0037_v2_shadow_v1_submits", """
+    """,
+    ),
+    (
+        "0037_v2_shadow_v1_submits",
+        """
         CREATE TABLE IF NOT EXISTS v2_shadow_v1_submits (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -1209,8 +1461,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_shadow_v1_submits(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submits_hotkey_challenge
             ON v2_shadow_v1_submits(miner_hotkey, challenge_id);
-    """),
-    ("0038_v2_shadow_v1_submit_meta", """
+    """,
+    ),
+    (
+        "0038_v2_shadow_v1_submit_meta",
+        """
         CREATE TABLE IF NOT EXISTS v2_shadow_v1_submit_meta (
             id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL DEFAULT '',
@@ -1233,8 +1488,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_shadow_v1_submit_meta(received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_v2_shadow_v1_submit_meta_hotkey_challenge
             ON v2_shadow_v1_submit_meta(miner_hotkey, challenge_id);
-    """),
-    ("0039_v2_submit_events", """
+    """,
+    ),
+    (
+        "0039_v2_submit_events",
+        """
         CREATE TABLE IF NOT EXISTS v2_submit_events (
             id TEXT PRIMARY KEY,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -1266,21 +1524,33 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON v2_submit_events(miner_hotkey, challenge_id);
         CREATE INDEX IF NOT EXISTS idx_v2_submit_events_epoch
             ON v2_submit_events(epoch, status);
-    """),
-    ("0040_v2_submit_events_solver_meta", """
+    """,
+    ),
+    (
+        "0040_v2_submit_events_solver_meta",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_id TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS solver_hash TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS image_url TEXT;
-    """),
-    ("0041_v2_submit_events_challenge_kind", """
+    """,
+    ),
+    (
+        "0041_v2_submit_events_challenge_kind",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS challenge_kind TEXT;
-    """),
-    ("0041b_v2_submit_events_async_verify", """
+    """,
+    ),
+    (
+        "0041b_v2_submit_events_async_verify",
+        """
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS locked_by TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS locked_until_iso TEXT;
         ALTER TABLE v2_submit_events ADD COLUMN IF NOT EXISTS last_error TEXT;
-    """),
-    ("0042_v2_cnf_store", """
+    """,
+    ),
+    (
+        "0042_v2_cnf_store",
+        """
         CREATE TABLE IF NOT EXISTS v2_cnf_store (
             challenge_id TEXT PRIMARY KEY,
             cnf_sha256 TEXT NOT NULL,
@@ -1288,18 +1558,27 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             created_at_iso TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_v2_cnf_store_created ON v2_cnf_store(created_at_iso);
-    """),
-    ("0043_solution_manifests_inline", """
+    """,
+    ),
+    (
+        "0043_solution_manifests_inline",
+        """
         ALTER TABLE solution_manifests ADD COLUMN IF NOT EXISTS solution_inline BYTEA;
-    """),
-    ("0044_v2_worker_heartbeat", """
+    """,
+    ),
+    (
+        "0044_v2_worker_heartbeat",
+        """
         CREATE TABLE IF NOT EXISTS v2_worker_heartbeat (
             key TEXT PRIMARY KEY,
             worker_id TEXT,
             beat_at_iso TEXT
         );
-    """),
-    ("0045_external_score_reports", """
+    """,
+    ),
+    (
+        "0045_external_score_reports",
+        """
         CREATE TABLE IF NOT EXISTS external_score_reports (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -1334,8 +1613,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ON external_score_entries(source, received_at_iso);
         CREATE INDEX IF NOT EXISTS idx_external_score_entries_hotkey_received
             ON external_score_entries(miner_hotkey, received_at_iso);
-    """),
-    ("0046_v2_cnf_artifacts", """
+    """,
+    ),
+    (
+        "0046_v2_cnf_artifacts",
+        """
         CREATE TABLE IF NOT EXISTS v2_cnf_artifacts (
             challenge_id TEXT PRIMARY KEY,
             epoch BIGINT NOT NULL,
@@ -1363,8 +1645,11 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
             ready INTEGER NOT NULL DEFAULT 0,
             updated_at_iso TEXT NOT NULL
         );
-    """),
-    ("0047_external_score_audience", """
+    """,
+    ),
+    (
+        "0047_external_score_audience",
+        """
         ALTER TABLE external_score_reports ADD COLUMN IF NOT EXISTS network TEXT;
         ALTER TABLE external_score_reports ADD COLUMN IF NOT EXISTS netuid INTEGER;
         CREATE INDEX IF NOT EXISTS idx_external_score_reports_audience_epoch
@@ -1372,7 +1657,8 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
         CREATE UNIQUE INDEX IF NOT EXISTS uq_external_score_reports_audience_epoch
             ON external_score_reports(source, network, netuid, epoch)
             WHERE network IS NOT NULL AND netuid IS NOT NULL;
-    """),
+    """,
+    ),
 ]
 
 # Conflict targets for INSERT OR REPLACE / INSERT OR IGNORE upserts that name no
@@ -1417,8 +1703,12 @@ def _is_postgres_dsn(s: str | None) -> bool:
 # ===========================================================================
 # Postgres dialect translation
 # ===========================================================================
-_INSERT_OR_IGNORE_RE = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)", re.IGNORECASE)
-_INSERT_OR_REPLACE_RE = re.compile(r"^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]*)\)", re.IGNORECASE)
+_INSERT_OR_IGNORE_RE = re.compile(
+    r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)", re.IGNORECASE
+)
+_INSERT_OR_REPLACE_RE = re.compile(
+    r"^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]*)\)", re.IGNORECASE
+)
 
 
 def _translate_sql(sql: str) -> str:
@@ -1437,7 +1727,7 @@ def _translate_sql(sql: str) -> str:
         pk = _PK_BY_TABLE.get(table, "")
         pk_cols = {c.strip() for c in pk.split(",")} if pk else set()
         set_cols = [c for c in cols if c not in pk_cols]
-        body = s[m.end():]  # everything after the column list — the VALUES(...) part
+        body = s[m.end() :]  # everything after the column list — the VALUES(...) part
         assignments = ", ".join(f"{c}=excluded.{c}" for c in set_cols)
         head = f"INSERT INTO {table}({m.group(2)})"
         if pk and assignments:
@@ -1449,7 +1739,13 @@ def _translate_sql(sql: str) -> str:
     # Only add the clause if the statement does not already name ON CONFLICT.
     m = _INSERT_OR_IGNORE_RE.search(s)
     if m:
-        s = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", s, count=1, flags=re.IGNORECASE)
+        s = re.sub(
+            r"INSERT\s+OR\s+IGNORE\s+INTO",
+            "INSERT INTO",
+            s,
+            count=1,
+            flags=re.IGNORECASE,
+        )
         if "ON CONFLICT" not in s.upper():
             s = s.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
@@ -1534,7 +1830,11 @@ class Store:
         # prefer_env_database_url=False so a separate explicit path/DSN cannot
         # accidentally fall back to the live DATABASE_URL.
         env_url = os.environ.get("DATABASE_URL") if prefer_env_database_url else None
-        dsn = path if _is_postgres_dsn(path) else (env_url if _is_postgres_dsn(env_url) else None)
+        dsn = (
+            path
+            if _is_postgres_dsn(path)
+            else (env_url if _is_postgres_dsn(env_url) else None)
+        )
         self.backend = "postgres" if dsn else "sqlite"
         self.path = dsn or path
 
@@ -1557,11 +1857,16 @@ class Store:
         minconn = int(os.environ.get("CATHEDRAL_PG_POOL_MIN", "1"))
         maxconn = int(os.environ.get("CATHEDRAL_PG_POOL_MAX", "10"))
         self._pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn, maxconn, dsn, cursor_factory=psycopg2.extras.DictCursor,
+            minconn,
+            maxconn,
+            dsn,
+            cursor_factory=psycopg2.extras.DictCursor,
             connect_timeout=int(os.environ.get("CATHEDRAL_PG_CONNECT_TIMEOUT", "10")),
             keepalives=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES", "1")),
             keepalives_idle=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_IDLE", "30")),
-            keepalives_interval=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_INTERVAL", "10")),
+            keepalives_interval=int(
+                os.environ.get("CATHEDRAL_PG_KEEPALIVES_INTERVAL", "10")
+            ),
             keepalives_count=int(os.environ.get("CATHEDRAL_PG_KEEPALIVES_COUNT", "3")),
         )
 
@@ -1574,7 +1879,9 @@ class Store:
                 "CREATE TABLE IF NOT EXISTS schema_migrations "
                 "(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
-            applied = {r["id"] for r in self._conn.execute("SELECT id FROM schema_migrations")}
+            applied = {
+                r["id"] for r in self._conn.execute("SELECT id FROM schema_migrations")
+            }
             for mid, sql in _MIGRATIONS:
                 if mid in applied:
                     continue
@@ -1591,7 +1898,8 @@ class Store:
             cur = raw.cursor()
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations "
-                "(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+                "(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+            )
             cur.execute("SELECT id FROM schema_migrations")
             applied = {r[0] for r in cur.fetchall()}
             for mid, sql in _MIGRATIONS_PG:
@@ -1602,7 +1910,8 @@ class Store:
                         cur.execute(stmt)
                 cur.execute(
                     "INSERT INTO schema_migrations(id, applied_at) VALUES (%s, now())",
-                    (mid,))
+                    (mid,),
+                )
             raw.commit()
         except Exception:
             raw.rollback()
@@ -1655,7 +1964,6 @@ class Store:
                 pass
             return
         self._pool.putconn(raw)
-
 
     # ---- low-level access -------------------------------------------------
     def query(self, sql: str, params: tuple = ()) -> list:
@@ -1847,7 +2155,9 @@ class Store:
         finally:
             self._pool.putconn(raw)
 
-    def write_v2_worker_heartbeat(self, key: str, worker_id: str, beat_at_iso: str) -> None:
+    def write_v2_worker_heartbeat(
+        self, key: str, worker_id: str, beat_at_iso: str
+    ) -> None:
         """Best-effort liveness beat for a v2 singleton background worker.
 
         Powers steal_stale_advisory_lock's second guardrail: a lock is only
@@ -1857,11 +2167,13 @@ class Store:
         failure must not stall (or crash) verification.
         """
         try:
-            self.write(lambda conn: conn.execute(
-                "INSERT OR REPLACE INTO v2_worker_heartbeat(key, worker_id, beat_at_iso) "
-                "VALUES (?, ?, ?)",
-                (key, worker_id, beat_at_iso),
-            ))
+            self.write(
+                lambda conn: conn.execute(
+                    "INSERT OR REPLACE INTO v2_worker_heartbeat(key, worker_id, beat_at_iso) "
+                    "VALUES (?, ?, ?)",
+                    (key, worker_id, beat_at_iso),
+                )
+            )
         except Exception:
             pass
 
@@ -1877,15 +2189,23 @@ class Store:
         """Insert one feed row (OR IGNORE). Returns 1 if newly inserted, 0 if it
         already existed — callers count insertions from rowcount instead of
         bracketing every row with COUNT(*) table scans."""
+
         def _do(conn):
             cur = conn.execute(
                 "INSERT OR IGNORE INTO eval_runs "
                 "(id, ran_at, eval_output_schema_version, miner_hotkey, task_type, row_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (row["id"], row["ran_at"], int(row["eval_output_schema_version"]),
-                 row["miner_hotkey"], row["task_type"], json.dumps(row)),
+                (
+                    row["id"],
+                    row["ran_at"],
+                    int(row["eval_output_schema_version"]),
+                    row["miner_hotkey"],
+                    row["task_type"],
+                    json.dumps(row),
+                ),
             )
             return int(cur.rowcount or 0)
+
         return self.write(_do)
 
     # ---- seed watermark (G1) ---------------------------------------------
@@ -1900,6 +2220,7 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (key, value),
             )
+
         self.write(_do)
 
     def count_rows(self) -> int:

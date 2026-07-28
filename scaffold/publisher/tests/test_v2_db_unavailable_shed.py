@@ -11,6 +11,7 @@ readiness flaps. These tests pin the controlled behaviour:
 - Receipt polling has its own small concurrency gate
   (`receipt_poll_busy_retry`) so a poll flood cannot exhaust the DB pool.
 """
+
 from __future__ import annotations
 
 import base64
@@ -33,8 +34,7 @@ _EMPTY_BUNDLE = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f326
 
 # psycopg2-shaped errors without importing psycopg2 (optional dependency on
 # sqlite deployments) — the shed matches by class name + module.
-_PgOperationalError = type(
-    "OperationalError", (Exception,), {"__module__": "psycopg2"})
+_PgOperationalError = type("OperationalError", (Exception,), {"__module__": "psycopg2"})
 _PgPoolError = type("PoolError", (Exception,), {"__module__": "psycopg2.pool"})
 
 
@@ -45,6 +45,7 @@ def _now_iso() -> str:
 
 def _keypair(uri: str):
     from bittensor_wallet import Keypair
+
     return Keypair.create_from_uri(uri)
 
 
@@ -66,7 +67,9 @@ def _read_headers(kp, *, submitted_at: str | None = None) -> dict[str, str]:
     }
 
 
-def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, str]:
+def _bitset_headers(
+    kp, body: dict, *, submitted_at: str | None = None
+) -> dict[str, str]:
     ts = submitted_at or _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
         body,
@@ -75,7 +78,8 @@ def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[
         card_id=_FAMILY,
     )
     sig = base64.b64encode(
-        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
+        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
+    ).decode("ascii")
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
         "X-Cathedral-Signature": sig,
@@ -88,7 +92,9 @@ def _build(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true")
-    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
+    monkeypatch.setenv(
+        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret"
+    )
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_DB_PATH", str(tmp_path / "v2.sqlite"))
@@ -116,7 +122,8 @@ def _build_submit(client: TestClient, uri: str):
     item = board.json()["items"][0]
     with v2_pipeline.v2_pm_env():
         _cid, _cnf, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
+        )
     body = {
         "schema": v2_bitset_submit.SCHEMA,
         "card_id": _FAMILY,
@@ -225,7 +232,9 @@ def test_receipt_poll_concurrency_gate_sheds_429(tmp_path, monkeypatch):
     results: list = []
     holder = threading.Thread(
         target=lambda: results.append(
-            client.get("/v2/agents/submit-bitset/receipts/held-slot")))
+            client.get("/v2/agents/submit-bitset/receipts/held-slot")
+        )
+    )
     holder.start()
     try:
         assert started.wait(timeout=10), "first poll never reached the store"
