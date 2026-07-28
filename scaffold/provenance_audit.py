@@ -1245,7 +1245,10 @@ def run_audit(
             ],
             recomputed=dict(result.recomputed_hotkey_weights),
             candidate_count=len(manifest["candidate_set"]["candidates"]),
-            anchored_block=anchored_block,
+            # Read from the manifest, not the local named after it: that local
+            # is only bound inside the controlled-evidence branch, so using it
+            # here crashed every receipts-only audit with UnboundLocalError.
+            anchored_block=int(manifest["candidate_set"]["block"]),
             not_proven_reasons=list(getattr(result, "not_proven_reasons", ()) or []),
         )
         audit = ProvenanceAudit(

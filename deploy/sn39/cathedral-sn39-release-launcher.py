@@ -300,6 +300,13 @@ def _child_environment(
     }
     if mode in {"preflight", "launch", "continuous", "reconcile"}:
         environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"] = "cathedral-validator-log"
+        # Presentation-only pass-through. The child writes to journald, never a
+        # tty, so without these the operator stream is monochrome and laid out
+        # for a width nobody has. Neither value reaches any decision; the
+        # renderer treats a garbage COLUMNS as unset.
+        for passthrough in ("CATHEDRAL_VALIDATOR_FORCE_COLOR", "COLUMNS", "NO_COLOR"):
+            if os.environ.get(passthrough):
+                environment[passthrough] = os.environ[passthrough]
     if release_sha is not None:
         environment["CATHEDRAL_SN39_RELEASE_SHA"] = release_sha
     if launch_config_sha256 is not None:

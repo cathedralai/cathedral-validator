@@ -1649,11 +1649,15 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
             duration_ms=audit.duration_ms,
             artifact=audit.manifest_digest,
             detail=(
+                f"assurance={audit.assurance} "
                 f"source_epoch={audit.source_epoch} release={audit.policy_release} "
                 f"mechanism={audit.mechanism} verified_miners={len(audit.recomputed)} "
+                f"unproven_candidates="
+                f"{(getattr(audit, 'assurance_scope', {}) or {}).get('unproven_count', 'n/a')} "
                 f"vector_agrees={audit.agrees_with_vector}"
             ),
             vector_agrees=audit.agrees_with_vector,
+            assurance=audit.assurance,
         )
         return True
     else:
@@ -1687,7 +1691,9 @@ def _run_provenance_stage(
     result is drained and logged, a new audit is submitted without blocking,
     and the thin submission proceeds untouched regardless of audit speed or
     health. Authority: synchronous; the tick refuses to submit anything
-    unless the audit PASSes at FULL assurance.
+    unless the audit PASSes at or above the configured minimum assurance
+    (default rewarded_set_proven: every paid hotkey raw-replayed, everything
+    unreplayed at exactly zero).
     """
     settings = _provenance_settings(args)
     if settings.mode == "authority":
@@ -3631,6 +3637,98 @@ def _require_uid_mapping_stability(
     }
 
 
+def _eviction_depths(
+    prunable_rows: list[tuple[int, str, int]],
+    metric_by_hotkey: dict[str, tuple[float, float, float]],
+) -> dict[str, int]:
+    """How many prunable neurons the runtime must evict before each target.
+
+    The deployed runtime generation selects its victim as the minimum of
+    (emission, block_at_registration, uid) lexicographically (subtensor
+    get_neuron_to_prune; the u16 PruningScores map is retired). Strict
+    dominance on all three carried metrics implies strictly lower emission,
+    the primary key, so that branch is sound. On an exact metric tie the
+    runtime prunes the OLDEST registration first, then the lower UID -- not
+    the lower UID outright, which is what this rule previously assumed and
+    which overcounted depth for exactly the mature targets the proof exists
+    to protect. Anything not provably ahead counts as possibly behind the
+    target, the conservative direction.
+    """
+    depths: dict[str, int] = {}
+    for uid, hotkey, registered_at in prunable_rows:
+        target_metric = metric_by_hotkey[hotkey]
+        depth = 0
+        for other_uid, other_hotkey, other_registered_at in prunable_rows:
+            if other_hotkey == hotkey:
+                continue
+            other_metric = metric_by_hotkey[other_hotkey]
+            strictly_weaker = all(
+                other_value < target_value
+                for other_value, target_value in zip(other_metric, target_metric)
+            )
+            tied_ahead = other_metric == target_metric and (
+                other_registered_at,
+                other_uid,
+            ) < (registered_at, uid)
+            if strictly_weaker or tied_ahead:
+                depth += 1
+        depths[hotkey] = depth
+    return depths
+
+
+def _drop_unprovable_targets(
+    args: Any,
+    uid_weights: dict[int, float],
+    uid_safety: dict[str, Any],
+    hotkey_to_uid: dict[str, int],
+) -> dict[int, float]:
+    """Apply the exclusions the stability proof demanded.
+
+    _require_uid_mapping_stability returns excluded_hotkeys with the stated
+    contract "targets the caller must drop, normalizing their mass to burn" --
+    and no caller dropped them, so a target whose UID could be reassigned
+    mid-era was still submitted at full weight. Dropping it here means the
+    remaining targets renormalize on chain: on a one-miner subnet an unprovable
+    miner fails safe to burn instead of risking payment to whoever takes the
+    slot. Loud on every surface, because a vector that differs from the signed
+    or recomputed allocation must never be a quiet event.
+    """
+    excluded = list(uid_safety.get("excluded_hotkeys") or [])
+    if not excluded:
+        return uid_weights
+    excluded_uids = {
+        hotkey_to_uid[hotkey] for hotkey in excluded if hotkey in hotkey_to_uid
+    }
+    kept = {
+        uid: weight for uid, weight in uid_weights.items() if uid not in excluded_uids
+    }
+    if not kept:
+        # The ALL-unprovable case hard-fails inside the stability proof, so
+        # reaching emptiness here means the maps disagree. Refuse.
+        raise wire.VectorError(
+            "every weighted target was excluded as unprovable; nothing safe "
+            "remains to submit"
+        )
+    dropped = sorted(set(uid_weights) - set(kept))
+    detail = (
+        f"excluded_uids={','.join(str(uid) for uid in dropped)} "
+        f"reason=uid_mapping_unprovable remaining_targets={len(kept)}"
+    )
+    _get_events(args).event(
+        "UNSAFE_TARGETS_EXCLUDED",
+        stage="safety",
+        status=NOT_PROVEN,
+        detail=detail,
+        remediation=(
+            "The excluded targets' mass shifts to the remaining vector on "
+            "chain normalization. They rejoin automatically once their UID "
+            "mapping is provable for a full mortal era."
+        ),
+    )
+    _lifecycle("SAFETY excluded", detail)
+    return kept
+
+
 def _require_launch_evidence_after_rotations(
     *,
     payload: dict[str, Any],
@@ -4120,9 +4218,20 @@ def _chain_preflight_unbounded(
         if registered_at + immunity_period <= finalized_block
         and hotkey not in owner_immortal_hotkeys
     ]
+    # The MinNonImmuneUids floor is evaluated at prune time, not at this head:
+    # a neuron whose immunity expires DURING the era joins the pool mid-era and
+    # permits one further prune. Cap B therefore counts everyone prunable by
+    # the era's LAST block. The depth competition below deliberately does not:
+    # a mid-era maturer is only guaranteed prunable for part of the era, so
+    # counting it as a body in front of the target would be optimistic.
+    era_prunable_count = sum(
+        registered_at + immunity_period <= finalized_block + SN39_MORTAL_PERIOD_BLOCKS
+        and hotkey not in owner_immortal_hotkeys
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+    )
     worst_case_evictions = min(
         max(0, maximum_era_registrations - free_uid_slots),
-        max(0, len(prunable_rows) - min_nonimmune_uids),
+        max(0, era_prunable_count - min_nonimmune_uids),
     )
     metric_by_hotkey = {
         hotkey: (
@@ -4132,28 +4241,7 @@ def _chain_preflight_unbounded(
         )
         for _, hotkey, _ in prunable_rows
     }
-    # A candidate counts as ranking AHEAD of the target only when the runtime
-    # must reach it first under any scalar pruning score that is monotone in
-    # these metrics: strictly weaker on all three, or identical on all three
-    # with a lower UID. `get_neuron_to_prune` keeps the first minimum it sees,
-    # so an exact tie resolves to the lower UID. Anything else is counted as
-    # possibly ranking behind the target, which is the conservative direction.
-    eviction_depth: dict[str, int] = {}
-    for uid, hotkey, _ in prunable_rows:
-        target_metric = metric_by_hotkey[hotkey]
-        depth = 0
-        for other_uid, other_hotkey, _ in prunable_rows:
-            if other_hotkey == hotkey:
-                continue
-            other_metric = metric_by_hotkey[other_hotkey]
-            strictly_weaker = all(
-                other_value < target_value
-                for other_value, target_value in zip(other_metric, target_metric)
-            )
-            tied_lower_uid = other_metric == target_metric and other_uid < uid
-            if strictly_weaker or tied_lower_uid:
-                depth += 1
-        eviction_depth[hotkey] = depth
+    eviction_depth = _eviction_depths(prunable_rows, metric_by_hotkey)
     eviction_safe_hotkeys = {
         hotkey
         for hotkey, depth in eviction_depth.items()
@@ -4984,7 +5072,7 @@ def _authorize_sn39_chain_submission(
         full.get("policy_release") == getattr(audit, "policy_release", None),
         full.get("policy_digest") == getattr(audit, "policy_digest", None),
         full.get("mechanism") == getattr(audit, "mechanism", None),
-        full.get("scope") == "rewarded_set_full",
+        full.get("scope") in ("rewarded_set_proven", "rewarded_set_full"),
         full.get("whole_epoch_assurance") == getattr(audit, "assurance", None),
         full.get("vector_agrees") is True,
         full.get("rewarded_hotkeys") == sorted(rewarded),
@@ -5677,8 +5765,18 @@ def tick(args) -> bool:
                 raise
             fallback_reason = str(exc)
     # Outside the thin lock: the authority tick takes its own.
-    _lifecycle("FEED unavailable", f"reason={fallback_reason} fallback=full")
+    _lifecycle(
+        "FEED unavailable",
+        f"reason={fallback_reason} switching_to=full permanent=true",
+    )
     args._feed_down_fallback_active = True
+    # The switch is the whole runtime's, not one call's. The provenance stage
+    # dispatches on args.provenance, so leaving it at "shadow" sent the
+    # authority tick through the shadow audit, which produces no recomputed
+    # vector, and the fallback crashed on its only target path. Setting it
+    # here also makes the one-way conversion visible in every later banner
+    # and event instead of only in the lane state.
+    args.provenance = "authority"
     _prepare_tick_preflight(args)
     return _authority_tick(args, None)
 
@@ -5696,7 +5794,12 @@ def _full_path_provisioned(args: Any) -> bool:
     """
     controlled = getattr(args, "provenance_controlled_dir", None)
     verifier = getattr(args, "provenance_verifier_binary", None)
-    return bool(controlled) and bool(verifier) and Path(str(verifier)).exists()
+    return (
+        bool(controlled)
+        and Path(str(controlled)).is_dir()
+        and bool(verifier)
+        and Path(str(verifier)).exists()
+    )
 
 
 def _thin_tick_locked(args) -> bool:
@@ -5945,6 +6048,7 @@ def _thin_tick_locked(args) -> bool:
             {uid: hotkey for hotkey, uid in hk2uid.items() if uid in uid_weights},
             mortal_period_blocks=inclusion_policy.mortal_period_blocks,
         )
+        uid_weights = _drop_unprovable_targets(args, uid_weights, uid_safety, hk2uid)
         # Persist an ambiguity fence BEFORE the irreversible call. Mapping block
         # is retained in the exact submission record but excluded from the
         # dedup identity: advancing a block with the same signed vector and
@@ -5998,7 +6102,10 @@ def _thin_tick_locked(args) -> bool:
                 "policy_release": launch_audit.policy_release,
                 "policy_digest": launch_audit.policy_digest,
                 "mechanism": launch_audit.mechanism,
-                "scope": "rewarded_set_full",
+                # Scope names the claim actually made: the rewarded set was
+                # proven; nothing here asserts the whole epoch. The assurance
+                # field carries the exact audited level alongside it.
+                "scope": "rewarded_set_proven",
                 "whole_epoch_assurance": launch_audit.assurance,
                 "vector_agrees": launch_audit.agrees_with_vector,
                 "rewarded_hotkeys": sorted(launch_audit.recomputed),
@@ -7879,7 +7986,7 @@ def _match_signed_public_release_to_launch(
         <= extrinsic.get("block", -1)
         < broadcast_intent.get("era_reference_block", 0)
         + broadcast_intent.get("mortal_period_blocks", 0),
-        full.get("scope") == "rewarded_set_full",
+        full.get("scope") in ("rewarded_set_proven", "rewarded_set_full"),
         # An accepted vocabulary, not a rank test: this validates a recorded
         # launch approval, so it must keep parsing artifacts written before the
         # ranked levels existed as well as ones written after.
@@ -8429,7 +8536,7 @@ def _revalidate_authority_after_audit(
     )
     _validate_chain_constraints(uid_weights, fresh)
     inclusion_policy = _authority_inclusion_policy(audit, fresh)
-    _require_uid_mapping_stability(
+    uid_safety = _require_uid_mapping_stability(
         fresh,
         {
             uid: hotkey
@@ -8437,6 +8544,11 @@ def _revalidate_authority_after_audit(
             if uid in uid_weights
         },
         mortal_period_blocks=inclusion_policy.mortal_period_blocks,
+    )
+    # The reservation downstream re-runs the stability proof over the filtered
+    # vector, so what gets reserved and what gets signed are the same set.
+    uid_weights = _drop_unprovable_targets(
+        args, uid_weights, uid_safety, fresh.hotkey_to_uid
     )
     args._tick_preflight = fresh
     return fresh, fresh.hotkey_to_uid, uid_weights, inclusion_policy
@@ -8784,8 +8896,8 @@ def _drain_shadow_audit_once(args) -> bool:
             stage="provenance",
             status=FAIL,
             detail=(
-                "single-run shadow audit did not establish FULL assurance "
-                "and exact agreement with the signed vector"
+                "single-run shadow audit did not establish the configured "
+                "minimum assurance and exact agreement with the signed vector"
             ),
             remediation=(
                 "inspect the preceding provenance verdict; do not treat this "

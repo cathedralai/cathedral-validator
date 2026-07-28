@@ -327,6 +327,20 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         )
         return 2
     cfg.provenance = provenance_mode
+    min_assurance = getattr(cfg, "min_assurance", None)
+    if min_assurance is not None and min_assurance not in (
+        "receipts_only",
+        "rewarded_set_proven",
+        "full_over_epoch",
+    ):
+        # TOML and env bypassed the CLI's choices= list, so a typo here
+        # surfaced only at the first broadcast attempt instead of at startup.
+        print(
+            f"error: min_assurance must be receipts_only, rewarded_set_proven, "
+            f"or full_over_epoch; got {min_assurance!r}",
+            file=sys.stderr,
+        )
+        return 2
     try:
         validator_thin._validate_runtime_contract(cfg)
     except validator_thin.wire.VectorError as exc:
@@ -374,23 +388,41 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         )
     if getattr(cfg, "beta_skip_launch_ceremony", False):
         # Never let a waived launch ceremony be invisible in the log.
+        # Lawyerlike: name exactly what is waived and exactly what holds, and
+        # state the one caveat that is true of everything in the second list.
         rows.append(
             (
-                "beta",
-                [render.yellow("launch ceremony waived")]
-                + [
-                    render.dim(check)
-                    for check in (
-                        "signature",
-                        "freshness",
-                        "rollback fence",
-                        "contract",
-                        "burn",
-                        "uid safety",
-                        "single writer",
+                "waived",
+                [
+                    render.yellow("launch canary"),
+                    render.yellow("signed write authorization"),
+                    render.yellow("account-nonce window"),
+                ],
+            )
+        )
+        rows.append(
+            (
+                "enforced",
+                [
+                    "signature",
+                    "freshness",
+                    "policy-version fence",
+                    "contract",
+                    "burn destination and floor",
+                    "uid replacement safety",
+                    "single writer",
+                ],
+            )
+        )
+        rows.append(
+            (
+                "caveat",
+                [
+                    render.dim(
+                        "fences compare against the local state file; restoring "
+                        "it from a snapshot rewinds them"
                     )
-                ]
-                + [render.dim("all still enforced")],
+                ],
             )
         )
     if getattr(cfg, "jsonl", None):
