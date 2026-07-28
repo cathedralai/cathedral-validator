@@ -34,7 +34,7 @@ from .events import _neutralize
 # decision anywhere depends on it, so an occasional drifting block is harmless.
 _SECS_PER_BLOCK = 12
 
-_LABEL_WIDTH = 10
+_LABEL_WIDTH = 11  # one wider than the longest label ("provenance")
 _INDENT = "   "
 _RULE_WIDTH = max(
     60,
@@ -131,7 +131,7 @@ def _blocks_as_time(blocks: Any) -> str:
     return _duration(n * _SECS_PER_BLOCK)
 
 
-_KV = re.compile(r"(\w+)=(\S+)")
+_KV = re.compile(r'(\w+)=("[^"]*"|\S+)')
 
 
 def parse_detail(detail: str) -> tuple[dict[str, str], str]:
@@ -140,7 +140,7 @@ def parse_detail(detail: str) -> tuple[dict[str, str], str]:
     The lifecycle call sites were written for a flat key=value line, so this
     keeps them working untouched while the renderer gets structured input.
     """
-    kv = {m.group(1): m.group(2) for m in _KV.finditer(detail or "")}
+    kv = {m.group(1): m.group(2).strip('"') for m in _KV.finditer(detail or "")}
     leftover = _KV.sub("", detail or "").strip()
     return kv, leftover
 
@@ -153,20 +153,39 @@ def _visible(text: str) -> int:
     return len(_ANSI.sub("", text))
 
 
-def _wrap(parts: list[str], first: str, cont: str, width: int) -> list[str]:
-    """Lay parts out across as many lines as they need, breaking on separators.
+def _atomic(part: str) -> bool:
+    """True for a part that must never be split across lines.
 
-    Wrapping happens between parts rather than inside them, so a hash or a
-    hotkey is never split across lines where it cannot be copied. A single part
-    wider than the budget simply overflows: truncating an identifier to make a
-    column line up would be the wrong trade.
+    A hash, hotkey, digest or URL is only useful if it can be copied whole, so
+    those overflow rather than break. Anything with spaces is prose and wraps.
+    """
+    return " " not in _ANSI.sub("", part).strip()
+
+
+def _wrap(parts: list[str], first: str, cont: str, width: int) -> list[str]:
+    """Lay parts out across as many lines as they need.
+
+    Breaking prefers separator boundaries so related fields stay together. A
+    single part too wide for the budget is word-wrapped unless it is atomic, in
+    which case it overflows: splitting an identifier to make a column line up
+    would be the wrong trade.
     """
     sep = " · "
     lines: list[str] = []
     prefix, budget = first, width - _visible(first)
     current: list[str] = []
     used = 0
-    for part in [p for p in parts if p]:
+    expanded: list[str] = []
+    for part in [p for p in parts if p and p.strip()]:
+        if _visible(part) <= width - _visible(cont) or _atomic(part):
+            expanded.append(part)
+            continue
+        # Too wide and not atomic: split it into word-sized pieces that the
+        # packing loop below can lay out normally.
+        import textwrap
+
+        expanded.extend(textwrap.wrap(part, width=max(20, width - _visible(cont))))
+    for part in expanded:
         need = _visible(part) + (len(sep) if current else 0)
         if current and used + need > budget:
             lines.append(prefix + dim(sep).join(current))
@@ -210,6 +229,9 @@ class _Stream:
         # refresh, not news, and repeating it makes the block look confused.
         if once and label in self.seen_labels:
             return
+        parts = text if isinstance(text, list) else [text]
+        if not [p for p in parts if p and p.strip()]:
+            return
         self.seen_labels.add(label)
         self.flush_feed(unless=label)
         first = f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}"
@@ -242,9 +264,12 @@ class _Stream:
         # Rows emitted outside a tick carry no event timestamp of their own, so
         # the block is stamped with the wall clock instead of rendering blank.
         stamp = stamp or datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")
-        # An empty block helps nobody: a rule drawn with nothing under it yet
-        # is reused rather than stacked.
+        # An empty block helps nobody. A tick that failed before emitting
+        # anything leaves its rule open, and the next tick reuses it rather
+        # than drawing a second identical divider under the first.
         if self.in_tick and self.rows_since_rule == 0:
+            self.tick_started = time.monotonic()
+            self.seen_labels = set()
             return
         self.flush_feed()
         if self.in_tick:
@@ -421,7 +446,17 @@ def _r_chain_problem(label: str):
 
 
 def _r_provenance(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    s.row("evidence", [_n(rest), _n(kv.get("reason", ""))] or [dim("audited")])
+    s.row("evidence", [_n(rest), _n(kv.get("reason", ""))])
+
+
+def _r_provenance_not_proven(
+    s: _Stream, kv: dict[str, str], rest: str, ts: str
+) -> None:
+    # Named explicitly rather than left to the fallback: the fallback derives a
+    # label from the first word, which for "PROVENANCE not proven" collided
+    # with the label column and dumped the whole detail as one unbreakable run.
+    message = kv.get("error") or kv.get("reason") or kv.get("detail") or rest
+    s.row("evidence", [yellow("not proven"), _n(message)])
 
 
 def _r_suppress(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -452,6 +487,7 @@ _RENDERERS = {
     "CHAIN recovered": _r_chain_problem("recovered a pending attempt"),
     "CHAIN reservation released": _r_chain_problem("reservation released"),
     "PROVENANCE": _r_provenance,
+    "PROVENANCE not proven": _r_provenance_not_proven,
     "PROVENANCE mismatch": _r_provenance,
     "AUTHORITY provenance": _r_provenance,
     "LAUNCH rewarded-set gate": _r_provenance,
@@ -526,7 +562,7 @@ def outcome(ok: bool, text: str) -> None:
     took = _STREAM.elapsed()
     _STREAM.note(
         tint("✓") if ok else tint("✗"),
-        [tint(plain), dim(f"in {took}" if took else "")],
+        [tint(plain), dim(f"in {took}") if took else ""],
     )
     # The exact message stays available, but one indent down and dimmed, so the
     # headline is what the eye lands on.
