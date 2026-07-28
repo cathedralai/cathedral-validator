@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import shutil
 import sys
 import time
 from typing import Any
@@ -33,17 +34,31 @@ from .events import _neutralize
 # decision anywhere depends on it, so an occasional drifting block is harmless.
 _SECS_PER_BLOCK = 12
 
-_LABEL_WIDTH = 10
+_LABEL_WIDTH = 11  # one wider than the longest label ("provenance")
 _INDENT = "   "
-_RULE_WIDTH = 68
+_RULE_WIDTH = max(
+    60,
+    min(
+        120,
+        int(os.environ.get("COLUMNS") or 0)
+        or shutil.get_terminal_size(fallback=(100, 24)).columns,
+    )
+    - len("   "),
+)
 
 
 def _color_enabled() -> bool:
-    """Colour only a real terminal, and honour NO_COLOR."""
-    if os.environ.get("NO_COLOR"):
+    """Colour a real terminal, or anything that asks for it.
+
+    A systemd service writes to the journal, not a tty, so isatty() alone
+    leaves production output permanently monochrome even though journalctl
+    renders ANSI perfectly well. FORCE_COLOR exists for exactly that case.
+    NO_COLOR still wins over everything, per the convention.
+    """
+    if os.environ.get("NO_COLOR") or os.environ.get("CATHEDRAL_VALIDATOR_NO_COLOR"):
         return False
-    if os.environ.get("CATHEDRAL_VALIDATOR_NO_COLOR"):
-        return False
+    if os.environ.get("CATHEDRAL_VALIDATOR_FORCE_COLOR"):
+        return True
     try:
         return sys.stdout.isatty()
     except Exception:  # noqa: BLE001 - a closed or exotic stream is not a tty
@@ -116,7 +131,7 @@ def _blocks_as_time(blocks: Any) -> str:
     return _duration(n * _SECS_PER_BLOCK)
 
 
-_KV = re.compile(r"(\w+)=(\S+)")
+_KV = re.compile(r'(\w+)=("[^"]*"|\S+)')
 
 
 def parse_detail(detail: str) -> tuple[dict[str, str], str]:
@@ -125,9 +140,63 @@ def parse_detail(detail: str) -> tuple[dict[str, str], str]:
     The lifecycle call sites were written for a flat key=value line, so this
     keeps them working untouched while the renderer gets structured input.
     """
-    kv = {m.group(1): m.group(2) for m in _KV.finditer(detail or "")}
+    kv = {m.group(1): m.group(2).strip('"') for m in _KV.finditer(detail or "")}
     leftover = _KV.sub("", detail or "").strip()
     return kv, leftover
+
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def _visible(text: str) -> int:
+    """Width as a person sees it. Colour codes occupy no columns."""
+    return len(_ANSI.sub("", text))
+
+
+def _atomic(part: str) -> bool:
+    """True for a part that must never be split across lines.
+
+    A hash, hotkey, digest or URL is only useful if it can be copied whole, so
+    those overflow rather than break. Anything with spaces is prose and wraps.
+    """
+    return " " not in _ANSI.sub("", part).strip()
+
+
+def _wrap(parts: list[str], first: str, cont: str, width: int) -> list[str]:
+    """Lay parts out across as many lines as they need.
+
+    Breaking prefers separator boundaries so related fields stay together. A
+    single part too wide for the budget is word-wrapped unless it is atomic, in
+    which case it overflows: splitting an identifier to make a column line up
+    would be the wrong trade.
+    """
+    sep = " · "
+    lines: list[str] = []
+    prefix, budget = first, width - _visible(first)
+    current: list[str] = []
+    used = 0
+    expanded: list[str] = []
+    for part in [p for p in parts if p and p.strip()]:
+        if _visible(part) <= width - _visible(cont) or _atomic(part):
+            expanded.append(part)
+            continue
+        # Too wide and not atomic: split it into word-sized pieces that the
+        # packing loop below can lay out normally.
+        import textwrap
+
+        expanded.extend(textwrap.wrap(part, width=max(20, width - _visible(cont))))
+    for part in expanded:
+        need = _visible(part) + (len(sep) if current else 0)
+        if current and used + need > budget:
+            lines.append(prefix + dim(sep).join(current))
+            prefix, budget = cont, width - _visible(cont)
+            current, used = [part], _visible(part)
+            continue
+        current.append(part)
+        used += need
+    if current:
+        lines.append(prefix + dim(sep).join(current))
+    return lines or [first]
 
 
 class _Stream:
@@ -138,6 +207,8 @@ class _Stream:
         self.feed_open = False
         self.in_tick = False
         self.rows_since_rule = 0
+        self.last_stamp = ""
+        self.seen_labels: set[str] = set()
         self.tick_started: float | None = None
 
     def elapsed(self) -> str:
@@ -150,29 +221,65 @@ class _Stream:
     def write(self, text: str = "") -> None:
         print(text)
 
-    def row(self, label: str, text: str) -> None:
+    def row(self, label: str, text: str, *, once: bool = False) -> None:
         # Anything emitted outside a tick (startup preflight, receipt recovery)
         # opens its own block, so a row is never orphaned above the first rule.
         if not self.in_tick:
             self.rule("")
+        # Chain preflight runs more than once per tick. The second reading is a
+        # refresh, not news, and repeating it makes the block look confused.
+        if once and label in self.seen_labels:
+            return
+        parts = text if isinstance(text, list) else [text]
+        if not [p for p in parts if p and p.strip()]:
+            return
+        self.seen_labels.add(label)
         self.flush_feed(unless=label)
-        self.write(f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}{text}")
+        first = f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}"
+        cont = f"{_INDENT}{' ' * _LABEL_WIDTH}"
+        for line in _wrap(
+            text if isinstance(text, list) else [text],
+            first,
+            cont,
+            _RULE_WIDTH + len(_INDENT),
+        ):
+            self.write(line)
         self.rows_since_rule += 1
 
     def note(self, symbol: str, text: str) -> None:
         if not self.in_tick:
             self.rule("")
         self.flush_feed()
-        self.write(f"{_INDENT}{symbol} {text}")
+        first = f"{_INDENT}{symbol} "
+        cont = f"{_INDENT}  "
+        for line in _wrap(
+            text if isinstance(text, list) else [text],
+            first,
+            cont,
+            _RULE_WIDTH + len(_INDENT),
+        ):
+            self.write(line)
         self.rows_since_rule += 1
 
     def rule(self, stamp: str = "") -> None:
         # Rows emitted outside a tick carry no event timestamp of their own, so
         # the block is stamped with the wall clock instead of rendering blank.
         stamp = stamp or datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")
-        # An empty block helps nobody: a rule drawn with nothing under it yet
-        # is reused rather than stacked.
+        # An empty block helps nobody. A tick that failed before emitting
+        # anything leaves its rule open, and the next tick reuses it rather
+        # than drawing a second identical divider under the first.
         if self.in_tick and self.rows_since_rule == 0:
+            self.tick_started = time.monotonic()
+            self.seen_labels = set()
+            self.last_stamp = stamp
+            return
+        # A head-drift retry rebuilds the whole tick, so it re-enters here
+        # within the same second. Those are attempts at one submission, not
+        # separate ticks, and drawing a fresh identical divider for each made
+        # the stream look like it was repeating itself.
+        if self.in_tick and stamp == self.last_stamp:
+            # seen_labels deliberately NOT reset: a retry is the same tick, so
+            # its refreshed chain reading is still the same row, not news.
             return
         self.flush_feed()
         if self.in_tick:
@@ -181,6 +288,8 @@ class _Stream:
         self.write(dim(_INDENT + head + "─" * max(0, _RULE_WIDTH - len(head))))
         self.in_tick = True
         self.rows_since_rule = 0
+        self.seen_labels = set()
+        self.last_stamp = stamp
         self.tick_started = time.monotonic()
 
     # -- the one accumulated row -------------------------------------------
@@ -193,7 +302,10 @@ class _Stream:
         if not self.feed_open or unless == "feed":
             return
         bits, self.feed_bits, self.feed_open = self.feed_bits, [], False
-        self.write(f"{_INDENT}{dim('feed'.ljust(_LABEL_WIDTH))}{_sep(bits)}")
+        first = f"{_INDENT}{dim('feed'.ljust(_LABEL_WIDTH))}"
+        cont = f"{_INDENT}{' ' * _LABEL_WIDTH}"
+        for line in _wrap(bits, first, cont, _RULE_WIDTH + len(_INDENT)):
+            self.write(line)
 
 
 _STREAM = _Stream()
@@ -245,13 +357,13 @@ def _r_vector_accepted(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> No
         parts.append(f"{bold(n)} miner{'' if n == '1' else 's'} scored")
     if burn:
         parts.append(f"burn {_n(burn)}")
-    s.row("vector", _sep(parts) or "accepted")
+    s.row("vector", parts or ["accepted"])
 
 
 def _r_vector_rejected(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     stage = kv.get("stage", "")
     reason = kv.get("reason", "") or rest
-    s.note(red("✗"), _sep([red("vector rejected"), _n(stage), _n(reason)]))
+    s.note(red("✗"), [red("vector rejected"), _n(stage), _n(reason)])
 
 
 def _r_vector_idle(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -259,26 +371,24 @@ def _r_vector_idle(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
 
 
 def _r_verify_failed(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    s.note(red("✗"), _sep([red("verification failed"), _n(kv.get("reason", ""))]))
+    s.note(red("✗"), [red("verification failed"), _n(kv.get("reason", ""))])
 
 
 def _r_feed_unavailable(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     s.flush_feed()
     s.row(
         "feed",
-        _sep(
-            [
-                yellow("unavailable"),
-                _n(kv.get("reason", "")),
-                dim("continuing on independent evidence"),
-            ]
-        ),
+        [
+            yellow("unavailable"),
+            _n(kv.get("reason", "")),
+            dim("continuing on independent evidence"),
+        ],
     )
 
 
 def _r_feed_invalid(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     s.flush_feed()
-    s.row("feed", _sep([red("invalid"), _n(kv.get("reason", ""))]))
+    s.row("feed", [red("invalid"), _n(kv.get("reason", ""))])
 
 
 def _r_preflight(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -293,7 +403,7 @@ def _r_preflight(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
         parts.append(f"last write {_blocks_as_time(since)} ago")
     if safe is not None:
         parts.append(dim(f"{_n(safe)} uids replacement-safe"))
-    s.row("chain", _sep(parts))
+    s.row("chain", parts, once=True)
 
 
 def _r_map_complete(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -310,7 +420,7 @@ def _r_map_complete(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
             pct = _n(weight)
         tag = dim("burn") if uid == burn_uid else ""
         entries.append(f"{cyan(_n(uid))} {bold(pct)}{(' ' + tag) if tag else ''}")
-    s.row("weights", _sep(entries) if entries else dim("none"))
+    s.row("weights", entries or [dim("none")])
 
 
 def _r_map_offline(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -325,16 +435,14 @@ def _r_chain_submitted(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> No
     final = str(kv.get("finalized", "")).lower() == "true"
     s.row(
         "submit",
-        _sep(
-            [
-                _short(kv.get("extrinsic_hash", "")),
-                f"block {bold(_n(kv.get('block_number', '')))}",
-                green("finalized") if final else yellow("included"),
-            ]
-        ),
+        [
+            _short(kv.get("extrinsic_hash", "")),
+            f"block {bold(_n(kv.get('block_number', '')))}",
+            green("finalized") if final else yellow("included"),
+        ],
     )
     took = s.elapsed()
-    s.note(green("✓"), _sep([green("weights written"), dim(f"in {took}" if took else "")]))
+    s.note(green("✓"), [green("weights written"), dim(f"in {took}" if took else "")])
 
 
 def _r_chain_problem(label: str):
@@ -343,13 +451,23 @@ def _r_chain_problem(label: str):
             _n(kv.get("reason", "")),
             _short(kv.get("attempt_id", "")) if kv.get("attempt_id") else "",
         ]
-        s.note(yellow("⚠"), _sep([yellow(label)] + parts))
+        s.note(yellow("⚠"), [yellow(label)] + parts)
 
     return render
 
 
 def _r_provenance(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    s.row("evidence", _sep([_n(rest), _n(kv.get("reason", ""))]) or dim("audited"))
+    s.row("evidence", [_n(rest), _n(kv.get("reason", ""))])
+
+
+def _r_provenance_not_proven(
+    s: _Stream, kv: dict[str, str], rest: str, ts: str
+) -> None:
+    # Named explicitly rather than left to the fallback: the fallback derives a
+    # label from the first word, which for "PROVENANCE not proven" collided
+    # with the label column and dumped the whole detail as one unbreakable run.
+    message = kv.get("error") or kv.get("reason") or kv.get("detail") or rest
+    s.row("evidence", [yellow("not proven"), _n(message)])
 
 
 def _r_suppress(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
@@ -380,6 +498,7 @@ _RENDERERS = {
     "CHAIN recovered": _r_chain_problem("recovered a pending attempt"),
     "CHAIN reservation released": _r_chain_problem("reservation released"),
     "PROVENANCE": _r_provenance,
+    "PROVENANCE not proven": _r_provenance_not_proven,
     "PROVENANCE mismatch": _r_provenance,
     "AUTHORITY provenance": _r_provenance,
     "LAUNCH rewarded-set gate": _r_provenance,
@@ -454,15 +573,32 @@ def outcome(ok: bool, text: str) -> None:
     took = _STREAM.elapsed()
     _STREAM.note(
         tint("✓") if ok else tint("✗"),
-        _sep([tint(plain), dim(original), dim(f"after {took}" if took else "")]),
+        [tint(plain), dim(f"in {took}") if took else ""],
     )
+    # The exact message stays available, but one indent down and dimmed, so the
+    # headline is what the eye lands on.
+    if original:
+        import textwrap
+
+        body = _INDENT + "  "
+        for line in textwrap.wrap(
+            original,
+            width=max(40, _RULE_WIDTH - 2),
+            initial_indent="",
+            subsequent_indent="",
+        ):
+            _STREAM.write(body + dim(line))
 
 
-def banner(rows: list[tuple[str, str]], title: str, subtitle: str) -> None:
+def banner(rows: list[tuple[str, list[str] | str]], title: str, subtitle: str) -> None:
     """Startup identity block. One per process, before the first tick."""
     _STREAM.write()
     _STREAM.write(f"{_INDENT}{bold(_n(title))}{dim('  ' + _n(subtitle))}")
     _STREAM.write(dim(_INDENT + "─" * _RULE_WIDTH))
     for label, value in rows:
-        _STREAM.write(f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}{value}")
+        first = f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}"
+        cont = f"{_INDENT}{' ' * _LABEL_WIDTH}"
+        parts = value if isinstance(value, list) else [value]
+        for line in _wrap(parts, first, cont, _RULE_WIDTH + len(_INDENT)):
+            _STREAM.write(line)
     _STREAM.write()
