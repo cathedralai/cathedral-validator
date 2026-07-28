@@ -338,16 +338,16 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
     from . import render
 
     authority = {
-        "off": (
-            f"{render.bold('thin')} · follows the signed vector, no provenance audit"
-        ),
-        "shadow": (
-            f"{render.bold('thin')} · follows the signed vector, "
-            f"audits provenance every tick"
-        ),
-        "authority": (
-            f"{render.bold('full')} · independent recomputation is what gets submitted"
-        ),
+        "off": [render.bold("thin"), "follows the signed vector, no audit"],
+        "shadow": [
+            render.bold("thin"),
+            "follows the signed vector",
+            "audits provenance every tick",
+        ],
+        "authority": [
+            render.bold("full"),
+            "independent recomputation is what gets submitted",
+        ],
     }[provenance_mode]
     rows = [
         (
@@ -359,15 +359,17 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         ("authority", authority),
         (
             "feed",
-            f"{validator_thin._safe_endpoint_label(cfg.publisher_url)}"
-            f"{render.dim('  key ')}{cfg.key_id}",
+            [
+                validator_thin._safe_endpoint_label(cfg.publisher_url),
+                render.dim(f"key {cfg.key_id}"),
+            ],
         ),
     ]
     if cfg.require_policy:
         rows.append(
             (
                 "policy",
-                f"{cfg.require_policy}{render.dim('  legacy and v3 vectors rejected')}",
+                [cfg.require_policy, render.dim("legacy and v3 vectors rejected")],
             )
         )
     if getattr(cfg, "beta_skip_launch_ceremony", False):
@@ -375,9 +377,20 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         rows.append(
             (
                 "beta",
-                f"{render.yellow('launch ceremony waived')}"
-                f"{render.dim(' · signature, freshness, rollback fence, contract, ')}"
-                f"{render.dim('burn, uid safety and single-writer all still enforced')}",
+                [render.yellow("launch ceremony waived")]
+                + [
+                    render.dim(check)
+                    for check in (
+                        "signature",
+                        "freshness",
+                        "rollback fence",
+                        "contract",
+                        "burn",
+                        "uid safety",
+                        "single writer",
+                    )
+                ]
+                + [render.dim("all still enforced")],
             )
         )
     if getattr(cfg, "jsonl", None):

@@ -25,6 +25,11 @@ Environment=HOME=/var/lib/cathedral-validator
 # CATHEDRAL_VALIDATOR_JSONL_GROUP is deliberately NOT set, so the raw
 # journal stays 0600 and the validator refuses to open it any other way.
 Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=cathedral-validator-log
+# A service writes to the journal, never a tty, so the renderer would otherwise
+# emit monochrome forever. journalctl renders ANSI fine, and NO_COLOR still wins.
+Environment=CATHEDRAL_VALIDATOR_FORCE_COLOR=1
+# The journal has no terminal to measure, so the layout needs a width to target.
+Environment=COLUMNS=100
 # Belt and braces. Conflicts= only acts on units systemd is asked to start;
 # it cannot stop a writer someone launched by hand. This refuses to start
 # at all while any known SN39 writer is active, because the legacy writer
