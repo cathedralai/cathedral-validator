@@ -93,8 +93,10 @@ jobs:
   integration:
     # Advisory. Exercises the default-OFF Compute+Distill integration lane against
     # the shared contract shipped by cathedral-distill (the '.[integration]' extra).
-    # The lane test skips cleanly until the companion cathedral-distill contract is
-    # published on main; this job proves it live once it is. See VALIDATOR.md.
+    # The integration dependency is fetched best-effort: while cathedral-distill is
+    # private (or its contract is not yet on main), the extra will not install and
+    # the lane test SKIPS cleanly (it importorskips the contract modules). Once the
+    # dependency is CI-reachable, the same job runs the test for real. See VALIDATOR.md.
     name: Integration lane (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -105,5 +107,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[test,integration]"
+      # base + test always install (so pytest is present); the integration extra is
+      # best-effort so a private/unpublished dependency skips rather than errors.
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pip install -e ".[integration]" || echo "integration extra unavailable in CI; lane test will skip"
       - run: python -m pytest -q tests/thin/test_integration_lane.py
