@@ -89,3 +89,21 @@ jobs:
       - run: |
           python -m pytest -q scaffold/publisher/tests \
             --deselect scaffold/publisher/tests/test_validator_two_mode.py::test_required_ci_collection_gate_returns_zero
+
+  integration:
+    # Advisory. Exercises the default-OFF Compute+Distill integration lane against
+    # the shared contract shipped by cathedral-distill (the '.[integration]' extra).
+    # The lane test skips cleanly until the companion cathedral-distill contract is
+    # published on main; this job proves it live once it is. See VALIDATOR.md.
+    name: Integration lane (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[test,integration]"
+      - run: python -m pytest -q tests/thin/test_integration_lane.py
