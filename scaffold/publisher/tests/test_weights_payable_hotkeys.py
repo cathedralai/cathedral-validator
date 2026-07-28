@@ -98,10 +98,7 @@ def test_mark_mode_keeps_weights_and_marks_missing_hotkeys(tmp_path, monkeypatch
 
     payload = _build(store, now)
 
-    assert [w["miner_hotkey"] for w in payload["weights"]] == [
-        "hk-missing",
-        "hk-payable",
-    ]
+    assert [w["miner_hotkey"] for w in payload["weights"]] == ["hk-missing", "hk-payable"]
     meta = payload["policy_metadata"]["payable_hotkeys"]
     assert meta["mode"] == "mark"
     assert meta["enforced"] is False
@@ -110,25 +107,18 @@ def test_mark_mode_keeps_weights_and_marks_missing_hotkeys(tmp_path, monkeypatch
     assert meta["final_miner_count"] == 2
 
 
-def test_filter_mode_without_fresh_snapshot_fails_open_and_marks_status(
-    tmp_path, monkeypatch
-):
+def test_filter_mode_without_fresh_snapshot_fails_open_and_marks_status(tmp_path, monkeypatch):
     _common_env(monkeypatch, "filter")
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = _store(tmp_path)
     ran_at = weights._ms_iso(now - timedelta(minutes=1))
     _add_eval_run(store, "hk-payable", ran_at)
     _add_eval_run(store, "hk-missing", ran_at)
-    _add_metagraph_hotkey(
-        store, "hk-payable", weights._ms_iso(now - timedelta(hours=1)), uid=7
-    )
+    _add_metagraph_hotkey(store, "hk-payable", weights._ms_iso(now - timedelta(hours=1)), uid=7)
 
     payload = _build(store, now)
 
-    assert [w["miner_hotkey"] for w in payload["weights"]] == [
-        "hk-missing",
-        "hk-payable",
-    ]
+    assert [w["miner_hotkey"] for w in payload["weights"]] == ["hk-missing", "hk-payable"]
     meta = payload["policy_metadata"]["payable_hotkeys"]
     assert meta["mode"] == "filter"
     assert meta["enforced"] is False

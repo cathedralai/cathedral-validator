@@ -16,14 +16,13 @@ arena, not volume ratios on disposable challenges.
 Anti-arms-race by construction: a hotkey can solve each board challenge at
 most once, so there is a hard ceiling, not an open-ended volume race.
 """
-
 from __future__ import annotations
 
 import os
 
 from .store import Store
 
-SUBMIT_MODE_ENV = "CATHEDRAL_SUBMIT_MODE"  # open_window | lock_wins
+SUBMIT_MODE_ENV = "CATHEDRAL_SUBMIT_MODE"            # open_window | lock_wins
 
 
 def submit_mode() -> str:
@@ -33,7 +32,6 @@ def submit_mode() -> str:
 
 # -- open-window claim --------------------------------------------------------
 
-
 def claim_solve(conn, challenge_id: str, miner_hotkey: str, now_iso: str) -> int | None:
     """Atomically claim a distinct (challenge, hotkey) solve inside the caller's
     write transaction. Returns the first-seen solve rank (1-based), or None if
@@ -41,15 +39,12 @@ def claim_solve(conn, challenge_id: str, miner_hotkey: str, now_iso: str) -> int
     property production's PAR-2 relies on)."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
-        "VALUES (?, ?, ?)",
-        (challenge_id, miner_hotkey, now_iso),
-    )
+        "VALUES (?, ?, ?)", (challenge_id, miner_hotkey, now_iso))
     if not cur.rowcount:
         return None
     n = conn.execute(
         "SELECT COUNT(*) FROM lane_challenge_solves WHERE challenge_id=?",
-        (challenge_id,),
-    ).fetchone()[0]
+        (challenge_id,)).fetchone()[0]
     return int(n)
 
 

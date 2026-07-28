@@ -4,7 +4,6 @@ Covers the SAT-as-mechanism-#1 adapter: verified V2 SAT scores
 (v2_pipeline.score_totals) remapped from miner_hotkey to miner uid via the
 metagraph_hotkeys snapshot table, per deploy/MECHANISM_ROUTER_CONTRACT.md.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -90,25 +89,16 @@ def test_maps_verified_scores_to_uids_and_drops_unmapped_hotkeys(tmp_path, monke
     store = _store(tmp_path)
 
     _insert_manifest(
-        store,
-        manifest_id="m-mapped-1",
-        hotkey="hk-mapped-1",
-        challenge_id="chal-1",
-        weighted_score=3.0,
+        store, manifest_id="m-mapped-1", hotkey="hk-mapped-1",
+        challenge_id="chal-1", weighted_score=3.0,
     )
     _insert_manifest(
-        store,
-        manifest_id="m-mapped-2",
-        hotkey="hk-mapped-2",
-        challenge_id="chal-2",
-        weighted_score=5.0,
+        store, manifest_id="m-mapped-2", hotkey="hk-mapped-2",
+        challenge_id="chal-2", weighted_score=5.0,
     )
     _insert_manifest(
-        store,
-        manifest_id="m-unmapped",
-        hotkey="hk-unmapped",
-        challenge_id="chal-3",
-        weighted_score=7.0,
+        store, manifest_id="m-unmapped", hotkey="hk-unmapped",
+        challenge_id="chal-3", weighted_score=7.0,
     )
     _insert_metagraph_hotkey(store, hotkey="hk-mapped-1", uid=11)
     _insert_metagraph_hotkey(store, hotkey="hk-mapped-2", uid=22)
@@ -129,17 +119,11 @@ def test_sums_multiple_verified_challenges_per_uid(tmp_path, monkeypatch):
     store = _store(tmp_path)
 
     _insert_manifest(
-        store,
-        manifest_id="m-1",
-        hotkey="hk-a",
-        challenge_id="chal-1",
+        store, manifest_id="m-1", hotkey="hk-a", challenge_id="chal-1",
         weighted_score=2.0,
     )
     _insert_manifest(
-        store,
-        manifest_id="m-2",
-        hotkey="hk-a",
-        challenge_id="chal-2",
+        store, manifest_id="m-2", hotkey="hk-a", challenge_id="chal-2",
         weighted_score=4.5,
     )
     _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1)
@@ -154,13 +138,8 @@ def test_unverified_rows_are_not_scored(tmp_path, monkeypatch):
     store = _store(tmp_path)
 
     _insert_manifest(
-        store,
-        manifest_id="m-pending",
-        hotkey="hk-a",
-        challenge_id="chal-1",
-        weighted_score=9.0,
-        status="received",
-        verified_at_iso=None,
+        store, manifest_id="m-pending", hotkey="hk-a", challenge_id="chal-1",
+        weighted_score=9.0, status="received", verified_at_iso=None,
     )
     _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1)
 
@@ -187,34 +166,23 @@ def test_since_iso_and_epoch_filters_pass_through(tmp_path, monkeypatch):
     store = _store(tmp_path)
 
     _insert_manifest(
-        store,
-        manifest_id="m-old",
-        hotkey="hk-a",
-        challenge_id="chal-1",
-        weighted_score=1.0,
-        verified_at_iso="2026-01-01T00:00:00.000Z",
+        store, manifest_id="m-old", hotkey="hk-a", challenge_id="chal-1",
+        weighted_score=1.0, verified_at_iso="2026-01-01T00:00:00.000Z",
     )
     _insert_manifest(
-        store,
-        manifest_id="m-new",
-        hotkey="hk-a",
-        challenge_id="chal-2",
-        weighted_score=2.0,
-        verified_at_iso="2026-07-01T00:00:00.000Z",
+        store, manifest_id="m-new", hotkey="hk-a", challenge_id="chal-2",
+        weighted_score=2.0, verified_at_iso="2026-07-01T00:00:00.000Z",
     )
     _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1)
 
     vector, _meta = mechanism_sat_adapter.sat_mechanism_scores(
-        store,
-        since_iso="2026-06-01T00:00:00.000Z",
+        store, since_iso="2026-06-01T00:00:00.000Z",
     )
 
     assert vector == {1: 2.0}
 
 
-def test_default_off_no_env_still_maps_using_default_network_netuid(
-    tmp_path, monkeypatch
-):
+def test_default_off_no_env_still_maps_using_default_network_netuid(tmp_path, monkeypatch):
     """No CATHEDRAL_WEIGHT_POLICY_* env set: defaults (finney/39) should still
     find a mapping if metagraph_hotkeys already carries those defaults, and
     must not raise."""
@@ -223,10 +191,7 @@ def test_default_off_no_env_still_maps_using_default_network_netuid(
     store = _store(tmp_path)
 
     _insert_manifest(
-        store,
-        manifest_id="m-1",
-        hotkey="hk-a",
-        challenge_id="chal-1",
+        store, manifest_id="m-1", hotkey="hk-a", challenge_id="chal-1",
         weighted_score=1.0,
     )
     _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1, network="finney", netuid=39)

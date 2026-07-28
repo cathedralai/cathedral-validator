@@ -12,7 +12,6 @@ Two directions are pinned:
                 app.py, the `solution_*` reasons in sat_solution.py, and the
                 `*_origin_unavailable` reasons in worker.mjs.
 """
-
 import pathlib
 import re
 
@@ -79,9 +78,7 @@ def test_solution_reasons_documented_and_emitted():
     sat_src = SAT.read_text(encoding="utf-8")
     for reason in SOLUTION_REASONS:
         assert reason in doc, f"{reason!r} not documented in contract"
-        assert reason in sat_src, (
-            f"{reason!r} documented but not emitted by sat_solution.py"
-        )
+        assert reason in sat_src, f"{reason!r} documented but not emitted by sat_solution.py"
 
 
 def test_origin_unavailable_documented():
@@ -127,7 +124,9 @@ def test_reverse_submit_header_reasons_documented():
     documented. Catches a new submit-path reason added without a doc row."""
     doc = _doc()
     app_src = APP.read_text(encoding="utf-8")
-    emitted = set(re.findall(r'"X-Cathedral-Rejection-Reason":\s*"([^"]+)"', app_src))
+    emitted = set(
+        re.findall(r'"X-Cathedral-Rejection-Reason":\s*"([^"]+)"', app_src)
+    )
     assert emitted, "no static rejection-reason header values found -- regex stale?"
     for reason in sorted(emitted):
         assert reason in doc, (
@@ -155,9 +154,7 @@ def test_reverse_origin_unavailable_reasons_documented():
     doc = _doc()
     worker_src = WORKER.read_text(encoding="utf-8")
     emitted = set(re.findall(r"[a-z]+_origin_unavailable", worker_src))
-    assert emitted, (
-        "no *_origin_unavailable reasons found in worker.mjs -- regex stale?"
-    )
+    assert emitted, "no *_origin_unavailable reasons found in worker.mjs -- regex stale?"
     for reason in sorted(emitted):
         documented = reason in doc or "_origin_unavailable" in doc
         assert documented, (
@@ -173,7 +170,7 @@ def test_planned_admission_code_marked_planned():
     # It is genuinely not yet emitted; the doc must flag it as planned.
     assert "submit_admission_unavailable" not in app_src
     idx = doc.rindex("submit_admission_unavailable")
-    row = doc[idx : idx + 400].lower()
+    row = doc[idx: idx + 400].lower()
     assert "planned" in row, "submit_admission_unavailable must be marked planned"
 
 

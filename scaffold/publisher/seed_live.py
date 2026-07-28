@@ -25,7 +25,6 @@ Usage:
     python -m scaffold.publisher.seed_live --db publisher.db --days 7
     python -m scaffold.publisher.seed_live --db publisher.db --dry-run
 """
-
 from __future__ import annotations
 
 import argparse
@@ -53,8 +52,7 @@ def _http_json(url: str, timeout: int = 90, retries: int = 3) -> dict[str, Any]:
     for attempt in range(retries):
         try:
             req = urllib.request.Request(
-                url, headers={"User-Agent": "cathedral-thin-seeder/1.0"}
-            )
+                url, headers={"User-Agent": "cathedral-thin-seeder/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read())
         except Exception as e:  # network blip / read timeout — back off and retry
@@ -127,9 +125,7 @@ def seed_rows(
             if _tuple_gt(ran_at, rid, newest_ran_at, newest_id):
                 newest_ran_at, newest_id = ran_at, rid
         # advance the page cursor to the feed's reported next position
-        cur_ran_at = (
-            page.get("next_since_ran_at") or page.get("next_since") or cur_ran_at
-        )
+        cur_ran_at = page.get("next_since_ran_at") or page.get("next_since") or cur_ran_at
         cur_id = page.get("next_since_id")
         # CHECKPOINT THE WATERMARK EVERY PAGE so a killed/dropped seed resumes
         # from here instead of restarting from days-ago. Idempotent (OR IGNORE
@@ -149,11 +145,8 @@ def seed_rows(
             store.set_seed_state(WATERMARK_ID, newest_id)
 
     return {
-        "pages": pages,
-        "rows_pulled": pulled,
-        "rows_inserted": inserted,
-        "watermark_ran_at": newest_ran_at,
-        "watermark_id": newest_id,
+        "pages": pages, "rows_pulled": pulled, "rows_inserted": inserted,
+        "watermark_ran_at": newest_ran_at, "watermark_id": newest_id,
     }
 
 
@@ -182,8 +175,7 @@ def seed_board(
             continue
         by_tier[tier] = by_tier.get(tier, 0) + 1
         cnf_url = c.get("active_cnf_path") or (
-            f"/api/cathedral/v1/synthetic-boolean/active-cnf?challenge_id={cid}"
-        )
+            f"/api/cathedral/v1/synthetic-boolean/active-cnf?challenge_id={cid}")
         if dry_run:
             mirrored += 1
             continue
@@ -202,32 +194,17 @@ def seed_board(
                 "  difficulty_label=excluded.difficulty_label, cnf_url=excluded.cnf_url, "
                 "  updated_at_iso=excluded.updated_at_iso "
                 "WHERE lane_challenges.cnf_source='external'",
-                (
-                    cid,
-                    c.get("family_id", "synthetic_boolean_v1"),
-                    tier,
-                    c.get("cnf_sha256", ""),
-                    int(c.get("cnf_bytes", 0)),
-                    int(c.get("num_vars", 0)),
-                    int(c.get("num_clauses", 0)),
-                    c.get("status", "active"),
-                    float(c.get("score_multiplier", 1.0)),
-                    c.get("difficulty_label"),
-                    now,
-                    cnf_url,
-                    now,
-                ),
+                (cid, c.get("family_id", "synthetic_boolean_v1"), tier,
+                 c.get("cnf_sha256", ""), int(c.get("cnf_bytes", 0)),
+                 int(c.get("num_vars", 0)), int(c.get("num_clauses", 0)),
+                 c.get("status", "active"), float(c.get("score_multiplier", 1.0)),
+                 c.get("difficulty_label"), now, cnf_url, now),
             )
-
         store.write(_do)
         mirrored += 1
 
-    return {
-        "mirrored": mirrored,
-        "skipped": skipped,
-        "by_tier": by_tier,
-        "board_count": board.get("count", len(items)),
-    }
+    return {"mirrored": mirrored, "skipped": skipped, "by_tier": by_tier,
+            "board_count": board.get("count", len(items))}
 
 
 def run_with_store(store: Store, args: argparse.Namespace, log=print) -> dict[str, Any]:
@@ -235,17 +212,9 @@ def run_with_store(store: Store, args: argparse.Namespace, log=print) -> dict[st
     Used by the in-app boot seeder so the long-lived publisher process owns the
     connection. Returns the rows + board summary."""
     base = args.base_url.rstrip("/")
-    rs = seed_rows(
-        store,
-        base_url=base,
-        days=args.days,
-        page_limit=args.page_limit,
-        pace_secs=args.pace,
-        dry_run=args.dry_run,
-        timeout=args.timeout,
-        max_pages=args.max_pages,
-        log=log,
-    )
+    rs = seed_rows(store, base_url=base, days=args.days, page_limit=args.page_limit,
+                   pace_secs=args.pace, dry_run=args.dry_run, timeout=args.timeout,
+                   max_pages=args.max_pages, log=log)
     bs = seed_board(store, base_url=base, dry_run=args.dry_run, log=log)
     return {"rows": rs, "board": bs, "total_rows": store.count_rows()}
 
@@ -256,32 +225,18 @@ def run(args: argparse.Namespace, log=print) -> int:
     mode = "DRY-RUN (no writes)" if args.dry_run else "LIVE seed"
     log(f"seed_live — {mode} — db={args.db} base={base}")
 
-    log(
-        "ROWS — pulling last "
-        f"{args.days}d of signed rows (tuple cursor, verbatim, no re-sign)"
-    )
-    rs = seed_rows(
-        store,
-        base_url=base,
-        days=args.days,
-        page_limit=args.page_limit,
-        pace_secs=args.pace,
-        dry_run=args.dry_run,
-        timeout=args.timeout,
-        max_pages=args.max_pages,
-        log=log,
-    )
-    log(
-        f"  pages={rs['pages']} pulled={rs['rows_pulled']} "
-        f"inserted={rs['rows_inserted']} watermark=({rs['watermark_ran_at']}, {rs['watermark_id']})"
-    )
+    log("ROWS — pulling last "
+        f"{args.days}d of signed rows (tuple cursor, verbatim, no re-sign)")
+    rs = seed_rows(store, base_url=base, days=args.days, page_limit=args.page_limit,
+                   pace_secs=args.pace, dry_run=args.dry_run, timeout=args.timeout,
+                   max_pages=args.max_pages, log=log)
+    log(f"  pages={rs['pages']} pulled={rs['rows_pulled']} "
+        f"inserted={rs['rows_inserted']} watermark=({rs['watermark_ran_at']}, {rs['watermark_id']})")
 
     log("BOARD — mirroring active challenges (metadata-only, CNF external)")
     bs = seed_board(store, base_url=base, dry_run=args.dry_run, log=log)
-    log(
-        f"  mirrored={bs['mirrored']} skipped={bs['skipped']} "
-        f"by_tier={bs['by_tier']} (live board count={bs['board_count']})"
-    )
+    log(f"  mirrored={bs['mirrored']} skipped={bs['skipped']} "
+        f"by_tier={bs['by_tier']} (live board count={bs['board_count']})")
 
     if not args.dry_run:
         log(f"  store now holds {store.count_rows()} feed rows")
@@ -291,35 +246,17 @@ def run(args: argparse.Namespace, log=print) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
-        description="Seed the thin publisher from the live public surface."
-    )
-    p.add_argument(
-        "--db", default="publisher.db", help="SQLite path for the publisher store"
-    )
+    p = argparse.ArgumentParser(description="Seed the thin publisher from the live public surface.")
+    p.add_argument("--db", default="publisher.db", help="SQLite path for the publisher store")
     p.add_argument("--base-url", default=DEFAULT_BASE, help="live publisher base URL")
-    p.add_argument(
-        "--days", type=int, default=7, help="days of feed history to seed (default 7)"
-    )
+    p.add_argument("--days", type=int, default=7, help="days of feed history to seed (default 7)")
     p.add_argument("--page-limit", type=int, default=500, help="feed page size (<=500)")
-    p.add_argument(
-        "--pace",
-        type=float,
-        default=1.0,
-        help="seconds to sleep between feed pages (rate-limit courtesy)",
-    )
-    p.add_argument(
-        "--timeout", type=int, default=90, help="per-request HTTP timeout secs"
-    )
-    p.add_argument(
-        "--max-pages",
-        type=int,
-        default=100_000,
-        help="cap pages pulled (use a small value for a quick probe)",
-    )
-    p.add_argument(
-        "--dry-run", action="store_true", help="print what would be seeded; no writes"
-    )
+    p.add_argument("--pace", type=float, default=1.0,
+                   help="seconds to sleep between feed pages (rate-limit courtesy)")
+    p.add_argument("--timeout", type=int, default=90, help="per-request HTTP timeout secs")
+    p.add_argument("--max-pages", type=int, default=100_000,
+                   help="cap pages pulled (use a small value for a quick probe)")
+    p.add_argument("--dry-run", action="store_true", help="print what would be seeded; no writes")
     return run(p.parse_args(argv))
 
 

@@ -26,7 +26,6 @@ Coverage matrix
 - regression_v3_10pct             — existing v3 cap path still works
 - regression_legacy               — legacy (no metadata) path still works
 """
-
 from __future__ import annotations
 
 import math
@@ -39,7 +38,6 @@ from scaffold import validator_thin
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 
 def _cp_meta(
     *,
@@ -100,7 +98,6 @@ def _cp_payload(
 # Positive path — external only, 100%
 # ---------------------------------------------------------------------------
 
-
 def test_positive_external_only_100pct() -> None:
     """Two miners, weights sum to 1.0, maps correctly with no burn."""
     rows = [_cp_row("hk_a", 0.6), _cp_row("hk_b", 0.4)]
@@ -111,31 +108,19 @@ def test_positive_external_only_100pct() -> None:
 
 def test_base_component_must_be_zero_nonzero_raises() -> None:
     """A row with base_component != 0 is always rejected."""
-    row = {
-        "miner_hotkey": "hk",
-        "weight": 0.5,
-        "base_component": 0.1,
-        "external_component": 0.5,
-    }
+    row = {"miner_hotkey": "hk", "weight": 0.5,
+           "base_component": 0.1, "external_component": 0.5}
     payload = _cp_payload([row, _cp_row("hk2", 0.5)])
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="base_component must be 0"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError, match="base_component must be 0"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1, "hk2": 2})
 
 
 def test_weight_equals_external_component() -> None:
     """external_component must equal weight to within 1e-12."""
-    row = {
-        "miner_hotkey": "hk",
-        "weight": 0.4,
-        "base_component": 0.0,
-        "external_component": 0.6,
-    }
+    row = {"miner_hotkey": "hk", "weight": 0.4,
+           "base_component": 0.0, "external_component": 0.6}
     payload = _cp_payload([row, _cp_row("hk2", 0.6)])
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="weight != external_component"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError, match="weight != external_component"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1, "hk2": 2})
 
 
@@ -143,15 +128,10 @@ def test_weight_equals_external_component() -> None:
 # Disabled / missing / unconfirmed → empty (signed burn only)
 # ---------------------------------------------------------------------------
 
-
 def test_disabled_mass0_applies_burn_only() -> None:
     """Degraded vector (confidential_mass=0, no positive rows) → just burn."""
-    payload = _cp_payload(
-        [],
-        cp_meta=_cp_meta(confidential_mass=0.0),
-        burn_uid=99,
-        forced_burn_percentage=5.0,
-    )
+    payload = _cp_payload([], cp_meta=_cp_meta(confidential_mass=0.0),
+                          burn_uid=99, forced_burn_percentage=5.0)
     result = validator_thin.vector_to_uid_weights(payload, {"hk": 10})
     # No positive weights → burn UID gets all the mass
     assert result == {99: 1.0}
@@ -202,9 +182,7 @@ def test_wrong_mode_mass1_raises() -> None:
         [_cp_row("hk", 1.0)],
         cp_meta=_cp_meta(mode="blend"),
     )
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="mode=confidential_primary"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError, match="mode=confidential_primary"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
@@ -212,24 +190,18 @@ def test_wrong_mode_mass1_raises() -> None:
 # Zero revocation
 # ---------------------------------------------------------------------------
 
-
 def test_zero_revocation_mass0_no_burn_uid_raises() -> None:
     """All-miners revoke with no burn_uid configured: fail closed (VectorError)."""
     payload = _cp_payload([], cp_meta=_cp_meta(confidential_mass=0.0))
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="no miner mass and no burn_uid fallback"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="no miner mass and no burn_uid fallback"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 5})
 
 
 def test_zero_revocation_mass0_with_burn_uid() -> None:
     """All-miners revoke with burn_uid configured: all mass routes to burn."""
-    payload = _cp_payload(
-        [],
-        cp_meta=_cp_meta(confidential_mass=0.0),
-        burn_uid=99,
-        forced_burn_percentage=5.0,
-    )
+    payload = _cp_payload([], cp_meta=_cp_meta(confidential_mass=0.0),
+                          burn_uid=99, forced_burn_percentage=5.0)
     result = validator_thin.vector_to_uid_weights(payload, {"hk": 5})
     # No positive miners, entire mass to burn_uid
     assert result == {99: 1.0}
@@ -238,10 +210,8 @@ def test_zero_revocation_mass0_with_burn_uid() -> None:
 def test_zero_revocation_mass1_no_positive_rows_raises() -> None:
     """mass=1 with zero positive rows is a contract violation."""
     payload = _cp_payload([], cp_meta=_cp_meta(confidential_mass=1.0))
-    with pytest.raises(
-        validator_thin.wire.VectorError,
-        match="claims mass 1 but has no positive weight",
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="claims mass 1 but has no positive weight"):
         validator_thin.vector_to_uid_weights(payload, {})
 
 
@@ -249,21 +219,18 @@ def test_zero_revocation_mass1_no_positive_rows_raises() -> None:
 # Missing hotkey
 # ---------------------------------------------------------------------------
 
-
 def test_missing_hotkey_raises() -> None:
     """A signed hotkey absent from the metagraph is an all-or-nothing failure."""
     rows = [_cp_row("known", 0.7), _cp_row("missing", 0.3)]
     payload = _cp_payload(rows)
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="has no current metagraph UID"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="has no current metagraph UID"):
         validator_thin.vector_to_uid_weights(payload, {"known": 1})
 
 
 # ---------------------------------------------------------------------------
 # Duplicate UID
 # ---------------------------------------------------------------------------
-
 
 def test_duplicate_uid_raises() -> None:
     """Two hotkeys that map to the same UID are rejected."""
@@ -277,21 +244,23 @@ def test_duplicate_uid_raises() -> None:
 # Malformed contract flags / components / sums
 # ---------------------------------------------------------------------------
 
-
 def test_malformed_contract_version_raises() -> None:
-    payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=_cp_meta(contract_version="v2"))
+    payload = _cp_payload([_cp_row("hk", 1.0)],
+                          cp_meta=_cp_meta(contract_version="v2"))
     with pytest.raises(validator_thin.wire.VectorError, match="contract_version"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
 def test_malformed_source_raises() -> None:
-    payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=_cp_meta(source="violet_audio"))
+    payload = _cp_payload([_cp_row("hk", 1.0)],
+                          cp_meta=_cp_meta(source="violet_audio"))
     with pytest.raises(validator_thin.wire.VectorError, match="invalid source"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
 def test_malformed_base_mass_nonzero_raises() -> None:
-    payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=_cp_meta(base_mass=0.1))
+    payload = _cp_payload([_cp_row("hk", 1.0)],
+                          cp_meta=_cp_meta(base_mass=0.1))
     with pytest.raises(validator_thin.wire.VectorError, match="base_mass must be 0"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
@@ -302,17 +271,15 @@ def test_malformed_confidential_mass_raises(mass: float) -> None:
     # mass=1 enforcement checks happen only for exact 1.0; these will hit the
     # "must be 0 or 1" guard first.
     payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=meta)
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="confidential_mass must be 0 or 1"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="confidential_mass must be 0 or 1"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
 def test_malformed_complete_not_bool_raises() -> None:
-    payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=_cp_meta(complete="yes"))
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="complete flag must be a bool"
-    ):
+    payload = _cp_payload([_cp_row("hk", 1.0)],
+                          cp_meta=_cp_meta(complete="yes"))
+    with pytest.raises(validator_thin.wire.VectorError, match="complete flag must be a bool"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
@@ -320,9 +287,8 @@ def test_missing_row_base_component_raises() -> None:
     """Rows in a confidential_primary vector must carry base_component explicitly."""
     row = {"miner_hotkey": "hk", "weight": 1.0, "external_component": 1.0}
     payload = _cp_payload([row])
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="base_component and external_component"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="base_component and external_component"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
@@ -330,9 +296,8 @@ def test_missing_row_external_component_raises() -> None:
     """Rows in a confidential_primary vector must carry external_component explicitly."""
     row = {"miner_hotkey": "hk", "weight": 1.0, "base_component": 0.0}
     payload = _cp_payload([row])
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="base_component and external_component"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="base_component and external_component"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
 
 
@@ -352,12 +317,8 @@ def test_duplicate_signed_hotkey_raises() -> None:
 
 
 def test_nonfinite_weight_raises() -> None:
-    row = {
-        "miner_hotkey": "hk",
-        "weight": math.nan,
-        "base_component": 0.0,
-        "external_component": math.nan,
-    }
+    row = {"miner_hotkey": "hk", "weight": math.nan,
+           "base_component": 0.0, "external_component": math.nan}
     payload = _cp_payload([row])
     with pytest.raises(validator_thin.wire.VectorError, match="non-finite or negative"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1})
@@ -366,7 +327,6 @@ def test_nonfinite_weight_raises() -> None:
 # ---------------------------------------------------------------------------
 # Burn fallback
 # ---------------------------------------------------------------------------
-
 
 def test_burn_applied_after_successful_mapping() -> None:
     """Burn UID receives forced percentage of mass; positive miners share the rest."""
@@ -380,12 +340,8 @@ def test_burn_applied_after_successful_mapping() -> None:
 
 def test_burn_fallback_mass0_vector() -> None:
     """Degraded (mass=0) vector with a burn UID routes all mass to burn."""
-    payload = _cp_payload(
-        [],
-        cp_meta=_cp_meta(confidential_mass=0.0),
-        burn_uid=99,
-        forced_burn_percentage=100.0,
-    )
+    payload = _cp_payload([], cp_meta=_cp_meta(confidential_mass=0.0),
+                          burn_uid=99, forced_burn_percentage=100.0)
     result = validator_thin.vector_to_uid_weights(payload, {})
     assert result == {99: 1.0}
 
@@ -393,7 +349,6 @@ def test_burn_fallback_mass0_vector() -> None:
 # ---------------------------------------------------------------------------
 # Regression — existing 10% cap (v3) and legacy paths still work
 # ---------------------------------------------------------------------------
-
 
 def _v3_row(hotkey: str, base: float, external: float) -> dict:
     return {
@@ -417,13 +372,11 @@ def _v3_payload(rows: list[dict], *, configured_fraction: object = 0.10) -> dict
 
 def test_regression_v3_10pct_blend_still_works() -> None:
     """confidential_primary path must not interfere with existing v3 cap vectors."""
-    payload = _v3_payload(
-        [
-            _v3_row("base", 0.45, 0.0),
-            _v3_row("overlap", 0.45, 0.05),
-            _v3_row("compute", 0.0, 0.05),
-        ]
-    )
+    payload = _v3_payload([
+        _v3_row("base", 0.45, 0.0),
+        _v3_row("overlap", 0.45, 0.05),
+        _v3_row("compute", 0.0, 0.05),
+    ])
     result = validator_thin.vector_to_uid_weights(
         payload, {"base": 10, "overlap": 11, "compute": 12}
     )
@@ -455,8 +408,7 @@ def test_pin_accepts_valid_confidential_primary_vector() -> None:
     rows = [_cp_row("hk_a", 0.6), _cp_row("hk_b", 0.4)]
     payload = _cp_payload(rows)
     result = validator_thin.vector_to_uid_weights(
-        payload, {"hk_a": 10, "hk_b": 20}, require_policy=PIN
-    )
+        payload, {"hk_a": 10, "hk_b": 20}, require_policy=PIN)
     assert result == {10: 0.6, 20: 0.4}
 
 
@@ -469,34 +421,29 @@ def test_pin_rejects_legacy_vector() -> None:
         ],
         "burn_snapshot": {"burn_uid": None, "forced_burn_percentage": 0.0},
     }
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="no confidential_primary policy block"
-    ):
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="no confidential_primary policy block"):
         validator_thin.vector_to_uid_weights(
-            payload, {"first": 0, "second": 1}, require_policy=PIN
-        )
+            payload, {"first": 0, "second": 1}, require_policy=PIN)
 
 
 def test_pin_rejects_v3_vector() -> None:
     """A pinned validator rejects a correctly signed v3 (10% cap) vector."""
-    payload = _v3_payload(
-        [
-            _v3_row("base", 0.45, 0.0),
-            _v3_row("overlap", 0.45, 0.05),
-            _v3_row("compute", 0.0, 0.05),
-        ]
-    )
-    with pytest.raises(
-        validator_thin.wire.VectorError, match="no confidential_primary policy block"
-    ):
+    payload = _v3_payload([
+        _v3_row("base", 0.45, 0.0),
+        _v3_row("overlap", 0.45, 0.05),
+        _v3_row("compute", 0.0, 0.05),
+    ])
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="no confidential_primary policy block"):
         validator_thin.vector_to_uid_weights(
-            payload, {"base": 10, "overlap": 11, "compute": 12}, require_policy=PIN
-        )
+            payload, {"base": 10, "overlap": 11, "compute": 12}, require_policy=PIN)
 
 
 def test_pin_still_enforces_malformed_primary_block() -> None:
     """A pinned validator rejects a present-but-invalid confidential_primary block."""
-    payload = _cp_payload([_cp_row("hk", 1.0)], cp_meta=_cp_meta(contract_version="v2"))
+    payload = _cp_payload([_cp_row("hk", 1.0)],
+                          cp_meta=_cp_meta(contract_version="v2"))
     with pytest.raises(validator_thin.wire.VectorError, match="contract_version"):
         validator_thin.vector_to_uid_weights(payload, {"hk": 1}, require_policy=PIN)
 
@@ -509,8 +456,7 @@ def test_unpinned_still_accepts_legacy_and_v3() -> None:
     }
     assert validator_thin.vector_to_uid_weights(legacy, {"first": 0}) == {0: 1.0}
     assert validator_thin.vector_to_uid_weights(
-        legacy, {"first": 0}, require_policy=None
-    ) == {0: 1.0}
+        legacy, {"first": 0}, require_policy=None) == {0: 1.0}
     v3 = _v3_payload([_v3_row("base", 0.9, 0.0), _v3_row("compute", 0.0, 0.1)])
     result = validator_thin.vector_to_uid_weights(v3, {"base": 1, "compute": 2})
     assert result == {1: 0.9, 2: 0.1}

@@ -4,7 +4,6 @@ This is deliberately an off-chain revenue lane, not an emissions lane. It only
 writes tee_gpu_* tables, never eval_runs / lane_challenge_solves / per_miner_solves,
 so the existing validator vector is unchanged.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -26,7 +25,6 @@ from .store import Store, new_uuid
 try:
     from fastapi import Header, HTTPException, Query, Request
 except Exception:  # lets storage/preflight helpers run without publisher deps
-
     def Header(*args, **kwargs):  # type: ignore[no-redef]
         return None
 
@@ -42,7 +40,6 @@ except Exception:  # lets storage/preflight helpers run without publisher deps
             self.status_code = status_code
             self.detail = detail
 
-
 TEE_CARD_ID = "cathedral-tee-gpu-capacity-v1"
 AUTHORIZATION_VERSION = "cathedral-secure-compute-capacity-v1"
 AUTHORIZATION_TEXT = (
@@ -54,32 +51,10 @@ _SKEW_SECS = 300
 # Live Chutes /nodes/supported snapshot checked 2026-06-19. The endpoint is the
 # short-ref truth for add-node, but it does not expose a tee_capable flag.
 _CHUTES_SUPPORTED = {
-    "3090",
-    "4090",
-    "5090",
-    "a4000",
-    "a4000_ada",
-    "a5000",
-    "a6000",
-    "a6000_ada",
-    "a10",
-    "a40",
-    "a100",
-    "a100_sxm",
-    "a100_40gb",
-    "a100_40gb_sxm",
-    "b200",
-    "b300",
-    "h20",
-    "h100",
-    "h100_nvl",
-    "h100_sxm",
-    "h200",
-    "h800",
-    "l4",
-    "l40",
-    "l40s",
-    "mi300x",
+    "3090", "4090", "5090", "a4000", "a4000_ada", "a5000", "a6000",
+    "a6000_ada", "a10", "a40", "a100", "a100_sxm", "a100_40gb",
+    "a100_40gb_sxm", "b200", "b300", "h20", "h100", "h100_nvl",
+    "h100_sxm", "h200", "h800", "l4", "l40", "l40s", "mi300x",
     "pro_6000",
 }
 # Live Chutes /servers/tee/measurements checked 2026-06-19. Public accepted TEE
@@ -102,12 +77,7 @@ _REVIEWED_REOPEN_STATUS = {"active", "paused"}
 _PROVIDER_ACCEPTED_STATUS = {"accepted", "active", "listed", "running", "ready"}
 _EVIDENCE_CRYPTO_STATUS = "cryptographically_verified"
 _EVIDENCE_ACCEPTED_STATUS = {"operator_reviewed", _EVIDENCE_CRYPTO_STATUS}
-_EVIDENCE_REVIEW_STATUS = {
-    "operator_reviewed",
-    "needs_review",
-    "rejected",
-    _EVIDENCE_CRYPTO_STATUS,
-}
+_EVIDENCE_REVIEW_STATUS = {"operator_reviewed", "needs_review", "rejected", _EVIDENCE_CRYPTO_STATUS}
 _EVIDENCE_MANUAL_REVIEW_STATUS = {"operator_reviewed", "needs_review", "rejected"}
 _DEFAULT_EVIDENCE_REQUEST_TTL_SECS = 600
 _INTAKE_REQUIRE_CODE_ENV = "CATHEDRAL_TEE_GPU_REQUIRE_INTAKE_CODE"
@@ -115,14 +85,8 @@ _INTAKE_CODE_ENV = "CATHEDRAL_TEE_GPU_INTAKE_CODE"
 _INTAKE_ALLOWLIST_ENV = "CATHEDRAL_TEE_GPU_INTAKE_ALLOWLIST"
 _INTAKE_CODE_FIELDS = {"intake_code", "invite_code", "access_code"}
 _MINER_REVIEW_FIELDS = (
-    "gpu_short_ref",
-    "gpu_count",
-    "agent_api",
-    "tee_kind",
-    "tdx_claimed",
-    "gpu_cc_claimed",
-    "hourly_cost",
-    "attestation_digest",
+    "gpu_short_ref", "gpu_count", "agent_api", "tee_kind",
+    "tdx_claimed", "gpu_cc_claimed", "hourly_cost", "attestation_digest",
 )
 
 
@@ -132,8 +96,7 @@ def tee_gpu_enabled() -> bool:
 
 def public_catalog_enabled() -> bool:
     return tee_gpu_enabled() and _truthy(
-        os.environ.get("CATHEDRAL_TEE_GPU_PUBLIC_CATALOG_ENABLED", "")
-    )
+        os.environ.get("CATHEDRAL_TEE_GPU_PUBLIC_CATALOG_ENABLED", ""))
 
 
 def intake_gate_status() -> dict[str, Any]:
@@ -182,25 +145,14 @@ def register_routes(app, store: Store) -> None:
         payload_digest = _payload_digest(body)
         node_id = _required_str(body, "node_id")
         _verify_offer_claim(
-            verifier,
-            x_cathedral_hotkey,
-            x_cathedral_signature,
-            x_cathedral_submitted_at,
-            node_id=node_id,
-            payload_digest=payload_digest,
-        )
+            verifier, x_cathedral_hotkey, x_cathedral_signature,
+            x_cathedral_submitted_at, node_id=node_id, payload_digest=payload_digest)
         require_miner_intake_gate(x_cathedral_hotkey, body)
         record = create_capacity(
-            store,
-            body,
-            owner_hotkey=x_cathedral_hotkey,
-            actor=x_cathedral_hotkey,
-            event_type="submitted",
-            preserve_admin_fields=True,
-        )
-        return JSONResponse(
-            {"status": record["status"], "capacity": miner_record(record)}
-        )
+            store, body, owner_hotkey=x_cathedral_hotkey,
+            actor=x_cathedral_hotkey, event_type="submitted",
+            preserve_admin_fields=True)
+        return JSONResponse({"status": record["status"], "capacity": miner_record(record)})
 
     @app.get("/v1/tee-gpu/offers")
     def tee_gpu_my_offers(
@@ -211,13 +163,8 @@ def register_routes(app, store: Store) -> None:
         if not tee_gpu_enabled():
             raise HTTPException(404, "tee_gpu_disabled")
         _verify_offer_claim(
-            verifier,
-            x_cathedral_hotkey,
-            x_cathedral_signature,
-            x_cathedral_submitted_at,
-            node_id="list",
-            payload_digest="",
-        )
+            verifier, x_cathedral_hotkey, x_cathedral_signature,
+            x_cathedral_submitted_at, node_id="list", payload_digest="")
         rows = list_capacity(store, owner_hotkey=x_cathedral_hotkey)
         return {"items": [miner_record(r) for r in rows], "count": len(rows)}
 
@@ -233,21 +180,13 @@ def register_routes(app, store: Store) -> None:
         body = await _json_body(request)
         node_id = _required_str(body, "node_id")
         _verify_offer_claim(
-            verifier,
-            x_cathedral_hotkey,
-            x_cathedral_signature,
-            x_cathedral_submitted_at,
-            node_id=node_id,
-            payload_digest=_payload_digest(body),
-        )
+            verifier, x_cathedral_hotkey, x_cathedral_signature,
+            x_cathedral_submitted_at, node_id=node_id,
+            payload_digest=_payload_digest(body))
         require_miner_intake_gate(x_cathedral_hotkey, body)
         return create_evidence_request(
-            store,
-            owner_hotkey=x_cathedral_hotkey,
-            node_id=node_id,
-            actor=x_cathedral_hotkey,
-            ttl_secs=_optional_int(body.get("ttl_secs")),
-        )
+            store, owner_hotkey=x_cathedral_hotkey, node_id=node_id,
+            actor=x_cathedral_hotkey, ttl_secs=_optional_int(body.get("ttl_secs")))
 
     @app.post("/v1/admin/tee-gpu/capacity")
     async def tee_gpu_admin_create(
@@ -257,14 +196,8 @@ def register_routes(app, store: Store) -> None:
         require_admin(authorization)
         body = await _json_body(request)
         owner = _required_str(body, "owner_hotkey")
-        record = create_capacity(
-            store,
-            body,
-            owner_hotkey=owner,
-            actor="admin",
-            event_type="admin_created",
-            allow_requested_status=True,
-        )
+        record = create_capacity(store, body, owner_hotkey=owner, actor="admin",
+                                 event_type="admin_created", allow_requested_status=True)
         return JSONResponse({"capacity": admin_record(record, store=store)})
 
     @app.patch("/v1/admin/tee-gpu/capacity/{capacity_id}")
@@ -353,10 +286,7 @@ def register_routes(app, store: Store) -> None:
     ):
         require_admin(authorization)
         rows = list_capacity(store, status=status, owner_hotkey=owner_hotkey)
-        return {
-            "items": [admin_record(r, store=store) for r in rows],
-            "count": len(rows),
-        }
+        return {"items": [admin_record(r, store=store) for r in rows], "count": len(rows)}
 
     @app.get("/v1/admin/tee-gpu/metrics")
     def tee_gpu_admin_metrics(authorization: str | None = Header(None)):
@@ -383,9 +313,7 @@ def register_routes(app, store: Store) -> None:
     ):
         require_admin(authorization)
         rows = list_capacity(store, status=status)
-        eligible = [
-            r for r in rows if include_blocked or r["preflight_status"] == "eligible"
-        ]
+        eligible = [r for r in rows if include_blocked or r["preflight_status"] == "eligible"]
         return {
             "count": len(eligible),
             "omitted_blocked": len(rows) - len(eligible),
@@ -413,11 +341,8 @@ def register_routes(app, store: Store) -> None:
         if not public_catalog_enabled():
             raise HTTPException(404, "tee_gpu_catalog_disabled")
         rows = [
-            r
-            for r in list_capacity(store, status="active")
-            if capacity_launch_evidence(store, r["capacity_id"])[
-                "production_compute_ready"
-            ]
+            r for r in list_capacity(store, status="active")
+            if capacity_launch_evidence(store, r["capacity_id"])["production_compute_ready"]
         ]
         return {"items": [public_record(r) for r in rows], "count": len(rows)}
 
@@ -446,55 +371,37 @@ def create_capacity(
     )
     if allow_requested_status and "attestation_review" in body:
         attestation_json = _attestation_review_json(
-            attestation_json, body["attestation_review"], reviewed_by=actor
-        )
+            attestation_json, body["attestation_review"], reviewed_by=actor)
     health_json = _json_blob(body.get("health") or body.get("health_json") or {})
-    attestation_digest = (
-        _digest_text(attestation_json) if attestation_json != "{}" else ""
-    )
+    attestation_digest = _digest_text(attestation_json) if attestation_json != "{}" else ""
     evidence = evidence_summary(attestation_json)
     operator_use_authorized = _operator_use_authorized(body)
     if not allow_requested_status and not operator_use_authorized:
-        raise HTTPException(
-            400,
-            {
-                "detail": "operator_use_authorization_required",
-                "required_field": "operator_use_authorized",
-                "authorization_version": AUTHORIZATION_VERSION,
-                "authorization_text": AUTHORIZATION_TEXT,
-            },
-        )
+        raise HTTPException(400, {
+            "detail": "operator_use_authorization_required",
+            "required_field": "operator_use_authorized",
+            "authorization_version": AUTHORIZATION_VERSION,
+            "authorization_text": AUTHORIZATION_TEXT,
+        })
     authorization_json = _authorization_json(
-        body,
-        owner_hotkey=owner_hotkey,
-        node_id=node_id,
+        body, owner_hotkey=owner_hotkey, node_id=node_id,
         accepted=operator_use_authorized,
         source="admin_record" if allow_requested_status else "signed_miner_offer",
         accepted_at_iso=now,
     )
-    authorization_digest = (
-        _digest_text(authorization_json) if operator_use_authorized else ""
-    )
+    authorization_digest = _digest_text(authorization_json) if operator_use_authorized else ""
     tdx_claimed = _boolish(body.get("tdx_claimed") or body.get("tdx"))
     gpu_cc_claimed = _boolish(body.get("gpu_cc_claimed") or body.get("gpu_cc"))
     preflight = preflight_capacity(
-        gpu_short_ref=gpu_short_ref,
-        gpu_count=gpu_count,
-        hourly_cost=hourly_cost,
-        agent_api=str(body.get("agent_api") or ""),
-        tee_kind=str(body.get("tee_kind") or ""),
-        tdx_claimed=tdx_claimed,
-        gpu_cc_claimed=gpu_cc_claimed,
+        gpu_short_ref=gpu_short_ref, gpu_count=gpu_count, hourly_cost=hourly_cost,
+        agent_api=str(body.get("agent_api") or ""), tee_kind=str(body.get("tee_kind") or ""),
+        tdx_claimed=tdx_claimed, gpu_cc_claimed=gpu_cc_claimed,
         operator_use_authorized=operator_use_authorized,
         has_attestation=bool(attestation_digest),
         evidence_status=evidence["status"],
         evidence_acceptable=bool(evidence["acceptable"]),
     )
-    status = (
-        str(body.get("status") or "pending").lower()
-        if allow_requested_status
-        else "pending"
-    )
+    status = str(body.get("status") or "pending").lower() if allow_requested_status else "pending"
     if status not in _STATUS:
         status = "pending"
     if status == "active" and preflight["status"] != "eligible":
@@ -524,9 +431,7 @@ def create_capacity(
         "hourly_cost": hourly_cost,
         "currency": str(body.get("currency") or "USD").upper(),
         "operator_use_authorized": 1 if operator_use_authorized else 0,
-        "authorization_version": AUTHORIZATION_VERSION
-        if operator_use_authorized
-        else "",
+        "authorization_version": AUTHORIZATION_VERSION if operator_use_authorized else "",
         "authorization_digest": authorization_digest,
         "authorization_json": authorization_json,
         "attestation_digest": attestation_digest,
@@ -538,21 +443,13 @@ def create_capacity(
         "chutes_validator_hotkey": str(
             (body.get("chutes_validator_hotkey") if allow_requested_status else "")
             or os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_VALIDATOR_HOTKEY")
-            or _DEFAULT_CHUTES_VALIDATOR
-        ),
+            or _DEFAULT_CHUTES_VALIDATOR),
         "chutes_server_name": str(
-            (body.get("chutes_server_name") if allow_requested_status else "") or ""
-        ),
-        "chutes_server_id": str(body.get("chutes_server_id") or "")
-        if allow_requested_status
-        else "",
-        "chutes_status": str(body.get("chutes_status") or "")
-        if allow_requested_status
-        else "",
+            (body.get("chutes_server_name") if allow_requested_status else "") or ""),
+        "chutes_server_id": str(body.get("chutes_server_id") or "") if allow_requested_status else "",
+        "chutes_status": str(body.get("chutes_status") or "") if allow_requested_status else "",
         "emissions_eligible": 0,
-        "admin_note": str(body.get("admin_note") or "")
-        if allow_requested_status
-        else "",
+        "admin_note": str(body.get("admin_note") or "") if allow_requested_status else "",
         "created_at_iso": now,
         "updated_at_iso": now,
         "last_heartbeat_iso": body.get("last_heartbeat_iso"),
@@ -560,23 +457,17 @@ def create_capacity(
 
     def _do(conn):
         existing = conn.execute(
-            "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-        ).fetchone()
+            "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?",
+            (capacity_id,)).fetchone()
         if existing:
             row["created_at_iso"] = existing["created_at_iso"]
             if preserve_admin_fields:
                 for key in (
-                    "status",
-                    "admin_note",
-                    "chutes_validator_hotkey",
-                    "chutes_server_name",
-                    "chutes_server_id",
-                    "chutes_status",
+                    "status", "admin_note", "chutes_validator_hotkey",
+                    "chutes_server_name", "chutes_server_id", "chutes_status",
                 ):
                     row[key] = existing[key]
-                material_changed = any(
-                    row[key] != existing[key] for key in _MINER_REVIEW_FIELDS
-                )
+                material_changed = any(row[key] != existing[key] for key in _MINER_REVIEW_FIELDS)
                 if material_changed:
                     if existing["status"] in _REVIEWED_REOPEN_STATUS:
                         row["status"] = "pending"
@@ -598,48 +489,16 @@ def create_capacity(
             "admin_note, created_at_iso, updated_at_iso, last_heartbeat_iso) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            tuple(
-                row[k]
-                for k in (
-                    "capacity_id",
-                    "provider_ref",
-                    "owner_hotkey",
-                    "node_id",
-                    "region",
-                    "endpoint_url",
-                    "agent_api",
-                    "public_ip",
-                    "gpu_short_ref",
-                    "gpu_model",
-                    "gpu_count",
-                    "gpu_memory_gb",
-                    "tee_kind",
-                    "tdx_claimed",
-                    "gpu_cc_claimed",
-                    "hourly_cost",
-                    "currency",
-                    "operator_use_authorized",
-                    "authorization_version",
-                    "authorization_digest",
-                    "authorization_json",
-                    "attestation_digest",
-                    "attestation_json",
-                    "health_json",
-                    "status",
-                    "preflight_status",
-                    "preflight_json",
-                    "chutes_validator_hotkey",
-                    "chutes_server_name",
-                    "chutes_server_id",
-                    "chutes_status",
-                    "emissions_eligible",
-                    "admin_note",
-                    "created_at_iso",
-                    "updated_at_iso",
-                    "last_heartbeat_iso",
-                )
-            ),
-        )
+            tuple(row[k] for k in (
+                "capacity_id", "provider_ref", "owner_hotkey", "node_id", "region",
+                "endpoint_url", "agent_api", "public_ip", "gpu_short_ref", "gpu_model",
+                "gpu_count", "gpu_memory_gb", "tee_kind", "tdx_claimed",
+                "gpu_cc_claimed", "hourly_cost", "currency", "operator_use_authorized",
+                "authorization_version", "authorization_digest", "authorization_json", "attestation_digest",
+                "attestation_json", "health_json", "status", "preflight_status",
+                "preflight_json", "chutes_validator_hotkey", "chutes_server_name",
+                "chutes_server_id", "chutes_status", "emissions_eligible",
+                "admin_note", "created_at_iso", "updated_at_iso", "last_heartbeat_iso")))
         _insert_event(conn, capacity_id, actor, event_type, row)
 
     store.write(_do)
@@ -653,9 +512,7 @@ def update_capacity_admin(
     *,
     preserve_embedded_review: bool = False,
 ) -> dict[str, Any] | None:
-    rows = store.query(
-        "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-    )
+    rows = store.query("SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,))
     if not rows:
         return None
     body = dict(body)
@@ -673,29 +530,11 @@ def update_capacity_admin(
                 raise HTTPException(400, "evidence_request_not_found")
     updates: dict[str, Any] = {}
     allowed = {
-        "provider_ref",
-        "region",
-        "endpoint_url",
-        "agent_api",
-        "public_ip",
-        "gpu_model",
-        "gpu_memory_gb",
-        "tee_kind",
-        "tdx_claimed",
-        "gpu_cc_claimed",
-        "hourly_cost",
-        "currency",
-        "operator_use_authorized",
-        "status",
-        "admin_note",
-        "health_json",
-        "last_heartbeat_iso",
-        "attestation_json",
-        "chutes_validator_hotkey",
-        "chutes_server_name",
-        "chutes_server_id",
-        "chutes_status",
-        "authorization_json",
+        "provider_ref", "region", "endpoint_url", "agent_api", "public_ip",
+        "gpu_model", "gpu_memory_gb", "tee_kind", "tdx_claimed", "gpu_cc_claimed",
+        "hourly_cost", "currency", "operator_use_authorized", "status", "admin_note", "health_json",
+        "last_heartbeat_iso", "attestation_json", "chutes_validator_hotkey",
+        "chutes_server_name", "chutes_server_id", "chutes_status", "authorization_json",
     }
     for key in allowed:
         if key in body:
@@ -725,35 +564,21 @@ def update_capacity_admin(
     if "attestation_json" in updates:
         updates["attestation_digest"] = (
             _digest_text(updates["attestation_json"])
-            if updates["attestation_json"] != "{}"
-            else ""
-        )
+            if updates["attestation_json"] != "{}" else "")
     if "operator_use_authorized" in updates or "authorization_json" in updates:
-        accepted = bool(
-            int(
-                updates.get(
-                    "operator_use_authorized", rows[0]["operator_use_authorized"]
-                )
-            )
-        )
+        accepted = bool(int(updates.get("operator_use_authorized", rows[0]["operator_use_authorized"])))
         updates["authorization_version"] = AUTHORIZATION_VERSION if accepted else ""
         if "authorization_json" not in updates:
             updates["authorization_json"] = _authorization_json(
-                body,
-                owner_hotkey=rows[0]["owner_hotkey"],
-                node_id=rows[0]["node_id"],
-                accepted=accepted,
-                source="admin_update",
-                accepted_at_iso=_now_iso(),
-            )
-        updates["authorization_digest"] = (
-            _digest_text(updates["authorization_json"]) if accepted else ""
-        )
+                body, owner_hotkey=rows[0]["owner_hotkey"], node_id=rows[0]["node_id"],
+                accepted=accepted, source="admin_update", accepted_at_iso=_now_iso())
+        updates["authorization_digest"] = _digest_text(updates["authorization_json"]) if accepted else ""
 
     current = _row_to_dict(rows[0])
     merged = {**current, **updates}
     material_changed = any(
-        key in updates and merged[key] != current[key] for key in _MINER_REVIEW_FIELDS
+        key in updates and merged[key] != current[key]
+        for key in _MINER_REVIEW_FIELDS
     )
     if material_changed:
         if current["status"] in _REVIEWED_REOPEN_STATUS and "status" not in updates:
@@ -767,12 +592,9 @@ def update_capacity_admin(
             merged["chutes_status"] = "needs_review"
     evidence = evidence_summary(merged.get("attestation_json", "{}"))
     preflight = preflight_capacity(
-        gpu_short_ref=str(merged["gpu_short_ref"]),
-        gpu_count=int(merged["gpu_count"]),
-        hourly_cost=float(merged["hourly_cost"]),
-        agent_api=str(merged["agent_api"]),
-        tee_kind=str(merged["tee_kind"]),
-        tdx_claimed=bool(int(merged["tdx_claimed"])),
+        gpu_short_ref=str(merged["gpu_short_ref"]), gpu_count=int(merged["gpu_count"]),
+        hourly_cost=float(merged["hourly_cost"]), agent_api=str(merged["agent_api"]),
+        tee_kind=str(merged["tee_kind"]), tdx_claimed=bool(int(merged["tdx_claimed"])),
         gpu_cc_claimed=bool(int(merged["gpu_cc_claimed"])),
         operator_use_authorized=bool(int(merged["operator_use_authorized"])),
         has_attestation=bool(merged.get("attestation_digest")),
@@ -782,9 +604,7 @@ def update_capacity_admin(
     updates["preflight_status"] = preflight["status"]
     updates["preflight_json"] = _json_blob(preflight)
     if updates.get("status") == "active" and preflight["status"] != "eligible":
-        raise HTTPException(
-            400, {"detail": "preflight_not_eligible", "preflight": preflight}
-        )
+        raise HTTPException(400, {"detail": "preflight_not_eligible", "preflight": preflight})
     if (
         "status" not in updates
         and str(merged.get("status")) == "active"
@@ -796,17 +616,11 @@ def update_capacity_admin(
     def _do(conn):
         set_clause = ", ".join(f"{k}=?" for k in updates)
         params = tuple(updates.values()) + (capacity_id,)
-        conn.execute(
-            f"UPDATE tee_gpu_capacity SET {set_clause} WHERE capacity_id=?", params
-        )
+        conn.execute(f"UPDATE tee_gpu_capacity SET {set_clause} WHERE capacity_id=?", params)
         _insert_event(conn, capacity_id, "admin", "admin_updated", updates)
 
     store.write(_do)
-    return _row_to_dict(
-        store.query(
-            "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-        )[0]
-    )
+    return _row_to_dict(store.query("SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,))[0])
 
 
 def create_evidence_request(
@@ -862,9 +676,7 @@ def verify_capacity_evidence(
     capacity_id: str,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    rows = store.query(
-        "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-    )
+    rows = store.query("SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,))
     if not rows:
         return None
     row = _row_to_dict(rows[0])
@@ -927,18 +739,8 @@ def record_provider_status(
         return None
     _require_launch_ready_base(row)
     provider_status = _normal_provider_status(_required_str(body, "provider_status"))
-    server_id = str(
-        body.get("server_id")
-        or body.get("chutes_server_id")
-        or row["chutes_server_id"]
-        or ""
-    ).strip()
-    server_name = str(
-        body.get("server_name")
-        or body.get("chutes_server_name")
-        or row["chutes_server_name"]
-        or ""
-    ).strip()
+    server_id = str(body.get("server_id") or body.get("chutes_server_id") or row["chutes_server_id"] or "").strip()
+    server_name = str(body.get("server_name") or body.get("chutes_server_name") or row["chutes_server_name"] or "").strip()
     if not server_id:
         raise HTTPException(400, "provider_server_id_required")
     payload = {
@@ -953,13 +755,10 @@ def record_provider_status(
         "accepted": provider_status in _PROVIDER_ACCEPTED_STATUS,
     }
     if not payload["accepted"]:
-        raise HTTPException(
-            400,
-            {
-                "detail": "provider_status_not_accepted",
-                "accepted_statuses": sorted(_PROVIDER_ACCEPTED_STATUS),
-            },
-        )
+        raise HTTPException(400, {
+            "detail": "provider_status_not_accepted",
+            "accepted_statuses": sorted(_PROVIDER_ACCEPTED_STATUS),
+        })
     new_server_name = server_name or row["chutes_server_name"]
     now = _now_iso()
 
@@ -1002,29 +801,23 @@ def record_health_receipt(
         "source": str(body.get("source") or "operator_probe"),
         "probe_url": str(body.get("probe_url") or row["agent_api"] or ""),
         "latency_ms": _optional_float(body.get("latency_ms")),
-        "response_digest": str(
-            body.get("response_digest") or _digest_text(_json_blob(body))
-        ),
+        "response_digest": str(body.get("response_digest") or _digest_text(_json_blob(body))),
         "receipt_id": str(body.get("receipt_id") or ""),
     }
     health = _loads(row["health_json"])
     health = health if isinstance(health, dict) else {}
-    health.update(
-        {
-            "last_ok": True,
-            "last_ok_at_iso": payload["observed_at_iso"],
-            "last_probe_source": payload["source"],
-            "last_response_digest": payload["response_digest"],
-        }
-    )
+    health.update({
+        "last_ok": True,
+        "last_ok_at_iso": payload["observed_at_iso"],
+        "last_probe_source": payload["source"],
+        "last_response_digest": payload["response_digest"],
+    })
     update_capacity_admin(
         store,
         capacity_id,
         {"health_json": health, "last_heartbeat_iso": payload["observed_at_iso"]},
     )
-    _record_capacity_event(
-        store, capacity_id, "admin", "health_receipt_verified", payload
-    )
+    _record_capacity_event(store, capacity_id, "admin", "health_receipt_verified", payload)
     return _capacity_row(store, capacity_id)
 
 
@@ -1045,9 +838,7 @@ def record_usage_receipt(
     receipt_id = _required_str(body, "receipt_id")
     revenue_usd = _optional_float(body.get("revenue_usd"))
     usage_seconds = _optional_float(body.get("usage_seconds"))
-    workload_count = _optional_int(
-        body.get("workload_count") or body.get("workloads_completed")
-    )
+    workload_count = _optional_int(body.get("workload_count") or body.get("workloads_completed"))
     if (
         (revenue_usd is None or revenue_usd <= 0.0)
         and (usage_seconds is None or usage_seconds <= 0.0)
@@ -1064,9 +855,7 @@ def record_usage_receipt(
         "currency": str(body.get("currency") or "USD").upper(),
         "raw_digest": _digest_text(_json_blob(body)),
     }
-    _record_capacity_event(
-        store, capacity_id, "admin", "usage_receipt_verified", payload
-    )
+    _record_capacity_event(store, capacity_id, "admin", "usage_receipt_verified", payload)
     return _capacity_row(store, capacity_id)
 
 
@@ -1168,12 +957,7 @@ def _run_evidence_verifier(
         with open(request_path, "w", encoding="utf-8") as f:
             json.dump(request_payload, f, sort_keys=True, separators=(",", ":"))
         with open(capacity_path, "w", encoding="utf-8") as f:
-            json.dump(
-                _verifier_capacity_context(capacity_row),
-                f,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            json.dump(_verifier_capacity_context(capacity_row), f, sort_keys=True, separators=(",", ":"))
 
         args = _evidence_verifier_args(
             command,
@@ -1191,62 +975,44 @@ def _run_evidence_verifier(
                 check=False,
             )
         except FileNotFoundError as e:
-            raise HTTPException(
-                503,
-                {
-                    "detail": "tee_gpu_evidence_verifier_not_found",
-                    "binary": e.filename,
-                },
-            )
+            raise HTTPException(503, {
+                "detail": "tee_gpu_evidence_verifier_not_found",
+                "binary": e.filename,
+            })
         except OSError as e:
-            raise HTTPException(
-                503,
-                {
-                    "detail": "tee_gpu_evidence_verifier_error",
-                    "error": str(e),
-                },
-            )
+            raise HTTPException(503, {
+                "detail": "tee_gpu_evidence_verifier_error",
+                "error": str(e),
+            })
         except subprocess.TimeoutExpired as e:
-            raise HTTPException(
-                504,
-                {
-                    "detail": "tee_gpu_evidence_verifier_timeout",
-                    "timeout_secs": timeout,
-                    "stdout": _tail(e.stdout),
-                    "stderr": _tail(e.stderr),
-                },
-            )
+            raise HTTPException(504, {
+                "detail": "tee_gpu_evidence_verifier_timeout",
+                "timeout_secs": timeout,
+                "stdout": _tail(e.stdout),
+                "stderr": _tail(e.stderr),
+            })
 
         result = _load_verifier_result(result_path, proc.stdout)
         result.setdefault("returncode", proc.returncode)
         result.setdefault("stdout_tail", _tail(proc.stdout, limit=1200))
         result.setdefault("stderr_tail", _tail(proc.stderr, limit=1200))
         if proc.returncode != 0:
-            raise HTTPException(
-                400,
-                {
-                    "detail": "tee_gpu_evidence_verifier_failed",
-                    "result": _public_verifier_summary(result),
-                },
-            )
+            raise HTTPException(400, {
+                "detail": "tee_gpu_evidence_verifier_failed",
+                "result": _public_verifier_summary(result),
+            })
         if not _verifier_result_ok(result):
-            raise HTTPException(
-                400,
-                {
-                    "detail": "tee_gpu_evidence_not_verified",
-                    "result": _public_verifier_summary(result),
-                },
-            )
+            raise HTTPException(400, {
+                "detail": "tee_gpu_evidence_not_verified",
+                "result": _public_verifier_summary(result),
+            })
         missing = _missing_required_verifier_checks(result)
         if missing:
-            raise HTTPException(
-                400,
-                {
-                    "detail": "tee_gpu_evidence_verifier_missing_required_checks",
-                    "missing": missing,
-                    "result": _public_verifier_summary(result),
-                },
-            )
+            raise HTTPException(400, {
+                "detail": "tee_gpu_evidence_verifier_missing_required_checks",
+                "missing": missing,
+                "result": _public_verifier_summary(result),
+            })
         return result
 
 
@@ -1269,13 +1035,10 @@ def _evidence_verifier_args(
             rendered = command.format(**mapping)
             return shlex.split(rendered, posix=os.name != "nt")
         except (IndexError, KeyError, ValueError) as e:
-            raise HTTPException(
-                400,
-                {
-                    "detail": "tee_gpu_evidence_verifier_command_invalid",
-                    "error": str(e),
-                },
-            )
+            raise HTTPException(400, {
+                "detail": "tee_gpu_evidence_verifier_command_invalid",
+                "error": str(e),
+            })
     return shlex.split(command, posix=os.name != "nt") + [
         evidence_path,
         request_path,
@@ -1331,35 +1094,14 @@ def _missing_required_verifier_checks(result: dict[str, Any]) -> list[str]:
 
 def _public_verifier_summary(result: dict[str, Any]) -> dict[str, Any]:
     allowed = {
-        "ok",
-        "verified",
-        "verifier",
-        "version",
-        "policy",
-        "reason",
-        "proof",
-        "tdx_verified",
-        "tdx_quote_verified",
-        "gpu_verified",
-        "gpu_attestation_verified",
-        "report_data_match",
-        "nonce_bound",
-        "binding_verified",
-        "debug_disabled",
-        "tdx_debug_disabled",
-        "gpu_claims_match",
-        "gpu_model_count_match",
-        "capacity_gpu_match",
-        "claimed_gpu_match",
-        "gpu_model_match",
-        "gpu_count_match",
-        "gpu_model",
-        "gpu_count",
-        "measurement",
-        "mrtd_hex",
-        "returncode",
-        "stdout_tail",
-        "stderr_tail",
+        "ok", "verified", "verifier", "version", "policy", "reason", "proof",
+        "tdx_verified", "tdx_quote_verified", "gpu_verified",
+        "gpu_attestation_verified", "report_data_match", "nonce_bound",
+        "binding_verified", "debug_disabled", "tdx_debug_disabled",
+        "gpu_claims_match", "gpu_model_count_match", "capacity_gpu_match",
+        "claimed_gpu_match", "gpu_model_match", "gpu_count_match",
+        "gpu_model", "gpu_count", "measurement", "mrtd_hex", "returncode",
+        "stdout_tail", "stderr_tail",
     }
     return {key: result[key] for key in sorted(allowed) if key in result}
 
@@ -1418,13 +1160,10 @@ def _require_launch_ready_base(row: dict[str, Any]) -> None:
     if evidence["status"] != _EVIDENCE_CRYPTO_STATUS:
         raise HTTPException(400, "cryptographic_attestation_required")
     if row["preflight_status"] != "eligible":
-        raise HTTPException(
-            400,
-            {
-                "detail": "preflight_not_eligible",
-                "preflight": _loads(row["preflight_json"]),
-            },
-        )
+        raise HTTPException(400, {
+            "detail": "preflight_not_eligible",
+            "preflight": _loads(row["preflight_json"]),
+        })
     if not bool(int(row["operator_use_authorized"])):
         raise HTTPException(400, "operator_use_not_authorized")
 
@@ -1458,11 +1197,8 @@ def list_capacity(
         params.append(owner_hotkey)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     rows = store.query(
-        "SELECT * FROM tee_gpu_capacity"
-        + where
-        + " ORDER BY updated_at_iso DESC, capacity_id DESC",
-        tuple(params),
-    )
+        "SELECT * FROM tee_gpu_capacity" + where + " ORDER BY updated_at_iso DESC, capacity_id DESC",
+        tuple(params))
     return [_row_to_dict(r) for r in rows]
 
 
@@ -1499,9 +1235,7 @@ def capacity_metrics(store: Store) -> dict[str, Any]:
         "active_gpus": production_ready_gpus,
         "active_listed_hourly_cost": round(production_ready_hourly_cost, 6),
         "admin_active_candidate_gpus": admin_active_candidate_gpus,
-        "admin_active_candidate_hourly_cost": round(
-            admin_active_candidate_hourly_cost, 6
-        ),
+        "admin_active_candidate_hourly_cost": round(admin_active_candidate_hourly_cost, 6),
         "production_ready_gpus": production_ready_gpus,
         "production_ready_hourly_cost": round(production_ready_hourly_cost, 6),
         "provider_verified": provider_verified,
@@ -1524,7 +1258,9 @@ def tee_gpu_dashboard_html(store: Store) -> str:
     rows_html = "\n".join(
         _dashboard_row(row, capacity_launch_evidence(store, row["capacity_id"]))
         for row in rows
-    ) or ("<tr><td colspan=11 class=empty>No capacity offers yet.</td></tr>")
+    ) or (
+        "<tr><td colspan=11 class=empty>No capacity offers yet.</td></tr>"
+    )
     return f"""<!doctype html>
 <html lang=en>
 <meta charset=utf-8>
@@ -1627,11 +1363,7 @@ def _dashboard_row(row: dict[str, Any], launch: dict[str, Any]) -> str:
     reasons = preflight.get("reasons") or []
     warnings = preflight.get("warnings") or []
     status = str(row["status"])
-    status_cls = (
-        "ok"
-        if status == "active"
-        else ("bad" if status in {"rejected", "retired"} else "warn")
-    )
+    status_cls = "ok" if status == "active" else ("bad" if status in {"rejected", "retired"} else "warn")
     preflight_cls = "ok" if row["preflight_status"] == "eligible" else "bad"
     auth_ok = bool(int(row["operator_use_authorized"]))
     auth_cls = "ok" if auth_ok else "bad"
@@ -1640,9 +1372,7 @@ def _dashboard_row(row: dict[str, Any], launch: dict[str, Any]) -> str:
     usage_ok = bool(launch.get("usage_or_revenue_verified"))
     prod_ok = bool(launch.get("production_compute_ready"))
     handoff_cls = "ok" if item["ready"] else "warn"
-    handoff_text = (
-        "ready for Chutes" if item["ready"] else "needs " + ", ".join(item["missing"])
-    )
+    handoff_text = "ready for Chutes" if item["ready"] else "needs " + ", ".join(item["missing"])
     cmd = f"<div class=code>{_h(item['command'])}</div>" if item["command"] else ""
     reason_text = ", ".join(str(x) for x in reasons) if reasons else "eligible"
     if warnings:
@@ -1712,38 +1442,30 @@ def preflight_capacity(
         reasons.append("tee_kind_not_intel_tdx")
     if evidence_status == "rejected":
         reasons.append("attestation_evidence_rejected")
-    require_crypto = _truthy(
-        os.environ.get("CATHEDRAL_TEE_GPU_REQUIRE_CRYPTO_EVIDENCE", "")
-    )
+    require_crypto = _truthy(os.environ.get("CATHEDRAL_TEE_GPU_REQUIRE_CRYPTO_EVIDENCE", ""))
     if require_crypto and not is_tpu:
         if not has_attestation:
             reasons.append("attestation_evidence_required")
         elif evidence_status != _EVIDENCE_CRYPTO_STATUS:
             reasons.append("cryptographic_attestation_required")
-    elif (
-        _truthy(os.environ.get("CATHEDRAL_TEE_GPU_REQUIRE_EVIDENCE", "")) and not is_tpu
-    ):
+    elif _truthy(os.environ.get("CATHEDRAL_TEE_GPU_REQUIRE_EVIDENCE", "")) and not is_tpu:
         if not has_attestation:
             reasons.append("attestation_evidence_required")
         elif not evidence_acceptable:
             reasons.append("attestation_evidence_review_required")
     return {
-        "status": "exploratory"
-        if is_tpu and not reasons
-        else ("eligible" if not reasons else "blocked"),
+        "status": "exploratory" if is_tpu and not reasons else ("eligible" if not reasons else "blocked"),
         "reasons": reasons,
         "warnings": warnings,
         "capacity_kind": "google_tpu" if is_tpu else "tee_gpu",
-        "evidence_status": evidence_status
-        or ("submitted" if has_attestation else "missing"),
+        "evidence_status": evidence_status or ("submitted" if has_attestation else "missing"),
         "evidence_acceptable": bool(evidence_acceptable),
         "checked_at": _now_iso(),
         "note": (
             "google_tpu_exploratory_inactive_for_scoring"
-            if is_tpu
-            else "cryptographic_tdx_gpu_attestation_required"
-            if require_crypto
-            else "operator_reviewed_evidence_only_not_cryptographic_attestation"
+            if is_tpu else
+            "cryptographic_tdx_gpu_attestation_required"
+            if require_crypto else "operator_reviewed_evidence_only_not_cryptographic_attestation"
         ),
     }
 
@@ -1758,25 +1480,21 @@ def admin_record(row: dict[str, Any], *, store: Store | None = None) -> dict[str
     out["health"] = _loads(out.pop("health_json", "{}"))
     out["emissions_eligible"] = False
     out["chutes"] = chutes_manifest_item(row)
-    out["launch_evidence"] = (
-        capacity_launch_evidence(store, capacity_id) if store else {}
-    )
+    out["launch_evidence"] = capacity_launch_evidence(store, capacity_id) if store else {}
     return out
 
 
 def miner_record(row: dict[str, Any]) -> dict[str, Any]:
     out = public_record(row)
-    out.update(
-        {
-            "node_id": row["node_id"],
-            "status": row["status"],
-            "preflight": _loads(row["preflight_json"]),
-            "operator_use_authorized": bool(int(row["operator_use_authorized"])),
-            "authorization_version": row["authorization_version"],
-            "evidence": evidence_summary(row["attestation_json"]),
-            "updated_at_iso": row["updated_at_iso"],
-        }
-    )
+    out.update({
+        "node_id": row["node_id"],
+        "status": row["status"],
+        "preflight": _loads(row["preflight_json"]),
+        "operator_use_authorized": bool(int(row["operator_use_authorized"])),
+        "authorization_version": row["authorization_version"],
+        "evidence": evidence_summary(row["attestation_json"]),
+        "updated_at_iso": row["updated_at_iso"],
+    })
     return out
 
 
@@ -1802,14 +1520,9 @@ def public_record(row: dict[str, Any]) -> dict[str, Any]:
 
 def chutes_manifest_item(row: dict[str, Any]) -> dict[str, Any]:
     validator = row["chutes_validator_hotkey"] or _DEFAULT_CHUTES_VALIDATOR
-    miner_api = os.environ.get(
-        "CATHEDRAL_TEE_GPU_CHUTES_MINER_API", "http://127.0.0.1:32000"
-    )
+    miner_api = os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_MINER_API", "http://127.0.0.1:32000")
     hotkey_path = os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_HOTKEY_PATH", "").strip()
-    cli = (
-        os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_CLI", "chutes-miner").strip()
-        or "chutes-miner"
-    )
+    cli = os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_CLI", "chutes-miner").strip() or "chutes-miner"
     name = str(row["chutes_server_name"] or "").strip()
     agent_api = str(row["agent_api"] or "").strip()
     preflight = _loads(row["preflight_json"])
@@ -1835,22 +1548,14 @@ def chutes_manifest_item(row: dict[str, Any]) -> dict[str, Any]:
     args = []
     if ready:
         args = [
-            cli,
-            "add-node",
-            "--name",
-            name,
-            "--validator",
-            validator,
-            "--hourly-cost",
-            str(row["hourly_cost"]),
-            "--gpu-short-ref",
-            row["gpu_short_ref"],
-            "--hotkey",
-            hotkey_path,
-            "--agent-api",
-            agent_api,
-            "--miner-api",
-            miner_api,
+            cli, "add-node",
+            "--name", name,
+            "--validator", validator,
+            "--hourly-cost", str(row["hourly_cost"]),
+            "--gpu-short-ref", row["gpu_short_ref"],
+            "--hotkey", hotkey_path,
+            "--agent-api", agent_api,
+            "--miner-api", miner_api,
         ]
     payload = {
         "name": name,
@@ -1872,9 +1577,7 @@ def chutes_manifest_item(row: dict[str, Any]) -> dict[str, Any]:
         "command": " ".join(shlex.quote(str(x)) for x in args) if ready else None,
         "note": (
             "set missing operator fields before running chutes-miner add-node"
-            if missing
-            else "run from the Chutes miner control plane after k3s/agent setup"
-        ),
+            if missing else "run from the Chutes miner control plane after k3s/agent setup"),
     }
 
 
@@ -1885,9 +1588,7 @@ def list_capacity_on_chutes(
     execute: bool = False,
     timeout_secs: int | None = None,
 ) -> dict[str, Any]:
-    rows = store.query(
-        "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-    )
+    rows = store.query("SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,))
     if not rows:
         raise HTTPException(404, "capacity_not_found")
     row = _row_to_dict(rows[0])
@@ -1905,14 +1606,11 @@ def list_capacity_on_chutes(
     if row["status"] not in _LISTABLE_STATUS:
         _block("status_not_listable")
     if blockers:
-        raise HTTPException(
-            400,
-            {
-                "detail": "chutes_listing_not_ready",
-                "blockers": blockers,
-                "manifest": item,
-            },
-        )
+        raise HTTPException(400, {
+            "detail": "chutes_listing_not_ready",
+            "blockers": blockers,
+            "manifest": item,
+        })
 
     if execute and row["chutes_status"] == "listed":
         return {
@@ -1925,17 +1623,12 @@ def list_capacity_on_chutes(
             "status": "already_listed",
         }
 
-    if execute and not _truthy(
-        os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_EXECUTE_ENABLED", "")
-    ):
-        raise HTTPException(
-            403,
-            {
-                "detail": "chutes_execution_disabled",
-                "required_env": "CATHEDRAL_TEE_GPU_CHUTES_EXECUTE_ENABLED=1",
-                "manifest": item,
-            },
-        )
+    if execute and not _truthy(os.environ.get("CATHEDRAL_TEE_GPU_CHUTES_EXECUTE_ENABLED", "")):
+        raise HTTPException(403, {
+            "detail": "chutes_execution_disabled",
+            "required_env": "CATHEDRAL_TEE_GPU_CHUTES_EXECUTE_ENABLED=1",
+            "manifest": item,
+        })
 
     result = {
         "capacity_id": capacity_id,
@@ -1966,67 +1659,52 @@ def list_capacity_on_chutes(
             timeout=timeout,
             check=False,
         )
-        result.update(
-            {
-                "executed": True,
-                "returncode": proc.returncode,
-                "stdout": _tail(proc.stdout),
-                "stderr": _tail(proc.stderr),
-                "status": "listed" if proc.returncode == 0 else "list_failed",
-            }
-        )
+        result.update({
+            "executed": True,
+            "returncode": proc.returncode,
+            "stdout": _tail(proc.stdout),
+            "stderr": _tail(proc.stderr),
+            "status": "listed" if proc.returncode == 0 else "list_failed",
+        })
     except FileNotFoundError as e:
-        result.update(
-            {
-                "executed": False,
-                "returncode": None,
-                "error": f"cli_not_found: {e.filename}",
-                "status": "list_failed",
-            }
-        )
+        result.update({
+            "executed": False,
+            "returncode": None,
+            "error": f"cli_not_found: {e.filename}",
+            "status": "list_failed",
+        })
     except OSError as e:
-        result.update(
-            {
-                "executed": False,
-                "returncode": None,
-                "error": f"cli_error: {e}",
-                "status": "list_failed",
-            }
-        )
+        result.update({
+            "executed": False,
+            "returncode": None,
+            "error": f"cli_error: {e}",
+            "status": "list_failed",
+        })
     except subprocess.TimeoutExpired as e:
-        result.update(
-            {
-                "executed": True,
-                "returncode": None,
-                "stdout": _tail(e.stdout),
-                "stderr": _tail(e.stderr),
-                "error": f"timeout_after_{timeout}s",
-                "status": "list_failed",
-            }
-        )
+        result.update({
+            "executed": True,
+            "returncode": None,
+            "stdout": _tail(e.stdout),
+            "stderr": _tail(e.stderr),
+            "error": f"timeout_after_{timeout}s",
+            "status": "list_failed",
+        })
 
-    event_type = (
-        "chutes_list_succeeded"
-        if result["status"] == "listed"
-        else "chutes_list_failed"
-    )
+    event_type = "chutes_list_succeeded" if result["status"] == "listed" else "chutes_list_failed"
 
     def _do(conn):
         new_status = "active" if result["status"] == "listed" else row["status"]
         conn.execute(
             "UPDATE tee_gpu_capacity "
             "SET status=?, chutes_status=?, updated_at_iso=? WHERE capacity_id=?",
-            (new_status, result["status"], _now_iso(), capacity_id),
-        )
+            (new_status, result["status"], _now_iso(), capacity_id))
         _insert_event(conn, capacity_id, "admin", event_type, result)
 
     store.write(_do)
     return result
 
 
-def _claim_chutes_listing(
-    store: Store, capacity_id: str, payload: dict[str, Any]
-) -> str:
+def _claim_chutes_listing(store: Store, capacity_id: str, payload: dict[str, Any]) -> str:
     def _do(conn):
         row = conn.execute(
             "SELECT chutes_status, updated_at_iso FROM tee_gpu_capacity WHERE capacity_id=?",
@@ -2103,14 +1781,9 @@ def evidence_summary(attestation: Any) -> dict[str, Any]:
             "acceptable": review_status in _EVIDENCE_ACCEPTED_STATUS,
             "proof": str(
                 review.get("proof")
-                or (
-                    "tdx_dcap_and_nvidia_gpu_attestation"
-                    if crypto
-                    else "operator_review_only"
-                )
+                or ("tdx_dcap_and_nvidia_gpu_attestation" if crypto else "operator_review_only")
             ),
-            "cryptographic_proof": crypto
-            and _boolish(review.get("cryptographic_proof")),
+            "cryptographic_proof": crypto and _boolish(review.get("cryptographic_proof")),
             "reason": str(review.get("reason") or ""),
             "reviewed_at_iso": str(review.get("reviewed_at_iso") or ""),
             "verifier": str(review.get("verifier") or ""),
@@ -2119,8 +1792,7 @@ def evidence_summary(attestation: Any) -> dict[str, Any]:
             "gpu_claims_match": crypto and _boolish(review.get("gpu_claims_match")),
             "note": (
                 "cryptographic TDX/GPU attestation verified"
-                if crypto
-                else "operator review only; not cryptographic attestation"
+                if crypto else "operator review only; not cryptographic attestation"
             ),
         }
 
@@ -2148,17 +1820,9 @@ def evidence_summary(attestation: Any) -> dict[str, Any]:
 
 def _submitted_evidence_fields(body: dict[str, Any]) -> list[str]:
     candidates = (
-        "tdx_quote_b64",
-        "quote_b64",
-        "raw_quote_b64",
-        "collateral_b64",
-        "collateral_json",
-        "gpu_evidence_b64",
-        "gpu_evidence_json",
-        "nvidia_cc_evidence",
-        "report_data_hex",
-        "mrtd_hex",
-        "rtmrs_json",
+        "tdx_quote_b64", "quote_b64", "raw_quote_b64", "collateral_b64",
+        "collateral_json", "gpu_evidence_b64", "gpu_evidence_json",
+        "nvidia_cc_evidence", "report_data_hex", "mrtd_hex", "rtmrs_json",
     )
     return [key for key in candidates if body.get(key) not in (None, "", {}, [])]
 
@@ -2183,9 +1847,7 @@ def _attestation_input_json(value: Any, *, allow_review: bool) -> str:
     return _json_blob(body)
 
 
-def _attestation_review_json(
-    attestation_json: Any, review: Any, *, reviewed_by: str
-) -> str:
+def _attestation_review_json(attestation_json: Any, review: Any, *, reviewed_by: str) -> str:
     body = _loads(_json_blob(attestation_json or {}))
     if not isinstance(body, dict):
         body = {"raw": body}
@@ -2232,14 +1894,10 @@ def _attestation_verified_json(
     result_digest = _digest_text(_json_blob(verifier_result))
     body["cathedral_review"] = {
         "status": _EVIDENCE_CRYPTO_STATUS,
-        "reason": str(
-            verifier_result.get("reason") or "tdx_and_gpu_attestation_verified"
-        ),
+        "reason": str(verifier_result.get("reason") or "tdx_and_gpu_attestation_verified"),
         "reviewed_by": reviewed_by,
         "reviewed_at_iso": _now_iso(),
-        "proof": str(
-            verifier_result.get("proof") or "tdx_dcap_and_nvidia_gpu_attestation"
-        ),
+        "proof": str(verifier_result.get("proof") or "tdx_dcap_and_nvidia_gpu_attestation"),
         "cryptographic_proof": True,
         "verifier": str(verifier_result.get("verifier") or "configured_verifier"),
         "verifier_command_digest": _verifier_command_digest(),
@@ -2271,13 +1929,10 @@ def _normal_review_status(raw: str) -> str:
     }
     status = aliases.get(status, status)
     if status not in _EVIDENCE_MANUAL_REVIEW_STATUS:
-        raise HTTPException(
-            400,
-            {
-                "detail": "invalid_attestation_review_status",
-                "allowed": sorted(_EVIDENCE_MANUAL_REVIEW_STATUS),
-            },
-        )
+        raise HTTPException(400, {
+            "detail": "invalid_attestation_review_status",
+            "allowed": sorted(_EVIDENCE_MANUAL_REVIEW_STATUS),
+        })
     return status
 
 
@@ -2296,13 +1951,10 @@ def _verify_offer_claim(
     if abs(datetime.now(timezone.utc).timestamp() - ts) > _SKEW_SECS:
         raise HTTPException(400, "submitted_at_outside_clock_skew")
     msg = canonical_claim_bytes(
-        bundle_hash=_empty_bundle_hash(),
-        card_id=TEE_CARD_ID,
-        miner_hotkey=hotkey,
-        submitted_at=submitted_at,
+        bundle_hash=_empty_bundle_hash(), card_id=TEE_CARD_ID,
+        miner_hotkey=hotkey, submitted_at=submitted_at,
         challenge_id=node_id,
-        dimacs_solution_sha256=payload_digest,
-    )
+        dimacs_solution_sha256=payload_digest)
     if not verifier.verify(hotkey, msg, signature_b64):
         raise HTTPException(401, "invalid_hotkey_signature")
 
@@ -2319,8 +1971,7 @@ def require_miner_intake_gate(hotkey: str, body: dict[str, Any]) -> None:
             raise HTTPException(403, "tee_gpu_hotkey_not_invited")
         detail = (
             "tee_gpu_intake_code_not_configured"
-            if require_code
-            else "tee_gpu_intake_gate_not_configured"
+            if require_code else "tee_gpu_intake_gate_not_configured"
         )
         raise HTTPException(503, detail)
 
@@ -2340,15 +1991,12 @@ def _intake_allowlist() -> set[str]:
     return {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
 
 
-def _insert_event(
-    conn, capacity_id: str, actor: str, event_type: str, payload: dict[str, Any]
-) -> None:
+def _insert_event(conn, capacity_id: str, actor: str, event_type: str, payload: dict[str, Any]) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO tee_gpu_capacity_events"
         "(id, capacity_id, actor, event_type, event_json, created_at_iso) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (new_uuid(), capacity_id, actor, event_type, _json_blob(payload), _now_iso()),
-    )
+        (new_uuid(), capacity_id, actor, event_type, _json_blob(payload), _now_iso()))
 
 
 def _record_capacity_event(
@@ -2365,9 +2013,7 @@ def _record_capacity_event(
 
 
 def _capacity_row(store: Store, capacity_id: str) -> dict[str, Any] | None:
-    rows = store.query(
-        "SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,)
-    )
+    rows = store.query("SELECT * FROM tee_gpu_capacity WHERE capacity_id=?", (capacity_id,))
     return _row_to_dict(rows[0]) if rows else None
 
 
@@ -2389,9 +2035,7 @@ def _capacity_events(store: Store, capacity_id: str) -> list[dict[str, Any]]:
     return events
 
 
-def _latest_event(
-    events: list[dict[str, Any]], event_type: str
-) -> dict[str, Any] | None:
+def _latest_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
     for event in reversed(events):
         if event.get("event_type") == event_type:
             return event
@@ -2411,9 +2055,7 @@ def _record_chutes_listing(
 
 
 def _payload_digest(body: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _digest_text(text: str) -> str:
@@ -2423,16 +2065,13 @@ def _digest_text(text: str) -> str:
 def _empty_bundle_hash() -> str:
     try:
         import blake3
-
         return blake3.blake3(b"").hexdigest()
     except Exception:
         return hashlib.sha256(b"").hexdigest()
 
 
 def _capacity_id(owner_hotkey: str, node_id: str) -> str:
-    return (
-        "tee-" + hashlib.sha256(f"{owner_hotkey}:{node_id}".encode()).hexdigest()[:16]
-    )
+    return "tee-" + hashlib.sha256(f"{owner_hotkey}:{node_id}".encode()).hexdigest()[:16]
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
@@ -2496,16 +2135,13 @@ def _truthy(raw: str | None) -> bool:
 def _operator_use_authorized(body: dict[str, Any]) -> bool:
     auth = body.get("authorization")
     auth_body = auth if isinstance(auth, dict) else {}
-    return any(
-        _boolish(v)
-        for v in (
-            body.get("operator_use_authorized"),
-            body.get("capacity_use_authorized"),
-            body.get("use_authorized"),
-            auth_body.get("operator_use_authorized"),
-            auth_body.get("capacity_use_authorized"),
-        )
-    )
+    return any(_boolish(v) for v in (
+        body.get("operator_use_authorized"),
+        body.get("capacity_use_authorized"),
+        body.get("use_authorized"),
+        auth_body.get("operator_use_authorized"),
+        auth_body.get("capacity_use_authorized"),
+    ))
 
 
 def _authorization_json(
@@ -2520,8 +2156,7 @@ def _authorization_json(
     supplied = body.get("authorization")
     supplied_body = supplied if isinstance(supplied, dict) else {}
     supplied_body = {
-        key: value
-        for key, value in supplied_body.items()
+        key: value for key, value in supplied_body.items()
         if key not in _INTAKE_CODE_FIELDS
     }
     payload = {
@@ -2609,11 +2244,7 @@ def _bounded_evidence_request_ttl(value: int | None) -> int:
 def _tail(value: Any, *, limit: int = 8000) -> str:
     if value is None:
         return ""
-    text = (
-        value.decode("utf-8", errors="replace")
-        if isinstance(value, bytes)
-        else str(value)
-    )
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
     return text[-limit:]
 
 

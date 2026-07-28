@@ -71,10 +71,7 @@ def test_etag_is_hash_of_serialized_payload():
     body, ser_etag = snap.serialized()
     assert ser_etag == etag
     # Stable serialization: sorted keys, compact separators.
-    assert (
-        body
-        == json.dumps({"a": 1, "b": 2}, sort_keys=True, separators=(",", ":")).encode()
-    )
+    assert body == json.dumps({"a": 1, "b": 2}, sort_keys=True, separators=(",", ":")).encode()
 
 
 def test_failed_build_keeps_last_good_snapshot():
@@ -132,9 +129,7 @@ def test_start_is_noop_when_flag_off(monkeypatch):
 
 
 def test_snapshot_headers_carry_swr_and_markers():
-    headers = ms.snapshot_headers(
-        'W/"abc"', {"snapshot": "board", "built_at": "x", "age_secs": 1.2}
-    )
+    headers = ms.snapshot_headers('W/"abc"', {"snapshot": "board", "built_at": "x", "age_secs": 1.2})
     assert "stale-while-revalidate" in headers["Cache-Control"]
     assert headers["ETag"] == 'W/"abc"'
     assert headers["X-Cathedral-Snapshot"] == "board"

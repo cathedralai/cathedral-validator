@@ -1,4 +1,4 @@
-""" "Who can earn" eligibility gate for the Mechanism Router.
+""""Who can earn" eligibility gate for the Mechanism Router.
 
 ``mechanism_router.compose(...)`` already drops any uid not present in the
 ``registered_uids`` set it is given — the gate is entirely about building that
@@ -24,7 +24,6 @@ already-composed ``{uid: weight}`` table it is handed), so this module has no
 call site to wire in the router today. When one is added, it must go through
 ``compose_eligible``.
 """
-
 from __future__ import annotations
 
 import logging
@@ -125,8 +124,7 @@ def eligible_uids(
             "mechanism_eligibility: %s=%s requested but metagraph_hotkeys has no "
             "stake column yet — stake filtering is a NO-OP (registration-only "
             "gate applied instead). See TODO(stake-gate) in mechanism_eligibility.py.",
-            MIN_STAKE_ENV,
-            stake_floor,
+            MIN_STAKE_ENV, stake_floor,
         )
         meta["min_stake_enforced"] = False
     else:
@@ -147,10 +145,7 @@ def eligible_uids(
         logger.info(
             "mechanism_eligibility: %d/%d fresh registered hotkeys had no uid in "
             "metagraph_hotkeys (network=%s netuid=%s)",
-            unmapped,
-            len(hotkeys),
-            network,
-            netuid,
+            unmapped, len(hotkeys), network, netuid,
         )
 
     meta["eligible_uid_count"] = len(uids)
@@ -160,9 +155,7 @@ def eligible_uids(
 def compose_eligible(
     store: Store,
     specs: list[mechanism_router.MechanismSpec],
-    scores: dict[
-        str, tuple[mechanism_router.ScoreVector, mechanism_router.ScoreVectorMeta]
-    ],
+    scores: dict[str, tuple[mechanism_router.ScoreVector, mechanism_router.ScoreVectorMeta]],
     *,
     now_ms: int,
     now: datetime | None = None,

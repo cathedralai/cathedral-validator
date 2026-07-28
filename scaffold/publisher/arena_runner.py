@@ -14,7 +14,6 @@ fields and let the wrapper enforce pull policy, digest pinning, and cache rules.
 The safest interface is `{manifest_path}`: miner-controlled fields are written to
 a JSON manifest and passed as data instead of option-like argv tokens.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -27,12 +26,7 @@ from pathlib import Path
 
 from ..contract import Outcome
 from ..lanes import sandbox
-from ..lanes.solver_arena import (
-    AdapterOutput,
-    SolverAdapter,
-    SolverSpec,
-    real_solver_adapter,
-)
+from ..lanes.solver_arena import AdapterOutput, SolverAdapter, SolverSpec, real_solver_adapter
 
 
 def adapter_for_spec(spec: SolverSpec) -> SolverAdapter | None:
@@ -41,16 +35,16 @@ def adapter_for_spec(spec: SolverSpec) -> SolverAdapter | None:
     Default is fail-closed: if no runner is configured, or containment is required
     but unavailable, the solver remains pending and no record-fall can happen.
     """
-    require_containment = _truthy(
-        os.environ.get("CATHEDRAL_ARENA_REQUIRE_CONTAINMENT", "1")
-    )
+    require_containment = _truthy(os.environ.get(
+        "CATHEDRAL_ARENA_REQUIRE_CONTAINMENT", "1"))
     if require_containment and not sandbox.sandbox_available():
         return None
 
     runner_cmd = os.environ.get("CATHEDRAL_ARENA_RUNNER_CMD", "").strip()
     if runner_cmd:
         try:
-            return command_runner_adapter(spec, runner_cmd, contain=require_containment)
+            return command_runner_adapter(
+                spec, runner_cmd, contain=require_containment)
         except ValueError:
             return None
 
@@ -153,7 +147,8 @@ def _validate_runner_command(command: str) -> None:
         # `--network=host` into an option consumed by the wrapper. Embedded forms
         # such as `--source={source_url}` remain one operator-owned argv token.
         if token in {f"{{{name}}}" for name in found} and not after_terminator:
-            raise ValueError(f"unsafe_miner_placeholder_before_terminator:{token}")
+            raise ValueError(
+                f"unsafe_miner_placeholder_before_terminator:{token}")
 
 
 def _write_manifest(

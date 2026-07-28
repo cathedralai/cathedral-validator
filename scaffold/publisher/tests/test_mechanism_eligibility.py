@@ -1,5 +1,4 @@
 """Tests for the mechanism-router "who can earn" eligibility gate."""
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -56,9 +55,8 @@ def test_empty_snapshot_fails_closed():
 
 def test_all_stale_fails_closed():
     now = datetime.now(timezone.utc)
-    stale = [
-        {"hotkey": "5A", "uid": 1, "updated_at_iso": _iso(now - timedelta(hours=5))}
-    ]
+    stale = [{"hotkey": "5A", "uid": 1,
+              "updated_at_iso": _iso(now - timedelta(hours=5))}]
     uids, meta = elig.eligible_uids(FakeStore(stale), now=now)
     assert uids == set()
     assert meta["fail_closed"] is True
@@ -71,12 +69,10 @@ def test_compose_eligible_drops_unregistered_uid():
     specs = [R.MechanismSpec("m1", "5owner", 1.0, "signed", owner_uid=None)]
     # scores: uid 1 is registered, uid 99 is NOT
     scores = {
-        "m1": (
-            {1: 10.0, 99: 90.0},
-            R.ScoreVectorMeta("m1", now_ms, True, "signed_post"),
-        ),
+        "m1": ({1: 10.0, 99: 90.0},
+               R.ScoreVectorMeta("m1", now_ms, True, "signed_post")),
     }
     weights, debug = elig.compose_eligible(store, specs, scores, now_ms=now_ms, now=now)
-    assert set(weights) == {1}  # 99 dropped by the gate
+    assert set(weights) == {1}          # 99 dropped by the gate
     assert abs(sum(weights.values()) - 1.0) < 1e-9
     assert debug["eligibility"]["eligible_uid_count"] == 3

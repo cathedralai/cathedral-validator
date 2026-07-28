@@ -35,7 +35,6 @@ Usage (in build_app):
     app.add_middleware(AbuseLimitMiddleware)
     app.add_middleware(RateLimitMiddleware)
 """
-
 from __future__ import annotations
 
 import os
@@ -67,7 +66,6 @@ def _note_unresolved_ip() -> None:
 def unresolved_ip_count() -> int:
     """Total fail-open (un-derivable client IP) events since process start."""
     return _unresolved_ip_count
-
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -117,7 +115,6 @@ def _ratelimit_rpm() -> int:
 
 class _WindowEntry:
     """Sliding-window state for one key: (window_start, count)."""
-
     __slots__ = ("window_start", "count", "last_seen")
 
     def __init__(self, now: float) -> None:
@@ -138,7 +135,7 @@ class _WindowEntry:
 class _RateLimiterState:
     """Thread-safe per-key state store with periodic GC."""
 
-    _GC_EVERY_N = 500  # GC check every N requests across all keys
+    _GC_EVERY_N = 500          # GC check every N requests across all keys
     _GC_IDLE_TTL = _WINDOW_SECS * 4  # evict keys idle for 4 windows
 
     def __init__(self) -> None:
@@ -221,7 +218,7 @@ def _canonical_path(path: str) -> str:
     if path == _LEGACY_PREFIX:
         return "/"
     if path.startswith(_LEGACY_PREFIX + "/"):
-        return path[len(_LEGACY_PREFIX) :]
+        return path[len(_LEGACY_PREFIX):]
     return path
 
 
@@ -278,8 +275,7 @@ class _AbuseLimiterState:
                 return True, 0
             entry.limited_count += 1
             retry_after = self._retry_after(
-                entry.limited_count, retry_base=retry_base, retry_max=retry_max
-            )
+                entry.limited_count, retry_base=retry_base, retry_max=retry_max)
             return False, retry_after
 
     @staticmethod
@@ -287,7 +283,7 @@ class _AbuseLimiterState:
         base = max(1, retry_base)
         cap = max(base, retry_max)
         step = min(max(0, strikes - 1), 10)
-        return min(cap, base * (2**step))
+        return min(cap, base * (2 ** step))
 
     def _gc(self, now: float) -> None:
         cutoff = now - self._GC_IDLE_TTL
@@ -438,26 +434,22 @@ class RateLimitMiddleware:
             retry_after = str(_WINDOW_SECS).encode()
             limit_str = str(limit).encode()
             window_str = f"{_WINDOW_SECS}s".encode()
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 429,
-                    "headers": [
-                        (b"content-type", b"text/plain; charset=utf-8"),
-                        (b"content-length", str(len(body)).encode()),
-                        (b"retry-after", retry_after),
-                        (b"x-ratelimit-limit", limit_str),
-                        (b"x-ratelimit-window", window_str),
-                    ],
-                }
-            )
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": body,
-                    "more_body": False,
-                }
-            )
+            await send({
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"retry-after", retry_after),
+                    (b"x-ratelimit-limit", limit_str),
+                    (b"x-ratelimit-window", window_str),
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            })
             return
 
         await self.app(scope, receive, send)
@@ -490,11 +482,9 @@ class AbuseLimitMiddleware:
             return
 
         retry_base = _env_int(
-            "CATHEDRAL_ABUSE_RETRY_BASE_SECS", _ABUSE_DEFAULT_RETRY_BASE_SECS
-        )
+            "CATHEDRAL_ABUSE_RETRY_BASE_SECS", _ABUSE_DEFAULT_RETRY_BASE_SECS)
         retry_max = _env_int(
-            "CATHEDRAL_ABUSE_RETRY_MAX_SECS", _ABUSE_DEFAULT_RETRY_MAX_SECS
-        )
+            "CATHEDRAL_ABUSE_RETRY_MAX_SECS", _ABUSE_DEFAULT_RETRY_MAX_SECS)
 
         ip = _client_ip_from_scope(scope)
         if ip == UNRESOLVED_IP:
@@ -504,19 +494,16 @@ class AbuseLimitMiddleware:
             return
         ip_limit = _env_int("CATHEDRAL_ABUSE_IP_RPM", _ABUSE_DEFAULT_IP_RPM)
         allowed, retry_after = _abuse_state.check(
-            f"ip:{ip}", ip_limit, retry_base=retry_base, retry_max=retry_max
-        )
+            f"ip:{ip}", ip_limit, retry_base=retry_base, retry_max=retry_max)
         if not allowed:
             await self._reject(send, IP_ABUSE_REASON, retry_after)
             return
 
-        actor = (
-            _get_header(scope.get("headers", []), b"x-cathedral-hotkey") or ""
-        ).strip()
+        actor = (_get_header(scope.get("headers", []), b"x-cathedral-hotkey")
+                 or "").strip()
         if actor:
             actor_limit = _env_int(
-                "CATHEDRAL_ABUSE_ACTOR_RPM", _ABUSE_DEFAULT_ACTOR_RPM
-            )
+                "CATHEDRAL_ABUSE_ACTOR_RPM", _ABUSE_DEFAULT_ACTOR_RPM)
             allowed, retry_after = _abuse_state.check(
                 f"actor:{ip}:{actor}",
                 actor_limit,
@@ -532,22 +519,18 @@ class AbuseLimitMiddleware:
     @staticmethod
     async def _reject(send: Send, reason: str, retry_after: int) -> None:
         body = reason.encode("utf-8")
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 429,
-                "headers": [
-                    (b"content-type", b"text/plain; charset=utf-8"),
-                    (b"content-length", str(len(body)).encode()),
-                    (b"retry-after", str(max(1, retry_after)).encode()),
-                    (b"x-cathedral-rejection-reason", body),
-                ],
-            }
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": body,
-                "more_body": False,
-            }
-        )
+        await send({
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", str(max(1, retry_after)).encode()),
+                (b"x-cathedral-rejection-reason", body),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+            "more_body": False,
+        })

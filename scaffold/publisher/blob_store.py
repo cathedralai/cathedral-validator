@@ -5,7 +5,6 @@ HTTP fetch path for externally published blobs. Hippius/IPFS/R2 can be layered i
 by returning content-addressed URLs/CIDs in the manifest; the verifier only needs
 `fetch(cid)` plus sha256 validation.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -58,14 +57,12 @@ class LocalBlobStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_bytes(body)
-        return BlobPutResult(
-            cid=f"local://{quote(kind)}/{sha}", sha256=sha, size=len(body)
-        )
+        return BlobPutResult(cid=f"local://{quote(kind)}/{sha}", sha256=sha, size=len(body))
 
     def fetch(self, cid: str, *, max_bytes: int = 0) -> bytes:
         if not cid.startswith("local://"):
             raise ValueError("unsupported_local_cid")
-        rest = cid[len("local://") :]
+        rest = cid[len("local://"):]
         try:
             kind, sha = rest.split("/", 1)
         except ValueError as exc:
@@ -90,13 +87,8 @@ class CompositeBlobStore:
     set CATHEDRAL_V2_CID_GATEWAY_TEMPLATE to an HTTP URL containing `{cid}`.
     """
 
-    def __init__(
-        self,
-        local: LocalBlobStore,
-        *,
-        timeout: float = 30.0,
-        gateway_template: str = "",
-    ) -> None:
+    def __init__(self, local: LocalBlobStore, *, timeout: float = 30.0,
+                 gateway_template: str = "") -> None:
         self.local = local
         self.timeout = timeout
         self.gateway_template = gateway_template
@@ -138,10 +130,6 @@ def store_from_env() -> CompositeBlobStore:
         or os.environ.get("CATHEDRAL_BLOB_DIR")
         or "/tmp/cathedral-v2-blobs"
     )
-    timeout = float(
-        os.environ.get("CATHEDRAL_V2_BLOB_FETCH_TIMEOUT_SECS", "30") or "30"
-    )
+    timeout = float(os.environ.get("CATHEDRAL_V2_BLOB_FETCH_TIMEOUT_SECS", "30") or "30")
     gateway_template = os.environ.get("CATHEDRAL_V2_CID_GATEWAY_TEMPLATE", "").strip()
-    return CompositeBlobStore(
-        LocalBlobStore(root), timeout=timeout, gateway_template=gateway_template
-    )
+    return CompositeBlobStore(LocalBlobStore(root), timeout=timeout, gateway_template=gateway_template)

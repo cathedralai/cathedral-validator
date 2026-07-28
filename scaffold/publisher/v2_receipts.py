@@ -17,7 +17,6 @@ underlying row. It does not modify v2_pipeline.py — this is a read-only,
 additive, public *view* of already-verified rows; it must never be able to
 affect scoring/verification/weights.
 """
-
 from __future__ import annotations
 
 import base64
@@ -100,9 +99,7 @@ def _public_receipt(row: dict[str, Any], *, coldkey: str | None) -> dict[str, An
         "submitted_at": row.get("submitted_at"),
         "verified_at": row.get("verified_at_iso"),
         "weighted_score": (
-            float(row["weighted_score"])
-            if row.get("weighted_score") is not None
-            else None
+            float(row["weighted_score"]) if row.get("weighted_score") is not None else None
         ),
         "miner_signature": row.get("signature"),
         # SAME function/inputs as audit_bundle's leaves, so a receipt's
@@ -142,12 +139,7 @@ def build_receipts_bundle(
             "SELECT * FROM solution_manifests WHERE status=? "
             "AND (epoch=? OR (epoch IS NULL AND challenge_id LIKE ?)) "
             "ORDER BY received_at_iso ASC LIMIT ?",
-            (
-                v2_pipeline.STATUS_VERIFIED,
-                int(epoch),
-                f"pm-%-e{int(epoch)}-%",
-                int(limit),
-            ),
+            (v2_pipeline.STATUS_VERIFIED, int(epoch), f"pm-%-e{int(epoch)}-%", int(limit)),
         )
     ]
     bitset_rows = [
@@ -191,9 +183,7 @@ def build_receipts_bundle(
         "receipts": receipts,
     }
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
-    payload["publisher_signature"] = base64.b64encode(
-        sk.sign(canonical_bytes(payload))
-    ).decode()
+    payload["publisher_signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload
 
 

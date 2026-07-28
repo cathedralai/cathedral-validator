@@ -1,5 +1,4 @@
 """Pre-auth abuse limiter wiring for hot SAT endpoints."""
-
 from __future__ import annotations
 
 from starlette.testclient import TestClient
@@ -12,9 +11,7 @@ def _client(tmp_path) -> TestClient:
     return TestClient(app)
 
 
-def _enable(
-    monkeypatch, *, ip_rpm: int, actor_rpm: int, base: int = 2, cap: int = 20
-) -> None:
+def _enable(monkeypatch, *, ip_rpm: int, actor_rpm: int, base: int = 2, cap: int = 20) -> None:
     monkeypatch.setenv("CATHEDRAL_ABUSE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_ABUSE_IP_RPM", str(ip_rpm))
     monkeypatch.setenv("CATHEDRAL_ABUSE_ACTOR_RPM", str(actor_rpm))
@@ -23,9 +20,7 @@ def _enable(
     monkeypatch.delenv("CATHEDRAL_PER_HOTKEY_LIMIT_ENABLED", raising=False)
 
 
-def test_actor_limit_covers_legacy_submit_and_escalates_retry_after(
-    tmp_path, monkeypatch
-):
+def test_actor_limit_covers_legacy_submit_and_escalates_retry_after(tmp_path, monkeypatch):
     _enable(monkeypatch, ip_rpm=100, actor_rpm=1, base=2, cap=9)
     client = _client(tmp_path)
     headers = {
@@ -53,64 +48,45 @@ def test_actor_limit_does_not_block_a_different_claimed_actor(tmp_path, monkeypa
     client = _client(tmp_path)
     ip = "198.51.100.22"
 
-    client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "actor-a",
-        },
-    )
-    limited = client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "actor-a",
-        },
-    )
+    client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "actor-a",
+    })
+    limited = client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "actor-a",
+    })
     assert limited.status_code == 429
     assert limited.headers["X-Cathedral-Rejection-Reason"] == "actor_rate_limited"
 
-    other = client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "actor-b",
-        },
-    )
+    other = client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "actor-b",
+    })
     assert other.headers.get("X-Cathedral-Rejection-Reason") != "actor_rate_limited"
 
 
 def test_actor_limit_is_scoped_to_ip_to_prevent_cross_ip_hotkey_lockout(
-    tmp_path, monkeypatch
-):
+        tmp_path, monkeypatch):
     _enable(monkeypatch, ip_rpm=100, actor_rpm=1)
     client = _client(tmp_path)
     victim = "known-public-hotkey"
 
-    client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": "198.51.100.30",
-            "X-Cathedral-Hotkey": victim,
-        },
-    )
-    limited = client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": "198.51.100.30",
-            "X-Cathedral-Hotkey": victim,
-        },
-    )
+    client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": "198.51.100.30",
+        "X-Cathedral-Hotkey": victim,
+    })
+    limited = client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": "198.51.100.30",
+        "X-Cathedral-Hotkey": victim,
+    })
     assert limited.status_code == 429
     assert limited.headers["X-Cathedral-Rejection-Reason"] == "actor_rate_limited"
 
-    other_ip = client.post(
-        "/v1/agents/submit",
-        headers={
-            "X-Forwarded-For": "198.51.100.31",
-            "X-Cathedral-Hotkey": victim,
-        },
-    )
+    other_ip = client.post("/v1/agents/submit", headers={
+        "X-Forwarded-For": "198.51.100.31",
+        "X-Cathedral-Hotkey": victim,
+    })
     assert other_ip.headers.get("X-Cathedral-Rejection-Reason") != "actor_rate_limited"
 
 
@@ -119,31 +95,22 @@ def test_ip_limit_spans_per_miner_listing_and_cnf_paths(tmp_path, monkeypatch):
     client = _client(tmp_path)
     ip = "198.51.100.23"
 
-    r1 = client.get(
-        "/v1/synthetic-boolean/per-miner/challenges",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "ip-a",
-        },
-    )
+    r1 = client.get("/v1/synthetic-boolean/per-miner/challenges", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "ip-a",
+    })
     assert r1.headers.get("X-Cathedral-Rejection-Reason") != "ip_rate_limited"
 
-    r2 = client.get(
-        "/v1/synthetic-boolean/per-miner/cnf?challenge_id=pm-test",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "ip-b",
-        },
-    )
+    r2 = client.get("/v1/synthetic-boolean/per-miner/cnf?challenge_id=pm-test", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "ip-b",
+    })
     assert r2.headers.get("X-Cathedral-Rejection-Reason") != "ip_rate_limited"
 
-    r3 = client.get(
-        "/v1/synthetic-boolean/per-miner/challenges",
-        headers={
-            "X-Forwarded-For": ip,
-            "X-Cathedral-Hotkey": "ip-c",
-        },
-    )
+    r3 = client.get("/v1/synthetic-boolean/per-miner/challenges", headers={
+        "X-Forwarded-For": ip,
+        "X-Cathedral-Hotkey": "ip-c",
+    })
     assert r3.status_code == 429
     assert r3.text == "ip_rate_limited"
     assert r3.headers["X-Cathedral-Rejection-Reason"] == "ip_rate_limited"

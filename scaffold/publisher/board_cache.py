@@ -16,7 +16,6 @@ the snapshot is missing or the TTL has lapsed.
 The ETag is a hash of the rendered payload, so a CDN / conditional GET gets a
 cheap 304 whenever the board hasn't changed — the common case at miner poll rates.
 """
-
 from __future__ import annotations
 
 import hashlib

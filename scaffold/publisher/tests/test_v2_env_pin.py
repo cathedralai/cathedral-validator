@@ -17,7 +17,6 @@ making v2_pm_env() a lock-free no-op. Guards covered here:
   - missing seed secret still fails closed (503) on the V2 endpoints in both
     pinned and bridged modes.
 """
-
 from __future__ import annotations
 
 import os
@@ -94,9 +93,7 @@ def test_converged_profile_pinned_v2_pm_env_is_lock_free(monkeypatch):
     with v2_pipeline._PM_ENV_LOCK:
         t = threading.Thread(target=use_env)
         t.start()
-        assert entered.wait(timeout=5.0), (
-            "v2_pm_env blocked on _PM_ENV_LOCK despite profile pin"
-        )
+        assert entered.wait(timeout=5.0), "v2_pm_env blocked on _PM_ENV_LOCK despite profile pin"
         t.join(timeout=5.0)
 
 
@@ -182,9 +179,7 @@ def test_pinned_v2_pm_env_is_lock_free(monkeypatch):
     with v2_pipeline._PM_ENV_LOCK:
         t = threading.Thread(target=use_env)
         t.start()
-        assert entered.wait(timeout=5.0), (
-            "v2_pm_env blocked on _PM_ENV_LOCK despite pin"
-        )
+        assert entered.wait(timeout=5.0), "v2_pm_env blocked on _PM_ENV_LOCK despite pin"
         t.join(timeout=5.0)
 
 
@@ -242,18 +237,14 @@ def test_missing_seed_secret_fails_closed_503(tmp_path, monkeypatch, pin):
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ENABLED", "1")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ENV_PIN", pin)
     monkeypatch.setenv("CATHEDRAL_V2_DB_PATH", str(tmp_path / "v2.sqlite"))
-    for name in (
-        "CATHEDRAL_V2_PERMINER_SEED_SECRET",
-        "CATHEDRAL_REFILL_SEED_SECRET",
-        "CATHEDRAL_PUBLISHER_SEED_SECRET",
-    ):
+    for name in ("CATHEDRAL_V2_PERMINER_SEED_SECRET", "CATHEDRAL_REFILL_SEED_SECRET",
+                 "CATHEDRAL_PUBLISHER_SEED_SECRET"):
         monkeypatch.delenv(name, raising=False)
 
     from starlette.testclient import TestClient
 
-    app = build_app(
-        database_path=str(tmp_path / "pub.sqlite"), signing_key_hex="11" * 32
-    )
+    app = build_app(database_path=str(tmp_path / "pub.sqlite"),
+                    signing_key_hex="11" * 32)
     assert v2_pipeline._PM_ENV_PINNED is (pin == "1")
     client = TestClient(app)
     resp = client.get(

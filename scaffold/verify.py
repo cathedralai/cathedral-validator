@@ -11,7 +11,6 @@ The point of centralizing these: the three-outcome grade (grading.py) and all
 three lanes call the SAME witness/cert/attest checks, so correctness lives in
 one place.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -39,7 +38,6 @@ def verify_unsat_cert(cnf_text: str, drat_text: str) -> UnsatCheck:
     stub=True so nothing is credited as verified without a real check.
     """
     from .solve_real import verify_drat, have_drat_trim
-
     if not drat_text.strip():
         return UnsatCheck(False, stub=False, reason="empty_cert")
     if not have_drat_trim():
@@ -54,19 +52,13 @@ def attested_elapsed_ms(res: AttestResult) -> float | None:
     verified stdout (report_data[32:64] binds it), so it is tamper-evident and
     attributable to the pinned image. Never read this from a raw submission."""
     import re
-
     m = re.search(r"elapsed_ms=(\d+(?:\.\d+)?)", res.stdout or "")
     return float(m.group(1)) if m else None
 
 
 def verify_attestation(
-    client: PolarisClient,
-    *,
-    nonce: str,
-    pubkey_b64: str,
-    expected_image: str,
-    workload: str,
-    measured_elapsed_ms: float | None = None,
+    client: PolarisClient, *, nonce: str, pubkey_b64: str,
+    expected_image: str, workload: str, measured_elapsed_ms: float | None = None,
 ) -> tuple[bool, AttestResult]:
     """An attested run is valid iff (verified against the real /v1/attest recipe,
     measured 2026-06-04):
@@ -81,13 +73,9 @@ def verify_attestation(
     A measured_elapsed_ms, if given, is bound into stdout so the verified run
     carries a tamper-evident wall-clock (read it back with attested_elapsed_ms).
     """
-    res = client.attest(
-        nonce=nonce,
-        e2e_pubkey_b64=pubkey_b64,
-        image=expected_image,
-        workload=workload,
-        measured_elapsed_ms=measured_elapsed_ms,
-    )
+    res = client.attest(nonce=nonce, e2e_pubkey_b64=pubkey_b64,
+                         image=expected_image, workload=workload,
+                         measured_elapsed_ms=measured_elapsed_ms)
     rd = res.report_data
     if len(rd) != 64:
         return False, res
@@ -99,11 +87,9 @@ def verify_attestation(
     # equal the bound one; a bare tag is accepted and the resolved digest is
     # recorded (the box must have run some image -> got_hex non-empty).
     import re
-
     def _hex(s: str) -> str:
         m = re.search(r"[a-f0-9]{64}", s or "")
         return m.group(0) if m else ""
-
     exp_hex, got_hex = _hex(expected_image), _hex(res.image_digest)
     img_ok = bool(got_hex) and (exp_hex == "" or exp_hex == got_hex)
     ok = res.intel_verified and lo_ok and hi_ok and img_ok

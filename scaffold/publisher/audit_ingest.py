@@ -4,7 +4,6 @@ Default is dry-run and SAT-only. Current miner submit accepts SAT witnesses; UNS
 proof intake is a later lane, so UNSAT instances are skipped unless explicitly
 requested for smoke/visibility.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -75,9 +74,7 @@ def ingest(
                 cnf_id = str(item.get("cnf_id") or "").strip()
                 if not cnf_id:
                     continue
-                result = str(
-                    item.get("verified_result") or item.get("result") or ""
-                ).lower()
+                result = str(item.get("verified_result") or item.get("result") or "").lower()
                 if not include_unsat and not result.startswith("sat"):
                     continue
                 cnf_path = _resolve_cnf(factory_out, item)
@@ -110,11 +107,7 @@ def ingest(
                 else:
                     row["status"] = "dry_run"
                 loaded.append(row)
-                if (
-                    limit is not None
-                    and len([r for r in loaded if r["status"] != "missing_cnf"])
-                    >= limit
-                ):
+                if limit is not None and len([r for r in loaded if r["status"] != "missing_cnf"]) >= limit:
                     return loaded
         return loaded
     finally:
@@ -124,27 +117,19 @@ def ingest(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True, help="SQLite path or Postgres DSN")
-    ap.add_argument(
-        "--factory-out", default=r"C:\Users\fred\code\audit-hunter\factory\out"
-    )
+    ap.add_argument("--factory-out", default=r"C:\Users\fred\code\audit-hunter\factory\out")
     ap.add_argument("--manifest", action="append", default=None)
-    ap.add_argument(
-        "--apply", action="store_true", help="actually seed rows; default is dry-run"
-    )
+    ap.add_argument("--apply", action="store_true", help="actually seed rows; default is dry-run")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--include-unsat", action="store_true")
     ap.add_argument("--score-multiplier", type=float, default=0.0)
     args = ap.parse_args()
 
     factory_out = Path(args.factory_out)
-    manifests = (
-        [Path(p) for p in args.manifest]
-        if args.manifest
-        else [
-            factory_out / "manifest.json",
-            factory_out / "manifest_root_reborn.json",
-        ]
-    )
+    manifests = [Path(p) for p in args.manifest] if args.manifest else [
+        factory_out / "manifest.json",
+        factory_out / "manifest_root_reborn.json",
+    ]
     rows = ingest(
         db_path=args.db,
         factory_out=factory_out,

@@ -18,7 +18,6 @@ Covers:
 
 This is metadata only — it must never change scoring/verification/eligibility.
 """
-
 from __future__ import annotations
 
 import base64
@@ -48,7 +47,6 @@ def _now_iso() -> str:
 
 def _keypair(uri: str):
     from bittensor_wallet import Keypair
-
     return Keypair.create_from_uri(uri)
 
 
@@ -70,19 +68,12 @@ def _read_headers(kp, *, submitted_at: str | None = None) -> dict[str, str]:
     }
 
 
-def _bitset_headers(
-    kp, body: dict, *, submitted_at: str | None = None
-) -> dict[str, str]:
+def _bitset_headers(kp, body: dict, *, submitted_at: str | None = None) -> dict[str, str]:
     ts = submitted_at or _now_iso()
     submit = v2_bitset_submit.normalize_submit_body(
-        body,
-        miner_hotkey=kp.ss58_address,
-        submitted_at=ts,
-        card_id=_FAMILY,
+        body, miner_hotkey=kp.ss58_address, submitted_at=ts, card_id=_FAMILY,
     )
-    sig = base64.b64encode(
-        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
-    ).decode("ascii")
+    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
         "X-Cathedral-Signature": sig,
@@ -90,25 +81,19 @@ def _bitset_headers(
     }
 
 
-def _build(
-    tmp_path, monkeypatch, *, source: str | None = None, kind: str | None = None
-):
+def _build(tmp_path, monkeypatch, *, source: str | None = None, kind: str | None = None):
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", "all")
     monkeypatch.setenv("CATHEDRAL_RATELIMIT_RPM", "0")
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true")
-    monkeypatch.setenv(
-        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret"
-    )
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATHEDRAL_CNF_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ENABLED", "1")
-    monkeypatch.setenv(
-        "CATHEDRAL_V2_PERMINER_SEED_SECRET", "kind-label-counter-test-seed"
-    )
+    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "kind-label-counter-test-seed")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T1", "2")
     monkeypatch.setenv("CATHEDRAL_V2_PERMINER_ALLOTMENT_T2", "2")
     monkeypatch.setenv("CATHEDRAL_V2_DB_PATH", str(tmp_path / "v2.sqlite"))
@@ -154,8 +139,7 @@ def _submit_and_assert_verified(client, kp, item):
     if item.get("kind") == "random_3sat_perminer":
         with v2_pipeline.v2_pm_env():
             _cid, _cnf, planted = pm.generate_instance(
-                kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
-            )
+                kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
         assert planted is not None
         assignment = planted
     else:
@@ -184,8 +168,7 @@ def _submit_and_assert_verified(client, kp, item):
     assert receipt["status"] == "received"
 
     results = v2_pipeline.process_bitset_batch(
-        client.app.state.v2_store, worker_id="test-kind", batch_size=8, lock_secs=60
-    )
+        client.app.state.v2_store, worker_id="test-kind", batch_size=8, lock_secs=60)
     assert len(results) == 1
     assert results[0]["status"] == v2_pipeline.STATUS_VERIFIED, results[0]
 
@@ -200,10 +183,7 @@ def _submit_and_assert_verified(client, kp, item):
 # Task 1: challenges-list `kind` label
 # --------------------------------------------------------------------------
 
-
-def test_real_source_reports_real_kind_matching_actual_generation(
-    tmp_path, monkeypatch
-):
+def test_real_source_reports_real_kind_matching_actual_generation(tmp_path, monkeypatch):
     """With CATHEDRAL_V2_CHALLENGE_SOURCE=combinatorial (real, unplanted
     instances), the challenges-list handler must report kind in
     {coloring, latin} — NOT the hardcoded random_3sat_perminer default — and
@@ -217,14 +197,12 @@ def test_real_source_reports_real_kind_matching_actual_generation(
     epoch = int(item["epoch"])
     with v2_pipeline.v2_pm_env():
         cid, cnf_text, planted = pm.generate_instance(
-            kp.ss58_address, epoch, int(item["tier"]), int(item["seq"])
-        )
+            kp.ss58_address, epoch, int(item["tier"]), int(item["seq"]))
     assert cid == item["challenge_id"]
     assert planted is None  # confirms this really is a REAL instance
 
     expected_kind = real_corpus.kind_for(
-        epoch, int(item["tier"]), int(item["seq"]), salt=kp.ss58_address
-    )
+        epoch, int(item["tier"]), int(item["seq"]), salt=kp.ss58_address)
     assert expected_kind == "coloring"
     assert item["kind"] == expected_kind
     assert item["kind"] in ("coloring", "latin")
@@ -241,15 +219,12 @@ def test_real_source_latin_kind_matches_actual_generation(tmp_path, monkeypatch)
 
     epoch = int(item["epoch"])
     expected_kind = real_corpus.kind_for(
-        epoch, int(item["tier"]), int(item["seq"]), salt=kp.ss58_address
-    )
+        epoch, int(item["tier"]), int(item["seq"]), salt=kp.ss58_address)
     assert expected_kind == "latin"
     assert item["kind"] == "latin"
 
 
-def test_default_planted_source_still_reports_random_3sat_perminer(
-    tmp_path, monkeypatch
-):
+def test_default_planted_source_still_reports_random_3sat_perminer(tmp_path, monkeypatch):
     """Guardrail: the default 'planted' source is unchanged — item["kind"]
     stays 'random_3sat_perminer' for every miner-instance."""
     app, _store = _build(tmp_path, monkeypatch, source=None)
@@ -262,15 +237,13 @@ def test_default_planted_source_still_reports_random_3sat_perminer(
     epoch = int(item["epoch"])
     with v2_pipeline.v2_pm_env():
         _cid, _cnf, planted = pm.generate_instance(
-            kp.ss58_address, epoch, int(item["tier"]), int(item["seq"])
-        )
+            kp.ss58_address, epoch, int(item["tier"]), int(item["seq"]))
     assert planted is not None
 
 
 # --------------------------------------------------------------------------
 # Task 2: attributed real-vs-planted counter
 # --------------------------------------------------------------------------
-
 
 def test_verify_metrics_by_kind_counts_real_and_planted_solves(tmp_path, monkeypatch):
     # Real solve.
@@ -311,9 +284,7 @@ def test_verify_metrics_by_kind_counts_planted_solve(tmp_path, monkeypatch):
     assert by_kind["by_hotkey"][kp.ss58_address]["real"] == 0
 
 
-def test_verify_metrics_by_kind_tolerates_null_challenge_kind_as_unknown(
-    tmp_path, monkeypatch
-):
+def test_verify_metrics_by_kind_tolerates_null_challenge_kind_as_unknown(tmp_path, monkeypatch):
     """Pre-existing rows from before this migration have NULL challenge_kind —
     the counter must bucket them as 'unknown', not crash."""
     app, store = _build(tmp_path, monkeypatch, source=None)
@@ -328,7 +299,6 @@ def test_verify_metrics_by_kind_tolerates_null_challenge_kind_as_unknown(
             "UPDATE v2_submit_events SET challenge_kind = NULL WHERE id = ?",
             (receipt["receipt_id"],),
         )
-
     store.write(_null_it)
 
     metrics = client.get("/v2/verify/metrics")

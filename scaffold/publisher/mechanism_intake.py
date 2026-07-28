@@ -56,7 +56,6 @@ Guardrails: default OFF (``CATHEDRAL_MECHANISM_INTAKE_ENABLED`` unset ->
 module only verifies a signature and writes to a store), no secrets in code
 or logs, body size capped before any JSON parsing occurs.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -152,7 +151,6 @@ def get_hotkey_verifier() -> HotkeyVerifier:
 
 # --- canonicalization + validation -------------------------------------------
 
-
 def canonical_score_post_bytes(body: dict[str, Any]) -> bytes:
     """Byte-identical to the wire body: sort_keys + compact separators, UTF-8.
 
@@ -160,14 +158,10 @@ def canonical_score_post_bytes(body: dict[str, Any]) -> bytes:
     auth.canonical_claim_bytes so signers can reuse one canonicalization
     routine across Cathedral's signed-post surfaces.
     """
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
-        "utf-8"
-    )
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 
 
-def _validate_shape(
-    payload: Any, *, path_mechanism_id: str
-) -> tuple[bytes, dict[str, Any], int]:
+def _validate_shape(payload: Any, *, path_mechanism_id: str) -> tuple[bytes, dict[str, Any], int]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_body")
     extra = set(payload.keys()) - _ALLOWED_KEYS
@@ -178,10 +172,7 @@ def _validate_shape(
         raise HTTPException(status_code=400, detail="missing_fields")
 
     body_mechanism_id = payload.get("mechanism_id")
-    if (
-        not isinstance(body_mechanism_id, str)
-        or body_mechanism_id.strip() != path_mechanism_id
-    ):
+    if not isinstance(body_mechanism_id, str) or body_mechanism_id.strip() != path_mechanism_id:
         raise HTTPException(status_code=400, detail="mechanism_id_mismatch")
 
     scores_raw = payload.get("scores")
@@ -191,11 +182,7 @@ def _validate_shape(
         raise HTTPException(status_code=400, detail="too_many_scores")
 
     signed_at_ms = payload.get("signed_at_ms")
-    if (
-        isinstance(signed_at_ms, bool)
-        or not isinstance(signed_at_ms, int)
-        or signed_at_ms <= 0
-    ):
+    if isinstance(signed_at_ms, bool) or not isinstance(signed_at_ms, int) or signed_at_ms <= 0:
         raise HTTPException(status_code=400, detail="invalid_signed_at_ms")
 
     # Canonicalize the payload EXACTLY as received (post shape-validation, pre
@@ -225,7 +212,6 @@ def _receipt_id(canonical: bytes) -> str:
 
 
 # --- route --------------------------------------------------------------
-
 
 @router.post("/mechanisms/{mechanism_id}/scores")
 async def post_scores(
@@ -264,9 +250,7 @@ async def post_scores(
     except Exception:
         raise HTTPException(status_code=400, detail="invalid_json")
 
-    canonical, scores_raw, signed_at_ms = _validate_shape(
-        payload, path_mechanism_id=mechanism_id
-    )
+    canonical, scores_raw, signed_at_ms = _validate_shape(payload, path_mechanism_id=mechanism_id)
 
     # (1) signature valid
     if not verifier.verify(x_cathedral_hotkey, canonical, x_cathedral_signature):

@@ -13,7 +13,6 @@ The pattern mirrors board_cache.py: a TopCache class + a module-level registry
 so build_app() can register the cache and start_all() can wire it to the store
 in one line.
 """
-
 from __future__ import annotations
 
 import os
@@ -23,9 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 # How often the background thread re-runs the aggregate query (seconds).
-TOP_CACHE_INTERVAL_SECS = int(
-    os.environ.get("CATHEDRAL_TOP_CACHE_INTERVAL_SECS", "120")
-)
+TOP_CACHE_INTERVAL_SECS = int(os.environ.get("CATHEDRAL_TOP_CACHE_INTERVAL_SECS", "120"))
 
 # Window in hours — only 24h is implemented; other values fall back to this.
 TOP_CACHE_WINDOW_H = 24
@@ -47,10 +44,7 @@ def enabled() -> bool:
     dashboards, but it must not compete with submit ingress on small runtimes.
     """
     return os.environ.get("CATHEDRAL_TOP_CACHE_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
+        "1", "true", "yes", "on"
     }
 
 
@@ -93,10 +87,7 @@ class TopCache:
         self._store = store
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._loop_with_immediate_build,
-            name="top-cache-refresh",
-            daemon=True,
-        )
+            target=self._loop_with_immediate_build, name="top-cache-refresh", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -133,10 +124,8 @@ class TopCache:
                 else:
                     rows = self._build_sqlite(store)
             rows_count = len(rows)
-            built_at = (
-                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.")
-                + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
-            )
+            built_at = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
             with self._lock:
                 self._rows = rows
                 self._built_at_iso = built_at
@@ -195,12 +184,8 @@ LIMIT 100
         # Derive a 24h cutoff string the same way the Postgres query does
         # (string comparison works because ran_at is ISO8601 UTC).
         from datetime import timedelta
-
         cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=TOP_CACHE_WINDOW_H)
-        cutoff_str = (
-            cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.")
-            + f"{cutoff_dt.microsecond // 1000:03d}Z"
-        )
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{cutoff_dt.microsecond // 1000:03d}Z"
 
         raw_rows = store.query(
             "SELECT miner_hotkey, ran_at, row_json FROM eval_runs "

@@ -28,7 +28,6 @@ instances and retiring stale/saturated ones — the live v6 open-window lifecycl
 
 Runs as an asyncio task inside the publisher, gated by CATHEDRAL_REFILL_ENABLED.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -70,8 +69,8 @@ from .store import Store
 # ---------------------------------------------------------------------------
 
 _FORK_TIMEOUT = int(os.environ.get("CATHEDRAL_GEN_FORK_TIMEOUT", "45"))
-MINT_CAP_FORK = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "4"))
-MINT_CAP_FALLBACK = 1  # if fork blocked; 1 gen×~5-6s GIL hold per tick
+MINT_CAP_FORK     = int(os.environ.get("CATHEDRAL_REFILL_MAX_MINTS", "4"))
+MINT_CAP_FALLBACK = 1   # if fork blocked; 1 gen×~5-6s GIL hold per tick
 
 
 def _worker_gen(conn, seed: int, n_vars: int, n_clauses: int, method: str) -> None:
@@ -103,21 +102,17 @@ def _gen_cnf_fork(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
     """
     ctx = multiprocessing.get_context("fork")
     parent_conn, child_conn = ctx.Pipe(duplex=False)
-    p = ctx.Process(
-        target=_worker_gen,
-        args=(child_conn, seed, n_vars, n_clauses, method),
-        daemon=True,
-    )
+    p = ctx.Process(target=_worker_gen,
+                    args=(child_conn, seed, n_vars, n_clauses, method),
+                    daemon=True)
     p.start()
-    child_conn.close()  # parent never writes; release child end in parent
+    child_conn.close()          # parent never writes; release child end in parent
     try:
         if not parent_conn.poll(_FORK_TIMEOUT):
             p.terminate()
             p.join(5)
-            raise RuntimeError(
-                f"gen fork timed out after {_FORK_TIMEOUT}s "
-                f"(n={n_vars}, m={n_clauses}, method={method})"
-            )
+            raise RuntimeError(f"gen fork timed out after {_FORK_TIMEOUT}s "
+                               f"(n={n_vars}, m={n_clauses}, method={method})")
         status, payload = parent_conn.recv()
     finally:
         parent_conn.close()
@@ -133,9 +128,7 @@ def _gen_cnf_fork(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
 # the event loop, so we do NOT call the probe here synchronously. Instead we
 # optimistically set _FORK_OK=True and let per-call failures flip it to False.
 _FORK_OK: bool = True
-print(
-    f"[refill] fork_mode=optimistic mint_cap={MINT_CAP_FORK} fallback_cap={MINT_CAP_FALLBACK}"
-)
+print(f"[refill] fork_mode=optimistic mint_cap={MINT_CAP_FORK} fallback_cap={MINT_CAP_FALLBACK}")
 
 
 def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
@@ -145,16 +138,14 @@ def _gen_cnf(seed: int, n_vars: int, n_clauses: int, method: str) -> str:
     if _FORK_OK:
         try:
             cnf = _gen_cnf_fork(seed, n_vars, n_clauses, method)
-            print(
-                f"[refill] fork_gen ok n={n_vars} m={n_clauses} method={method} "
-                f"elapsed={_time.monotonic() - t0:.2f}s"
-            )
+            print(f"[refill] fork_gen ok n={n_vars} m={n_clauses} method={method} "
+                  f"elapsed={_time.monotonic()-t0:.2f}s")
             return cnf
         except Exception as e:
             print(f"[refill] fork_gen failed ({e!r}); disabling fork, using in-process")
             _FORK_OK = False
     cnf, _ = gen_planted_3sat(seed, n_vars, n_clauses, method=method)
-    print(f"[refill] inproc_gen ok n={n_vars} elapsed={_time.monotonic() - t0:.2f}s")
+    print(f"[refill] inproc_gen ok n={n_vars} elapsed={_time.monotonic()-t0:.2f}s")
     return cnf
 
 
@@ -192,7 +183,9 @@ def _pregen_enabled() -> bool:
     raw = os.environ.get("CATHEDRAL_PREGEN_ENABLED", "").strip().lower()
     if raw:
         return _PREGEN_QUEUE_SIZE > 0 and raw in {"1", "true", "yes", "on"}
-    return _PREGEN_QUEUE_SIZE > 0
+    return (
+        _PREGEN_QUEUE_SIZE > 0
+    )
 
 
 def _pregen_worker(tier: int) -> None:
@@ -241,10 +234,8 @@ def _ensure_pregen_started() -> None:
         for tier in sorted(_DEFAULT_TARGETS):
             _pregen_queues[tier] = _queue.Queue(maxsize=_PREGEN_QUEUE_SIZE)
             t = _threading.Thread(
-                target=_pregen_worker,
-                args=(tier,),
-                name=f"pregen-tier{tier}",
-                daemon=True,
+                target=_pregen_worker, args=(tier,),
+                name=f"pregen-tier{tier}", daemon=True,
             )
             t.start()
             print(f"[pregen] started background gen thread for tier {tier}")
@@ -274,7 +265,7 @@ _EPHEMERAL_SEED_SECRET = secrets.token_bytes(32)
 # tier2 ships at a smaller AJM size; env-overridable for emergency revert.
 _TIER_SHAPE: dict[int, tuple[int, int]] = {
     1: (6000, 25560),
-    2: (400, 1704),  # AJM at m/n=4.26; calibrated 2026-06-17 (~1s minisat22)
+    2: (400, 1704),   # AJM at m/n=4.26; calibrated 2026-06-17 (~1s minisat22)
 }
 # Planting method per tier: tier1 stays biased (unchanged); tier2 uses AJM.
 _TIER_METHOD: dict[int, str] = {
@@ -289,11 +280,7 @@ _DEFAULT_INTERVAL_SECONDS = 20
 
 def refill_enabled() -> bool:
     return os.environ.get("CATHEDRAL_REFILL_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+        "1", "true", "yes", "on"}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -317,14 +304,12 @@ def generator_config() -> dict:
         "family_id": _FAMILY,
         "kind": "external_sat_generator" if external_enabled else "local_refill",
         "source": "scaffold.publisher.refill",
-        "interval_seconds": _env_int(
-            "CATHEDRAL_REFILL_INTERVAL_SECONDS", _DEFAULT_INTERVAL_SECONDS
-        ),
+        "interval_seconds": _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
+                                     _DEFAULT_INTERVAL_SECONDS),
         "retire_after_seconds": retire_after_seconds(),
         "retire_after_distinct_solvers": retire_after_distinct_solvers(),
-        "mint_cap": generator_max_mints()
-        if external_enabled
-        else (MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
+        "mint_cap": generator_max_mints() if external_enabled else (
+            MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
         "pregen_enabled": _pregen_enabled(),
         "pregen_queue_size": _PREGEN_QUEUE_SIZE,
         "external": {
@@ -333,12 +318,9 @@ def generator_config() -> dict:
             "configured": external_configured,
             "configuration_error": (
                 "missing_url_or_token"
-                if external_requested and not external_configured
-                else None
+                if external_requested and not external_configured else None
             ),
-            "local_fallback": _env_bool(
-                "CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False
-            ),
+            "local_fallback": _env_bool("CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False),
             "timeout_seconds": _generator_timeout(),
         },
         "seed": {
@@ -375,8 +357,9 @@ def generator_requested() -> bool:
 
 
 def generator_configured() -> bool:
-    return bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_URL", "").strip()) and bool(
-        os.environ.get("CATHEDRAL_SAT_GENERATOR_TOKEN", "").strip()
+    return (
+        bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_URL", "").strip())
+        and bool(os.environ.get("CATHEDRAL_SAT_GENERATOR_TOKEN", "").strip())
     )
 
 
@@ -389,13 +372,10 @@ def generator_max_mints() -> int:
 
 
 def generator_kind_for(tier: int) -> str:
-    return (
-        os.environ.get(
-            f"CATHEDRAL_SAT_GENERATOR_KIND_T{tier}",
-            os.environ.get("CATHEDRAL_SAT_GENERATOR_KIND", "random_3sat"),
-        ).strip()
-        or "random_3sat"
-    )
+    return os.environ.get(
+        f"CATHEDRAL_SAT_GENERATOR_KIND_T{tier}",
+        os.environ.get("CATHEDRAL_SAT_GENERATOR_KIND", "random_3sat"),
+    ).strip() or "random_3sat"
 
 
 def _generator_timeout() -> int:
@@ -426,8 +406,7 @@ def _generator_json(
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
     req = urllib.request.Request(
-        _generator_url(path_or_url), data=body, headers=headers, method=method
-    )
+        _generator_url(path_or_url), data=body, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=_generator_timeout()) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw) if raw else {}
@@ -467,8 +446,7 @@ def _lease_generator_cnf(challenge_id: str, tier: int) -> str:
         actual_sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
         if expected_sha and actual_sha != expected_sha:
             raise RuntimeError(
-                f"generator cnf hash mismatch expected={expected_sha} actual={actual_sha}"
-            )
+                f"generator cnf hash mismatch expected={expected_sha} actual={actual_sha}")
         _generator_json(
             "POST",
             f"/v1/challenges/lease/{lease_id}/confirm",
@@ -491,16 +469,13 @@ def _lease_generator_cnf(challenge_id: str, tier: int) -> str:
 
 
 def retire_after_seconds() -> int:
-    return _env_int(
-        "CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS", _DEFAULT_RETIRE_AFTER_SECONDS
-    )
+    return _env_int("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_SECONDS",
+                    _DEFAULT_RETIRE_AFTER_SECONDS)
 
 
 def retire_after_distinct_solvers() -> int:
-    return _env_int(
-        "CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS",
-        _DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS,
-    )
+    return _env_int("CATHEDRAL_OPEN_WINDOW_RETIRE_AFTER_DISTINCT_SOLVERS",
+                    _DEFAULT_RETIRE_AFTER_DISTINCT_SOLVERS)
 
 
 def target_for(tier: int) -> int:
@@ -521,10 +496,7 @@ def method_for(tier: int) -> str:
     Default: tier1='biased' (unchanged), tier2='ajm' (unbiased AJM planting).
     Setting CATHEDRAL_REFILL_METHOD_T2=biased reverts tier2 to biased planting."""
     default = _TIER_METHOD.get(tier, "biased")
-    return (
-        os.environ.get(f"CATHEDRAL_REFILL_METHOD_T{tier}", default).strip().lower()
-        or default
-    )
+    return os.environ.get(f"CATHEDRAL_REFILL_METHOD_T{tier}", default).strip().lower() or default
 
 
 def _seed_secret_bytes() -> bytes:
@@ -571,14 +543,10 @@ def record_solve(store: Store, challenge_id: str, miner_hotkey: str) -> None:
     scoring.claim_solve (same table, same idempotency) inside the submit
     transaction. Kept only for ad-hoc tooling; do NOT wire into submit or
     solves would double-insert."""
-
     def _do(conn):
         conn.execute(
             "INSERT OR IGNORE INTO lane_challenge_solves(challenge_id, miner_hotkey, solved_at_iso) "
-            "VALUES (?, ?, ?)",
-            (challenge_id, miner_hotkey, _now_iso()),
-        )
-
+            "VALUES (?, ?, ?)", (challenge_id, miner_hotkey, _now_iso()))
     store.write(_do)
 
 
@@ -586,8 +554,7 @@ def active_local_count(store: Store, tier: int) -> int:
     rows = store.query(
         "SELECT COUNT(*) AS n FROM lane_challenges "
         "WHERE family_id=? AND tier=? AND status='active' AND cnf_source='local'",
-        (_FAMILY, tier),
-    )
+        (_FAMILY, tier))
     return rows[0]["n"]
 
 
@@ -611,10 +578,8 @@ def retire_ready(store: Store, tier: int) -> int:
             "UPDATE lane_challenges SET status='retired', cnf_text='', updated_at_iso=? "
             "WHERE family_id=? AND tier=? AND status='active' AND cnf_source='local' "
             "AND created_at_iso <= ?",
-            (now, _FAMILY, tier, age_cutoff),
-        )
+            (now, _FAMILY, tier, age_cutoff))
         return int(cur.rowcount or 0)
-
     retired += store.write(_age)
 
     threshold = retire_after_distinct_solvers()
@@ -626,15 +591,12 @@ def retire_ready(store: Store, tier: int) -> int:
             "AND challenge_id IN ("
             "  SELECT challenge_id FROM lane_challenge_solves "
             "  GROUP BY challenge_id HAVING COUNT(DISTINCT miner_hotkey) >= ?)",
-            (now, _FAMILY, tier, threshold),
-        )
+            (now, _FAMILY, tier, threshold))
         return int(cur.rowcount or 0)
-
     retired += store.write(_solved)
     if retired:
         # broadcast tier: the active set shrank — drop the cached board snapshot.
         from . import board_cache as _bc
-
         _bc.invalidate_all()
     return retired
 
@@ -642,42 +604,29 @@ def retire_ready(store: Store, tier: int) -> int:
 def reclaim_retired_cnf(store: Store) -> int:
     """One-shot: null cnf_text on already-retired challenges (back-fills the
     retention fix for rows retired before it shipped). Returns rows cleared."""
-
     def _do(conn):
         cur = conn.execute(
             "UPDATE lane_challenges SET cnf_text='' "
-            "WHERE status='retired' AND cnf_source='local' AND length(cnf_text)>0"
-        )
+            "WHERE status='retired' AND cnf_source='local' AND length(cnf_text)>0")
         return int(cur.rowcount or 0)
-
     return store.write(_do)
 
 
-def _plan_tier(
-    store: Store, tier: int, seed_input: str, mint_cap: int, log=lambda *a, **k: None
-) -> tuple[int, list[tuple[str, int, int, int, str]]]:
+def _plan_tier(store: Store, tier: int, seed_input: str, mint_cap: int,
+               log=lambda *a, **k: None) -> tuple[int, list[tuple[str, int, int, int, str]]]:
     """Retire stale challenges + plan mints for this pass. Returns (retired, work).
     work = list of (cid, seed, n_vars, n_clauses, method). Called in a thread."""
     retired = retire_ready(store, tier)
     target = target_for(tier)
     n_vars, n_clauses = shape_for(tier)
     planting_method = method_for(tier)
-    if (n_vars, n_clauses) != _TIER_SHAPE.get(
-        tier
-    ) or planting_method != _TIER_METHOD.get(tier, "biased"):
-        log(
-            "refill_shape_divergence",
-            tier=tier,
-            n_vars=n_vars,
-            n_clauses=n_clauses,
-            live=_TIER_SHAPE.get(tier),
-            method=planting_method,
-        )
+    if (n_vars, n_clauses) != _TIER_SHAPE.get(tier) or planting_method != _TIER_METHOD.get(tier, "biased"):
+        log("refill_shape_divergence", tier=tier, n_vars=n_vars, n_clauses=n_clauses,
+            live=_TIER_SHAPE.get(tier), method=planting_method)
 
     seq = store.query(
         "SELECT COUNT(*) AS n FROM lane_challenges WHERE family_id=? AND tier=? AND cnf_source='local'",
-        (_FAMILY, tier),
-    )[0]["n"]
+        (_FAMILY, tier))[0]["n"]
     work: list[tuple[str, int, int, int, str]] = []
     guard = 0
     while active_local_count(store, tier) < target and guard < target * 4 + 8:
@@ -686,9 +635,7 @@ def _plan_tier(
             break
         cid = mint_challenge_id(seed_input, tier, seq)
         seq += 1
-        if store.query(
-            "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,)
-        ):
+        if store.query("SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,)):
             continue
         seed = mint_seed(seed_input, tier, seq - 1)
         work.append((cid, seed, n_vars, n_clauses, planting_method))
@@ -697,30 +644,20 @@ def _plan_tier(
 
 def _commit_challenge(store: Store, cid: str, tier: int, cnf_text: str) -> None:
     """Write one minted challenge. Called in a thread."""
-    seed_challenge(
-        store, challenge_id=cid, tier=tier, cnf_text=cnf_text, status="active"
-    )
-
+    seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf_text, status="active")
     def _stamp(conn, cid=cid):
         conn.execute(
-            "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?",
-            (cid,),
-        )
-
+            "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?", (cid,))
     store.write(_stamp)
 
 
 # Synchronous versions kept for test compatibility.
-def refill_tier(
-    store: Store, tier: int, *, seed_input: str | None = None, log=lambda *a, **k: None
-) -> dict:
+def refill_tier(store: Store, tier: int, *, seed_input: str | None = None,
+                log=lambda *a, **k: None) -> dict:
     """Synchronous refill (used in tests). Production uses refill_tier_async."""
     seed_input = seed_input or default_seed_input()
-    mint_cap = (
-        generator_max_mints()
-        if generator_enabled()
-        else (MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
-    )
+    mint_cap = generator_max_mints() if generator_enabled() else (
+        MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     retired, work = _plan_tier(store, tier, seed_input, mint_cap, log)
     n_vars_hint = _TIER_SHAPE.get(tier, (6000, 25560))[0]
     n_clauses_hint = _TIER_SHAPE.get(tier, (6000, 25560))[1]
@@ -728,35 +665,19 @@ def refill_tier(
     for cid, seed, n_vars, n_clauses, method in work:
         _mint_one(store, cid, tier, seed, n_vars, n_clauses, method)
         minted += 1
-    return {
-        "tier": tier,
-        "retired": retired,
-        "minted": minted,
-        "active": active_local_count(store, tier),
-        "target": target_for(tier),
-        "shape": (n_vars_hint, n_clauses_hint),
-    }
+    return {"tier": tier, "retired": retired, "minted": minted,
+            "active": active_local_count(store, tier), "target": target_for(tier),
+            "shape": (n_vars_hint, n_clauses_hint)}
 
 
-def refill_once(
-    store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None
-) -> list[dict]:
+def refill_once(store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None) -> list[dict]:
     """Synchronous refill (used in tests). Production uses refill_once_async."""
-    return [
-        refill_tier(store, tier, seed_input=seed_input, log=log)
-        for tier in sorted(_DEFAULT_TARGETS)
-    ]
+    return [refill_tier(store, tier, seed_input=seed_input, log=log)
+            for tier in sorted(_DEFAULT_TARGETS)]
 
 
-def _mint_one(
-    store: Store,
-    cid: str,
-    tier: int,
-    seed: int,
-    n_vars: int,
-    n_clauses: int,
-    method: str,
-) -> str:
+def _mint_one(store: Store, cid: str, tier: int, seed: int,
+              n_vars: int, n_clauses: int, method: str) -> str:
     """Generate + commit one challenge.  Called in a thread via to_thread.
 
     Tries the pre-generation queue first (O(1), no CPU spike).  Falls back to
@@ -773,9 +694,7 @@ def _mint_one(
             print(f"[refill] minted tier={tier} cid={cid[:20]}... source=generator")
             return cnf_text
         except Exception as exc:
-            print(
-                f"[refill] generator_mint_failed tier={tier} cid={cid[:20]} error={exc!r}"
-            )
+            print(f"[refill] generator_mint_failed tier={tier} cid={cid[:20]} error={exc!r}")
             if not _env_bool("CATHEDRAL_SAT_GENERATOR_LOCAL_FALLBACK", False):
                 raise
 
@@ -789,9 +708,8 @@ def _mint_one(
     return cnf_text
 
 
-async def refill_tier_async(
-    store: Store, tier: int, *, seed_input: str | None = None, log=lambda *a, **k: None
-) -> dict:
+async def refill_tier_async(store: Store, tier: int, *, seed_input: str | None = None,
+                            log=lambda *a, **k: None) -> dict:
     """Async refill for one tier.
     1. Ensure background pre-gen threads are running.
     2. to_thread: retire + plan (DB calls, releases GIL via I/O).
@@ -800,26 +718,19 @@ async def refill_tier_async(
     4. sleep(0): yield to event loop between mints.
     """
     if not generator_enabled():
-        _ensure_pregen_started()  # idempotent; starts bg gen threads on first call
+        _ensure_pregen_started()   # idempotent; starts bg gen threads on first call
     seed_input = seed_input or default_seed_input()
-    mint_cap = (
-        generator_max_mints()
-        if generator_enabled()
-        else (MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
-    )
+    mint_cap = generator_max_mints() if generator_enabled() else (
+        MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK)
     n_vars_hint, n_clauses_hint = shape_for(tier)
 
-    retired, work = await asyncio.to_thread(
-        _plan_tier, store, tier, seed_input, mint_cap, log
-    )
+    retired, work = await asyncio.to_thread(_plan_tier, store, tier, seed_input, mint_cap, log)
 
     minted = 0
     failed = 0
     for cid, seed, n_vars, n_clauses, method in work:
         try:
-            await asyncio.to_thread(
-                _mint_one, store, cid, tier, seed, n_vars, n_clauses, method
-            )
+            await asyncio.to_thread(_mint_one, store, cid, tier, seed, n_vars, n_clauses, method)
         except Exception as exc:
             failed += 1
             log("refill_mint_failed", tier=tier, cid=cid[:20], error=str(exc))
@@ -828,53 +739,34 @@ async def refill_tier_async(
         await asyncio.sleep(0)  # yield to the event loop between mints
 
     active = await asyncio.to_thread(active_local_count, store, tier)
-    return {
-        "tier": tier,
-        "retired": retired,
-        "minted": minted,
-        "failed": failed,
-        "active": active,
-        "target": target_for(tier),
-        "shape": (n_vars_hint, n_clauses_hint),
-    }
+    return {"tier": tier, "retired": retired, "minted": minted,
+            "failed": failed,
+            "active": active, "target": target_for(tier),
+            "shape": (n_vars_hint, n_clauses_hint)}
 
 
-async def refill_once_async(
-    store: Store, *, seed_input: str | None = None, log=lambda *a, **k: None
-) -> list[dict]:
+async def refill_once_async(store: Store, *, seed_input: str | None = None,
+                            log=lambda *a, **k: None) -> list[dict]:
     """One full async refill+retire pass across all configured tiers."""
-    return [
-        await refill_tier_async(store, tier, seed_input=seed_input, log=log)
-        for tier in sorted(_DEFAULT_TARGETS)
-    ]
+    return [await refill_tier_async(store, tier, seed_input=seed_input, log=log)
+            for tier in sorted(_DEFAULT_TARGETS)]
 
 
-async def refill_loop(
-    store: Store,
-    *,
-    interval_seconds: int | None = None,
-    log=lambda *a, **k: None,
-    stop_event: asyncio.Event | None = None,
-) -> None:
+async def refill_loop(store: Store, *, interval_seconds: int | None = None,
+                      log=lambda *a, **k: None, stop_event: asyncio.Event | None = None) -> None:
     """Asyncio task: periodic refill+retire.
     Background pre-gen threads keep a small CNF buffer so each mint is instant
     (queue.get_nowait).  Falls back to fork gen if the buffer is empty.
     Either way the event loop is never blocked: queue reads are instant, and
     fork gen releases the GIL via Pipe.poll (epoll_wait).
     """
-    interval = interval_seconds or _env_int(
-        "CATHEDRAL_REFILL_INTERVAL_SECONDS", _DEFAULT_INTERVAL_SECONDS
-    )
-    log(
-        "refill_loop_start",
-        interval=interval,
-        targets=_DEFAULT_TARGETS,
+    interval = interval_seconds or _env_int("CATHEDRAL_REFILL_INTERVAL_SECONDS",
+                                            _DEFAULT_INTERVAL_SECONDS)
+    log("refill_loop_start", interval=interval, targets=_DEFAULT_TARGETS,
         fork_ok=_FORK_OK,
-        mint_cap=generator_max_mints()
-        if generator_enabled()
-        else (MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
-        generator=generator_config(),
-    )
+        mint_cap=generator_max_mints() if generator_enabled() else (
+            MINT_CAP_FORK if _FORK_OK else MINT_CAP_FALLBACK),
+        generator=generator_config())
     try:
         while not (stop_event and stop_event.is_set()):
             try:
@@ -885,8 +777,7 @@ async def refill_loop(
             try:
                 await asyncio.wait_for(
                     stop_event.wait() if stop_event else asyncio.sleep(interval),
-                    timeout=interval,
-                )
+                    timeout=interval)
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:

@@ -33,7 +33,6 @@ Env flags (read at build time via :func:`config_from_env`):
   * ``CATHEDRAL_PER_HOTKEY_REFILL_PER_SEC``  float,default 5.0  (sustained rate)
   * ``CATHEDRAL_PER_HOTKEY_RETRY_AFTER_SECS``int,  default 1    (Retry-After hint)
 """
-
 from __future__ import annotations
 
 import os

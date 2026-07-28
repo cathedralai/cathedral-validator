@@ -31,7 +31,6 @@ In-process CNF body cache (reliability fix):
   active + recently-retired challenge with room to spare); tunable via
   CATHEDRAL_CNF_MEM_CACHE_SIZE=N (0 disables).
 """
-
 from __future__ import annotations
 
 import os
@@ -43,9 +42,7 @@ from dataclasses import dataclass
 # change for a given challenge_id, so this is deliberately long. The HMAC token
 # (short TTL) gates the FIRST fetch; once cached at the edge under its URL the
 # bytes are public-immutable for that signed URL's lifetime.
-CNF_CACHE_MAX_AGE = int(
-    os.environ.get("CATHEDRAL_CNF_CACHE_MAX_AGE", str(60 * 60 * 24 * 30))
-)
+CNF_CACHE_MAX_AGE = int(os.environ.get("CATHEDRAL_CNF_CACHE_MAX_AGE", str(60 * 60 * 24 * 30)))
 
 # In-process immutable CNF body cache.  CATHEDRAL_CNF_MEM_CACHE_SIZE=0 disables.
 _CNF_MEM_CACHE_SIZE = int(os.environ.get("CATHEDRAL_CNF_MEM_CACHE_SIZE", "512"))
@@ -82,9 +79,7 @@ class _LRUCache:
 
 
 # Module-level singleton; disabled (maxsize=0) when the env var is zero.
-_cnf_mem_cache: _LRUCache | None = (
-    _LRUCache(_CNF_MEM_CACHE_SIZE) if _CNF_MEM_CACHE_SIZE > 0 else None
-)
+_cnf_mem_cache: _LRUCache | None = _LRUCache(_CNF_MEM_CACHE_SIZE) if _CNF_MEM_CACHE_SIZE > 0 else None
 
 # Presigned-URL lifetime for the bucket backend (seconds). Matches the order of
 # the active-cnf token TTL so the access-gate window is preserved end to end.
@@ -117,7 +112,6 @@ class CNFServeResult:
     * mode 'redirect': return a 302 to `url` (presigned) + headers.
     * mode 'not_found': opaque 404.
     """
-
     mode: str
     text: str | None = None
     url: str | None = None
@@ -156,23 +150,16 @@ class CNFStore:
             self.backend = "db"  # fail-closed: incomplete config -> serve from db
             return
         import boto3  # lazy: only when bucket backend is actually selected
-
         self._s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=access,
-            aws_secret_access_key=secret,
-            region_name=region,
-        )
+            "s3", endpoint_url=endpoint, aws_access_key_id=access,
+            aws_secret_access_key=secret, region_name=region)
         self._bucket = bucket
 
     def _key(self, challenge_id: str) -> str:
         return f"{self._prefix}{challenge_id}.cnf"
 
     # ---- write side (called on mint) --------------------------------------
-    def put(
-        self, challenge_id: str, cnf_text: str, *, sha256: str | None = None
-    ) -> None:
+    def put(self, challenge_id: str, cnf_text: str, *, sha256: str | None = None) -> None:
         """Persist a CNF body. db backend is a no-op (the body already lives in
         lane_challenges.cnf_text via the existing INSERT). bucket backend uploads
         the immutable object once."""
@@ -180,22 +167,15 @@ class CNFStore:
             return
         meta = {"sha256": sha256} if sha256 else {}
         self._s3.put_object(
-            Bucket=self._bucket,
-            Key=self._key(challenge_id),
-            Body=cnf_text.encode("utf-8"),
-            ContentType="text/plain",
+            Bucket=self._bucket, Key=self._key(challenge_id),
+            Body=cnf_text.encode("utf-8"), ContentType="text/plain",
             CacheControl=f"public, max-age={CNF_CACHE_MAX_AGE}, immutable",
-            Metadata=meta,
-        )
+            Metadata=meta)
 
     # ---- generic immutable object seam (V2 content-addressed artifacts) ---
     def immutable_object_backend_ready(self) -> bool:
         """Whether the existing S3/R2-compatible backend is fully configured."""
-        return (
-            self.backend == "bucket"
-            and self._s3 is not None
-            and self._bucket is not None
-        )
+        return self.backend == "bucket" and self._s3 is not None and self._bucket is not None
 
     def put_immutable_object(
         self,
@@ -225,11 +205,8 @@ class CNFStore:
             details = getattr(exc, "response", {}) or {}
             error = details.get("Error", {}) if isinstance(details, dict) else {}
             code = str(error.get("Code") or "") if isinstance(error, dict) else ""
-            status = (
-                (details.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode")
-                if isinstance(details, dict)
-                else None
-            )
+            status = (details.get("ResponseMetadata", {}) or {}).get("HTTPStatusCode") \
+                if isinstance(details, dict) else None
             if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
                 return None
             raise
@@ -255,8 +232,7 @@ class CNFStore:
         if self.backend == "bucket" and self._s3 is not None:
             meta = self.store.query(
                 "SELECT cnf_sha256 FROM lane_challenges WHERE challenge_id=?",
-                (challenge_id,),
-            )
+                (challenge_id,))
             if not meta:
                 return CNFServeResult(mode="not_found")
             sha = meta[0]["cnf_sha256"]
@@ -264,8 +240,7 @@ class CNFStore:
             url = self._s3.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._bucket, "Key": self._key(challenge_id)},
-                ExpiresIn=CNF_SIGNED_URL_TTL,
-            )
+                ExpiresIn=CNF_SIGNED_URL_TTL)
             return CNFServeResult(mode="redirect", url=url, headers=headers)
 
         # db backend — consult the in-process LRU cache first.
@@ -274,15 +249,13 @@ class CNFStore:
             if cached is not None:
                 text, sha = cached
                 # Cache hit: serve from memory, no DB connection acquired.
-                return CNFServeResult(
-                    mode="inline", text=text, headers=cnf_cache_headers(sha)
-                )
+                return CNFServeResult(mode="inline", text=text,
+                                      headers=cnf_cache_headers(sha))
 
         # Cache miss (or cache disabled): fetch from DB, populate cache.
         rows = self.store.query(
             "SELECT cnf_text, cnf_sha256 FROM lane_challenges WHERE challenge_id=?",
-            (challenge_id,),
-        )
+            (challenge_id,))
         if not rows:
             return CNFServeResult(mode="not_found")
         sha = rows[0]["cnf_sha256"]

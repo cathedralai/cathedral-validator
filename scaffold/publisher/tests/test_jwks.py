@@ -41,9 +41,9 @@ def test_jwks_publishes_eval_and_dedicated_weight_policy_keys(monkeypatch):
         "cathedral-eval-signing",
         "cathedral-weight-policy-2026",
     ]
-    assert keys_by_id["cathedral-eval-signing"][
-        "public_key_hex"
-    ] == rows.public_key_hex(EVAL_KEY_HEX)
+    assert keys_by_id["cathedral-eval-signing"]["public_key_hex"] == rows.public_key_hex(
+        EVAL_KEY_HEX
+    )
     assert keys_by_id["cathedral-weight-policy-2026"][
         "public_key_hex"
     ] == rows.public_key_hex(WEIGHT_POLICY_KEY_HEX)
@@ -83,7 +83,7 @@ def test_jwks_publishes_weight_policy_alias_for_eval_fallback(monkeypatch):
         .decode("ascii"),
         "public_key_hex": public_key_hex,
         "purpose": "Cathedral signs every EvalRun projection served from "
-        "/v1/leaderboard/recent. Pin this key in your validator config.",
+                   "/v1/leaderboard/recent. Pin this key in your validator config.",
     }
     assert keys_by_id["fallback-weight-policy"]["public_key_hex"] == public_key_hex
 
@@ -117,7 +117,9 @@ def test_jwks_key_verifies_actual_weight_vector_signature(
     signing_key = weight_key or EVAL_KEY_HEX
     store = Store(str(tmp_path / "weights.sqlite"), prefer_env_database_url=False)
     vector = weights.build_signed_vector(store, signing_key_hex=signing_key)
-    published_key = next(key for key in doc["keys"] if key["kid"] == vector["key_id"])
+    published_key = next(
+        key for key in doc["keys"] if key["kid"] == vector["key_id"]
+    )
 
     weights.verify_signature(
         vector,

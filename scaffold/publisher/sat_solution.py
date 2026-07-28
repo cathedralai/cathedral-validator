@@ -22,7 +22,6 @@ pin (see ~/code/cathedral/src/cathedral/lanes/synthetic_boolean_v1/fixtures/):
 
 Total: never raises on hostile input (verifier-totality non-regression).
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass

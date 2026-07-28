@@ -23,7 +23,6 @@ Guardrails:
   - No secrets: reads two env vars for network/netuid (same ones weights.py
     already uses), no keys or credentials touched.
 """
-
 from __future__ import annotations
 
 import logging
@@ -105,10 +104,7 @@ def sat_mechanism_scores(
         logger.info(
             "sat_mechanism_scores: dropped %d/%d verified hotkeys with no uid "
             "mapping in metagraph_hotkeys (network=%s netuid=%s)",
-            dropped,
-            len(totals),
-            network,
-            netuid,
+            dropped, len(totals), network, netuid,
         )
 
     meta = ScoreVectorMeta(

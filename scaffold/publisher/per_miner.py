@@ -42,7 +42,6 @@ Shadow mode:
   shadow distribution vs live before committing. The shadow vector is logged
   and stored in the per_miner_shadow_scores table but never signed or served.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -70,22 +69,16 @@ _PM_ID_RE = re.compile(r"^pm-t(?P<tier>\d+)-e(?P<epoch>\d+)-[0-9a-f]{24}$")
 # Feature flags
 # --------------------------------------------------------------------------
 
-
 def perminer_enabled() -> bool:
     return os.environ.get("CATHEDRAL_PERMINER_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+        "1", "true", "yes", "on"}
 
 
 def perminer_shadow() -> bool:
     """Shadow mode: generate + score per-miner but don't serve the vector."""
     return perminer_enabled() and (
-        os.environ.get("CATHEDRAL_PERMINER_SHADOW", "").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+        os.environ.get("CATHEDRAL_PERMINER_SHADOW", "").strip().lower() in {
+            "1", "true", "yes", "on"})
 
 
 def seed_secret_configured() -> bool:
@@ -108,7 +101,6 @@ def require_seed_secret() -> None:
 # Config helpers
 # --------------------------------------------------------------------------
 
-
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     try:
@@ -130,13 +122,8 @@ def epoch_bucket_hours() -> int:
 
 
 def allotment_for(tier: int) -> int:
-    return max(
-        1,
-        _env_int(
-            f"CATHEDRAL_PERMINER_ALLOTMENT_T{tier}",
-            {1: 10_000, 2: 10_000}.get(tier, 10_000),
-        ),
-    )
+    return max(1, _env_int(f"CATHEDRAL_PERMINER_ALLOTMENT_T{tier}",
+                            {1: 10_000, 2: 10_000}.get(tier, 10_000)))
 
 
 # Worst-case entries are roughly cache_size * allotment_for(tier).
@@ -154,9 +141,8 @@ def assignment_page_limit(requested: int) -> int:
 
 
 def weight_for(tier: int) -> float:
-    return _env_float(
-        f"CATHEDRAL_PERMINER_WEIGHT_T{tier}", {1: 1.0, 2: 2.0}.get(tier, 1.0)
-    )
+    return _env_float(f"CATHEDRAL_PERMINER_WEIGHT_T{tier}",
+                      {1: 1.0, 2: 2.0}.get(tier, 1.0))
 
 
 def score_target() -> float:
@@ -202,7 +188,6 @@ def shape_for(tier: int) -> tuple[int, int]:
 # Epoch key
 # --------------------------------------------------------------------------
 
-
 def current_epoch() -> int:
     """UTC epoch integer — monotonically increasing, bucket-width = epoch_bucket_hours."""
     hours = epoch_bucket_hours()
@@ -227,7 +212,6 @@ def challenge_epoch(challenge_id: str) -> int | None:
 # Deterministic seed derivation
 # --------------------------------------------------------------------------
 
-
 def instance_seed(hotkey: str, epoch: int, tier: int, seq: int) -> int:
     """63-bit secret-derived seed from (hotkey, epoch, tier, seq).
 
@@ -243,9 +227,7 @@ def instance_seed(hotkey: str, epoch: int, tier: int, seq: int) -> int:
 def instance_id(hotkey: str, epoch: int, tier: int, seq: int) -> str:
     """Stable, opaque challenge ID for a per-miner instance."""
     raw = f"id:{hotkey}:{epoch}:{tier}:{seq}"
-    h = hmac.new(_seed_secret_bytes(), raw.encode("utf-8"), hashlib.sha256).hexdigest()[
-        :24
-    ]
+    h = hmac.new(_seed_secret_bytes(), raw.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
     return f"pm-t{tier}-e{epoch}-{h}"
 
 
@@ -270,17 +252,9 @@ def _seed_secret_fingerprint() -> str:
 # Per-miner instance set generation
 # --------------------------------------------------------------------------
 
-
 @lru_cache(maxsize=4096)
-def _gen_cached(
-    hotkey: str,
-    epoch: int,
-    tier: int,
-    seq: int,
-    method: str,
-    n_vars: int,
-    n_clauses: int,
-) -> tuple[str, list[int]]:
+def _gen_cached(hotkey: str, epoch: int, tier: int, seq: int,
+                method: str, n_vars: int, n_clauses: int) -> tuple[str, list[int]]:
     """Deterministic generation, memoized so repeated fetch/verify of the same
     instance doesn't regenerate. Bounded LRU keeps memory in check."""
     seed = instance_seed(hotkey, epoch, tier, seq)
@@ -324,9 +298,7 @@ def uses_real_instance(hotkey: str, epoch: int, tier: int, seq: int) -> bool:
     return frac >= 1.0 or (frac > 0.0 and _real_pick(hotkey, epoch, tier, seq) < frac)
 
 
-def generate_instance(
-    hotkey: str, epoch: int, tier: int, seq: int
-) -> tuple[str, str, list[int] | None]:
+def generate_instance(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, list[int] | None]:
     """Generate ONE per-miner instance. Returns (challenge_id, cnf_text, planted_assignment).
 
     The planted assignment is the publisher's hidden witness — never sent to
@@ -345,23 +317,19 @@ def generate_instance(
         # REAL, per-miner (salt=hotkey so miners can't copy), unplanted;
         # dimacs.verify_witness is the correctness gate.
         _content_id, cnf_text = real_corpus.generate_real_instance(
-            epoch, tier, seq, salt=hotkey
-        )
+            epoch, tier, seq, salt=hotkey)
         cid = instance_id(hotkey, epoch, tier, seq)
         return cid, cnf_text, None
 
     n_vars, n_clauses = shape_for(tier)
-    cnf_text, planted = _gen_cached(
-        hotkey, epoch, tier, seq, method_for(tier), n_vars, n_clauses
-    )
+    cnf_text, planted = _gen_cached(hotkey, epoch, tier, seq,
+                                    method_for(tier), n_vars, n_clauses)
     cid = instance_id(hotkey, epoch, tier, seq)
     return cid, cnf_text, planted
 
 
 @lru_cache(maxsize=200_000)
-def item_meta(
-    hotkey: str, epoch: int, tier: int, seq: int
-) -> tuple[str, str, int, bool, str]:
+def item_meta(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str, int, bool, str]:
     """Return per-item data the challenges page needs, plus the CNF body:
     (challenge_id, cnf_sha256, nvars, is_real, cnf_text).
 
@@ -377,11 +345,9 @@ def item_meta(
     re-running the source predicate.
     """
     import hashlib
-
     cid, cnf_text, planted = generate_instance(hotkey, epoch, tier, seq)
     sha = hashlib.sha256(cnf_text.encode("utf-8")).hexdigest()
     from ..dimacs import parse_cnf
-
     nvars, _clauses = parse_cnf(cnf_text)
     return cid, sha, nvars, (planted is None), cnf_text
 
@@ -405,29 +371,23 @@ def miner_instance_set(
         n_vars, n_clauses = shape_for(tier)
         allotment = allotment_for(tier)
         dw = weight_for(tier)
-        stop = (
-            allotment if limit is None else min(allotment, start + max(1, int(limit)))
-        )
+        stop = allotment if limit is None else min(allotment, start + max(1, int(limit)))
         for seq in range(start, stop):
             cid = instance_id(hotkey, epoch, tier, seq)
-            items.append(
-                {
-                    "challenge_id": cid,
-                    "tier": tier,
-                    "seq": seq,
-                    "epoch": epoch,
-                    "n_vars": n_vars,
-                    "n_clauses": n_clauses,
-                    "difficulty_weight": dw,
-                    "kind": "random_3sat_perminer",
-                }
-            )
+            items.append({
+                "challenge_id": cid,
+                "tier": tier,
+                "seq": seq,
+                "epoch": epoch,
+                "n_vars": n_vars,
+                "n_clauses": n_clauses,
+                "difficulty_weight": dw,
+                "kind": "random_3sat_perminer",
+            })
     return items
 
 
-def get_miner_cnf(
-    hotkey: str, epoch: int, tier: int, seq: int
-) -> tuple[str, str] | None:
+def get_miner_cnf(hotkey: str, epoch: int, tier: int, seq: int) -> tuple[str, str] | None:
     """Return (challenge_id, cnf_text) for a specific per-miner instance, or None
     if the parameters are out of range. Generation is on-demand and deterministic.
     """
@@ -442,7 +402,6 @@ def get_miner_cnf(
 # --------------------------------------------------------------------------
 # Submit verification
 # --------------------------------------------------------------------------
-
 
 def verify_miner_submission(
     hotkey: str, epoch: int, challenge_id: str, assignment: list[int]
@@ -472,8 +431,7 @@ def verify_miner_submission(
             cid, cnf_text, _planted = generate_instance(hotkey, epoch, tier, seq)
             if cid == challenge_id:
                 return verify_miner_submission_for(
-                    hotkey, epoch, tier, seq, challenge_id, assignment
-                )
+                    hotkey, epoch, tier, seq, challenge_id, assignment)
 
     # The challenge_id was not found in this miner's allotment — either it was
     # generated for a different hotkey (copy attack) or the epoch rolled over.
@@ -498,9 +456,7 @@ def verify_miner_submission_for(
     return True, None
 
 
-def recover_tier_seq_for(
-    hotkey: str, epoch: int, challenge_id: str
-) -> tuple[int, int] | None:
+def recover_tier_seq_for(hotkey: str, epoch: int, challenge_id: str) -> tuple[int, int] | None:
     """Find (tier, seq) for a challenge_id in the miner's allotment.
     Returns None if the challenge_id was not generated for this hotkey+epoch.
     """
@@ -548,23 +504,18 @@ def resolve_tier_seq_for(
     return recover_tier_seq_for(hotkey, epoch, challenge_id)
 
 
-def _recover_index_key(
-    hotkey: str, epoch: int, tier: int
-) -> tuple[str, int, int, int, str]:
-    return (
-        hotkey,
-        int(epoch),
-        int(tier),
-        allotment_for(tier),
-        _seed_secret_fingerprint(),
-    )
+def _recover_index_key(hotkey: str, epoch: int, tier: int) -> tuple[str, int, int, int, str]:
+    return hotkey, int(epoch), int(tier), allotment_for(tier), _seed_secret_fingerprint()
 
 
 @lru_cache(maxsize=_RECOVER_INDEX_CACHE_SIZE)
 def _instance_index(key: tuple[str, int, int, int, str]) -> dict[str, int]:
     """Shared read-only cid->seq cache; do not mutate the returned dict."""
     hotkey, epoch, tier, allotment, _secret_fingerprint = key
-    return {instance_id(hotkey, epoch, tier, seq): seq for seq in range(allotment)}
+    return {
+        instance_id(hotkey, epoch, tier, seq): seq
+        for seq in range(allotment)
+    }
 
 
 def recover_seq_for(hotkey: str, epoch: int, challenge_id: str) -> int | None:
@@ -576,7 +527,6 @@ def recover_seq_for(hotkey: str, epoch: int, challenge_id: str) -> int | None:
 # --------------------------------------------------------------------------
 # Per-miner scoring (shadow + live)
 # --------------------------------------------------------------------------
-
 
 def compute_perminer_raw_scores(store: Store, epoch: int) -> dict[str, float]:
     """Compute reward = Σ difficulty_weight of correctly-solved OWN instances
@@ -590,8 +540,7 @@ def compute_perminer_raw_scores(store: Store, epoch: int) -> dict[str, float]:
             "SELECT miner_hotkey, SUM(difficulty_weight) AS total "
             "FROM per_miner_solves WHERE epoch=? AND verified=1 "
             "GROUP BY miner_hotkey",
-            (epoch,),
-        )
+            (epoch,))
     except Exception:
         return {}
 
@@ -611,7 +560,8 @@ def compute_perminer_scores(store: Store, epoch: int) -> dict[str, float]:
     target = score_target()
     if target <= 0:
         return {}
-    return {hk: round(min(1.0, max(0.0, s / target)), 6) for hk, s in scores.items()}
+    return {hk: round(min(1.0, max(0.0, s / target)), 6)
+            for hk, s in scores.items()}
 
 
 def record_perminer_solve(
@@ -632,21 +582,10 @@ def record_perminer_solve(
     already scored the solve under its own env (the V2 verifier inside
     v2_pm_env) records EXACTLY what it verified, never a legacy/default value.
     """
-
     def _do(conn):
-        return int(
-            record_perminer_solve_tx(
-                conn,
-                hotkey,
-                epoch,
-                challenge_id,
-                tier,
-                seq,
-                verified,
-                difficulty_weight=difficulty_weight,
-            )
-            or 0
-        )
+        return int(record_perminer_solve_tx(
+            conn, hotkey, epoch, challenge_id, tier, seq, verified,
+            difficulty_weight=difficulty_weight) or 0)
 
     return bool(store.write(_do))
 
@@ -672,17 +611,8 @@ def record_perminer_solve_tx(
         "INSERT OR IGNORE INTO per_miner_solves"
         "(challenge_id, miner_hotkey, epoch, tier, seq, difficulty_weight, verified, solved_at_iso) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            challenge_id,
-            hotkey,
-            epoch,
-            tier,
-            seq,
-            dw,
-            1 if verified else 0,
-            solved_at_iso or _now_iso(),
-        ),
-    )
+        (challenge_id, hotkey, epoch, tier, seq, dw, 1 if verified else 0,
+         solved_at_iso or _now_iso()))
     return bool(int(cur.rowcount or 0))
 
 
@@ -694,7 +624,6 @@ def _now_iso() -> str:
 # --------------------------------------------------------------------------
 # Shadow vector
 # --------------------------------------------------------------------------
-
 
 def compute_shadow_vector(store: Store, epoch: int) -> dict[str, float]:
     """Compute what the signed vector WOULD look like under per-miner scoring.

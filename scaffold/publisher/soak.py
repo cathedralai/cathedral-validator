@@ -22,7 +22,6 @@ Usage:
     # live-feed read-only divergence/verify portion only (no local publisher):
     python -m scaffold.publisher.soak --live-only
 """
-
 from __future__ import annotations
 
 import argparse
@@ -43,23 +42,15 @@ WARN_THRESHOLD = 0.01
 FAIL_THRESHOLD = 0.10
 
 
-def _http_json(
-    url: str,
-    timeout: int = 90,
-    retries: int = 3,
-    headers: dict | None = None,
-    method: str = "GET",
-    data: bytes | None = None,
-) -> tuple[int, Any]:
+def _http_json(url: str, timeout: int = 90, retries: int = 3,
+               headers: dict | None = None, method: str = "GET",
+               data: bytes | None = None) -> tuple[int, Any]:
     last: Exception | None = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "cathedral-soak/1.0", **(headers or {})},
-                method=method,
-                data=data,
-            )
+                url, headers={"User-Agent": "cathedral-soak/1.0", **(headers or {})},
+                method=method, data=data)
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 body = r.read()
                 try:
@@ -71,23 +62,14 @@ def _http_json(
         except Exception as e:
             last = e
             import time
-
             time.sleep(2 * (attempt + 1))
     raise last  # type: ignore[misc]
 
 
-def _pull_feed(
-    base: str,
-    since: str,
-    limit: int = 200,
-    max_pages: int = 100,
-    timeout: int = 90,
-    pace: float = 1.0,
-    log=print,
-) -> list[dict]:
+def _pull_feed(base: str, since: str, limit: int = 200, max_pages: int = 100,
+               timeout: int = 90, pace: float = 1.0, log=print) -> list[dict]:
     """Tuple-cursor walk of /v1/leaderboard/recent from `since`."""
     import time
-
     out: list[dict] = []
     cur_ran, cur_id = since, None
     url = f"{base}/v1/leaderboard/recent"
@@ -116,7 +98,6 @@ def _load_keyset() -> dict[str, str]:
     """Configured public-key SET: production key (fixtures jwks) + any
     CATHEDRAL_SOAK_EXTRA_PUBKEYS (comma-sep name=hex)."""
     import os
-
     jwks = json.loads((FIX / "jwks.json").read_text())
     prod = next(k for k in jwks["keys"] if k["kid"] == "cathedral-eval-signing")
     keys = {"production": prod["public_key_hex"]}
@@ -145,17 +126,11 @@ def verify_with_keyset(rows: list[dict], keyset: dict[str, str]) -> dict:
             per_key[matched] += 1
         else:
             unverified.append(r.get("id", "?"))
-    return {
-        "total": len(rows),
-        "per_key": dict(per_key),
-        "unverified": unverified,
-        "unverified_count": len(unverified),
-    }
+    return {"total": len(rows), "per_key": dict(per_key),
+            "unverified": unverified, "unverified_count": len(unverified)}
 
 
-def per_hotkey_7d_scores(
-    rows: list[dict], now: datetime | None = None
-) -> dict[str, float]:
+def per_hotkey_7d_scores(rows: list[dict], now: datetime | None = None) -> dict[str, float]:
     """Per-hotkey 7-day mean weighted_score over v6 rows (the live aggregation
     shape: schema_version IN (5,6), synthetic_boolean_v1). v5 rows mirror v6, so
     counting v6 only avoids double-weighting one solve."""
@@ -188,15 +163,10 @@ def score_divergence(thin_rows: list[dict], live_rows: list[dict]) -> dict:
         d = abs(thin[hk] - live[hk])
         if d > max_abs:
             max_abs, worst = d, hk
-    return {
-        "thin_hotkeys": len(thin),
-        "live_hotkeys": len(live),
-        "common_hotkeys": len(common),
-        "thin_only": len(set(thin) - set(live)),
-        "live_only": len(set(live) - set(thin)),
-        "max_abs_divergence": max_abs,
-        "worst_hotkey": worst,
-    }
+    return {"thin_hotkeys": len(thin), "live_hotkeys": len(live),
+            "common_hotkeys": len(common), "thin_only": len(set(thin) - set(live)),
+            "live_only": len(set(live) - set(thin)), "max_abs_divergence": max_abs,
+            "worst_hotkey": worst}
 
 
 def miner_smoke(thin_base: str, log=print) -> dict:
@@ -225,13 +195,9 @@ def miner_smoke(thin_base: str, log=print) -> dict:
         return {"ok": False, "reason": f"no active challenges (status {st})"}
 
     # prefer the dedicated small smoke challenge (fast DPLL); then any other.
-    items = sorted(
-        board["items"],
-        key=lambda it: (
-            0 if it["challenge_id"] == "sat-soak-smoke-001" else 1,
-            int(it.get("num_vars", 10**9)),
-        ),
-    )
+    items = sorted(board["items"],
+                   key=lambda it: (0 if it["challenge_id"] == "sat-soak-smoke-001" else 1,
+                                   int(it.get("num_vars", 10**9))))
     cid = cnf_text = None
     tried = 0
     for item in items:
@@ -239,22 +205,15 @@ def miner_smoke(thin_base: str, log=print) -> dict:
         tried += 1
         sa = now_iso()
         cnf_claim = canonical_claim_bytes(
-            bundle_hash=empty,
-            card_id="synthetic_boolean_v1",
-            miner_hotkey=miner.ss58_address,
-            submitted_at=sa,
-            challenge_id="",
-            dimacs_solution_sha256="",
-        )
+            bundle_hash=empty, card_id="synthetic_boolean_v1",
+            miner_hotkey=miner.ss58_address, submitted_at=sa, challenge_id="",
+            dimacs_solution_sha256="")
         cnf_sig = base64.b64encode(miner.sign(cnf_claim)).decode()
         st, j = _http_json(
             f"{thin_base}/v1/synthetic-boolean/active-cnf?challenge_id={cand}",
-            headers={
-                "X-Cathedral-Hotkey": miner.ss58_address,
-                "X-Cathedral-Signature": cnf_sig,
-                "X-Cathedral-Submitted-At": sa,
-            },
-        )
+            headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                     "X-Cathedral-Signature": cnf_sig,
+                     "X-Cathedral-Submitted-At": sa})
         if st != 200 or "cnf_url" not in j:
             continue
         st, body = _http_json(f"{thin_base}{j['cnf_url']}")
@@ -264,11 +223,8 @@ def miner_smoke(thin_base: str, log=print) -> dict:
         if tried >= 60:
             break
     if cid is None:
-        return {
-            "ok": False,
-            "reason": "no locally-served CNF found "
-            "(board may be all external mirrors; enable refill to mint local)",
-        }
+        return {"ok": False, "reason": "no locally-served CNF found "
+                "(board may be all external mirrors; enable refill to mint local)"}
 
     log("    solving CNF (DPLL)...")
     sol = solve_cnf(cnf_text)
@@ -278,32 +234,18 @@ def miner_smoke(thin_base: str, log=print) -> dict:
     sa2 = now_iso()
     sol_sha = hashlib.sha256(blob.encode()).hexdigest()
     claim = canonical_claim_bytes(
-        bundle_hash=empty,
-        card_id="synthetic_boolean_v1",
-        miner_hotkey=miner.ss58_address,
-        submitted_at=sa2,
-        challenge_id=cid,
-        dimacs_solution_sha256=sol_sha,
-    )
+        bundle_hash=empty, card_id="synthetic_boolean_v1",
+        miner_hotkey=miner.ss58_address, submitted_at=sa2, challenge_id=cid,
+        dimacs_solution_sha256=sol_sha)
     sig = base64.b64encode(miner.sign(claim)).decode()
-    body = urllib.parse.urlencode(
-        {
-            "card_id": "synthetic_boolean_v1",
-            "submitted_at": sa2,
-            "challenge_id": cid,
-            "dimacs_solution": blob,
-        }
-    ).encode()
+    body = urllib.parse.urlencode({
+        "card_id": "synthetic_boolean_v1", "submitted_at": sa2,
+        "challenge_id": cid, "dimacs_solution": blob}).encode()
     st, resp = _http_json(
-        f"{thin_base}/v1/agents/submit",
-        method="POST",
-        data=body,
-        headers={
-            "X-Cathedral-Hotkey": miner.ss58_address,
-            "X-Cathedral-Signature": sig,
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-    )
+        f"{thin_base}/v1/agents/submit", method="POST", data=body,
+        headers={"X-Cathedral-Hotkey": miner.ss58_address,
+                 "X-Cathedral-Signature": sig,
+                 "Content-Type": "application/x-www-form-urlencoded"})
     ok = st == 200 and isinstance(resp, dict) and resp.get("status") == "ranked"
     return {"ok": ok, "challenge_id": cid, "submit_status": st, "resp": resp}
 
@@ -317,24 +259,17 @@ def _provision_smoke_challenge(db_path: str, *, tier: int = 1, log=print) -> str
     from .store import Store
     from .app import seed_challenge
     from ..dimacs import gen_planted_3sat
-
     cid = "sat-soak-smoke-001"
     store = Store(db_path)
     existing = store.query(
-        "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,)
-    )
+        "SELECT status FROM lane_challenges WHERE challenge_id=?", (cid,))
     if not existing or existing[0]["status"] != "active":
         cnf, _ = gen_planted_3sat(2024, 30, 90)  # small, solvable in ms
-        seed_challenge(
-            store, challenge_id=cid, tier=tier, cnf_text=cnf, status="active"
-        )
-
+        seed_challenge(store, challenge_id=cid, tier=tier, cnf_text=cnf, status="active")
         def _stamp(conn):
             conn.execute(
                 "UPDATE lane_challenges SET updated_at_iso=created_at_iso WHERE challenge_id=?",
-                (cid,),
-            )
-
+                (cid,))
         store.write(_stamp)
         log(f"    provisioned smoke challenge {cid} (n=30,m=90)")
     store.close()
@@ -343,8 +278,7 @@ def _provision_smoke_challenge(db_path: str, *, tier: int = 1, log=print) -> str
 
 def run(args: argparse.Namespace, log=print) -> int:
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
+        "%Y-%m-%dT%H:%M:%S.000Z")
     keyset = _load_keyset()
     results: dict[str, Any] = {}
     checks: list[tuple[str, bool]] = []
@@ -357,20 +291,12 @@ def run(args: argparse.Namespace, log=print) -> int:
 
     # (b live half always runs — it's public, read-only)
     log("LIVE FEED — pulling for divergence baseline + signature verify")
-    live_rows = _pull_feed(
-        LIVE_BASE,
-        since,
-        limit=args.page_limit,
-        max_pages=args.max_pages,
-        pace=args.pace,
-        log=log,
-    )
+    live_rows = _pull_feed(LIVE_BASE, since, limit=args.page_limit,
+                           max_pages=args.max_pages, pace=args.pace, log=log)
     log(f"  live rows pulled: {len(live_rows)}")
     live_verify = verify_with_keyset(live_rows, keyset)
-    ck(
-        f"live rows all verify under keyset (unverified={live_verify['unverified_count']})",
-        live_verify["unverified_count"] == 0,
-    )
+    ck(f"live rows all verify under keyset (unverified={live_verify['unverified_count']})",
+       live_verify["unverified_count"] == 0)
     results["live_verify"] = live_verify
 
     if args.live_only or not args.thin:
@@ -379,24 +305,15 @@ def run(args: argparse.Namespace, log=print) -> int:
         results["mode"] = "live-only"
     else:
         log(f"THIN FEED — pulling from {args.thin}")
-        thin_rows = _pull_feed(
-            args.thin,
-            since,
-            limit=args.page_limit,
-            max_pages=args.max_pages,
-            pace=0,
-            log=log,
-        )
+        thin_rows = _pull_feed(args.thin, since, limit=args.page_limit,
+                               max_pages=args.max_pages, pace=0, log=log)
         log(f"  thin rows pulled: {len(thin_rows)}")
         results["mode"] = "thin-vs-live"
 
     # (a) signature verify on thin feed
     thin_verify = verify_with_keyset(thin_rows, keyset)
-    ck(
-        f"thin rows all verify under keyset (unverified={thin_verify['unverified_count']}, "
-        f"per_key={thin_verify['per_key']})",
-        thin_verify["unverified_count"] == 0,
-    )
+    ck(f"thin rows all verify under keyset (unverified={thin_verify['unverified_count']}, "
+       f"per_key={thin_verify['per_key']})", thin_verify["unverified_count"] == 0)
     results["thin_verify"] = thin_verify
 
     # (b) divergence
@@ -404,16 +321,12 @@ def run(args: argparse.Namespace, log=print) -> int:
     results["divergence"] = div
     md = div["max_abs_divergence"]
     band = "OK" if md < WARN_THRESHOLD else ("WARN" if md < FAIL_THRESHOLD else "FAIL")
-    log(
-        f"  7d score divergence: max_abs={md:.4f} ({band}) "
-        f"common_hotkeys={div['common_hotkeys']} worst={div['worst_hotkey']}"
-    )
+    log(f"  7d score divergence: max_abs={md:.4f} ({band}) "
+        f"common_hotkeys={div['common_hotkeys']} worst={div['worst_hotkey']}")
     # an empty intersection makes the divergence check vacuously true — require
     # real overlap before low divergence counts as a pass.
-    ck(
-        "divergence computed over a non-empty hotkey intersection",
-        div["common_hotkeys"] > 0,
-    )
+    ck("divergence computed over a non-empty hotkey intersection",
+       div["common_hotkeys"] > 0)
     ck(f"7d score divergence < fail threshold {FAIL_THRESHOLD}", md < FAIL_THRESHOLD)
 
     # (c) miner smoke (only with a thin publisher)
@@ -428,10 +341,8 @@ def run(args: argparse.Namespace, log=print) -> int:
         log("MINER SMOKE — token fetch + solve + submit")
         smoke = miner_smoke(args.thin, log=log)
         results["miner_smoke"] = smoke
-        ck(
-            f"miner path: token fetch + submit ranked ({smoke.get('reason', 'ok')})",
-            smoke["ok"],
-        )
+        ck(f"miner path: token fetch + submit ranked ({smoke.get('reason','ok')})",
+           smoke["ok"])
 
     fails = [n for n, c in checks if not c]
     verdict = "PASS" if not fails else "FAIL"
@@ -442,16 +353,10 @@ def run(args: argparse.Namespace, log=print) -> int:
     log(f"  thin rows          : {len(thin_rows)}")
     log(f"  keyset             : {list(keyset)}")
     log(f"  thin per-key verify: {results.get('thin_verify', {}).get('per_key')}")
-    log(
-        f"  unverified (thin)  : {results.get('thin_verify', {}).get('unverified_count')}"
-    )
-    log(
-        f"  max 7d divergence  : {md:.4f}  (warn {WARN_THRESHOLD} / fail {FAIL_THRESHOLD}) -> {band}"
-    )
+    log(f"  unverified (thin)  : {results.get('thin_verify', {}).get('unverified_count')}")
+    log(f"  max 7d divergence  : {md:.4f}  (warn {WARN_THRESHOLD} / fail {FAIL_THRESHOLD}) -> {band}")
     if "miner_smoke" in results:
-        log(
-            f"  miner smoke        : {'ok' if results['miner_smoke']['ok'] else results['miner_smoke'].get('reason')}"
-        )
+        log(f"  miner smoke        : {'ok' if results['miner_smoke']['ok'] else results['miner_smoke'].get('reason')}")
     if fails:
         log(f"  FAILED CHECKS      : {fails}")
     log("=" * 60)
@@ -459,33 +364,17 @@ def run(args: argparse.Namespace, log=print) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
-        description="Soak the thin publisher feed + miner path."
-    )
-    p.add_argument(
-        "--thin",
-        default=None,
-        help="thin publisher base URL (e.g. http://127.0.0.1:8000)",
-    )
-    p.add_argument(
-        "--live-only",
-        action="store_true",
-        help="run only the public live-feed verify + divergence baseline",
-    )
+    p = argparse.ArgumentParser(description="Soak the thin publisher feed + miner path.")
+    p.add_argument("--thin", default=None, help="thin publisher base URL (e.g. http://127.0.0.1:8000)")
+    p.add_argument("--live-only", action="store_true",
+                   help="run only the public live-feed verify + divergence baseline")
     p.add_argument("--days", type=int, default=7, help="lookback window (default 7)")
     p.add_argument("--page-limit", type=int, default=200, help="feed page size")
-    p.add_argument(
-        "--max-pages", type=int, default=20, help="cap pages pulled per feed"
-    )
-    p.add_argument(
-        "--pace", type=float, default=1.0, help="sleep between live feed pages"
-    )
-    p.add_argument(
-        "--smoke-db",
-        default=None,
-        help="path to the running publisher's SQLite DB; if given, a small "
-        "DPLL-tractable local challenge is provisioned for the miner smoke",
-    )
+    p.add_argument("--max-pages", type=int, default=20, help="cap pages pulled per feed")
+    p.add_argument("--pace", type=float, default=1.0, help="sleep between live feed pages")
+    p.add_argument("--smoke-db", default=None,
+                   help="path to the running publisher's SQLite DB; if given, a small "
+                        "DPLL-tractable local challenge is provisioned for the miner smoke")
     return run(p.parse_args(argv))
 
 

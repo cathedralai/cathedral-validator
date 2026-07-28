@@ -30,13 +30,8 @@ def test_v2_bitset_ingress_golden_contract():
     token_payload_bytes = _b64url_decode(token_parts[1])
     token_sig_bytes = _b64url_decode(token_parts[2])
     assert token_payload_bytes.decode("utf-8") == vector["token_payload_canonical_json"]
-    assert (
-        hashlib.sha256(token_payload_bytes).hexdigest()
-        == vector["token_payload_sha256"]
-    )
-    assert (
-        hashlib.sha256(token_sig_bytes).hexdigest() == vector["token_signature_sha256"]
-    )
+    assert hashlib.sha256(token_payload_bytes).hexdigest() == vector["token_payload_sha256"]
+    assert hashlib.sha256(token_sig_bytes).hexdigest() == vector["token_signature_sha256"]
 
     token_payload = v2_bitset_submit.verify_submit_token(
         token,
@@ -56,10 +51,7 @@ def test_v2_bitset_ingress_golden_contract():
     assert submit == vector["normalized_submit_body"]
     canonical_submit = v2_bitset_submit.canonical_submit_bytes(submit)
     assert canonical_submit.decode("utf-8") == vector["canonical_submit_json"]
-    assert (
-        hashlib.sha256(canonical_submit).hexdigest()
-        == vector["canonical_submit_sha256"]
-    )
+    assert hashlib.sha256(canonical_submit).hexdigest() == vector["canonical_submit_sha256"]
 
     assert BittensorVerifier().verify(
         vector["miner_hotkey"],
@@ -75,10 +67,7 @@ def test_v2_bitset_ingress_golden_contract():
     assert assignment == vector["assignment"]
     assert hashlib.sha256(raw).hexdigest() == vector["assignment_sha256"]
 
-    assert (
-        v2_bitset_submit.idempotency_key(
-            miner_hotkey=vector["miner_hotkey"],
-            challenge_id=vector["normalized_submit_body"]["challenge_id"],
-        )
-        == vector["idempotency_key"]
-    )
+    assert v2_bitset_submit.idempotency_key(
+        miner_hotkey=vector["miner_hotkey"],
+        challenge_id=vector["normalized_submit_body"]["challenge_id"],
+    ) == vector["idempotency_key"]

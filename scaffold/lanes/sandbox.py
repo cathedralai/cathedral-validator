@@ -28,7 +28,6 @@ falls back to a plain rlimit-bounded subprocess and records
 network-isolated when it was not. The eval host in production MUST run on a
 host where `sandbox_available()` is True.
 """
-
 from __future__ import annotations
 
 import os
@@ -44,36 +43,29 @@ try:
 except ModuleNotFoundError:  # Windows/local smoke tests; production sandbox is Linux.
     resource = None
 
-_MAX_OUTPUT_BYTES = 16 * 1024 * 1024  # cap captured stdout (a DRAT proof can be large)
+_MAX_OUTPUT_BYTES = 16 * 1024 * 1024     # cap captured stdout (a DRAT proof can be large)
 _UNSHARE_MIN_VERSION = (2, 36)
 
 
 @dataclass(frozen=True)
 class RunResult:
     """One sandboxed solver invocation, observed by the eval host."""
-
     stdout: str
     stderr: str
     returncode: int | None
-    wall_ms: float  # MEASURED by the eval host, never the solver's word
-    timed_out: bool  # the host's own observation -> TIMEOUT outcome
-    contained: bool  # True iff it ran network-isolated + rlimit-bounded
+    wall_ms: float              # MEASURED by the eval host, never the solver's word
+    timed_out: bool             # the host's own observation -> TIMEOUT outcome
+    contained: bool             # True iff it ran network-isolated + rlimit-bounded
 
 
 def _unshare_version() -> tuple[int, int] | None:
     import re
-
     binary = shutil.which("unshare")
     if not binary:
         return None
     try:
-        out = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            check=False,
-        )
+        out = subprocess.run([binary, "--version"], capture_output=True,
+                             text=True, timeout=2.0, check=False)
     except (subprocess.TimeoutExpired, OSError):
         return None
     m = re.search(r"(\d+)\.(\d+)", out.stdout or out.stderr or "")
@@ -85,13 +77,8 @@ def _userns_available() -> bool:
     if not binary:
         return False
     try:
-        out = subprocess.run(
-            [binary, "--user", "--map-root-user", "true"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            check=False,
-        )
+        out = subprocess.run([binary, "--user", "--map-root-user", "true"],
+                             capture_output=True, text=True, timeout=2.0, check=False)
     except (subprocess.TimeoutExpired, OSError):
         return False
     return out.returncode == 0
@@ -118,17 +105,12 @@ def _set_limits(cpu_secs: int, as_bytes: int):
             resource.setrlimit(resource.RLIMIT_AS, (as_bytes, as_bytes))
         except (ValueError, OSError):
             pass
-
     return _pre
 
 
 def run_solver(
-    argv: list[str],
-    *,
-    timeout_s: float,
-    cwd: str | None = None,
-    cpu_secs: int | None = None,
-    as_bytes: int = 2 * 1024 * 1024 * 1024,
+    argv: list[str], *, timeout_s: float, cwd: str | None = None,
+    cpu_secs: int | None = None, as_bytes: int = 2 * 1024 * 1024 * 1024,
     contain: bool | None = None,
 ) -> RunResult:
     """Run `argv` (a solver invocation) under containment + a wall deadline.
@@ -145,17 +127,8 @@ def run_solver(
     full_argv = list(argv)
     if contain:
         unshare = shutil.which("unshare") or "unshare"
-        full_argv = [
-            unshare,
-            "--user",
-            "--map-root-user",
-            "--mount",
-            "--net",
-            "--pid",
-            "--fork",
-            "--mount-proc",
-            "--",
-        ] + list(argv)
+        full_argv = [unshare, "--user", "--map-root-user", "--mount", "--net",
+                     "--pid", "--fork", "--mount-proc", "--"] + list(argv)
 
     started = time.monotonic()
     try:
@@ -170,14 +143,8 @@ def run_solver(
             popen_kwargs["preexec_fn"] = preexec_fn
         proc = subprocess.Popen(full_argv, **popen_kwargs)
     except (OSError, FileNotFoundError) as e:
-        return RunResult(
-            "",
-            f"spawn_failed:{e}",
-            None,
-            round((time.monotonic() - started) * 1000, 3),
-            False,
-            contain,
-        )
+        return RunResult("", f"spawn_failed:{e}", None,
+                         round((time.monotonic() - started) * 1000, 3), False, contain)
 
     timed_out = False
     try:
@@ -194,14 +161,8 @@ def run_solver(
     out = (out or b"")[:_MAX_OUTPUT_BYTES]
     err = (err or b"")[:_MAX_OUTPUT_BYTES]
     rc = None if timed_out else proc.returncode
-    return RunResult(
-        out.decode("utf-8", "replace"),
-        err.decode("utf-8", "replace"),
-        rc,
-        wall_ms,
-        timed_out,
-        contain,
-    )
+    return RunResult(out.decode("utf-8", "replace"), err.decode("utf-8", "replace"),
+                     rc, wall_ms, timed_out, contain)
 
 
 def _kill_group(proc: subprocess.Popen) -> None:

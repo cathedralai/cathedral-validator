@@ -4,7 +4,6 @@ Tracks only pressure responses (429 and 5xx) on submit/per-miner read paths.
 The snapshot is intended for operator debugging: enough to identify top actors,
 without logging request bodies, signatures, full IPs, or full user agents.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -100,7 +99,7 @@ def _canonical_path(path: str) -> str:
     if path == _LEGACY_PREFIX:
         return "/"
     if path.startswith(_LEGACY_PREFIX + "/"):
-        return path[len(_LEGACY_PREFIX) :]
+        return path[len(_LEGACY_PREFIX):]
     return path
 
 
@@ -109,7 +108,6 @@ def _client_ip(scope: Scope) -> str:
     # so telemetry buckets are not spoofable on the un-proxied origin either.
     # See ratelimit._client_ip_from_scope and issue #333.
     from . import ratelimit
-
     ip = ratelimit._client_ip_from_scope(scope)
     if ip in ("unknown", "", ratelimit.UNRESOLVED_IP):
         return ""
@@ -200,22 +198,17 @@ class PressureTelemetry:
             "user_agent_family": _ua_family(ua),
             "user_agent_hash": _digest(ua, salt=self._config.hash_salt),
             "claimed_hotkey_hash": _digest(claimed_hotkey, salt=self._config.hash_salt),
-            "verified_hotkey_hash": _digest(
-                verified_hotkey, salt=self._config.hash_salt
-            ),
+            "verified_hotkey_hash": _digest(verified_hotkey, salt=self._config.hash_salt),
         }
-        key = tuple(
-            event.get(k)
-            for k in (
-                "path",
-                "status",
-                "reason",
-                "ip_block",
-                "user_agent_hash",
-                "claimed_hotkey_hash",
-                "verified_hotkey_hash",
-            )
-        )
+        key = tuple(event.get(k) for k in (
+            "path",
+            "status",
+            "reason",
+            "ip_block",
+            "user_agent_hash",
+            "claimed_hotkey_hash",
+            "verified_hotkey_hash",
+        ))
 
         with self._lock:
             self._total += 1
@@ -239,7 +232,7 @@ class PressureTelemetry:
                 (dict(v) for v in self._groups.values()),
                 key=lambda row: int(row["count"]),
                 reverse=True,
-            )[: self._config.top_n]
+            )[:self._config.top_n]
             return {
                 "schema": "cathedral.pressure_telemetry.v1",
                 "enabled": self._config.enabled,

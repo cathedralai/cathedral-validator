@@ -5,7 +5,6 @@ Bug fixed: a failed background refresh used to freeze a cold ``warming``
 placeholder forever AND re-trigger a build on every request. The cache now backs
 off after failures, flips warming->degraded, and preserves last-known-good.
 """
-
 import time
 
 from scaffold.publisher.app import _SoftTtlCache, _weights_vector_expired
@@ -56,21 +55,21 @@ def test_failed_refresh_preserves_last_known_good():
         raise RuntimeError("now failing")
 
     c = _SoftTtlCache("t", ttl_secs=0.05, retry_backoff_secs=10.0)
-    v, s = c.get("k", builder)  # sync cold build
+    v, s = c.get("k", builder)          # sync cold build
     assert s == "cold" and v["v"] == "good"
-    v, s = c.get("k", builder)  # within ttl
+    v, s = c.get("k", builder)          # within ttl
     assert s == "hit"
 
-    time.sleep(0.08)  # expire ttl
+    time.sleep(0.08)                    # expire ttl
     state["ok"] = False
-    v, s = c.get("k", builder)  # healthy->stale: spawns refresh, serves good
+    v, s = c.get("k", builder)          # healthy->stale: spawns refresh, serves good
     assert s == "stale" and v["v"] == "good"
 
-    assert _wait(lambda: state["n"] >= 2)  # the stale refresh ran and failed
+    assert _wait(lambda: state["n"] >= 2)   # the stale refresh ran and failed
     time.sleep(0.05)
-    v, s = c.get("k", builder)  # failure recorded, inside backoff -> degraded
+    v, s = c.get("k", builder)          # failure recorded, inside backoff -> degraded
     assert s == "degraded"
-    assert v["v"] == "good"  # last-known-good preserved, not dropped
+    assert v["v"] == "good"             # last-known-good preserved, not dropped
 
 
 def test_cold_async_recovers_when_build_succeeds():
@@ -87,12 +86,8 @@ def test_cold_async_recovers_when_build_succeeds():
     ok["v"] = True
     # With zero backoff, subsequent reads keep retrying; once a build succeeds we
     # promote to a real value and report hit/stale (no longer warming/degraded).
-    assert _wait(
-        lambda: (
-            c.get("k", builder, cold_async=True, cold_value={"warming": True})[0]
-            == {"v": "real"}
-        )
-    )
+    assert _wait(lambda: c.get("k", builder, cold_async=True,
+                               cold_value={"warming": True})[0] == {"v": "real"})
 
 
 def test_weights_vector_expired_helper():
@@ -107,9 +102,5 @@ def test_weights_vector_expired_helper():
     assert _weights_vector_expired({"expires_at": "not-a-date"}) is True
     assert _weights_vector_expired(None) is True
     # now_epoch_ms override path.
-    assert (
-        _weights_vector_expired(
-            {"expires_at": "1970-01-01T00:00:01.000Z"}, now_epoch_ms=now_ms
-        )
-        is True
-    )
+    assert _weights_vector_expired({"expires_at": "1970-01-01T00:00:01.000Z"},
+                                   now_epoch_ms=now_ms) is True

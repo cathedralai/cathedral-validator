@@ -39,9 +39,9 @@ UID200_PAGE_SECONDS = 1200.0
 # These are the hard limits the validator release gate enforces (see the plan's
 # "Validator release gate" checklist). They are intentionally the *warn* edges:
 # the gate fails a deploy at the first sign of staleness, not at the page edge.
-GATE_VECTOR_MAX_AGE_SECONDS = 300.0  # signed-vector age <= 5 min
-GATE_UID200_MAX_AGE_SECONDS = 600.0  # UID200 update age <= 10 min
-GATE_WEIGHTS_FEED_MAX_5XX = 0  # 0x 5xx on the weight feed
+GATE_VECTOR_MAX_AGE_SECONDS = 300.0   # signed-vector age <= 5 min
+GATE_UID200_MAX_AGE_SECONDS = 600.0   # UID200 update age <= 10 min
+GATE_WEIGHTS_FEED_MAX_5XX = 0         # 0x 5xx on the weight feed
 
 
 def classify_age(

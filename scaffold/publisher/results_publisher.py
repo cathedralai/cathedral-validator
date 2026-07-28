@@ -34,7 +34,6 @@ None (token/bucket not configured), publish_miner_results is a no-op.
 This module never raises into the caller; every public function is
 best-effort.
 """
-
 from __future__ import annotations
 
 import json
@@ -51,10 +50,7 @@ _SCHEMA = "cathedral.v2.results.v1"
 
 
 def results_publish_enabled() -> bool:
-    return (
-        os.environ.get("CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED", "").strip().lower()
-        in _TRUTHY
-    )
+    return os.environ.get("CATHEDRAL_V2_RESULTS_PUBLISH_ENABLED", "").strip().lower() in _TRUTHY
 
 
 def _now_iso() -> str:
@@ -92,16 +88,14 @@ def publish_miner_results(
         for r in rows:
             status = str(r.get("status") or "")
             score = float(r.get("weighted_score") or 0.0)
-            items.append(
-                {
-                    "challenge_id": str(r.get("challenge_id") or ""),
-                    "tier": int(r.get("tier") or 0),
-                    "seq": int(r.get("seq") or 0),
-                    "status": status,
-                    "weighted_score": score if status == "verified" else 0.0,
-                    "verified_at": r.get("verified_at_iso"),
-                }
-            )
+            items.append({
+                "challenge_id": str(r.get("challenge_id") or ""),
+                "tier": int(r.get("tier") or 0),
+                "seq": int(r.get("seq") or 0),
+                "status": status,
+                "weighted_score": score if status == "verified" else 0.0,
+                "verified_at": r.get("verified_at_iso"),
+            })
             if status == "verified":
                 total_verified += 1
                 total_score += score
@@ -117,14 +111,10 @@ def publish_miner_results(
         }
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         key = f"results/{hotkey}.json"
-        url = hip.put(
-            key, data, content_type="application/json; charset=utf-8", get_ttl=7200
-        )
+        url = hip.put(key, data, content_type="application/json; charset=utf-8", get_ttl=7200)
         return url
     except Exception as exc:
-        print(
-            f"[results_publisher] publish_failed hotkey={hotkey} epoch={epoch} error={exc!r}"
-        )
+        print(f"[results_publisher] publish_failed hotkey={hotkey} epoch={epoch} error={exc!r}")
         return None
 
 

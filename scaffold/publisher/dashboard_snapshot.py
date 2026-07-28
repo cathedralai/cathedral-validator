@@ -9,7 +9,6 @@ This module owns a timer-built, in-memory snapshot. The request path only reads
 the last completed payload. It never runs the builders and never falls back to DB
 queries when cold.
 """
-
 from __future__ import annotations
 
 import copy
@@ -34,39 +33,27 @@ def enabled() -> bool:
 
 def refresh_secs() -> float:
     try:
-        return max(
-            1.0,
-            float(
-                os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_REFRESH_SECS", "10")
-                or "10"
-            ),
-        )
+        return max(1.0, float(
+            os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_REFRESH_SECS", "10") or "10"
+        ))
     except ValueError:
         return 10.0
 
 
 def max_stale_secs() -> float:
     try:
-        return max(
-            0.0,
-            float(
-                os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_MAX_STALE_SECS", "120")
-                or "120"
-            ),
-        )
+        return max(0.0, float(
+            os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_MAX_STALE_SECS", "120") or "120"
+        ))
     except ValueError:
         return 120.0
 
 
 def _slow_build_log_secs() -> float:
     try:
-        return max(
-            0.0,
-            float(
-                os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_SLOW_LOG_SECS", "1.0")
-                or "1.0"
-            ),
-        )
+        return max(0.0, float(
+            os.environ.get("CATHEDRAL_DASHBOARD_SNAPSHOT_SLOW_LOG_SECS", "1.0") or "1.0"
+        ))
     except ValueError:
         return 1.0
 
@@ -130,7 +117,10 @@ class DashboardStateSnapshot:
             elapsed = time.monotonic() - started
             threshold = _slow_build_log_secs()
             if threshold > 0 and elapsed >= threshold:
-                print(f"[dashboard_snapshot] slow_build ok={ok} elapsed={elapsed:.3f}s")
+                print(
+                    "[dashboard_snapshot] slow_build "
+                    f"ok={ok} elapsed={elapsed:.3f}s"
+                )
         return ok
 
     def get(self) -> dict[str, Any] | None:
@@ -247,4 +237,7 @@ def rejection_reason_counts(store, *, limit: int = 20) -> list[dict[str, Any]]:
         "ORDER BY n DESC, reason LIMIT ?",
         (limit,),
     )
-    return [{"reason": str(r["reason"]), "count": int(r["n"] or 0)} for r in rows]
+    return [
+        {"reason": str(r["reason"]), "count": int(r["n"] or 0)}
+        for r in rows
+    ]

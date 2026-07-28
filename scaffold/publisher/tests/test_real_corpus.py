@@ -5,7 +5,6 @@ deliverable 5: the new source must be valid/deterministic/genuinely solvable,
 and — the most important guardrail — leaving CATHEDRAL_V2_CHALLENGE_SOURCE
 unset must be a byte-identical no-op vs. the pre-existing planted behaviour.
 """
-
 from __future__ import annotations
 
 import os
@@ -23,7 +22,6 @@ EPOCH = 424242
 # --------------------------------------------------------------------------
 # Deliverable: default no-op
 # --------------------------------------------------------------------------
-
 
 def test_default_source_is_planted():
     assert "CATHEDRAL_V2_CHALLENGE_SOURCE" not in os.environ
@@ -46,8 +44,7 @@ def test_generate_instance_unset_flag_is_byte_identical_to_planted_path(monkeypa
     expected_seed = per_miner.instance_seed(HOTKEY, EPOCH, tier, seq)
     n_vars, n_clauses = per_miner.shape_for(tier)
     expected_cnf, expected_planted = gen_planted_3sat(
-        expected_seed, n_vars, n_clauses, method=per_miner.method_for(tier)
-    )
+        expected_seed, n_vars, n_clauses, method=per_miner.method_for(tier))
 
     assert cid == expected_cid
     assert cnf_text == expected_cnf
@@ -57,9 +54,7 @@ def test_generate_instance_unset_flag_is_byte_identical_to_planted_path(monkeypa
 
 
 @pytest.mark.parametrize("tier,seq", [(1, 0), (2, 3)])
-def test_generate_instance_unset_flag_matches_across_tiers_and_seqs(
-    tier, seq, monkeypatch
-):
+def test_generate_instance_unset_flag_matches_across_tiers_and_seqs(tier, seq, monkeypatch):
     monkeypatch.delenv("CATHEDRAL_V2_CHALLENGE_SOURCE", raising=False)
     cid1, cnf1, planted1 = per_miner.generate_instance(HOTKEY, EPOCH, tier, seq)
     cid2, cnf2, planted2 = per_miner.generate_instance(HOTKEY, EPOCH, tier, seq)
@@ -70,7 +65,6 @@ def test_generate_instance_unset_flag_matches_across_tiers_and_seqs(
 # --------------------------------------------------------------------------
 # real_corpus: combinatorial generator — validity, determinism, solvability
 # --------------------------------------------------------------------------
-
 
 @pytest.mark.parametrize("tier", [1, 2])
 def test_combinatorial_instance_is_valid_dimacs(tier):
@@ -150,15 +144,12 @@ def test_forced_kind_env_override(monkeypatch):
 # real_corpus: on-disk corpus loading
 # --------------------------------------------------------------------------
 
-
 def test_corpus_dir_unset_falls_back_to_combinatorial(monkeypatch):
     monkeypatch.delenv("CATHEDRAL_V2_CORPUS_DIR", raising=False)
     monkeypatch.setenv("CATHEDRAL_V2_CHALLENGE_SOURCE", "corpus")
     assert real_corpus.load_corpus_instance(EPOCH, 1, 0) is None
     content_id, cnf_text = real_corpus.generate_real_instance(EPOCH, 1, 0)
-    expected_content_id, expected_cnf = real_corpus.generate_combinatorial_instance(
-        EPOCH, 1, 0
-    )
+    expected_content_id, expected_cnf = real_corpus.generate_combinatorial_instance(EPOCH, 1, 0)
     assert (content_id, cnf_text) == (expected_content_id, expected_cnf)
 
 
@@ -199,7 +190,6 @@ def test_corpus_source_wired_through_generate_instance(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # Env flag parsing edge cases
 # --------------------------------------------------------------------------
-
 
 def test_challenge_source_rejects_unknown_values(monkeypatch):
     monkeypatch.setenv("CATHEDRAL_V2_CHALLENGE_SOURCE", "bogus")

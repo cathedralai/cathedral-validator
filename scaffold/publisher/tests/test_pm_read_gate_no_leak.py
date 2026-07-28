@@ -8,7 +8,6 @@ miner polling with occasional disconnects the BoundedSemaphore drained to zero
 and every per-miner read 429'd spuriously even on a fully idle origin. This test
 reproduces that path against the FIXED single-try/finally structure.
 """
-
 import asyncio
 import threading
 
@@ -50,6 +49,4 @@ def test_read_gate_does_not_leak_on_cancel_after_acquire():
                 pass
 
     asyncio.run(run())
-    assert _available(sem, cap) == cap, (
-        "read gate leaked a slot on cancel-after-acquire"
-    )
+    assert _available(sem, cap) == cap, "read gate leaked a slot on cancel-after-acquire"

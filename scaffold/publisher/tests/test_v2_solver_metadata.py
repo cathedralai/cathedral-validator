@@ -7,7 +7,6 @@ tampering with it after signing must fail the hotkey signature check), it is
 stored on the v2_submit_events row and echoed back on the receipt, but it
 never affects scoring/verification/eligibility today.
 """
-
 from __future__ import annotations
 
 import base64
@@ -36,7 +35,6 @@ def _now_iso() -> str:
 
 def _keypair(uri: str):
     from bittensor_wallet import Keypair
-
     return Keypair.create_from_uri(uri)
 
 
@@ -46,9 +44,7 @@ def _build(tmp_path, monkeypatch, *, require_solver_meta: bool = False):
     monkeypatch.setenv("CATHEDRAL_V2_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", "true")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_BITSET_ENABLED", "true")
-    monkeypatch.setenv(
-        "CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret"
-    )
+    monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_SECRET", "test-v2-submit-token-secret")
     monkeypatch.setenv("CATHEDRAL_V2_SUBMIT_TOKEN_TTL_SECS", "300")
     monkeypatch.setenv("CATHEDRAL_V2_BLOB_DIR", str(tmp_path / "v2_blobs"))
     monkeypatch.setenv("CATHEDRAL_V2_ADMIN_TOKEN", "test-admin-token")
@@ -90,14 +86,9 @@ def _bitset_headers(kp, body: dict, *, submitted_at: str) -> dict[str, str]:
     produce a stale signature when the caller mutates `body` afterwards
     (the tamper test)."""
     submit = v2_bitset_submit.normalize_submit_body(
-        body,
-        miner_hotkey=kp.ss58_address,
-        submitted_at=submitted_at,
-        card_id=_FAMILY,
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY,
     )
-    sig = base64.b64encode(
-        kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))
-    ).decode("ascii")
+    sig = base64.b64encode(kp.sign(v2_bitset_submit.canonical_submit_bytes(submit))).decode("ascii")
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
         "X-Cathedral-Signature": sig,
@@ -112,9 +103,7 @@ def _stub_headers(kp, *, submitted_at: str) -> dict[str, str]:
     checked — so the signature's validity is irrelevant to these cases."""
     return {
         "X-Cathedral-Hotkey": kp.ss58_address,
-        "X-Cathedral-Signature": base64.b64encode(b"placeholder-unverified").decode(
-            "ascii"
-        ),
+        "X-Cathedral-Signature": base64.b64encode(b"placeholder-unverified").decode("ascii"),
         "X-Cathedral-Submitted-At": submitted_at,
     }
 
@@ -128,8 +117,7 @@ def _fetch_and_solve(client, kp) -> tuple[dict, str]:
     item = board.json()["items"][0]
     with v2_pipeline.v2_pm_env():
         _cid, _cnf, assignment = pm.generate_instance(
-            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"])
-        )
+            kp.ss58_address, int(item["epoch"]), int(item["tier"]), int(item["seq"]))
     assignment_b64 = base64.b64encode(
         v2_pipeline.encode_bitset_assignment(assignment)
     ).decode("ascii")
@@ -181,10 +169,7 @@ def test_solver_metadata_present_is_signed_stored_and_echoed(tmp_path, monkeypat
 
     # The metadata is part of the SIGNED bytes: canonical_submit_bytes covers it.
     submit = v2_bitset_submit.normalize_submit_body(
-        body,
-        miner_hotkey=kp.ss58_address,
-        submitted_at=submitted_at,
-        card_id=_FAMILY,
+        body, miner_hotkey=kp.ss58_address, submitted_at=submitted_at, card_id=_FAMILY,
     )
     canonical = v2_bitset_submit.canonical_submit_bytes(submit)
     assert b'"solver_id":"cadical153"' in canonical
@@ -374,9 +359,7 @@ def test_require_solver_meta_flag_on_accepts_with_metadata(tmp_path, monkeypatch
     assert r.json()["status"] == "verified"
 
 
-def test_require_solver_meta_flag_off_by_default_accepts_missing_metadata(
-    tmp_path, monkeypatch
-):
+def test_require_solver_meta_flag_off_by_default_accepts_missing_metadata(tmp_path, monkeypatch):
     """Default is accept-optional — no breakage for existing miners that don't
     declare solver provenance yet."""
     app, _v2_store = _build(tmp_path, monkeypatch, require_solver_meta=False)

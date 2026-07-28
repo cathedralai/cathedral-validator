@@ -18,9 +18,7 @@ from scaffold.publisher import health_thresholds as ht
 
 # Load the script module by path (scripts/ is not an importable package).
 _GATE_PATH = os.path.join(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    ),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "scripts",
     "validator_release_gate.py",
 )
@@ -84,9 +82,7 @@ def test_vector_age_within_limit_passes():
 
 
 def test_vector_age_over_limit_fails():
-    assert (
-        gate.evaluate_vector_age(ht.GATE_VECTOR_MAX_AGE_SECONDS + 1)["passed"] is False
-    )
+    assert gate.evaluate_vector_age(ht.GATE_VECTOR_MAX_AGE_SECONDS + 1)["passed"] is False
 
 
 def test_vector_age_missing_fails():
@@ -115,32 +111,25 @@ def test_uid_update_age_stale_fails():
 def test_uid_update_age_respects_longer_chain_rate_limit():
     # A 100-block chain rate limit plus 120s grace permits 110 blocks,
     # even when a caller configures an impossible 600s loop interval.
-    assert (
-        gate.evaluate_uid_update_age(
-            110,
-            validator_interval_seconds=600,
-            weights_rate_limit_blocks=100,
-        )["passed"]
-        is True
-    )
-    assert (
-        gate.evaluate_uid_update_age(
-            111,
-            validator_interval_seconds=600,
-            weights_rate_limit_blocks=100,
-        )["passed"]
-        is False
-    )
+    assert gate.evaluate_uid_update_age(
+        110,
+        validator_interval_seconds=600,
+        weights_rate_limit_blocks=100,
+    )["passed"] is True
+    assert gate.evaluate_uid_update_age(
+        111,
+        validator_interval_seconds=600,
+        weights_rate_limit_blocks=100,
+    )["passed"] is False
 
 
 def test_uid_update_age_rejects_invalid_cadence_configuration():
     res = gate.evaluate_uid_update_age(1, validator_interval_seconds=0)
     assert res["passed"] is False
     assert "invalid" in res["detail"]
-    assert (
-        gate.evaluate_uid_update_age(1, validator_interval_seconds=math.nan)["passed"]
-        is False
-    )
+    assert gate.evaluate_uid_update_age(
+        1, validator_interval_seconds=math.nan
+    )["passed"] is False
 
 
 def test_cli_rejects_nonfinite_validator_interval():
@@ -202,49 +191,40 @@ def test_tempo_constant_is_72_minutes():
 
 
 def test_vector_status_levels():
-    assert ht.vector_status(60)["level"] == "ok"  # <= 2 min
-    assert ht.vector_status(360)["level"] == "warn"  # > 5 min
-    assert ht.vector_status(700)["level"] == "page"  # > 10 min
+    assert ht.vector_status(60)["level"] == "ok"        # <= 2 min
+    assert ht.vector_status(360)["level"] == "warn"     # > 5 min
+    assert ht.vector_status(700)["level"] == "page"     # > 10 min
     assert ht.vector_status(None)["level"] == "unknown"
 
 
 def test_vector_status_hard_ceiling_flag():
-    assert ht.vector_status(5000)["over_hard_ceiling"] is True  # > 72 min
+    assert ht.vector_status(5000)["over_hard_ceiling"] is True   # > 72 min
     assert ht.vector_status(60)["over_hard_ceiling"] is False
 
 
 def test_uid200_status_levels():
-    assert ht.uid200_status(120)["level"] == "ok"  # <= 5 min
-    assert ht.uid200_status(700)["level"] == "warn"  # > 10 min
-    assert ht.uid200_status(1300)["level"] == "page"  # > 20 min
+    assert ht.uid200_status(120)["level"] == "ok"       # <= 5 min
+    assert ht.uid200_status(700)["level"] == "warn"     # > 10 min
+    assert ht.uid200_status(1300)["level"] == "page"    # > 20 min
     assert ht.uid200_status(None)["level"] == "unknown"
 
 
 # ---- all-three-URL compatibility ------------------------------------------
 def test_compat_urls_covers_all_three():
-    urls = gate.compat_urls(
-        "https://api.cathedral.computer", "https://read.cathedral.computer"
-    )
+    urls = gate.compat_urls("https://api.cathedral.computer", "https://read.cathedral.computer")
     labels = {label for label, _ in urls}
     assert labels == {"canonical", "legacy_prefixed", "read_service"}
     by = dict(urls)
     assert by["canonical"] == "https://api.cathedral.computer/v1/validator/weights/next"
     assert by["legacy_prefixed"] == (
-        "https://api.cathedral.computer/api/cathedral/v1/validator/weights/next"
-    )
-    assert (
-        by["read_service"]
-        == "https://read.cathedral.computer/v1/validator/weights/next"
-    )
+        "https://api.cathedral.computer/api/cathedral/v1/validator/weights/next")
+    assert by["read_service"] == "https://read.cathedral.computer/v1/validator/weights/next"
 
 
 def _fresh_feed(sig: str = "AAAA"):
     now = datetime.now(timezone.utc)
-    return {
-        "status": 200,
-        "error": None,
-        "body": {"signature": sig, "generated_at": _iso(now)},
-    }
+    return {"status": 200, "error": None,
+            "body": {"signature": sig, "generated_at": _iso(now)}}
 
 
 def test_url_compat_fresh_200_passes_and_exposes_signature():
@@ -254,53 +234,40 @@ def test_url_compat_fresh_200_passes_and_exposes_signature():
 
 
 def test_url_compat_5xx_fails():
-    res = gate.evaluate_url_compat(
-        "read_service", {"status": 503, "error": None, "body": None}
-    )
+    res = gate.evaluate_url_compat("read_service", {"status": 503, "error": None, "body": None})
     assert res["passed"] is False
     assert "5xx" in res["detail"]
 
 
 def test_url_compat_unreachable_fails():
-    res = gate.evaluate_url_compat(
-        "legacy_prefixed", {"status": None, "error": "ConnRefused", "body": None}
-    )
+    res = gate.evaluate_url_compat("legacy_prefixed",
+                                   {"status": None, "error": "ConnRefused", "body": None})
     assert res["passed"] is False
 
 
 def test_url_compat_200_without_signature_fails():
-    res = gate.evaluate_url_compat(
-        "canonical", {"status": 200, "error": None, "body": {"generated_at": "x"}}
-    )
+    res = gate.evaluate_url_compat("canonical",
+                                   {"status": 200, "error": None, "body": {"generated_at": "x"}})
     assert res["passed"] is False
 
 
 def test_url_compat_stale_vector_fails():
-    old = datetime.now(timezone.utc) - timedelta(
-        seconds=ht.GATE_VECTOR_MAX_AGE_SECONDS + 60
-    )
+    old = datetime.now(timezone.utc) - timedelta(seconds=ht.GATE_VECTOR_MAX_AGE_SECONDS + 60)
     res = gate.evaluate_url_compat(
-        "canonical",
-        {
-            "status": 200,
-            "error": None,
-            "body": {"signature": "S", "generated_at": _iso(old)},
-        },
-    )
+        "canonical", {"status": 200, "error": None,
+                      "body": {"signature": "S", "generated_at": _iso(old)}})
     assert res["passed"] is False
 
 
 def test_same_signed_bytes_match_passes():
     res = gate.evaluate_same_signed_bytes(
-        {"canonical": "S", "legacy_prefixed": "S", "read_service": "S"}
-    )
+        {"canonical": "S", "legacy_prefixed": "S", "read_service": "S"})
     assert res["passed"] is True
 
 
 def test_same_signed_bytes_divergence_fails():
     res = gate.evaluate_same_signed_bytes(
-        {"canonical": "S", "legacy_prefixed": "DIFFERENT", "read_service": "S"}
-    )
+        {"canonical": "S", "legacy_prefixed": "DIFFERENT", "read_service": "S"})
     assert res["passed"] is False
     assert "DIVERGED" in res["detail"]
 

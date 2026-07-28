@@ -4,7 +4,6 @@ This module is intentionally isolated from the current subnet payout ledgers. It
 reads/writes only `solution_manifests`, so it can run in beta/staging/live-adjacent
 without changing current miner rewards or validator weights.
 """
-
 from __future__ import annotations
 
 import base64
@@ -59,10 +58,7 @@ def _record_cnf_store_miss() -> None:
 
 def cnf_store_metrics() -> dict[str, int]:
     with _CNF_STORE_METRICS_LOCK:
-        return {
-            "cnf_store_hits": _cnf_store_hits,
-            "cnf_store_misses": _cnf_store_misses,
-        }
+        return {"cnf_store_hits": _cnf_store_hits, "cnf_store_misses": _cnf_store_misses}
 
 
 _PM_ENV_LOCK = threading.RLock()
@@ -94,11 +90,8 @@ def _scoring_identity(store: Store, hotkey: str) -> str:
     and a coldkey_map row exists, instances derive from the coldkey; otherwise
     the raw hotkey. Signing and receipts always stay on the raw hotkey."""
     from . import weights as weights_mod
-
-    return (
-        weights_mod.scoring_identity_for_hotkey(store, hotkey, require_mapped=False)
-        or hotkey
-    )
+    return weights_mod.scoring_identity_for_hotkey(
+        store, hotkey, require_mapped=False) or hotkey
 
 
 def pm_payout_bridge_enabled() -> bool:
@@ -108,13 +101,10 @@ def pm_payout_bridge_enabled() -> bool:
     only the miner-facing protocol changes. Default off; implied on by the
     v2-converged launch profile."""
     from . import launch_profile
-
     if launch_profile.converged():
         return True
-    return (
-        os.environ.get("CATHEDRAL_V2_PM_PAYOUT_BRIDGE", "").strip().lower()
-        in _ENV_TRUTHY
-    )
+    return os.environ.get(
+        "CATHEDRAL_V2_PM_PAYOUT_BRIDGE", "").strip().lower() in _ENV_TRUTHY
 
 
 def v2_perminer_enabled() -> bool:
@@ -128,7 +118,6 @@ def v2_perminer_enabled() -> bool:
     legacy CATHEDRAL_PERMINER_ENABLED.
     """
     from . import launch_profile
-
     if launch_profile.converged() and "CATHEDRAL_V2_PERMINER_ENABLED" not in os.environ:
         # The converged launch profile implies the V2 per-miner surface;
         # an explicit env still wins (contradictions fail closed at boot).
@@ -281,9 +270,7 @@ def decode_bitset_assignment(data: bytes, n_vars: int) -> list[int]:
     ]
 
 
-def verify_assignment_literals(
-    cnf_text: str, assignment: list[int]
-) -> tuple[bool, str | None]:
+def verify_assignment_literals(cnf_text: str, assignment: list[int]) -> tuple[bool, str | None]:
     n_vars, clauses = parse_cnf(cnf_text)
     if len(assignment) != n_vars:
         return False, "solution_incomplete_assignment"
@@ -335,11 +322,7 @@ def claim_batch(
 
     def _tx(conn):
         params: list[Any] = [
-            STATUS_RECEIVED,
-            STATUS_RETRY,
-            STATUS_VERIFYING,
-            now_iso,
-            now_iso,
+            STATUS_RECEIVED, STATUS_RETRY, STATUS_VERIFYING, now_iso, now_iso,
         ]
         if max_attempts:
             params.append(int(max_attempts))
@@ -351,8 +334,8 @@ def claim_batch(
                 "WHERE status IN (?, ?, ?) "
                 "AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
                 "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
-                + cap_clause
-                + "ORDER BY received_at_iso ASC LIMIT ? FOR UPDATE SKIP LOCKED"
+                + cap_clause +
+                "ORDER BY received_at_iso ASC LIMIT ? FOR UPDATE SKIP LOCKED"
                 ") "
                 "UPDATE solution_manifests AS s SET status=?, locked_by=?, "
                 "locked_until_iso=?, attempt_count=attempt_count+1, last_error=NULL "
@@ -365,8 +348,8 @@ def claim_batch(
             "WHERE status IN (?, ?, ?) "
             "AND (next_attempt_at_iso IS NULL OR next_attempt_at_iso <= ?) "
             "AND (locked_until_iso IS NULL OR locked_until_iso <= ?) "
-            + cap_clause
-            + "ORDER BY received_at_iso ASC LIMIT ?",
+            + cap_clause +
+            "ORDER BY received_at_iso ASC LIMIT ?",
             tuple(params),
         ).fetchall()
         ids = [str(r["id"]) for r in rows]
@@ -409,9 +392,7 @@ def _finish_verified(store: Store, rid: str, result: dict[str, Any]) -> None:
     store.write(_tx)
 
 
-def _finish_rejected(
-    store: Store, rid: str, reason: str, *, terminal: bool = True
-) -> None:
+def _finish_rejected(store: Store, rid: str, reason: str, *, terminal: bool = True) -> None:
     now_iso = _now_iso_ms()
     status = STATUS_REJECTED if terminal else STATUS_RETRY
     next_attempt = None if terminal else _iso_plus(15.0)
@@ -427,9 +408,7 @@ def _finish_rejected(
     store.write(_tx)
 
 
-def verify_one(
-    store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes: int = 0
-) -> dict[str, Any]:
+def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes: int = 0) -> dict[str, Any]:
     """Verify one V2 manifest row and finalize it."""
     rid = str(row["id"])
     try:
@@ -458,17 +437,9 @@ def verify_one(
             blob = blob_store.fetch(cid, max_bytes=max_blob_bytes)
         except ValueError as exc:
             reason = str(exc) or "blob_fetch_failed"
-            terminal = reason in {
-                "blob_too_large",
-                "unsupported_cid_scheme",
-                "cid_fetch_backend_not_configured",
-            }
+            terminal = reason in {"blob_too_large", "unsupported_cid_scheme", "cid_fetch_backend_not_configured"}
             _finish_rejected(store, rid, reason, terminal=terminal)
-            return {
-                "id": rid,
-                "status": STATUS_REJECTED if terminal else STATUS_RETRY,
-                "reason": reason,
-            }
+            return {"id": rid, "status": STATUS_REJECTED if terminal else STATUS_RETRY, "reason": reason}
         except Exception as exc:
             reason = f"blob_fetch_failed:{type(exc).__name__}"
             # A local:// blob with no durable inline copy can NEVER be fetched by
@@ -492,11 +463,7 @@ def verify_one(
     actual_sha = hashlib.sha256(blob).hexdigest()
     if actual_sha != expected_sha:
         _finish_rejected(store, rid, "solution_sha256_mismatch")
-        return {
-            "id": rid,
-            "status": STATUS_REJECTED,
-            "reason": "solution_sha256_mismatch",
-        }
+        return {"id": rid, "status": STATUS_REJECTED, "reason": "solution_sha256_mismatch"}
 
     challenge_id = str(row["challenge_id"])
     miner_hotkey = str(row["miner_hotkey"])
@@ -505,11 +472,7 @@ def verify_one(
         parsed = pm.parse_challenge_id(challenge_id)
         if not parsed:
             _finish_rejected(store, rid, "unsupported_challenge_kind")
-            return {
-                "id": rid,
-                "status": STATUS_REJECTED,
-                "reason": "unsupported_challenge_kind",
-            }
+            return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_challenge_kind"}
         epoch = int(parsed["epoch"])
         # V1 parity: ownership resolves against the scoring identity (coldkey
         # collapse aware), matching the mint/admit sites. Raw hotkey stays the
@@ -518,11 +481,7 @@ def verify_one(
         tier_seq = pm.resolve_tier_seq_for(_manifest_identity, epoch, challenge_id)
         if tier_seq is None:
             _finish_rejected(store, rid, "assignment_required_fetch_challenges_first")
-            return {
-                "id": rid,
-                "status": STATUS_REJECTED,
-                "reason": "assignment_required_fetch_challenges_first",
-            }
+            return {"id": rid, "status": STATUS_REJECTED, "reason": "assignment_required_fetch_challenges_first"}
         tier, seq = tier_seq
 
         # CNF store read: the CNF for this challenge_id may already be baked
@@ -534,9 +493,7 @@ def verify_one(
         # be used; any error here is swallowed and treated as a plain miss —
         # this call must never be able to break verification.
         try:
-            cnf_text = v2_cnf_store.get(
-                store, challenge_id, expected_sha256=event_cnf_sha
-            )
+            cnf_text = v2_cnf_store.get(store, challenge_id, expected_sha256=event_cnf_sha)
         except Exception:
             cnf_text = None
         if cnf_text is not None:
@@ -547,11 +504,7 @@ def verify_one(
             generated = pm.get_miner_cnf(_manifest_identity, epoch, tier, seq)
             if generated is None:
                 _finish_rejected(store, rid, "challenge_id_not_in_miner_set")
-                return {
-                    "id": rid,
-                    "status": STATUS_REJECTED,
-                    "reason": "challenge_id_not_in_miner_set",
-                }
+                return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_not_in_miner_set"}
             _cid, cnf_text = generated
             # Backfill so the next event for this challenge_id hits.
             try:
@@ -586,16 +539,10 @@ def verify_one(
             return {"id": rid, "status": STATUS_REJECTED, "reason": reason}
     else:
         _finish_rejected(store, rid, "unsupported_assignment_encoding")
-        return {
-            "id": rid,
-            "status": STATUS_REJECTED,
-            "reason": "unsupported_assignment_encoding",
-        }
+        return {"id": rid, "status": STATUS_REJECTED, "reason": "unsupported_assignment_encoding"}
 
     with v2_pm_env():
-        ok, reason = pm.verify_miner_submission_for(
-            _manifest_identity, epoch, tier, seq, challenge_id, assignment
-        )
+        ok, reason = pm.verify_miner_submission_for(_manifest_identity, epoch, tier, seq, challenge_id, assignment)
         weight = pm.weight_for(tier)
     if not ok:
         _finish_rejected(store, rid, reason or "witness_check_failed")
@@ -639,12 +586,8 @@ def sweep_exhausted(store: Store, *, max_attempts: int = 20, limit: int = 500) -
                 "UPDATE solution_manifests SET status=?, rejection_reason=?, "
                 "locked_by=NULL, locked_until_iso=NULL, next_attempt_at_iso=NULL, "
                 "last_error=? WHERE id=?",
-                (
-                    STATUS_REJECTED,
-                    "verify_attempts_exhausted",
-                    "verify_attempts_exhausted",
-                    rid,
-                ),
+                (STATUS_REJECTED, "verify_attempts_exhausted",
+                 "verify_attempts_exhausted", rid),
             )
         return len(ids)
 
@@ -666,16 +609,9 @@ def process_batch(
 ) -> list[dict[str, Any]]:
     worker_id = worker_id or f"v2-{uuid.uuid4().hex[:12]}"
     rows = claim_batch(
-        store,
-        worker_id=worker_id,
-        batch_size=batch_size,
-        lock_secs=lock_secs,
-        max_attempts=max_attempts,
-    )
-    results = [
-        verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes)
-        for row in rows
-    ]
+        store, worker_id=worker_id, batch_size=batch_size,
+        lock_secs=lock_secs, max_attempts=max_attempts)
+    results = [verify_one(store, row, blob_store, max_blob_bytes=max_blob_bytes) for row in rows]
     # Sweep attempt-cap-exhausted rows to 'rejected' so they leave the queue
     # instead of lingering in 'retry'. Cheap point-update, best-effort.
     try:
@@ -690,16 +626,14 @@ def process_batch(
     # all-miner load and filled the disk (2026-07-09 incident).
     try:
         v2_cnf_store.maybe_purge_older_than(
-            store, hours=v2_cnf_store.retention_hours(), min_interval_secs=600.0
-        )
+            store, hours=v2_cnf_store.retention_hours(), min_interval_secs=600.0)
     except Exception:
         pass
     return results
 
 
-def claim_bitset_batch(
-    store: Store, *, worker_id: str, batch_size: int = 8, lock_secs: float = 120.0
-) -> list[dict[str, Any]]:
+def claim_bitset_batch(store: Store, *, worker_id: str, batch_size: int = 8,
+                       lock_secs: float = 120.0) -> list[dict[str, Any]]:
     """Claim 'received' v2_submit_events for async witness-check + scoring.
     Mirrors claim_batch but for the bitset table. Reclaims expired-lock rows so a
     dead worker cannot strand them."""
@@ -775,44 +709,31 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
         def _tx(conn):
             if payout is not None:
                 inserted = pm.record_perminer_solve_tx(
-                    conn,
-                    hk,
-                    payout["epoch"],
-                    payout["challenge_id"],
-                    tier_i,
-                    seq_i,
-                    True,
+                    conn, hk, payout["epoch"], payout["challenge_id"],
+                    tier_i, seq_i, True,
                     solved_at_iso=now_iso,
-                    difficulty_weight=payout["weight"],
-                )
+                    difficulty_weight=payout["weight"])
                 if not inserted:
                     # Existing ledger row (e.g. written earlier by the V1 accept
                     # path) wins; audit-log so a weight mismatch between the V2
                     # receipt and the paid row is visible in a dispute.
-                    print(
-                        f"[v2_pm_payout_bridge] duplicate_ledger_row "
-                        f"challenge_id={payout['challenge_id']} hotkey={hk} "
-                        f"v2_weight={payout['weight']}"
-                    )
+                    print(f"[v2_pm_payout_bridge] duplicate_ledger_row "
+                          f"challenge_id={payout['challenge_id']} hotkey={hk} "
+                          f"v2_weight={payout['weight']}")
             conn.execute(
                 "UPDATE v2_submit_events SET status=?, weighted_score=?, "
                 "answer_hash=?, verifier_details_hash=?, verified_at_iso=?, "
                 "eligibility_status=?, last_error=?, locked_by=NULL, "
                 "locked_until_iso=NULL WHERE id=?",
-                (
-                    status,
-                    float(score) if score is not None else 0.0,
-                    ah if ah is not None else "",
-                    vdh if vdh is not None else "",
-                    now_iso if status == STATUS_VERIFIED else None,
-                    "eligible_beta"
-                    if status == STATUS_VERIFIED
-                    else (reason or "rejected"),
-                    None if status == STATUS_VERIFIED else (reason or "rejected"),
-                    rid,
-                ),
+                (status,
+                 float(score) if score is not None else 0.0,
+                 ah if ah is not None else "",
+                 vdh if vdh is not None else "",
+                 now_iso if status == STATUS_VERIFIED else None,
+                 "eligible_beta" if status == STATUS_VERIFIED else (reason or "rejected"),
+                 None if status == STATUS_VERIFIED else (reason or "rejected"),
+                 rid),
             )
-
         store.write(_tx)
 
     try:
@@ -823,22 +744,15 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
                 # mint and admit; an event that slipped through anyway must
                 # terminal-reject here BEFORE the payout bridge can see it.
                 _finish(STATUS_REJECTED, reason="per_miner_challenge_expired")
-                return {
-                    "id": rid,
-                    "status": STATUS_REJECTED,
-                    "reason": "per_miner_challenge_expired",
-                }
+                return {"id": rid, "status": STATUS_REJECTED,
+                        "reason": "per_miner_challenge_expired"}
             # V1 parity: instances derive from the scoring identity (coldkey
             # collapse aware); receipts and the payout row keep the RAW hotkey.
             identity = _scoring_identity(store, hk)
             cid = pm.instance_id(identity, epoch_i, tier_i, seq_i)
             if cid != str(row["challenge_id"]):
                 _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
-                return {
-                    "id": rid,
-                    "status": STATUS_REJECTED,
-                    "reason": "challenge_id_mismatch",
-                }
+                return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
             expected_cnf_sha = str(row["cnf_sha256"]).lower()
             cnf_text = v2_cnf_store.get(store, cid, expected_sha256=expected_cnf_sha)
             if cnf_text is not None:
@@ -847,81 +761,49 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
             else:
                 _record_cnf_store_miss()
                 generated_cid, cnf_text, _planted = pm.generate_instance(
-                    identity, epoch_i, tier_i, seq_i
-                )
+                    identity, epoch_i, tier_i, seq_i)
                 if generated_cid != cid:
                     _finish(STATUS_REJECTED, reason="challenge_id_mismatch")
-                    return {
-                        "id": rid,
-                        "status": STATUS_REJECTED,
-                        "reason": "challenge_id_mismatch",
-                    }
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "challenge_id_mismatch"}
                 cnf_sha = _h.sha256(cnf_text.encode("utf-8")).hexdigest()
                 if cnf_sha != expected_cnf_sha:
                     # config drift since mint — cannot fairly score. Reject, never credit.
                     _finish(STATUS_REJECTED, reason="cnf_sha_drift")
-                    return {
-                        "id": rid,
-                        "status": STATUS_REJECTED,
-                        "reason": "cnf_sha_drift",
-                    }
+                    return {"id": rid, "status": STATUS_REJECTED, "reason": "cnf_sha_drift"}
                 try:
                     v2_cnf_store.put(store, cid, cnf_text)
                 except Exception:
                     pass
             nvars, _clauses = parse_cnf(cnf_text)
             from . import v2_bitset_submit as _bs
-
             assignment_raw, assignment = _bs.decode_assignment_b64(
-                str(row["assignment_b64"]), nvars=nvars
-            )
+                str(row["assignment_b64"]), nvars=nvars)
             ok, reason = verify_assignment_literals(cnf_text, assignment)
             weight = float(pm.weight_for(tier_i))
         if not ok:
             _finish(STATUS_REJECTED, reason=reason or "witness_check_failed")
-            return {
-                "id": rid,
-                "status": STATUS_REJECTED,
-                "reason": reason or "witness_check_failed",
-            }
+            return {"id": rid, "status": STATUS_REJECTED, "reason": reason or "witness_check_failed"}
         ah = _h.sha256(assignment_raw).hexdigest()
         details = {
             "schema": "cathedral.v2.submit_bitset_verifier_details.v1",
-            "challenge_id": cid,
-            "miner_hotkey": hk,
-            "epoch": epoch_i,
-            "tier": tier_i,
-            "seq": seq_i,
-            "cnf_sha256": cnf_sha,
-            "assignment_sha256": ah,
-            "verified_at": now_iso,
+            "challenge_id": cid, "miner_hotkey": hk, "epoch": epoch_i,
+            "tier": tier_i, "seq": seq_i, "cnf_sha256": cnf_sha,
+            "assignment_sha256": ah, "verified_at": now_iso,
         }
-        vdh = _h.sha256(
-            json.dumps(details, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        vdh = _h.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         payout = (
             {"epoch": epoch_i, "challenge_id": cid, "weight": weight}
-            if pm_payout_bridge_enabled()
-            else None
+            if pm_payout_bridge_enabled() else None
         )
         _finish(STATUS_VERIFIED, score=weight, ah=ah, vdh=vdh, payout=payout)
-        return {
-            "id": rid,
-            "status": STATUS_VERIFIED,
-            "weighted_score": weight,
-            "miner_hotkey": hk,
-            "challenge_id": cid,
-            "pm_payout_bridged": pm_payout_bridge_enabled(),
-        }
+        return {"id": rid, "status": STATUS_VERIFIED, "weighted_score": weight,
+                "miner_hotkey": hk, "challenge_id": cid,
+                "pm_payout_bridged": pm_payout_bridge_enabled()}
     except Exception as exc:  # keep it claimable next tick rather than lost
-
         def _unlock(conn):
             conn.execute(
                 "UPDATE v2_submit_events SET locked_by=NULL, locked_until_iso=NULL, "
-                "last_error=? WHERE id=?",
-                (f"bitset_verify_error:{type(exc).__name__}", rid),
-            )
-
+                "last_error=? WHERE id=?", (f"bitset_verify_error:{type(exc).__name__}", rid))
         try:
             store.write(_unlock)
         except Exception:
@@ -929,13 +811,8 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
         return {"id": rid, "status": "error", "reason": str(exc)[:120]}
 
 
-def process_bitset_batch(
-    store: Store,
-    *,
-    worker_id: str | None = None,
-    batch_size: int = 8,
-    lock_secs: float = 120.0,
-) -> list[dict[str, Any]]:
+def process_bitset_batch(store: Store, *, worker_id: str | None = None,
+                         batch_size: int = 8, lock_secs: float = 120.0) -> list[dict[str, Any]]:
     """Claim + verify + score a batch of received bitset events.
 
     The verification work is per-row independent after claim: read the baked CNF
@@ -945,31 +822,23 @@ def process_bitset_batch(
     loop.
     """
     worker_id = worker_id or f"v2b-{uuid.uuid4().hex[:12]}"
-    rows = claim_bitset_batch(
-        store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs
-    )
+    rows = claim_bitset_batch(store, worker_id=worker_id, batch_size=batch_size, lock_secs=lock_secs)
     if not rows:
         return []
     try:
-        workers = max(
-            1, int(os.environ.get("CATHEDRAL_V2_BITSET_VERIFY_THREADS", "8") or "1")
-        )
+        workers = max(1, int(os.environ.get("CATHEDRAL_V2_BITSET_VERIFY_THREADS", "8") or "1"))
     except ValueError:
         workers = 8
     workers = min(workers, len(rows))
     if workers <= 1:
         return [verify_bitset_one(store, r) for r in rows]
     from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="v2-bitset-verify"
-    ) as pool:
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="v2-bitset-verify") as pool:
         return list(pool.map(lambda r: verify_bitset_one(store, r), rows))
 
 
-def _score_rows(
-    store: Store, table: str, *, since_iso: str | None = None, epoch: int | None = None
-) -> list[dict[str, Any]]:
+def _score_rows(store: Store, table: str, *, since_iso: str | None = None,
+                epoch: int | None = None) -> list[dict[str, Any]]:
     clauses = ["status=?"]
     params: list[Any] = [STATUS_VERIFIED]
     if since_iso:
@@ -986,9 +855,7 @@ def _score_rows(
     return [_row_to_dict(r) for r in rows]
 
 
-def score_totals(
-    store: Store, *, since_iso: str | None = None, epoch: int | None = None
-) -> dict[str, float]:
+def score_totals(store: Store, *, since_iso: str | None = None, epoch: int | None = None) -> dict[str, float]:
     """Return V2 shadow scores with one score per miner/challenge.
 
     During the beta transition the same PM challenge can be submitted via the
@@ -1014,10 +881,7 @@ def score_totals(
 
 def receipt_counts(store: Store) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for table, prefix in (
-        ("solution_manifests", "manifest"),
-        ("v2_submit_events", "bitset"),
-    ):
+    for table, prefix in (("solution_manifests", "manifest"), ("v2_submit_events", "bitset")):
         rows = store.query(f"SELECT status, COUNT(*) AS n FROM {table} GROUP BY status")
         for r in rows:
             key = f"{prefix}:{r['status']}"
@@ -1034,9 +898,7 @@ def build_shadow_weight_vector(
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=float(window_hours))
-    since_iso = (
-        since.strftime("%Y-%m-%dT%H:%M:%S.") + f"{since.microsecond // 1000:03d}Z"
-    )
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%S.") + f"{since.microsecond // 1000:03d}Z"
     totals = score_totals(store, since_iso=since_iso)
     top = max(totals.values()) if totals else 0.0
     weights = {
@@ -1054,19 +916,10 @@ def build_shadow_weight_vector(
         "schema": "cathedral.v2.shadow_weights.v1",
         "vector_id": str(uuid.uuid4()),
         "policy_version": int(datetime.now(timezone.utc).timestamp() * 1000),
-        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S.")
-        + f"{now.microsecond // 1000:03d}Z",
-        "expires_at": (now + timedelta(seconds=float(valid_for_secs))).strftime(
-            "%Y-%m-%dT%H:%M:%S."
-        )
-        + f"{(now + timedelta(seconds=float(valid_for_secs))).microsecond // 1000:03d}Z",
-        "policy_hash": "sha256:"
-        + hashlib.sha256(
-            json.dumps(policy_inputs, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
-        "key_id": os.environ.get(
-            "CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"
-        ),
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z",
+        "expires_at": (now + timedelta(seconds=float(valid_for_secs))).strftime("%Y-%m-%dT%H:%M:%S.") + f"{(now + timedelta(seconds=float(valid_for_secs))).microsecond // 1000:03d}Z",
+        "policy_hash": "sha256:" + hashlib.sha256(json.dumps(policy_inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "key_id": os.environ.get("CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy"),
         "policy_reason": f"v2_shadow_verified_receipts_{window_hours:g}h",
         "policy_metadata": {
             "shadow": True,
@@ -1100,9 +953,7 @@ def _leaf_hash(row: dict[str, Any]) -> str:
         "answer_hash": row.get("answer_hash"),
         "verified_at_iso": row.get("verified_at_iso"),
     }
-    return hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
 def _audit_receipt(row: dict[str, Any]) -> dict[str, Any]:
@@ -1124,34 +975,22 @@ def _audit_receipt(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def audit_bundle(
-    store: Store, *, epoch: int, signing_key_hex: str, limit: int = 10_000
-) -> dict[str, Any]:
-    manifest_rows = [
-        _row_to_dict(r) | {"source": "manifest"}
-        for r in store.query(
-            "SELECT * FROM solution_manifests WHERE epoch=? OR (epoch IS NULL AND challenge_id LIKE ?) "
-            "ORDER BY received_at_iso ASC LIMIT ?",
-            (int(epoch), f"pm-%-e{int(epoch)}-%", int(limit)),
-        )
-    ]
-    bitset_rows = [
-        _row_to_dict(r) | {"source": "bitset"}
-        for r in store.query(
-            "SELECT * FROM v2_submit_events WHERE epoch=? ORDER BY received_at_iso ASC LIMIT ?",
-            (int(epoch), int(limit)),
-        )
-    ]
+def audit_bundle(store: Store, *, epoch: int, signing_key_hex: str, limit: int = 10_000) -> dict[str, Any]:
+    manifest_rows = [_row_to_dict(r) | {"source": "manifest"} for r in store.query(
+        "SELECT * FROM solution_manifests WHERE epoch=? OR (epoch IS NULL AND challenge_id LIKE ?) "
+        "ORDER BY received_at_iso ASC LIMIT ?",
+        (int(epoch), f"pm-%-e{int(epoch)}-%", int(limit)),
+    )]
+    bitset_rows = [_row_to_dict(r) | {"source": "bitset"} for r in store.query(
+        "SELECT * FROM v2_submit_events WHERE epoch=? ORDER BY received_at_iso ASC LIMIT ?",
+        (int(epoch), int(limit)),
+    )]
     rows = sorted(
         (manifest_rows + bitset_rows),
         key=lambda r: str(r.get("received_at_iso") or ""),
     )[: int(limit)]
     leaves = [_leaf_hash(r) for r in rows]
-    root = (
-        hashlib.sha256("".join(sorted(leaves)).encode()).hexdigest()
-        if leaves
-        else hashlib.sha256(b"").hexdigest()
-    )
+    root = hashlib.sha256("".join(sorted(leaves)).encode()).hexdigest() if leaves else hashlib.sha256(b"").hexdigest()
     counts: dict[str, int] = {}
     for r in rows:
         key = f"{r.get('source') or 'unknown'}:{r.get('status') or 'unknown'}"
@@ -1172,12 +1011,8 @@ def audit_bundle(
     return payload
 
 
-def publish_audit_bundle(
-    store: Store, blob_store, *, epoch: int, signing_key_hex: str
-) -> dict[str, Any]:
+def publish_audit_bundle(store: Store, blob_store, *, epoch: int, signing_key_hex: str) -> dict[str, Any]:
     bundle = audit_bundle(store, epoch=epoch, signing_key_hex=signing_key_hex)
-    data = json.dumps(
-        bundle, sort_keys=True, separators=(",", ":"), default=str
-    ).encode()
+    data = json.dumps(bundle, sort_keys=True, separators=(",", ":"), default=str).encode()
     put = blob_store.put(data, kind="audit")
     return {"cid": put.cid, "sha256": put.sha256, "bytes": put.size, "bundle": bundle}
