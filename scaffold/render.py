@@ -207,6 +207,7 @@ class _Stream:
         self.feed_open = False
         self.in_tick = False
         self.rows_since_rule = 0
+        self.last_stamp = ""
         self.seen_labels: set[str] = set()
         self.tick_started: float | None = None
 
@@ -270,6 +271,15 @@ class _Stream:
         if self.in_tick and self.rows_since_rule == 0:
             self.tick_started = time.monotonic()
             self.seen_labels = set()
+            self.last_stamp = stamp
+            return
+        # A head-drift retry rebuilds the whole tick, so it re-enters here
+        # within the same second. Those are attempts at one submission, not
+        # separate ticks, and drawing a fresh identical divider for each made
+        # the stream look like it was repeating itself.
+        if self.in_tick and stamp == self.last_stamp:
+            # seen_labels deliberately NOT reset: a retry is the same tick, so
+            # its refreshed chain reading is still the same row, not news.
             return
         self.flush_feed()
         if self.in_tick:
@@ -279,6 +289,7 @@ class _Stream:
         self.in_tick = True
         self.rows_since_rule = 0
         self.seen_labels = set()
+        self.last_stamp = stamp
         self.tick_started = time.monotonic()
 
     # -- the one accumulated row -------------------------------------------
