@@ -128,43 +128,71 @@ class _Events:
         self.emitted.append((name, fields))
 
 
-def test_excluded_targets_are_actually_dropped_from_the_vector(monkeypatch):
-    # The stability proof's contract line says "targets the caller must drop".
-    # This is the drop: the unsafe UID leaves the vector, loudly.
+def test_excluded_target_mass_goes_to_burn_and_mass_stays_one(monkeypatch):
+    # The invariant that matters: the submitted vector must still sum to
+    # exactly 1.0, or _validate_emission_vector refuses it before the chain
+    # ever sees it and the whole control is inert.
     from types import SimpleNamespace
 
     events = _Events()
-    args = SimpleNamespace(_events=None)
     monkeypatch.setattr(validator_thin, "_get_events", lambda _a: events)
     kept = _drop_unprovable_targets(
-        args,
-        {1: 0.9, 2: 0.1},
+        SimpleNamespace(),
+        {1: 0.6, 2: 0.3, 3: 0.1},  # two miners plus burn UID 3
         {"excluded_hotkeys": ["unsafe"]},
-        {"safe": 1, "unsafe": 2},
+        {"safe": 1, "unsafe": 2, "burn": 3},
+        burn_uid=3,
     )
-    assert kept == {1: 0.9}
+    assert 2 not in kept, "the unprovable target must not be paid"
+    assert kept[1] == 0.6, "a provable miner's share must not change"
+    assert kept[3] == pytest.approx(0.4), "forfeited mass goes to burn"
+    validator_thin._validate_emission_vector(kept)  # must not raise
     assert events.emitted and events.emitted[0][0] == "UNSAFE_TARGETS_EXCLUDED"
 
 
-def test_no_exclusions_means_the_vector_is_untouched(monkeypatch):
+def test_the_pre_fix_behaviour_would_have_been_rejected():
+    # Regression guard: simply dropping the target leaves mass below 1.0, and
+    # the chain preflight refuses it. This is what made the first version of
+    # the control inert.
+    with pytest.raises(validator_thin.wire.VectorError, match="mass"):
+        validator_thin._validate_emission_vector({1: 0.6, 3: 0.1})
+
+
+def test_no_exclusions_means_the_vector_is_untouched():
     from types import SimpleNamespace
 
     weights = {1: 0.9, 2: 0.1}
     kept = _drop_unprovable_targets(
-        SimpleNamespace(), weights, {"excluded_hotkeys": []}, {"a": 1, "b": 2}
+        SimpleNamespace(), weights, {"excluded_hotkeys": []}, {"a": 1, "b": 2}, 2
     )
     assert kept is weights
 
 
-def test_dropping_everything_refuses(monkeypatch):
+def test_excluding_the_burn_destination_refuses(monkeypatch):
+    # Burn is the subnet owner and owner-immortal. If the proof calls it
+    # unprovable the maps disagree and nothing here is trustworthy.
     from types import SimpleNamespace
 
     events = _Events()
     monkeypatch.setattr(validator_thin, "_get_events", lambda _a: events)
-    with pytest.raises(validator_thin.wire.VectorError, match="nothing safe"):
+    with pytest.raises(validator_thin.wire.VectorError, match="burn destination"):
         _drop_unprovable_targets(
             SimpleNamespace(),
-            {2: 1.0},
+            {1: 0.9, 2: 0.1},
+            {"excluded_hotkeys": ["burn"]},
+            {"safe": 1, "burn": 2},
+            burn_uid=2,
+        )
+
+
+def test_exclusion_without_a_burn_destination_refuses():
+    from types import SimpleNamespace
+
+    with pytest.raises(validator_thin.wire.VectorError, match="burn destination"):
+        _drop_unprovable_targets(
+            SimpleNamespace(),
+            {1: 1.0},
             {"excluded_hotkeys": ["unsafe"]},
-            {"unsafe": 2},
+            {"unsafe": 1},
+            burn_uid=None,
         )

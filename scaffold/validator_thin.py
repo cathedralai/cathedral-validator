@@ -3681,17 +3681,25 @@ def _drop_unprovable_targets(
     uid_weights: dict[int, float],
     uid_safety: dict[str, Any],
     hotkey_to_uid: dict[str, int],
+    burn_uid: int | None,
 ) -> dict[int, float]:
-    """Apply the exclusions the stability proof demanded.
+    """Move an unprovable target's mass to burn, keeping total mass at 1.0.
 
-    _require_uid_mapping_stability returns excluded_hotkeys with the stated
-    contract "targets the caller must drop, normalizing their mass to burn" --
-    and no caller dropped them, so a target whose UID could be reassigned
-    mid-era was still submitted at full weight. Dropping it here means the
-    remaining targets renormalize on chain: on a one-miner subnet an unprovable
-    miner fails safe to burn instead of risking payment to whoever takes the
-    slot. Loud on every surface, because a vector that differs from the signed
-    or recomputed allocation must never be a quiet event.
+    _require_uid_mapping_stability returns excluded_hotkeys under the contract
+    "targets the caller must drop, normalizing their mass to burn". An earlier
+    version dropped them and returned the remainder, which summed below 1.0 and
+    was rejected by _validate_emission_vector before it could reach the chain:
+    the control was inert, and worse, one unprovable target halted every write
+    instead of costing that target its share.
+
+    The mass goes to BURN, not to the surviving miners. Redistributing an
+    excluded miner's share among the others would let a target becoming
+    unprovable silently pay everyone else more, which is an allocation change
+    nobody signed. Burn is the destination the safety proof names, and it keeps
+    the sum exactly 1.0 with no renormalization of anyone else's share.
+
+    Loud on every surface: a vector that differs from the signed or recomputed
+    allocation must never be a quiet event.
     """
     excluded = list(uid_safety.get("excluded_hotkeys") or [])
     if not excluded:
@@ -3699,20 +3707,33 @@ def _drop_unprovable_targets(
     excluded_uids = {
         hotkey_to_uid[hotkey] for hotkey in excluded if hotkey in hotkey_to_uid
     }
+    if burn_uid is None or int(burn_uid) not in uid_weights:
+        raise wire.VectorError(
+            "cannot exclude an unprovable target without a burn destination "
+            "in the vector to receive its mass"
+        )
+    burn_uid = int(burn_uid)
+    if burn_uid in excluded_uids:
+        # The burn destination is the subnet owner and owner-immortal, so it
+        # is never prunable. If the proof says otherwise, the maps disagree
+        # and nothing here is trustworthy.
+        raise wire.VectorError(
+            "burn destination was itself excluded as unprovable; refusing"
+        )
     kept = {
         uid: weight for uid, weight in uid_weights.items() if uid not in excluded_uids
     }
-    if not kept:
-        # The ALL-unprovable case hard-fails inside the stability proof, so
-        # reaching emptiness here means the maps disagree. Refuse.
-        raise wire.VectorError(
-            "every weighted target was excluded as unprovable; nothing safe "
-            "remains to submit"
-        )
-    dropped = sorted(set(uid_weights) - set(kept))
+    forfeited = math.fsum(
+        weight for uid, weight in uid_weights.items() if uid in excluded_uids
+    )
+    if not forfeited:
+        return uid_weights
+    kept[burn_uid] = math.fsum((kept.get(burn_uid, 0.0), forfeited))
+    dropped = sorted(excluded_uids & set(uid_weights))
     detail = (
         f"excluded_uids={','.join(str(uid) for uid in dropped)} "
-        f"reason=uid_mapping_unprovable remaining_targets={len(kept)}"
+        f"reason=uid_mapping_unprovable forfeited_to_burn={forfeited:.6f} "
+        f"burn_uid={burn_uid} remaining_targets={len(kept) - 1}"
     )
     _get_events(args).event(
         "UNSAFE_TARGETS_EXCLUDED",
@@ -3720,9 +3741,9 @@ def _drop_unprovable_targets(
         status=NOT_PROVEN,
         detail=detail,
         remediation=(
-            "The excluded targets' mass shifts to the remaining vector on "
-            "chain normalization. They rejoin automatically once their UID "
-            "mapping is provable for a full mortal era."
+            "The excluded targets' mass was burned, not redistributed. They "
+            "rejoin automatically once their UID mapping is provable for a "
+            "full mortal era."
         ),
     )
     _lifecycle("SAFETY excluded", detail)
@@ -6048,7 +6069,18 @@ def _thin_tick_locked(args) -> bool:
             {uid: hotkey for hotkey, uid in hk2uid.items() if uid in uid_weights},
             mortal_period_blocks=inclusion_policy.mortal_period_blocks,
         )
-        uid_weights = _drop_unprovable_targets(args, uid_weights, uid_safety, hk2uid)
+        uid_weights = _drop_unprovable_targets(
+            args, uid_weights, uid_safety, hk2uid, burn_uid
+        )
+        # Recompute the derived views: `ordered` and the wire vectors were
+        # built from the pre-exclusion weights, so a reservation minted from
+        # them would describe a different allocation than the one signed.
+        ordered = sorted(uid_weights.items())
+        if not args.offline:
+            wire_uids, wire_values = _wire_weights(
+                [uid for uid, _weight in ordered],
+                [weight for _uid, weight in ordered],
+            )
         # Persist an ambiguity fence BEFORE the irreversible call. Mapping block
         # is retained in the exact submission record but excluded from the
         # dedup identity: advancing a block with the same signed vector and
@@ -8548,7 +8580,11 @@ def _revalidate_authority_after_audit(
     # The reservation downstream re-runs the stability proof over the filtered
     # vector, so what gets reserved and what gets signed are the same set.
     uid_weights = _drop_unprovable_targets(
-        args, uid_weights, uid_safety, fresh.hotkey_to_uid
+        args,
+        uid_weights,
+        uid_safety,
+        fresh.hotkey_to_uid,
+        fresh.hotkey_to_uid.get(getattr(args, "provenance_burn_hotkey", None)),
     )
     args._tick_preflight = fresh
     return fresh, fresh.hotkey_to_uid, uid_weights, inclusion_policy
