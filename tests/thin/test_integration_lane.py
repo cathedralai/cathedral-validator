@@ -63,6 +63,10 @@ def _receipts(fx, *, gpu_bound=None, distill=None):
 
 
 def _preview(fx, receipts, **kw):
+    # These cases exercise the composition and event vocabulary, not the launch
+    # policy, so they take the documented opt-out. A funded lane refuses without
+    # it: see tests/thin/test_integration_policy_gate.py.
+    kw.setdefault("allow_unpoliced_preview", True)
     return ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
         allocation_config=fx.allocation_config(_ALLOCATIONS),
@@ -153,6 +157,7 @@ def test_rolled_back_burn_config_is_refused_with_a_fail_event():
             now=NOW_DT,
             now_iso=NOW_ISO,
             min_burn_version=5,
+            allow_unpoliced_preview=True,
             events=events,
         )  # applied fence is 5; v3 is a rollback
     config_events = [e for e in _events(buf) if e["event"] == "INTEGRATION_CONFIG"]

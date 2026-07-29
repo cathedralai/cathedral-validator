@@ -25,6 +25,19 @@ LANE_DISTILL = "cathedral_distill"
 LANE_GPU = "cathedral_confidential_gpu"
 
 
+def _policy(fx, tmp_path):
+    """Every gate a funded lane requires, expressed in bundle form."""
+    return {
+        "allowed_measurements": [fx.tdx_measurement, fx.sev_measurement],
+        "allowed_tcb_statuses": ["UpToDate"],
+        # an explicit empty list: no advisory is tolerated. This is a policy, not
+        # an omission, and the CLI must treat the two differently.
+        "allowed_advisories": [],
+        "current_block": 6_000_100,
+        "ledger_path": str(tmp_path / "consumption.sqlite"),
+    }
+
+
 def _bundle(fx, allocations, receipts, **over):
     pub = base64.b64encode(fx.key.public_key().public_bytes_raw()).decode()
     bundle = {
@@ -58,7 +71,9 @@ def test_preview_cli_composes_cpu_and_distill(tmp_path):
         {"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()},
         {"kind": "distill", "lane": LANE_DISTILL, "receipt": fx.distill_receipt()},
     ]
-    bundle_path = _write(tmp_path, _bundle(fx, allocations, receipts))
+    bundle_path = _write(
+        tmp_path, _bundle(fx, allocations, receipts, **_policy(fx, tmp_path))
+    )
     out = tmp_path / "out.json"
 
     assert cli.main(["--bundle", bundle_path, "--out", str(out)]) == 0
@@ -71,6 +86,12 @@ def test_preview_cli_composes_cpu_and_distill(tmp_path):
     assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
     assert audit["verdicts"] == {"pass": 2, "fail": 0, "not_proven": 0}
     assert audit["schema"] == "cathedral_integration_audit_v1"
+    # per-lane gate visibility: the operator sees which gates actually ran
+    assert result["gates"]["omitted_gates"] == []
+    for lane in (LANE_CPU, LANE_DISTILL):
+        row = result["gates"]["lanes"][lane]
+        assert row["reward_lane"] and row["measurement_policy"]
+        assert row["block_window"] and row["consumption_ledger"]
 
 
 def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):
@@ -83,7 +104,9 @@ def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):
         {"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()},
         {"kind": "compute_gpu", "lane": LANE_GPU, "receipt": fx.gpu_receipt()},
     ]
-    bundle_path = _write(tmp_path, _bundle(fx, allocations, receipts))
+    bundle_path = _write(
+        tmp_path, _bundle(fx, allocations, receipts, **_policy(fx, tmp_path))
+    )
     out = tmp_path / "out.json"
     assert cli.main(["--bundle", bundle_path, "--out", str(out)]) == 0
     audit = json.loads(out.read_text())["audit"]
@@ -111,3 +134,67 @@ def test_preview_cli_missing_field_fails_closed(tmp_path):
     p = tmp_path / "b.json"
     p.write_text(json.dumps({"network": "finney"}))
     assert cli.main(["--bundle", str(p)]) == 2
+
+
+def _funded_cpu_bundle(fx, tmp_path, **over):
+    allocations = [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+    receipts = [{"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()}]
+    return _bundle(fx, allocations, receipts, **over)
+
+
+def test_preview_cli_refuses_a_funded_lane_without_policy(tmp_path, capsys):
+    """A warning is not a gate: an unpoliced funded lane must fail closed."""
+    fx = IntegrationFixtures()
+    path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path))
+    assert cli.main(["--bundle", path]) == 2
+    err = capsys.readouterr().err
+    assert "allowed_measurements" in err and "current_block" in err
+    assert "allow_unpoliced_preview" in err or "allow-unpoliced-preview" in err
+
+
+def test_preview_cli_unpoliced_opt_out_is_explicit_and_reported(tmp_path, capsys):
+    fx = IntegrationFixtures()
+    path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path))
+    out = tmp_path / "out.json"
+    assert (
+        cli.main(["--bundle", path, "--out", str(out), "--allow-unpoliced-preview"])
+        == 0
+    )
+    err = capsys.readouterr().err
+    assert "UNPOLICED" in err
+    gates = json.loads(out.read_text())["gates"]
+    assert gates["unpoliced_preview"] is True
+    assert set(gates["omitted_gates"]) == {
+        "allowed_measurements",
+        "allowed_tcb_statuses",
+        "allowed_advisories",
+        "current_block",
+        "consumption_ledger",
+    }
+
+
+def test_preview_cli_empty_allowlist_is_a_policy_not_an_omission(tmp_path):
+    """`[]` is a deliberate deny-everything policy, unlike a missing key."""
+    fx = IntegrationFixtures()
+    policy = _policy(fx, tmp_path)
+    policy["allowed_measurements"] = []
+    path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path, **policy))
+    out = tmp_path / "out.json"
+    assert cli.main(["--bundle", path, "--out", str(out)]) == 0  # gate satisfied
+    result = json.loads(out.read_text())
+    assert result["gates"]["omitted_gates"] == []
+    # and enforced: nothing is admitted under an empty measurement allow-list
+    (receipt,) = result["audit"]["receipts"]
+    assert receipt["verdict"] == "FAIL"
+    assert "measurement" in receipt["detail"]
+
+
+def test_preview_cli_rejects_an_unknown_receipt_kind(tmp_path):
+    fx = IntegrationFixtures()
+    receipts = [{"kind": "sat_solve", "lane": LANE_CPU, "receipt": fx.cpu_receipt()}]
+    allocations = [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+    path = _write(
+        tmp_path,
+        _bundle(fx, allocations, receipts, **_policy(fx, tmp_path)),
+    )
+    assert cli.main(["--bundle", path]) == 2

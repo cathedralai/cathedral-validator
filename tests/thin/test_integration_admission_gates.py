@@ -18,6 +18,7 @@ pytest.importorskip("cathedral_distill.integrated_feed")
 pytest.importorskip("cathedral_distill.testing")
 
 from cathedral_distill import integrated_feed as itf  # noqa: E402
+from cathedral_distill.consumption_ledger import ConsumptionLedger  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
@@ -119,6 +120,9 @@ def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
         now_iso="2026-07-25T12:30:00.000000Z",
         current_block=123456,
         allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=ConsumptionLedger(":memory:"),
         cpu_quote_verifier=lambda _evidence: False,
     )
     (receipt,) = out["audit"]["receipts"]
@@ -126,8 +130,8 @@ def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
     assert "quote did not verify" in receipt["detail"]
 
 
-def test_defaults_preserve_the_previous_behaviour():
-    """Omitting every new argument must not change the existing preview."""
+def test_every_gate_supplied_composes_and_reports_the_gates_applied():
+    """The fully policed preview is the reference case for a funded lane."""
     fx = IntegrationFixtures()
     out = ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
@@ -143,5 +147,12 @@ def test_defaults_preserve_the_previous_behaviour():
             2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
         ),
         now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=ConsumptionLedger(":memory:"),
     )
     assert out["audit"]["verdicts"]["pass"] == 1
+    assert out["gates"]["omitted_gates"] == []
+    assert all(out["gates"]["applied"].values())

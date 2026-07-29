@@ -21,11 +21,28 @@ Bundle shape:
       # OR, for the anchored path:
       # "registry": { ...signed key registry... },
       # "trusted_roots": { "cathedral-root-1": "<base64 root pubkey>" },
+
+      # Admission policy. REQUIRED for any lane with a nonzero allocation; each
+      # allow-list may be an empty list, which is an explicit deny-everything
+      # policy and a different statement from leaving the key out.
+      "allowed_measurements": ["tdx-measurement-sha256:..."],
+      "allowed_tcb_statuses": ["UpToDate"],
+      "allowed_advisories": [],
+      "current_block": 6000100,           # finalized height for the block window
+      "ledger_path": "/var/lib/cathedral/consumption.sqlite",   # replay ledger
+
       "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
-                     "receipt": { ... }}, ... ]
+                     "receipt": { ... }},
+                    # "lane" may be omitted: each kind has a canonical lane id
+                    # (compute_cpu, compute_gpu, distill, cybergym).
+                    {"kind": "cybergym", "receipt": { ... }} ]
     }
 
-A GPU lane with no attestation verifier is reported NOT_PROVEN — a CLI cannot carry
+Fail-closed by default: a funded lane whose measurement/TCB/advisory policy, block
+window, or consumption ledger is missing is REFUSED. `--allow-unpoliced-preview` is
+the deliberate opt-out for a shadow run, and it says so on stderr and in the output.
+
+A GPU lane with no attestation verifier is reported NOT_PROVEN. A CLI cannot carry
 a live verifier callable, so a real GPU proof runs through the library API, not here.
 """
 
@@ -40,6 +57,7 @@ from pathlib import Path
 from typing import Any
 
 from cathedral_thin.integration import (
+    DEFAULT_LANE_FOR_KIND,
     IntegrationError,
     IntegrationUnavailable,
     LaneReceipt,
@@ -103,7 +121,54 @@ def _build_registry(bundle: dict, now: datetime):
     )
 
 
-def run_bundle(bundle: dict) -> dict[str, Any]:
+def _open_ledger(bundle: dict):
+    """Build the replay ledger from `ledger_path`. Absent -> no ledger (refused
+    for a funded lane unless the operator opts out explicitly)."""
+    path = bundle.get("ledger_path")
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise PreviewError("bundle 'ledger_path' must be a non-empty string")
+    from cathedral_distill.consumption_ledger import ConsumptionLedger
+
+    try:
+        return ConsumptionLedger(path)
+    except Exception as exc:
+        raise PreviewError(
+            f"consumption ledger {path!r} could not be opened: {exc}"
+        ) from exc
+
+
+def _gate_status(gates: dict) -> str:
+    """One operator-facing line per lane: which gates actually ran."""
+    lines = [
+        "lane gates applied (measurement/tcb/advisory policy, block window, ledger):"
+    ]
+    for lane, row in gates["lanes"].items():
+        flags = " ".join(
+            f"{name}={'yes' if row[key] else 'no'}"
+            for name, key in (
+                ("measurement", "measurement_policy"),
+                ("tcb", "tcb_policy"),
+                ("advisory", "advisory_policy"),
+                ("block_window", "block_window"),
+                ("ledger", "consumption_ledger"),
+            )
+        )
+        role = "reward" if row["reward_lane"] else "unfunded"
+        lines.append(f"  {lane} [{role} allocation={row['allocation']}] {flags}")
+    if gates["omitted_gates"]:
+        lines.append(
+            "  UNPOLICED: " + ", ".join(gates["omitted_gates"]) + " not applied; "
+            "this preview is not evidence that a receipt would be admitted under a "
+            "real launch policy"
+        )
+    return "\n".join(lines)
+
+
+def run_bundle(
+    bundle: dict, *, allow_unpoliced_preview: bool = False
+) -> dict[str, Any]:
     for field in (
         "network",
         "netuid",
@@ -120,43 +185,44 @@ def run_bundle(bundle: dict) -> dict[str, Any]:
     registry = _build_registry(bundle, now)
     receipts = []
     for item in bundle["receipts"]:
-        if not isinstance(item, dict) or {"kind", "lane", "receipt"} - set(item):
-            raise PreviewError("each receipt entry needs kind, lane, receipt")
-        receipts.append(
-            LaneReceipt(str(item["kind"]), str(item["lane"]), item["receipt"])
-        )
+        if not isinstance(item, dict) or {"kind", "receipt"} - set(item):
+            raise PreviewError("each receipt entry needs kind and receipt")
+        unknown = set(item) - {"kind", "lane", "receipt"}
+        if unknown:
+            raise PreviewError(
+                "receipt entry has unknown keys: " + ", ".join(sorted(unknown))
+            )
+        kind = str(item["kind"])
+        if kind not in DEFAULT_LANE_FOR_KIND:
+            raise PreviewError(
+                f"unknown receipt kind {kind!r}; expected one of "
+                + ", ".join(sorted(DEFAULT_LANE_FOR_KIND))
+            )
+        # Each kind has a canonical lane id, so a bundle can name the lane
+        # explicitly or rely on the documented default (this is what makes the
+        # cybergym lane addressable from a bundle at all).
+        lane = str(item["lane"]) if item.get("lane") else DEFAULT_LANE_FOR_KIND[kind]
+        receipts.append(LaneReceipt(kind, lane, item["receipt"]))
 
-    # Admission policy from the bundle. Absent -> the gate is not applied, which
-    # is the previous behaviour; we say so out loud rather than letting a silent
-    # default read as "policy verified". A confidential-GPU launch must supply
-    # allowed_measurements, or an enclave measurement nobody ever approved is
-    # credited PASS (the exact failure attestation.py exists to prevent).
+    # Admission policy from the bundle. A key that is absent means the operator
+    # expressed no policy; an empty list means an explicit deny-everything
+    # policy. Those are different states, and only the first is refused for a
+    # funded lane, because otherwise an enclave measurement nobody ever approved
+    # is credited PASS (the exact failure attestation.py exists to prevent).
     def _set(key):
         value = bundle.get(key)
-        return frozenset(str(v) for v in value) if isinstance(value, list) else None
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise PreviewError(f"bundle {key!r} must be a list of strings")
+        return frozenset(str(v) for v in value)
 
     allowed_measurements = _set("allowed_measurements")
     allowed_tcb_statuses = _set("allowed_tcb_statuses")
     allowed_advisories = _set("allowed_advisories")
     current_block = bundle.get("current_block")
     current_block = int(current_block) if current_block is not None else None
-
-    ungated = [
-        name
-        for name, value in (
-            ("allowed_measurements", allowed_measurements),
-            ("current_block", current_block),
-        )
-        if value is None
-    ]
-    if ungated:
-        print(
-            "warning: preview ran WITHOUT " + ", ".join(ungated) +
-            " — measurement policy and/or the finalized block window were not "
-            "enforced. This preview is not evidence that a receipt would be "
-            "admitted under a real launch policy.",
-            file=sys.stderr,
-        )
+    ledger = _open_ledger(bundle)
 
     try:
         return preview_integrated_vector(
@@ -173,9 +239,11 @@ def run_bundle(bundle: dict) -> dict[str, Any]:
             min_allocation_version=int(bundle.get("min_allocation_version", 0)),
             expected_burn_hotkey=bundle.get("expected_burn_hotkey"),
             current_block=current_block,
+            consumption_ledger=ledger,
             allowed_measurements=allowed_measurements,
             allowed_tcb_statuses=allowed_tcb_statuses,
             allowed_advisories=allowed_advisories,
+            allow_unpoliced_preview=bool(allow_unpoliced_preview),
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc
@@ -190,7 +258,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--bundle", required=True, help="preview bundle JSON file")
     parser.add_argument(
-        "--out", help="write the {feed, audit} JSON here (default: stdout)"
+        "--out", help="write the {feed, audit, gates} JSON here (default: stdout)"
+    )
+    parser.add_argument(
+        "--allow-unpoliced-preview",
+        action="store_true",
+        help=(
+            "deliberately preview a funded lane WITHOUT the measurement/TCB/advisory "
+            "policy, block window, or replay ledger. Shadow runs only: the result is "
+            "not evidence that a receipt would be admitted under a launch policy."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -198,11 +275,14 @@ def main(argv: list[str] | None = None) -> int:
         bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
         if not isinstance(bundle, dict):
             raise PreviewError("bundle must be a JSON object")
-        result = run_bundle(bundle)
+        result = run_bundle(
+            bundle, allow_unpoliced_preview=args.allow_unpoliced_preview
+        )
     except (PreviewError, OSError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
 
+    sys.stderr.write(_gate_status(result["gates"]) + "\n")
     text = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.out and args.out != "-":
         Path(args.out).write_text(text, encoding="utf-8")
