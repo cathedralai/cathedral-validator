@@ -89,3 +89,32 @@ jobs:
       - run: |
           python -m pytest -q scaffold/publisher/tests \
             --deselect scaffold/publisher/tests/test_validator_two_mode.py::test_required_ci_collection_gate_returns_zero
+
+  integration:
+    # Advisory. Exercises the default-OFF Compute+Distill integration lane against
+    # the shared contract shipped by cathedral-distill (the '.[integration]' extra).
+    # The integration dependency is fetched best-effort: while cathedral-distill is
+    # private (or its contract is not yet on main), the extra will not install and
+    # the lane test SKIPS cleanly (it importorskips the contract modules). Once the
+    # dependency is CI-reachable, the same job runs the test for real. See VALIDATOR.md.
+    name: Integration lane (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # base + test always install (so pytest is present); the integration extra is
+      # best-effort so a private/unpublished dependency skips rather than errors.
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pip install -e ".[integration]" || echo "integration extra unavailable in CI; lane test will skip"
+      # Exit 5 = the lane test skipped because the extra is not installed; treat that
+      # as success here, but propagate any real failure (exit 1).
+      - run: |
+          python -m pytest -q tests/thin/test_integration_lane.py || {
+            code=$?
+            [ "$code" = "5" ] && echo "integration lane test skipped (extra not installed)" || exit "$code"
+          }

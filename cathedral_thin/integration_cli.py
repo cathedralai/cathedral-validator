@@ -1,0 +1,180 @@
+"""`cathedral-validator-integration-preview` — a NON-WRITING operator preview.
+
+Runs the default-OFF Compute+Distill integration lane over inputs from one JSON
+bundle and prints the composed feed + audit trail. It verifies the signed burn +
+allocation config and every lane receipt, composes one deterministic vector (a
+missing/invalid lane's share goes to burn), and emits the audit — but it never
+opens a chain client and never calls set_weights. It is a preview, exactly as
+`cathedral_thin.integration` documents; activation is a separate owner decision.
+
+    cathedral-validator-integration-preview --bundle preview.json
+
+Bundle shape:
+
+    {
+      "network": "finney", "netuid": 39, "source_epoch": 11,
+      "now": "2026-07-25T12:30:00Z",              # config verification time (UTC)
+      "now_iso": "2026-07-25T12:30:00.000000Z",   # receipt freshness time
+      "burn_config": { ...signed cathedral_burn_config_v1... },
+      "allocation_config": { ...signed cathedral_lane_allocation_v1... },
+      "keys": { "cathedral-config-1": "<base64 pubkey>", ... },   # hardware-free registry
+      # OR, for the anchored path:
+      # "registry": { ...signed key registry... },
+      # "trusted_roots": { "cathedral-root-1": "<base64 root pubkey>" },
+      "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
+                     "receipt": { ... }}, ... ]
+    }
+
+A GPU lane with no attestation verifier is reported NOT_PROVEN — a CLI cannot carry
+a live verifier callable, so a real GPU proof runs through the library API, not here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from cathedral_thin.integration import (
+    IntegrationError,
+    IntegrationUnavailable,
+    LaneReceipt,
+    preview_integrated_vector,
+)
+
+
+class PreviewError(RuntimeError):
+    """The preview bundle could not be run. Fails closed."""
+
+
+def _parse_now(value: Any) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise PreviewError("bundle 'now' must be a UTC timestamp string")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise PreviewError(f"bundle 'now' is not a valid timestamp: {value!r}") from exc
+    return (
+        parsed.astimezone(UTC)
+        if parsed.tzinfo is not None
+        else parsed.replace(tzinfo=UTC)
+    )
+
+
+def _build_registry(bundle: dict, now: datetime):
+    # Deferred import so `--help` and a missing extra give a clean message.
+    from cathedral_distill.receipt_keys import ReceiptKeyRegistry, verify_key_registry
+
+    if "keys" in bundle:
+        keys = bundle["keys"]
+        if not isinstance(keys, dict):
+            raise PreviewError(
+                "bundle 'keys' must be an object of key_id -> base64 pubkey"
+            )
+        try:
+            return ReceiptKeyRegistry.from_keys(
+                {str(k): base64.b64decode(v, validate=True) for k, v in keys.items()}
+            )
+        except Exception as exc:
+            raise PreviewError(f"invalid 'keys': {exc}") from exc
+    if "registry" in bundle and "trusted_roots" in bundle:
+        try:
+            roots = {
+                str(k): base64.b64decode(v, validate=True)
+                for k, v in bundle["trusted_roots"].items()
+            }
+            return verify_key_registry(
+                json.dumps(bundle["registry"]).encode(),
+                roots,
+                now=now,
+                max_age_seconds=10**12,
+            )
+        except Exception as exc:
+            raise PreviewError(f"signed key registry did not verify: {exc}") from exc
+    raise PreviewError(
+        "bundle needs either 'keys' (hardware-free) or 'registry' + 'trusted_roots'"
+    )
+
+
+def run_bundle(bundle: dict) -> dict[str, Any]:
+    for field in (
+        "network",
+        "netuid",
+        "source_epoch",
+        "now",
+        "now_iso",
+        "burn_config",
+        "allocation_config",
+        "receipts",
+    ):
+        if field not in bundle:
+            raise PreviewError(f"bundle is missing {field!r}")
+    now = _parse_now(bundle["now"])
+    registry = _build_registry(bundle, now)
+    receipts = []
+    for item in bundle["receipts"]:
+        if not isinstance(item, dict) or {"kind", "lane", "receipt"} - set(item):
+            raise PreviewError("each receipt entry needs kind, lane, receipt")
+        receipts.append(
+            LaneReceipt(str(item["kind"]), str(item["lane"]), item["receipt"])
+        )
+
+    try:
+        return preview_integrated_vector(
+            burn_config=json.dumps(bundle["burn_config"]).encode(),
+            allocation_config=json.dumps(bundle["allocation_config"]).encode(),
+            key_registry=registry,
+            receipts=receipts,
+            network=str(bundle["network"]),
+            netuid=int(bundle["netuid"]),
+            source_epoch=int(bundle["source_epoch"]),
+            now=now,
+            now_iso=str(bundle["now_iso"]),
+            min_burn_version=int(bundle.get("min_burn_version", 0)),
+            min_allocation_version=int(bundle.get("min_allocation_version", 0)),
+            expected_burn_hotkey=bundle.get("expected_burn_hotkey"),
+        )
+    except IntegrationUnavailable as exc:
+        raise PreviewError(str(exc)) from exc
+    except IntegrationError as exc:
+        raise PreviewError(f"preview rejected: {exc}") from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="cathedral-validator-integration-preview",
+        description="Non-writing Compute+Distill integration preview (no chain writes).",
+    )
+    parser.add_argument("--bundle", required=True, help="preview bundle JSON file")
+    parser.add_argument(
+        "--out", help="write the {feed, audit} JSON here (default: stdout)"
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
+        if not isinstance(bundle, dict):
+            raise PreviewError("bundle must be a JSON object")
+        result = run_bundle(bundle)
+    except (PreviewError, OSError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    text = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.out and args.out != "-":
+        Path(args.out).write_text(text, encoding="utf-8")
+    else:
+        sys.stdout.write(text)
+    sys.stderr.write("preview only — no chain write\n")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

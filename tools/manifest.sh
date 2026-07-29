@@ -36,10 +36,12 @@ tracked() { git ls-files | grep -vE '^MANIFEST\.(sha256|origin\.tsv)$'; }
 # group. These seven carry the fix and are expected to differ until it is
 # upstreamed.
 #
+# VALIDATOR.md diverges to document the default-OFF Compute+Distill integration
+# lane (cathedral-validator#1) — a validator-specific addition absent upstream.
+#
 # scaffold/provenance_audit.py carries the declared-authority relay-lane fix
-# (commit 6a9fec6); it diverges from the derived-from upstream and is declared
-# here.
-ALLOWED_DIVERGENCE="pyproject.toml README.md \
+# (commit 6a9fec6); it diverges from the derived-from upstream and is declared here.
+ALLOWED_DIVERGENCE="pyproject.toml README.md VALIDATOR.md \
 scaffold/events.py \
 scaffold/cli.py \
 scaffold/validator_thin.py \

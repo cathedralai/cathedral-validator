@@ -278,6 +278,50 @@ Treat a release or signing-key change as a new trust decision:
 Never accept a replacement key from a weight payload signed only by the old or
 new key itself.
 
+## Compute + Distill integration (preview, default OFF)
+
+`cathedral-validator` can independently verify **both** Compute (Intel TDX CPU and
+confidential-GPU) and Distill receipts and compose one auditable weight vector, per
+[cathedral-validator#1](https://github.com/cathedralai/cathedral-validator/issues/1).
+The receipt/lane/config contract is shared with, and shipped by,
+[`cathedral-distill`](https://github.com/cathedralai/cathedral-distill); this repo's
+`cathedral_thin.integration` module drives it through the validator's own event
+pipeline (`INTEGRATION_CONFIG`, `INTEGRATION_RECEIPT`, `INTEGRATION_LANE`,
+`INTEGRATION_VECTOR`, each `PASS` / `FAIL` / `NOT_PROVEN`).
+
+> [!IMPORTANT]
+> This lane is **default OFF and non-writing**. It never touches the live
+> `validated_supply_v2` thin path and never calls `set_weights`; it composes and
+> audits a *preview* vector only. Enabling it as a live reward lane — and choosing
+> the allocation — is a separate owner decision.
+
+Enable the optional dependency, then verify + preview from a signed burn/allocation
+config and a set of receipts:
+
+```bash
+python -m pip install -e '.[integration]'
+```
+
+```python
+from cathedral_thin.integration import preview_integrated_vector, LaneReceipt
+
+out = preview_integrated_vector(
+    burn_config=burn_bytes, allocation_config=alloc_bytes,   # Cathedral-signed
+    key_registry=registry, receipts=[LaneReceipt(kind, lane, receipt), ...],
+    network="finney", netuid=39, source_epoch=epoch,
+    now=now_dt, now_iso=now_iso, gpu_attestation_verifier=verify_gpu, events=events,
+)
+out["feed"]   # one deterministic pre-burn vector; a missing/invalid lane -> burn
+out["audit"]  # receipt -> verdict -> contribution -> allocation -> final weight
+```
+
+What is verified before any weight: the burn/allocation config's signer,
+network/subnet target, freshness, rollback fence, and burn destination; and each
+receipt's anchored signing key, canonical `receipt_id`, replay/epoch binding,
+freshness, strict TDX/TCB, and — for a GPU receipt — the composite binding to a
+valid TDX CPU quote (a GPU attestation alone never admits). See the
+[shared contract](https://github.com/cathedralai/cathedral-distill/blob/main/docs/INTEGRATION_CONTRACT.md).
+
 ## Further reading
 
 - [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
