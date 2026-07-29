@@ -310,17 +310,66 @@ out = preview_integrated_vector(
     key_registry=registry, receipts=[LaneReceipt(kind, lane, receipt), ...],
     network="finney", netuid=39, source_epoch=epoch,
     now=now_dt, now_iso=now_iso, gpu_attestation_verifier=verify_gpu, events=events,
+    # admission policy: required for any lane with a nonzero allocation
+    allowed_measurements=frozenset({...}), allowed_tcb_statuses=frozenset({"UpToDate"}),
+    allowed_advisories=frozenset(), current_block=finalized_block,
+    consumption_ledger=ConsumptionLedger("/var/lib/cathedral/consumption.sqlite"),
 )
 out["feed"]   # one deterministic pre-burn vector; a missing/invalid lane -> burn
 out["audit"]  # receipt -> verdict -> contribution -> allocation -> final weight
+out["gates"]  # per lane: which admission gates were actually applied
 ```
 
 What is verified before any weight: the burn/allocation config's signer,
 network/subnet target, freshness, rollback fence, and burn destination; and each
 receipt's anchored signing key, canonical `receipt_id`, replay/epoch binding,
-freshness, strict TDX/TCB, and — for a GPU receipt — the composite binding to a
+freshness, strict TDX/TCB, and, for a GPU receipt, the composite binding to a
 valid TDX CPU quote (a GPU attestation alone never admits). See the
 [shared contract](https://github.com/cathedralai/cathedral-distill/blob/main/docs/INTEGRATION_CONTRACT.md).
+
+### The preview fails closed on a missing policy
+
+A lane with a **nonzero allocation is a reward lane**, so every gate in
+`integration.REQUIRED_REWARD_GATES` must be supplied for it:
+`allowed_measurements`, `allowed_tcb_statuses`, `allowed_advisories`,
+`current_block`, `consumption_ledger`. Omit any one and the preview raises
+`IntegrationPolicyError` before verifying a single receipt, because a preview that
+could not apply the launch policy is not evidence that a receipt would be admitted
+under it.
+
+An **empty** allow-list is not an omission. `frozenset()` (bundle `[]`) is a
+deliberate deny-everything policy: it satisfies the gate and refuses every receipt
+it does not name. `None` (bundle key absent) means no policy was ever expressed,
+and that is what gets refused.
+
+Shadow and exploratory previews stay usable through one explicit opt-out,
+`allow_unpoliced_preview=True` (CLI: `--allow-unpoliced-preview`). The omission is
+then recorded in `out["gates"]` and announced on stderr, so an unpoliced run can
+never be mistaken for a policed one. An unfunded lane (allocation `0`) needs no
+policy, because it cannot pay anyone.
+
+### Lane boundary guarantees
+
+* one malformed contribution forfeits only its own lane share; it can never abort
+  the complete vector, including an unknown kind, an unfunded lane, an exception
+  from an injected verifier, or a ledger failure;
+* one receipt earns at most once across the whole preview, even with no ledger;
+* a miner with two credited receipts in one lane keeps exactly one, chosen by
+  lowest `receipt_id` so the outcome does not depend on submission order;
+* the configured burn hotkey is never a reward subject, and a receipt claiming it
+  is refused before it can consume a replay token.
+
+### CyberGym lane
+
+Each receipt kind has a canonical lane id
+(`integration.DEFAULT_LANE_FOR_KIND`), so a preview bundle may name the lane or
+take the default: `compute_cpu` -> `cathedral_confidential_tdx`, `compute_gpu` ->
+`cathedral_confidential_gpu`, `distill` -> `cathedral_distill`, `cybergym` ->
+`cathedral_cybergym`. A CyberGym receipt is authorized for a bounded
+`[valid_from_block, valid_until_block)` window, so `current_block` is what
+distinguishes an authorized receipt from an expired one. The CLI prints, per lane,
+whether the measurement/TCB/advisory policy, the block window and the ledger were
+applied.
 
 ## Further reading
 
