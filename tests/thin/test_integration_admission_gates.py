@@ -33,6 +33,10 @@ def test_preview_exposes_every_admission_gate_the_contract_implements():
         "allowed_measurements",
         "allowed_tcb_statuses",
         "allowed_advisories",
+        # the injected evidence verifiers are admission gates too: without them
+        # a GPU receipt is NOT_PROVEN and a raw CPU quote is never re-checked
+        "gpu_attestation_verifier",
+        "cpu_quote_verifier",
     ):
         assert name in params, f"validator seam cannot reach the {name} gate"
 
@@ -50,6 +54,13 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
 
     fx = IntegrationFixtures()
     ledger = object()
+
+    def gpu_verifier(_evidence):
+        return True
+
+    def cpu_verifier(_evidence):
+        return True
+
     try:
         ig.preview_integrated_vector(
             burn_config=fx.burn_config(),
@@ -70,6 +81,8 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
             allowed_measurements=frozenset({"tdx-measurement-sha256:" + "a" * 64}),
             allowed_tcb_statuses=frozenset({"UpToDate"}),
             allowed_advisories=frozenset(),
+            gpu_attestation_verifier=gpu_verifier,
+            cpu_quote_verifier=cpu_verifier,
         )
     except Exception:
         # The receipt may legitimately be refused by the policy we just supplied;
@@ -83,6 +96,34 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
     )
     assert seen.get("allowed_tcb_statuses") == frozenset({"UpToDate"})
     assert seen.get("allowed_advisories") == frozenset()
+    assert seen.get("gpu_attestation_verifier") is gpu_verifier
+    assert seen.get("cpu_quote_verifier") is cpu_verifier
+
+
+def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
+    """A threaded verifier must be able to refuse, not merely be forwarded."""
+    fx = IntegrationFixtures()
+    out = ig.preview_integrated_vector(
+        burn_config=fx.burn_config(),
+        allocation_config=fx.allocation_config(
+            [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+        ),
+        key_registry=fx.registry,
+        receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        now=__import__("datetime").datetime(
+            2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+        ),
+        now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        cpu_quote_verifier=lambda _evidence: False,
+    )
+    (receipt,) = out["audit"]["receipts"]
+    assert receipt["verdict"] == itf.FAIL
+    assert "quote did not verify" in receipt["detail"]
 
 
 def test_defaults_preserve_the_previous_behaviour():
