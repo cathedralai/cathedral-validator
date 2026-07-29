@@ -46,11 +46,24 @@ provenance = [
 # Default-OFF Compute+Distill integration lane (cathedral-validator#1). Pulls the
 # shared receipt/lane/config contract from cathedral-distill so this validator can
 # independently verify Compute (TDX CPU + confidential GPU) and Distill receipts and
-# PREVIEW one audited vector — non-writing, never the live thin path. Pin to a
-# reviewed release tag before shipping (mirrors the provenance extra); tracks the
-# companion cathedral-distill PR until it merges.
+# PREVIEW one audited vector — non-writing, never the live thin path.
+#
+# cathedral-distill is PRIVATE, unlike cathedralconfidential above: a plain
+# `archive/<ref>.tar.gz` URL 404s unauthenticated regardless of pinning, because
+# pip's HTTP downloader never consults git credentials. The `git+https://` VCS
+# form below does — `pip install` delegates to the local `git` binary, which
+# uses whatever credentials (SSH agent, stored HTTPS token, credential manager)
+# the caller already has for github.com, so this installs for anyone with real
+# repo access; CI has none configured yet, so it correctly still skips there
+# (see the integration job in .github/workflows/tests.yml) until an org secret
+# is added or cathedral-distill goes public.
+#
+# Pinned to the immutable companion-PR commit (mirrors the provenance extra's
+# discipline: never a mutable branch ref). Update ONLY together with a review
+# of what changed on cathedral-distill#5, and re-pin to distill's main once
+# that PR merges.
 integration = [
-    "cathedral-cybergym @ https://github.com/cathedralai/cathedral-distill/archive/refs/heads/main.tar.gz",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@ef6c030ceafdcac47cee24c39e41ea05c0b32ddd",
 ]
 
 # Validator-side entry points only. The upstream repo additionally ships
