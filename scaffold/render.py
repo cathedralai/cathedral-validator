@@ -36,15 +36,20 @@ _SECS_PER_BLOCK = 12
 
 _LABEL_WIDTH = 11  # one wider than the longest label ("provenance")
 _INDENT = "   "
-_RULE_WIDTH = max(
-    60,
-    min(
-        120,
-        int(os.environ.get("COLUMNS") or 0)
-        or shutil.get_terminal_size(fallback=(100, 24)).columns,
-    )
-    - len("   "),
-)
+
+
+def _rule_width() -> int:
+    """Pane width to lay out against; a garbage COLUMNS must not be fatal."""
+    try:
+        columns = int(os.environ.get("COLUMNS") or 0)
+    except ValueError:
+        columns = 0
+    if not columns:
+        columns = shutil.get_terminal_size(fallback=(100, 24)).columns
+    return max(60, min(120, columns) - len(_INDENT))
+
+
+_RULE_WIDTH = _rule_width()
 
 
 def _color_enabled() -> bool:
@@ -208,7 +213,7 @@ class _Stream:
         self.in_tick = False
         self.rows_since_rule = 0
         self.last_stamp = ""
-        self.seen_labels: set[str] = set()
+        self.seen_rows: dict[str, str] = {}
         self.tick_started: float | None = None
 
     def elapsed(self) -> str:
@@ -226,14 +231,17 @@ class _Stream:
         # opens its own block, so a row is never orphaned above the first rule.
         if not self.in_tick:
             self.rule("")
-        # Chain preflight runs more than once per tick. The second reading is a
-        # refresh, not news, and repeating it makes the block look confused.
-        if once and label in self.seen_labels:
-            return
         parts = text if isinstance(text, list) else [text]
         if not [p for p in parts if p and p.strip()]:
             return
-        self.seen_labels.add(label)
+        # Chain preflight runs more than once per tick. An IDENTICAL second
+        # reading is a refresh, not news -- but a reading that changed (a
+        # different block, a different safety count) is exactly news, so
+        # dedupe on content, not on the label alone.
+        rendered = "\x00".join(parts)
+        if once and self.seen_rows.get(label) == rendered:
+            return
+        self.seen_rows[label] = rendered
         self.flush_feed(unless=label)
         first = f"{_INDENT}{dim(label.ljust(_LABEL_WIDTH))}"
         cont = f"{_INDENT}{' ' * _LABEL_WIDTH}"
@@ -270,7 +278,7 @@ class _Stream:
         # than drawing a second identical divider under the first.
         if self.in_tick and self.rows_since_rule == 0:
             self.tick_started = time.monotonic()
-            self.seen_labels = set()
+            self.seen_rows = {}
             self.last_stamp = stamp
             return
         # A head-drift retry rebuilds the whole tick, so it re-enters here
@@ -278,8 +286,8 @@ class _Stream:
         # separate ticks, and drawing a fresh identical divider for each made
         # the stream look like it was repeating itself.
         if self.in_tick and stamp == self.last_stamp:
-            # seen_labels deliberately NOT reset: a retry is the same tick, so
-            # its refreshed chain reading is still the same row, not news.
+            # seen_rows deliberately NOT reset: a retry is the same tick, and
+            # content-aware dedupe already lets a changed reading through.
             return
         self.flush_feed()
         if self.in_tick:
@@ -288,7 +296,7 @@ class _Stream:
         self.write(dim(_INDENT + head + "─" * max(0, _RULE_WIDTH - len(head))))
         self.in_tick = True
         self.rows_since_rule = 0
-        self.seen_labels = set()
+        self.seen_rows = {}
         self.last_stamp = stamp
         self.tick_started = time.monotonic()
 
@@ -376,12 +384,15 @@ def _r_verify_failed(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None
 
 def _r_feed_unavailable(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     s.flush_feed()
+    switching = kv.get("switching_to")
     s.row(
         "feed",
         [
             yellow("unavailable"),
             _n(kv.get("reason", "")),
-            dim("continuing on independent evidence"),
+            yellow("switching to full permanently")
+            if switching
+            else dim("continuing on independent evidence"),
         ],
     )
 
@@ -450,6 +461,11 @@ def _r_chain_problem(label: str):
         parts = [
             _n(kv.get("reason", "")),
             _short(kv.get("attempt_id", "")) if kv.get("attempt_id") else "",
+            # The exact transaction being recovered or expired is the fact an
+            # operator has to correlate against the chain; never drop it.
+            _short(kv.get("extrinsic_hash", "")) if kv.get("extrinsic_hash") else "",
+            f"block {_n(kv['block_number'])}" if kv.get("block_number") else "",
+            _n(kv.get("included", "")) and f"included={_n(kv['included'])}",
         ]
         s.note(yellow("⚠"), [yellow(label)] + parts)
 
@@ -458,6 +474,18 @@ def _r_chain_problem(label: str):
 
 def _r_provenance(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     s.row("evidence", [_n(rest), _n(kv.get("reason", ""))])
+
+
+def _r_provenance_mismatch(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
+    # A recomputation that disagrees with the signed vector is the single most
+    # important thing this stream can ever say. It was landing in the generic
+    # renderer with every field consumed as key=value, leaving an empty row
+    # that the empty-parts guard then suppressed entirely.
+    s.note(
+        red("✗"),
+        [red("independent recomputation DISAGREES with the signed vector")]
+        + [f"{key}={value}" for key, value in kv.items()],
+    )
 
 
 def _r_provenance_not_proven(
@@ -470,9 +498,10 @@ def _r_provenance_not_proven(
     s.row("evidence", [yellow("not proven"), _n(message)])
 
 
-def _r_suppress(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    """Startup facts already shown in the banner; not repeated per tick."""
-    return None
+def _r_startup_fact(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
+    """Duplicates the banner when there is one, but a caller that skips the
+    banner (direct run(), tests, embedding) still gets the facts."""
+    s.row("startup", [dim(_n(rest))] + [dim(f"{k}={_n(v)}") for k, v in kv.items()])
 
 
 _RENDERERS = {
@@ -499,11 +528,11 @@ _RENDERERS = {
     "CHAIN reservation released": _r_chain_problem("reservation released"),
     "PROVENANCE": _r_provenance,
     "PROVENANCE not proven": _r_provenance_not_proven,
-    "PROVENANCE mismatch": _r_provenance,
+    "PROVENANCE mismatch": _r_provenance_mismatch,
     "AUTHORITY provenance": _r_provenance,
     "LAUNCH rewarded-set gate": _r_provenance,
-    "PIN active": _r_suppress,
-    "MODE active": _r_suppress,
+    "PIN active": _r_startup_fact,
+    "MODE active": _r_startup_fact,
 }
 
 

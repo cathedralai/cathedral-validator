@@ -56,10 +56,13 @@ _DEFAULTS = {
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
-    # Two-mode operation: thin submits by default while the full-provenance
-    # audit runs concurrently in shadow. "authority" submits the independent
-    # recomputation instead; "off" disables the audit.
-    "provenance": "shadow",
+    # Full is the default: the independent recomputation from raw evidence is
+    # what gets submitted, and nobody's feed is a bottleneck. Operators without
+    # evidence access opt DOWN to thin explicitly (--mode thin), which follows
+    # the signed feed after verifying it. Startup fails closed with that hint
+    # when full's inputs are missing; there is deliberately no silent
+    # downgrade, because full -> thin is the forbidden direction.
+    "provenance": "authority",
     "evidence_url": None,  # default: <publisher_url>/v1/evidence
     "evidence_dir": None,
     "provenance_registry_keys": None,
@@ -327,6 +330,20 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         )
         return 2
     cfg.provenance = provenance_mode
+    min_assurance = getattr(cfg, "min_assurance", None)
+    if min_assurance is not None and min_assurance not in (
+        "receipts_only",
+        "rewarded_set_proven",
+        "full_over_epoch",
+    ):
+        # TOML and env bypassed the CLI's choices= list, so a typo here
+        # surfaced only at the first broadcast attempt instead of at startup.
+        print(
+            f"error: min_assurance must be receipts_only, rewarded_set_proven, "
+            f"or full_over_epoch; got {min_assurance!r}",
+            file=sys.stderr,
+        )
+        return 2
     try:
         validator_thin._validate_runtime_contract(cfg)
     except validator_thin.wire.VectorError as exc:
@@ -374,23 +391,41 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         )
     if getattr(cfg, "beta_skip_launch_ceremony", False):
         # Never let a waived launch ceremony be invisible in the log.
+        # Lawyerlike: name exactly what is waived and exactly what holds, and
+        # state the one caveat that is true of everything in the second list.
         rows.append(
             (
-                "beta",
-                [render.yellow("launch ceremony waived")]
-                + [
-                    render.dim(check)
-                    for check in (
-                        "signature",
-                        "freshness",
-                        "rollback fence",
-                        "contract",
-                        "burn",
-                        "uid safety",
-                        "single writer",
+                "waived",
+                [
+                    render.yellow("launch canary"),
+                    render.yellow("signed write authorization"),
+                    render.yellow("account-nonce window"),
+                ],
+            )
+        )
+        rows.append(
+            (
+                "enforced",
+                [
+                    "signature",
+                    "freshness",
+                    "policy-version fence",
+                    "contract",
+                    "burn destination and floor",
+                    "uid replacement safety",
+                    "single writer",
+                ],
+            )
+        )
+        rows.append(
+            (
+                "caveat",
+                [
+                    render.dim(
+                        "fences compare against the local state file; restoring "
+                        "it from a snapshot rewinds them"
                     )
-                ]
-                + [render.dim("all still enforced")],
+                ],
             )
         )
     if getattr(cfg, "jsonl", None):

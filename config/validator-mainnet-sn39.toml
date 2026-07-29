@@ -36,7 +36,7 @@ max_submissions = 0
 root = "/var/lib/cathedral-validator"
 
 [provenance]
-mode = "shadow"
+mode = "authority"
 evidence_url = "https://api.cathedral.computer/v1/evidence"
 registry_keys = "/etc/cathedral-validator/provenance/registry-keys.json"
 registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
@@ -53,6 +53,14 @@ burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allow
 # provisioned on this host.
 controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
 verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
+# Mandatory in full mode. Every independent chain check is evaluated at the
+# producer-chosen candidate block; this bounds how stale that anchor may be.
+# Sized from measured export lag (~19 blocks) with ~10x headroom, 25x under
+# the immunity window it protects.
+max_anchor_lag_blocks = 600
+# Lowest assurance full mode will submit on. full_over_epoch restores the
+# never-submits-on-a-populated-subnet behaviour.
+min_assurance = "rewarded_set_proven"
 
 [launch]
 # Beta: waive the one-shot launch canary and ContinuousAuthorization. This is
