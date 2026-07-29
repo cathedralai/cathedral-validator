@@ -77,6 +77,18 @@ def preview_integrated_vector(
     expected_burn_hotkey: str | None = None,
     min_burn_version: int = 0,
     min_allocation_version: int = 0,
+    # Admission gates the shared contract already implements but this seam never
+    # reached, so the validator was strictly weaker than distill's own
+    # admission verifier for the same receipt:
+    #   current_block        -> the finalized block-window check (distill PR #8)
+    #   consumption_ledger   -> once-only receipt_id consumption (replay)
+    #   allowed_*            -> signed measurement / TCB / advisory policy gating
+    # All default to None, which preserves the previous behaviour exactly.
+    current_block: int | None = None,
+    consumption_ledger: Any = None,
+    allowed_measurements: frozenset[str] | set[str] | None = None,
+    allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
+    allowed_advisories: frozenset[str] | set[str] | None = None,
     events: Any = None,
 ) -> dict[str, Any]:
     """Verify the signed config and every lane receipt, then compose + audit one
@@ -133,8 +145,13 @@ def preview_integrated_vector(
             key_registry=key_registry,
             source_epoch=source_epoch,
             now_iso=now_iso,
+            current_block=current_block,
             gpu_attestation_verifier=gpu_attestation_verifier,
             cpu_quote_verifier=cpu_quote_verifier,
+            consumption_ledger=consumption_ledger,
+            allowed_measurements=allowed_measurements,
+            allowed_tcb_statuses=allowed_tcb_statuses,
+            allowed_advisories=allowed_advisories,
         )
         _emit(
             events,

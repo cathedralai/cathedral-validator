@@ -126,6 +126,38 @@ def run_bundle(bundle: dict) -> dict[str, Any]:
             LaneReceipt(str(item["kind"]), str(item["lane"]), item["receipt"])
         )
 
+    # Admission policy from the bundle. Absent -> the gate is not applied, which
+    # is the previous behaviour; we say so out loud rather than letting a silent
+    # default read as "policy verified". A confidential-GPU launch must supply
+    # allowed_measurements, or an enclave measurement nobody ever approved is
+    # credited PASS (the exact failure attestation.py exists to prevent).
+    def _set(key):
+        value = bundle.get(key)
+        return frozenset(str(v) for v in value) if isinstance(value, list) else None
+
+    allowed_measurements = _set("allowed_measurements")
+    allowed_tcb_statuses = _set("allowed_tcb_statuses")
+    allowed_advisories = _set("allowed_advisories")
+    current_block = bundle.get("current_block")
+    current_block = int(current_block) if current_block is not None else None
+
+    ungated = [
+        name
+        for name, value in (
+            ("allowed_measurements", allowed_measurements),
+            ("current_block", current_block),
+        )
+        if value is None
+    ]
+    if ungated:
+        print(
+            "warning: preview ran WITHOUT " + ", ".join(ungated) +
+            " — measurement policy and/or the finalized block window were not "
+            "enforced. This preview is not evidence that a receipt would be "
+            "admitted under a real launch policy.",
+            file=sys.stderr,
+        )
+
     try:
         return preview_integrated_vector(
             burn_config=json.dumps(bundle["burn_config"]).encode(),
@@ -140,6 +172,10 @@ def run_bundle(bundle: dict) -> dict[str, Any]:
             min_burn_version=int(bundle.get("min_burn_version", 0)),
             min_allocation_version=int(bundle.get("min_allocation_version", 0)),
             expected_burn_hotkey=bundle.get("expected_burn_hotkey"),
+            current_block=current_block,
+            allowed_measurements=allowed_measurements,
+            allowed_tcb_statuses=allowed_tcb_statuses,
+            allowed_advisories=allowed_advisories,
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc
