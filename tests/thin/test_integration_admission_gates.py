@@ -10,7 +10,10 @@ preview that structurally cannot apply the launch policy.
 
 from __future__ import annotations
 
+import functools
 import inspect
+from pathlib import Path
+import re
 
 import pytest
 
@@ -24,6 +27,13 @@ from _durable_ledger import durable_ledger  # noqa: E402
 from cathedral_thin import integration as ig  # noqa: E402
 
 LANE_CPU = "cathedral_confidential_tdx"
+
+
+def test_the_integration_extra_pins_the_reviewed_distill_contract_commit():
+    pyproject = (Path(__file__).parents[2] / "pyproject.toml").read_text()
+    match = re.search(r"cathedral-distill\.git@([0-9a-f]{40})", pyproject)
+    assert match is not None, "integration extra must use one exact 40-character SHA"
+    assert match.group(1) == ig.DISTILL_CONTRACT_COMMIT
 
 
 def test_preview_exposes_every_admission_gate_the_contract_implements():
@@ -42,6 +52,25 @@ def test_preview_exposes_every_admission_gate_the_contract_implements():
         assert name in params, f"validator seam cannot reach the {name} gate"
 
 
+def test_the_installed_distill_contract_is_checked_before_receipts(monkeypatch):
+    """An older but importable pin must fail the whole preview, not look like burn."""
+
+    def old_verifier(
+        kind,
+        receipt,
+        *,
+        lane,
+        key_registry,
+        source_epoch,
+        now_iso=None,
+    ):
+        raise AssertionError("an incompatible verifier must never be called")
+
+    monkeypatch.setattr(itf, "verify_lane_receipt", old_verifier)
+    with pytest.raises(ig.IntegrationUnavailable, match="current_block"):
+        ig._require_distill()
+
+
 def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
     """Proves the parameters are forwarded, not merely accepted and dropped.
 
@@ -53,6 +82,7 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
     seen: dict = {}
     real = itf.verify_lane_receipt
 
+    @functools.wraps(real)
     def spy(kind, receipt, **kw):
         seen.update(kw)
         return real(kind, receipt, **kw)
@@ -137,7 +167,7 @@ def test_the_ledger_is_used_after_selection_not_during():
     )
     assert out["audit"]["verdicts"]["pass"] == 1
     assert ledger.is_consumed(receipt["receipt_id"])
-    assert ledger.size() == 1
+    assert ledger.size() == 2  # authoritative epoch claim + credited receipt
 
 
 def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():

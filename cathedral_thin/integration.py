@@ -24,13 +24,41 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from hashlib import sha256
+import inspect
+import json
 from typing import Any, Callable, Mapping, Sequence
 
 _STAGE = "INTEGRATION"
+_AUTHORITATIVE_EPOCH_TOKEN_KIND = "integration_authoritative_epoch"
+_AUTHORITATIVE_EPOCH_TOKEN_PREFIX = "cathedral-integration-authoritative-epoch-v1"
+DISTILL_CONTRACT_COMMIT = "8cbb4b39d24d227ee9b517aa86c80624fae6f6e8"
+
+# This seam passes these named gates into the shared Distill contract. An older
+# pin that merely imports but does not accept one of them must fail before any
+# receipt is classified. Converting that contract mismatch into one receipt FAIL
+# produces a plausible 100% burn vector, which is the most dangerous possible
+# response to incompatible validator code.
+_REQUIRED_DISTILL_VERIFIER_PARAMETERS = frozenset(
+    {
+        "lane",
+        "key_registry",
+        "source_epoch",
+        "now_iso",
+        "current_block",
+        "gpu_attestation_verifier",
+        "cpu_quote_verifier",
+        "consumption_ledger",
+        "defer_consumption",
+        "allowed_measurements",
+        "allowed_tcb_statuses",
+        "allowed_advisories",
+    }
+)
 
 
 class IntegrationUnavailable(RuntimeError):
-    """The cathedral-distill integration dependency is not installed."""
+    """The cathedral-distill dependency is absent or contract-incompatible."""
 
 
 class IntegrationError(RuntimeError):
@@ -118,11 +146,31 @@ _GATE_NAMES = (
 def _require_distill():
     try:
         from cathedral_distill import integrated_feed, signed_config  # noqa: F401
+        from cathedral_distill.consumption_ledger import (  # noqa: F401
+            NO_REPLAY_LEDGER,
+            ReplayError,
+        )
     except ImportError as exc:  # pragma: no cover - exercised via the test's skip
         raise IntegrationUnavailable(
             "the Compute+Distill integration needs the cathedral-distill package; "
             "install it with: python -m pip install -e '.[integration]'"
         ) from exc
+
+    try:
+        parameters = inspect.signature(integrated_feed.verify_lane_receipt).parameters
+    except (TypeError, ValueError) as exc:
+        raise IntegrationUnavailable(
+            "the installed cathedral-distill verifier contract cannot be inspected; "
+            "install the exact commit pinned by the integration extra"
+        ) from exc
+    missing = sorted(_REQUIRED_DISTILL_VERIFIER_PARAMETERS - set(parameters))
+    if missing:
+        raise IntegrationUnavailable(
+            "the installed cathedral-distill verifier contract is incompatible: "
+            "verify_lane_receipt is missing "
+            + ", ".join(missing)
+            + "; install the exact commit pinned by the integration extra"
+        )
     return integrated_feed, signed_config
 
 
@@ -327,6 +375,100 @@ def _usable_ledger(ledger: Any) -> Any:
     return ledger
 
 
+def _authoritative_epoch_token(*, network: str, netuid: int, source_epoch: int) -> str:
+    """Stable, collision-resistant identity for one subnet epoch's mutation pass."""
+    body = json.dumps(
+        {
+            "network": str(network),
+            "netuid": int(netuid),
+            "source_epoch": int(source_epoch),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{_AUTHORITATIVE_EPOCH_TOKEN_PREFIX}:sha256:{sha256(body).hexdigest()}"
+
+
+def _claim_authoritative_epoch(
+    ledger: Any,
+    *,
+    network: str,
+    netuid: int,
+    source_epoch: int,
+    events: Any = None,
+) -> str:
+    """Atomically elect the only receipt-consuming pass for an epoch.
+
+    This is intentionally a narrow single-flight guarantee, not an atomic batch:
+    the epoch claim is durable before any receipt token is consumed. If the
+    winner crashes after claiming, the epoch stays locked and must be recovered
+    by operator review rather than re-run speculatively. That can withhold one
+    epoch, but it cannot let two overlapping processes compose competing vectors
+    or split the credited receipt set.
+    """
+    from cathedral_distill.consumption_ledger import ReplayError
+
+    token = _authoritative_epoch_token(
+        network=network, netuid=netuid, source_epoch=source_epoch
+    )
+
+    def recorded() -> bool:
+        try:
+            return bool(ledger.is_consumed(token))
+        except Exception as exc:
+            detail = (
+                "authoritative epoch claim ledger could not be queried for "
+                f"{network}/{netuid} epoch {source_epoch}: {exc}"
+            )
+            _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+            raise IntegrationLedgerError(detail) from exc
+
+    try:
+        ledger.consume(
+            token,
+            kind=_AUTHORITATIVE_EPOCH_TOKEN_KIND,
+            source_epoch=source_epoch,
+        )
+    except ReplayError as exc:
+        if recorded():
+            detail = (
+                "authoritative epoch already claimed for "
+                f"{network}/{netuid} epoch {source_epoch}; refusing overlapping "
+                "or repeated receipt consumption"
+            )
+        else:
+            detail = (
+                "authoritative epoch claim was not recorded for "
+                f"{network}/{netuid} epoch {source_epoch}: {exc}"
+            )
+        _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+        raise IntegrationLedgerError(detail) from exc
+    except Exception as exc:
+        detail = (
+            "authoritative epoch claim failed for "
+            f"{network}/{netuid} epoch {source_epoch}: {type(exc).__name__}: {exc}"
+        )
+        _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+        raise IntegrationLedgerError(detail) from exc
+    if not recorded():
+        detail = (
+            "authoritative epoch claim reported success but was not recorded for "
+            f"{network}/{netuid} epoch {source_epoch}"
+        )
+        _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+        raise IntegrationLedgerError(detail)
+    _emit(
+        events,
+        "INTEGRATION_EPOCH_CLAIM",
+        status="PASS",
+        network=network,
+        netuid=netuid,
+        source_epoch=source_epoch,
+        token=token,
+    )
+    return token
+
+
 def _apply_replay_gate(
     integrated_feed,
     decisions: Sequence[Any],
@@ -347,8 +489,9 @@ def _apply_replay_gate(
       preview that consumed its own evidence destroyed that evidence by being
       looked at twice: the second run composed a 100% burn vector.
     * ``consume=True`` (authoritative): the token is recorded, so the receipt
-      cannot be credited again by a later pass. This is the one pass per epoch
-      that is allowed to mutate the ledger.
+      cannot be credited again by a later pass. The caller must first hold the
+      epoch-level authoritative claim; this function only records the winning
+      pass's selected receipt set.
 
     Either way the gate runs AFTER selection, over the already-selected set, so
     nothing is spent on a contribution that will not be credited. Consuming during
@@ -575,9 +718,11 @@ def preview_integrated_vector(
 
     Repeatable by default: the replay gate is a read unless
     ``consume_receipts=True``, so an operator can run the same preview as often as
-    they like and get the same vector. ``consume_receipts=True`` is the
-    authoritative pass, which records each credited receipt so it cannot be
-    credited again; run it at most once per epoch.
+    they like and get the same vector. ``consume_receipts=True`` atomically claims
+    the epoch before recording any credited receipt. A second or overlapping
+    authoritative pass fails closed. If the winner crashes after the claim, the
+    epoch stays locked for operator review rather than being retried and possibly
+    splitting the credited set.
 
     ``gates`` records, per lane AND per receipt kind, which admission gates were
     actually applied to the receipts in that lane, so an operator sees the gates
@@ -678,6 +823,7 @@ def preview_integrated_vector(
         "omitted_gates": omitted,
         "unpoliced_preview": allow_unpoliced_preview is True,
         "replay_mode": "authoritative" if consume_receipts is True else "inspection",
+        "authoritative_epoch_claim": None,
         "supplied": dict(gate_supplied),
         "applied": {name: supplied[name] is not None for name in REQUIRED_REWARD_GATES},
         "lanes": {
@@ -764,6 +910,21 @@ def preview_integrated_vector(
     #    only the verified decisions, so it is a pure function of the receipt set
     #    rather than of its order.
     selected = _deduplicate(integrated_feed, verified)
+    if consume_receipts is True:
+        if ledger is None:
+            detail = (
+                "an authoritative pass requires a usable durable consumption ledger "
+                "to claim the epoch, even when no receipt is creditable"
+            )
+            _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+            raise IntegrationPolicyError(detail)
+        gates["authoritative_epoch_claim"] = _claim_authoritative_epoch(
+            ledger,
+            network=network,
+            netuid=netuid,
+            source_epoch=source_epoch,
+            events=events,
+        )
     decisions = _apply_replay_gate(
         integrated_feed,
         selected,
@@ -837,6 +998,7 @@ __all__ = [
     "LANE_COMPUTE_GPU",
     "LANE_DISTILL",
     "LANE_CYBERGYM",
+    "DISTILL_CONTRACT_COMMIT",
     "LaneReceipt",
     "preview_integrated_vector",
 ]

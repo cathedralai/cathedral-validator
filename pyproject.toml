@@ -60,10 +60,10 @@ provenance = [
 #
 # Pinned to the immutable companion-PR commit (mirrors the provenance extra's
 # discipline: never a mutable branch ref). Update ONLY together with a review
-# of what changed on cathedral-distill#5, and re-pin to distill's main once
+# of what changed on cathedral-distill#18, and re-pin to distill's main once
 # that PR merges.
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@ef6c030ceafdcac47cee24c39e41ea05c0b32ddd",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@8cbb4b39d24d227ee9b517aa86c80624fae6f6e8",
 ]
 
 # Validator-side entry points only. The upstream repo additionally ships

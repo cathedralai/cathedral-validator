@@ -1,4 +1,4 @@
-"""Replay refusal across restarts, repeats, and a racing consumer.
+"""Replay refusal and epoch-level single-flight across restarts and races.
 
 The consumption ledger is the only gate that stops a still-valid receipt from
 being credited twice, so its behaviour is exercised here at the validator seam
@@ -12,16 +12,13 @@ rather than trusted from the shared contract:
 * fail-open ledger: a ledger that reports a consume it did not record, or that
   cannot be read back at all, is refused as a preview-level failure rather than
   trusted, because within-preview deduplication cannot see across previews;
-* concurrency: two consumers racing one token, exactly one wins. Gated on
-  CATHEDRAL_LEDGER_RACE_TEST=1 because it depends on the ledger implementation
-  rather than on this seam: the version pinned by the '.[integration]' extra shares
-  one connection with no busy timeout and does NOT hold, while a fixed ledger does.
-  The cross-repo phase turns it on once the pin moves.
+* concurrency: two authoritative passes racing one epoch, exactly one wins the
+  epoch claim before receipt consumption; the shared ledger's lower-level
+  one-token race is also exercised directly.
 """
 
 from __future__ import annotations
 
-import os
 import threading
 from collections import Counter
 from datetime import UTC, datetime
@@ -51,7 +48,6 @@ _ALLOCATIONS = [
     {"lane": LANE_DISTILL, "allocation": "0.45", "enabled": True},
 ]
 
-RACE_ENV = "CATHEDRAL_LEDGER_RACE_TEST"
 RACE_CONSUMERS = 24
 
 
@@ -67,7 +63,7 @@ def _preview(fx, receipts, ledger, **kw):
         receipts=receipts,
         network="finney",
         netuid=39,
-        source_epoch=11,
+        source_epoch=fx.source_epoch,
         now=NOW_DT,
         now_iso=NOW_ISO,
         consumption_ledger=ledger,
@@ -119,7 +115,7 @@ def test_ledger_state_survives_a_restart_and_still_refuses_the_replay(tmp_path):
     assert (
         _verdict(_authoritative(fx, _one(fx, receipt), before))["verdict"] == itf.PASS
     )
-    assert before.size() == 1
+    assert before.size() == 2  # epoch claim + receipt
     before.close()  # the validator process exits here
 
     after = ConsumptionLedger(path)
@@ -127,26 +123,35 @@ def test_ledger_state_survives_a_restart_and_still_refuses_the_replay(tmp_path):
     refused = _verdict(_preview(fx, _one(fx, receipt), after))
     assert refused["verdict"] == itf.FAIL
     assert "already consumed" in refused["detail"]
-    assert after.size() == 1  # and nothing new was consumed
+    assert after.size() == 2  # and nothing new was consumed
 
 
-def test_a_fresh_receipt_still_passes_after_a_restart(tmp_path):
-    """The refusal must be specific to the replayed receipt, not to restarting."""
-    fx = IntegrationFixtures()
+def test_the_next_epoch_still_passes_after_a_restart(tmp_path):
+    """The durable claim fences one epoch, not the restarted validator forever."""
+    before_fx = IntegrationFixtures(source_epoch=11)
     path = str(tmp_path / "consumption.sqlite")
     before = ConsumptionLedger(path)
     assert (
-        _verdict(_authoritative(fx, _one(fx, fx.cpu_receipt(work_units="30")), before))[
-            "verdict"
-        ]
+        _verdict(
+            _authoritative(
+                before_fx,
+                _one(before_fx, before_fx.cpu_receipt(work_units="30")),
+                before,
+            )
+        )["verdict"]
         == itf.PASS
     )
     before.close()
 
+    after_fx = IntegrationFixtures(source_epoch=12)
     after = ConsumptionLedger(path)
-    out = _authoritative(fx, _one(fx, fx.cpu_receipt(work_units="31")), after)
+    out = _authoritative(
+        after_fx,
+        _one(after_fx, after_fx.cpu_receipt(work_units="31")),
+        after,
+    )
     assert _verdict(out)["verdict"] == itf.PASS
-    assert after.size() == 2
+    assert after.size() == 4  # two epoch claims + two receipt tokens
 
 
 def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
@@ -156,7 +161,7 @@ def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
     ledger = ConsumptionLedger(str(tmp_path / "consumption.sqlite"))
 
     refused = _verdict(
-        _authoritative(
+        _preview(
             fx,
             _one(fx, receipt),
             ledger,
@@ -170,6 +175,7 @@ def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
     assert (
         _verdict(_authoritative(fx, _one(fx, receipt), ledger))["verdict"] == itf.PASS
     )
+    assert ledger.size() == 2  # epoch claim + receipt
 
 
 # --------------------------------------------------------------------------- #
@@ -218,13 +224,46 @@ def test_the_authoritative_pass_records_and_a_later_inspection_sees_it():
 
     authoritative = _authoritative(fx, _one(fx, receipt), ledger)
     assert _verdict(authoritative)["verdict"] == itf.PASS
-    assert ledger.size() == 1
+    assert ledger.size() == 2  # epoch claim + receipt
+    assert authoritative["gates"]["authoritative_epoch_claim"].startswith(
+        "cathedral-integration-authoritative-epoch-v1:sha256:"
+    )
     # and the vector the authoritative pass wrote matches what inspection showed
     assert authoritative["feed"] == inspected["feed"]
 
     after = _preview(fx, _one(fx, receipt), ledger)
     assert _verdict(after)["verdict"] == itf.FAIL
     assert "already consumed" in _verdict(after)["detail"]
+
+
+def test_a_second_authoritative_pass_for_the_same_epoch_fails_closed():
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    first = fx.cpu_receipt(work_units="30")
+    second = fx.cpu_receipt(work_units="31")
+
+    assert _verdict(_authoritative(fx, _one(fx, first), ledger))["verdict"] == itf.PASS
+    with pytest.raises(ig.IntegrationLedgerError, match="epoch already claimed"):
+        _authoritative(fx, _one(fx, second), ledger)
+
+    assert ledger.is_consumed(first["receipt_id"])
+    assert not ledger.is_consumed(second["receipt_id"])
+    assert ledger.size() == 2
+
+
+def test_authoritative_mode_refuses_without_a_real_epoch_ledger():
+    no_replay = pytest.importorskip(
+        "cathedral_distill.consumption_ledger"
+    ).NO_REPLAY_LEDGER
+    fx = IntegrationFixtures()
+    with pytest.raises(ig.IntegrationPolicyError, match="authoritative pass requires"):
+        _preview(
+            fx,
+            _one(fx, fx.cpu_receipt()),
+            no_replay,
+            consume_receipts=True,
+            allow_unpoliced_preview=True,
+        )
 
 
 @pytest.mark.parametrize("value", ["false", "0", 1, {"consume": True}])
@@ -253,7 +292,7 @@ def test_a_no_op_ledger_is_refused_instead_of_credited(monkeypatch):
     ledger = durable_ledger()
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)  # fails open
 
-    with pytest.raises(ig.IntegrationLedgerError, match="not on record"):
+    with pytest.raises(ig.IntegrationLedgerError, match="not recorded"):
         _authoritative(fx, _one(fx, receipt), ledger)
 
 
@@ -267,6 +306,32 @@ def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypat
         with pytest.raises(ig.IntegrationLedgerError):
             _authoritative(fx, _one(fx, receipt), ledger)
     assert ledger.size() == 0  # nothing was credited on that basis
+
+
+def test_a_failure_after_the_epoch_claim_stays_locked_for_operator_review(
+    monkeypatch,
+):
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipt = fx.cpu_receipt()
+    real_consume = ledger.consume
+
+    def fail_after_claim(token, *, kind="receipt_id", **kw):
+        if kind == "integration_authoritative_epoch":
+            return real_consume(token, kind=kind, **kw)
+        raise RuntimeError("simulated crash before receipt token commit")
+
+    monkeypatch.setattr(ledger, "consume", fail_after_claim)
+    with pytest.raises(ig.IntegrationLedgerError, match="simulated crash"):
+        _authoritative(fx, _one(fx, receipt), ledger)
+
+    assert ledger.size() == 1  # the durable epoch claim survived
+    assert not ledger.is_consumed(receipt["receipt_id"])
+
+    monkeypatch.setattr(ledger, "consume", real_consume)
+    with pytest.raises(ig.IntegrationLedgerError, match="epoch already claimed"):
+        _authoritative(fx, _one(fx, receipt), ledger)
+    assert ledger.size() == 1
 
 
 def test_a_ledger_that_cannot_be_queried_is_refused_at_the_gate():
@@ -322,21 +387,49 @@ def test_the_seam_credits_one_receipt_once_within_a_preview():
 
 
 # --------------------------------------------------------------------------- #
-# B7(f) concurrent consumption: NOT PROVEN against the pinned ledger
+# B7(f) concurrent consumption: epoch single-flight and token atomicity
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(
-    os.environ.get(RACE_ENV) != "1",
-    reason=(
-        f"set {RACE_ENV}=1 to run the concurrent-consumption race. It measures the "
-        "ledger implementation, not this seam: the ledger pinned by the "
-        "'.[integration]' extra shares one connection with no busy timeout, so "
-        "racing consumers report several successful consumes for one token and "
-        "raise sqlite operational errors, while a per-connection BEGIN IMMEDIATE "
-        "ledger passes. Turn it on in the cross-repo phase, once the pin moves."
-    ),
-)
+def test_exactly_one_racing_authoritative_pass_claims_the_epoch(tmp_path):
+    path = str(tmp_path / "authoritative.sqlite")
+    ledgers = [ConsumptionLedger(path) for _ in range(8)]
+    barrier = threading.Barrier(len(ledgers))
+    lock = threading.Lock()
+    outcomes: list[str] = []
+
+    def authoritative(index: int) -> None:
+        fx = IntegrationFixtures(source_epoch=11)
+        barrier.wait()
+        try:
+            out = _authoritative(fx, _one(fx, fx.cpu_receipt()), ledgers[index])
+            outcome = "won" if _verdict(out)["verdict"] == itf.PASS else "wrong-verdict"
+        except ig.IntegrationLedgerError as exc:
+            outcome = (
+                "refused" if "epoch already claimed" in str(exc) else "ledger-error"
+            )
+        except Exception as exc:
+            outcome = f"error:{type(exc).__name__}"
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [
+        threading.Thread(target=authoritative, args=(index,))
+        for index in range(len(ledgers))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    tally = Counter(outcomes)
+    assert tally["won"] == 1, tally
+    assert tally["refused"] == len(ledgers) - 1, tally
+    assert ledgers[0].size() == 2  # one epoch claim + one receipt token
+    for ledger in ledgers:
+        ledger.close()
+
+
 def test_exactly_one_racing_consumer_wins_the_same_token(tmp_path):
     path = str(tmp_path / "consumption.sqlite")
     ledgers = [ConsumptionLedger(path), ConsumptionLedger(path)]

@@ -45,8 +45,10 @@ the deliberate opt-out for a shadow run, and it says so on stderr and in the out
 
 Repeatable by default: the replay ledger is READ, never written, so running the same
 bundle again returns the same vector. `--consume-receipts` is the authoritative pass
-that records each credited receipt so it can never be credited again; run it at most
-once per epoch, and use the plain form for inspection.
+that atomically claims the network/subnet/epoch before recording credited receipts.
+A repeated or overlapping authoritative pass is refused. If the winner crashes
+after claiming, the epoch remains locked for operator review; use the plain form
+for inspection.
 
 A GPU lane with no attestation verifier is reported NOT_PROVEN. A CLI cannot carry
 a live verifier callable, so a real GPU proof runs through the library API, not here.
@@ -171,13 +173,15 @@ def _gate_status(gates: dict) -> str:
     lines = [
         f"replay mode: {gates['replay_mode']}"
         + (
-            " (tokens recorded; run this at most once per epoch)"
+            " (epoch claimed; selected receipt tokens recorded)"
             if gates["replay_mode"] == "authoritative"
             else " (nothing is consumed; safe to re-run)"
         ),
         "configured: " + _flags(gates["supplied"]),
         "gates applied (measurement/tcb/advisory policy, block window, ledger):",
     ]
+    if gates.get("authoritative_epoch_claim"):
+        lines.append("authoritative epoch claim: " + gates["authoritative_epoch_claim"])
     for lane, row in gates["lanes"].items():
         role = "reward" if row["reward_lane"] else "unfunded"
         lines.append(f"  {lane} [{role} allocation={row['allocation']}] {_flags(row)}")

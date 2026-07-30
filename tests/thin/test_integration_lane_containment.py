@@ -273,7 +273,7 @@ def test_a_receipt_that_is_not_credited_keeps_its_replay_token():
         consume_receipts=True,
     )
     assert out["audit"]["verdicts"]["pass"] == 1
-    assert ledger.size() == 1  # exactly the credited receipt, nothing else
+    assert ledger.size() == 2  # authoritative epoch claim + credited receipt
 
 
 def test_one_receipt_replayed_into_two_lanes_earns_once_without_a_ledger():

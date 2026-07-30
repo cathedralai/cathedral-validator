@@ -287,7 +287,8 @@ The receipt/lane/config contract is shared with, and shipped by,
 [`cathedral-distill`](https://github.com/cathedralai/cathedral-distill); this repo's
 `cathedral_thin.integration` module drives it through the validator's own event
 pipeline (`INTEGRATION_CONFIG`, `INTEGRATION_RECEIPT`, `INTEGRATION_LANE`,
-`INTEGRATION_VECTOR`, each `PASS` / `FAIL` / `NOT_PROVEN`).
+`INTEGRATION_EPOCH_CLAIM`, `INTEGRATION_VECTOR`, each `PASS` / `FAIL` /
+`NOT_PROVEN` as applicable).
 
 > [!IMPORTANT]
 > This lane is **default OFF and non-writing**. It never touches the live
@@ -329,8 +330,8 @@ out = preview_integrated_vector(
     allowed_measurements=frozenset({...}), allowed_tcb_statuses=frozenset({"UpToDate"}),
     allowed_advisories=frozenset(), current_block=finalized_block,
     consumption_ledger=ConsumptionLedger("/var/lib/cathedral/consumption.sqlite"),
-    # consume_receipts=True only for the epoch's one authoritative pass; the
-    # default reads the ledger, so this call can be repeated safely
+    # consume_receipts=True atomically claims this epoch before consuming the
+    # selected receipts; the default reads the ledger and is safely repeatable
 )
 out["feed"]   # one deterministic pre-burn vector; a missing/invalid lane -> burn
 out["audit"]  # receipt -> verdict -> contribution -> allocation -> final weight
@@ -386,14 +387,27 @@ want opposite things from the same ledger.
 | Mode | How | Ledger | Repeatable |
 |------|-----|--------|------------|
 | Inspection (default) | `preview_integrated_vector(...)`, CLI as-is | read only | yes: N runs return an identical vector |
-| Authoritative | `consume_receipts=True`, CLI `--consume-receipts` | records each credited receipt | run at most once per epoch |
+| Authoritative | `consume_receipts=True`, CLI `--consume-receipts` | atomically claims the epoch, then records each credited receipt | exactly one winner; overlap/repeat is refused |
 
 Inspection still refuses a receipt whose token is already on record, so replay
 protection holds in both modes. What inspection does not do is spend the tokens:
 a preview that consumed its own evidence composed a 100% burn vector the second
 time it was run, which is the wrong property for a read-only document whose whole
-purpose is to be examined before activation. `out["gates"]["replay_mode"]` and the
-CLI status line say which mode ran.
+purpose is to be examined before activation. `out["gates"]["replay_mode"]`, the
+`authoritative_epoch_claim` field, and the CLI status line say which mode ran.
+
+The authoritative guarantee is deliberately narrow and fail-closed. Before any
+receipt token is mutated, the pass atomically consumes one claim token derived
+from `(network, netuid, source_epoch)`. Concurrent processes can both perform
+non-mutating verification, but exactly one can claim the epoch and proceed to
+receipt consumption; every other process raises `IntegrationLedgerError`.
+
+The epoch claim and the selected receipt tokens are not one database batch. If
+the winning process crashes after the claim, the claim remains durable and the
+epoch must be inspected and recovered by an operator. The software does not
+silently retry that epoch, because a retry could split the credited set between
+two competing vectors. This chooses a visibly withheld epoch over double credit
+or ambiguous authoritative output.
 
 ### The replay ledger must actually record
 
