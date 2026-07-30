@@ -198,14 +198,23 @@ def test_two_valid_receipts_from_one_miner_credit_exactly_one():
         ],
         events=events,
     )
+    # All three receipts verify, so all three are PASS: a miner legitimately
+    # holding two valid receipts has not failed verification. What the duplicate
+    # rule decides is `credited`, and exactly one of the two CPU receipts is.
     verdicts = out["audit"]["verdicts"]
-    assert verdicts["pass"] == 2 and verdicts["fail"] == 1  # cpu once + distill
+    assert verdicts["pass"] == 3 and verdicts["fail"] == 0
+    credited = [r for r in out["audit"]["receipts"] if r["credited"]]
+    assert len(credited) == 2  # cpu once + distill
     assert {w["miner_hotkey"] for w in out["feed"]["weights"]} == {
         "5CpuMiner",
         "5DistillMiner",
     }
-    refused = next(r for r in out["audit"]["receipts"] if r["verdict"] == itf.FAIL)
-    assert "already has a credited receipt" in refused["detail"]
+    refused = next(
+        r
+        for r in out["audit"]["receipts"]
+        if not r["credited"] and r["lane"] == LANE_CPU
+    )
+    assert "miner already credited in lane" in refused["drop_reason"]
     receipt_events = [e for e in _events(buf) if e["event"] == "INTEGRATION_RECEIPT"]
     assert len(receipt_events) == 3  # every submission is still audited
 
@@ -219,13 +228,13 @@ def test_which_duplicate_wins_is_independent_of_submission_order():
         out = _preview(
             fx, [ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, r) for r in order]
         )
-        return {
-            r["receipt_id"]
-            for r in out["audit"]["receipts"]
-            if r["verdict"] == itf.PASS
-        }
+        return {r["receipt_id"] for r in out["audit"]["receipts"] if r["credited"]}
 
     assert credited([first, second]) == credited([second, first])
+    # and it is the lowest receipt_id, not whichever arrived first
+    assert credited([first, second]) == {
+        min(first, second, key=lambda r: r["receipt_id"])["receipt_id"]
+    }
 
 
 def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
@@ -247,13 +256,13 @@ def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
         )
         return (
             out["feed"]["burn_snapshot"]["forced_burn_percentage"],
-            sorted((r["lane"], r["verdict"]) for r in out["audit"]["receipts"]),
+            sorted((r["lane"], r["credited"]) for r in out["audit"]["receipts"]),
         )
 
     assert summary([forward, reverse]) == summary([reverse, forward])
-    burn, verdicts = summary([forward, reverse])
+    burn, credited = summary([forward, reverse])
     # the receipt earns in exactly one lane; the other lane's share burns
-    assert [v for _lane, v in verdicts].count(itf.PASS) == 1
+    assert [c for _lane, c in credited].count(True) == 1
     assert burn == pytest.approx(55.0)  # 0.10 base + the lane that earned nothing
 
 
@@ -286,13 +295,16 @@ def test_one_receipt_replayed_into_two_lanes_earns_once_without_a_ledger():
             ig.LaneReceipt(itf.KIND_DISTILL, LANE_CPU, receipt),
         ],
     )
-    assert out["audit"]["verdicts"] == {"pass": 1, "fail": 1, "not_proven": 0}
+    # One signed receipt verifies once and verifies the same in both lanes, so both
+    # rows are PASS; the once-only rule decides which one is credited.
+    assert out["audit"]["verdicts"] == {"pass": 2, "fail": 0, "not_proven": 0}
+    assert [r["credited"] for r in out["audit"]["receipts"]].count(True) == 1
     weights = [
         w for w in out["feed"]["weights"] if w["miner_hotkey"] == "5DistillMiner"
     ]
     assert len(weights) == 1
-    refused = next(r for r in out["audit"]["receipts"] if r["verdict"] == itf.FAIL)
-    assert "credited once only" in refused["detail"]
+    refused = next(r for r in out["audit"]["receipts"] if not r["credited"])
+    assert "receipt_id already credited in lane" in refused["drop_reason"]
 
 
 # --------------------------------------------------------------------------- #

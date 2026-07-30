@@ -412,37 +412,80 @@ or ambiguous authoritative output.
 ### The replay ledger must actually record
 
 `consumption_ledger` is checked by behaviour, not presence. It must implement
-`consume` and `is_consumed`, and in the authoritative pass every consumption is
-read back before the receipt is credited. A ledger that reports a consume it did
-not record, cannot be queried, or is unavailable raises `IntegrationLedgerError`, a
+`consume` and `is_consumed`, and in the authoritative pass every consumption is read
+back against the audit the pass produced. A ledger that reports a consume it did not
+record, cannot be queried, or is unavailable raises `IntegrationLedgerError`, a
 preview-level failure: an outage reported as one `FAIL` per receipt would compose a
 100% burn vector and still call the run a success, denying every legitimate miner.
 The shared contract's `NO_REPLAY_LEDGER` marker counts as *no* ledger, so a funded
 lane still refuses unless the operator also takes the unpoliced opt-out.
 
-The gate runs only after selection is final, so a receipt that will not be credited
-never spends its replay token, and the composed vector does not depend on the order
-in which receipts were submitted.
+### Where the token is actually spent
+
+An uncredited receipt keeps its one-time token, and that has to hold for *every*
+reason it might not be credited. `compose_integrated` refuses a contribution on five
+grounds: an unknown lane, a lane funded with zero, a duplicate `receipt_id`, a miner
+already credited in that lane, and the burn hotkey as subject. It is the only place
+that knows all five, so it is the only safe place to burn a token, and that is where
+the authoritative pass burns it: the verifier is called with
+`defer_consumption=True`, which marks the decision `REPLAY_PENDING` without touching
+the ledger, and the ledger is handed to the composer.
+
+An earlier revision spent the token in the seam, before composition, having
+pre-refused four of those five grounds. The fifth is reachable from a valid signed
+config: an allocation is any decimal in `0..1`, so a lane can be *enabled and funded
+with zero*. A receipt aimed at one was credited by the seam, had its token burned,
+and was then dropped by the composer as "allocated zero and cannot pay". It earned
+nothing and could never be credited again in any later epoch. Deferring removes the
+whole class rather than adding a fifth check to a list that has to stay in sync.
+
+Two things are checked afterwards, by state rather than by reading any message:
+
+* every receipt the composer's own rules would have credited must actually be
+  credited. The seam re-composes the same decisions with no ledger, which skips the
+  consume step entirely, so the composer is its own oracle: a receipt that falls out
+  of the real pass lost its credit to the ledger, not to a rule. Without this, a
+  ledger whose writes fail becomes one dropped contribution per receipt and the pass
+  still returns a burn vector and calls itself a success.
+* a receipt credited anywhere must have its token on record, and a receipt credited
+  nowhere must not.
+
+Deduplication is the composer's, not the seam's. What the seam owes it is a
+canonical ORDER, because the composer's rules are first-wins and the caller's
+submission order must not decide who earns: decisions are composed sorted by
+`(receipt_id, lane, kind)`, and the audit trail is restored to submission order
+afterwards. Re-deriving those rules in the seam from a precomputed winner map got
+one case wrong that the composer gets right, because the composer claims a lane's
+per-miner slot only at the moment it credits: one receipt tagged into two lanes took
+the second lane's slot, was refused there as already credited elsewhere, and the
+miner's own second valid receipt in that lane was then refused citing a receipt that
+lane never credited.
 
 ### Reading the gate report and the audit trail
 
 `out["gates"]` separates configuration from effect:
 
 * `supplied`: what the operator passed;
-* per lane, one boolean per gate: what the receipts **in that lane** actually had
-  applied;
+* `applied`: which gates actually ran against at least one receipt in the preview;
+* per lane, one boolean per gate: what the receipts **in that lane** had applied;
 * per lane, `kinds`: the same per receipt kind.
 
-They differ, and the difference is the point. `current_block` gates nothing for a
-compute or distill receipt (only a CyberGym receipt carries a block window), and
-the measurement/TCB/advisory policy gates nothing for a CyberGym receipt (it
-carries no TEE evidence of its own). A report that echoed the arguments would say
-`block_window=yes` for a compute lane, and a `current_block=0` typo would look like
-an applied gate.
+`supplied` and `applied` differ, and the difference is the point. `current_block`
+gates nothing for a compute or distill receipt (only a CyberGym receipt carries a
+block window), and the measurement/TCB/advisory policy gates nothing for a CyberGym
+receipt (it carries no TEE evidence of its own). A compute-only preview with
+`current_block` passed therefore reports `block_window` supplied and **not**
+applied. A report that echoed the arguments would say `block_window=yes` for a
+compute lane, and a `current_block=0` typo would look like an applied gate.
 
 `out["audit"]["receipts"]` has one row per submission, in submission order, and
-every row carries the same keys, including the seam-built refusals for lanes the
-signed config does not fund. A consumer can read `row["credited"]` on every row.
+every row carries the same keys, including rows for lanes the signed config does not
+fund. A consumer can read `row["credited"]` on every row.
+
+Read `credited`, not `verdict`, to see who earned. `verdict` is the *verification*
+outcome, so a miner's second valid receipt in one lane is `PASS`: it verified, and it
+was simply not the one credited. `drop_reason` says why, and
+`replay_token_consumed` says whether its one-time token was spent.
 
 ### Lane boundary guarantees
 
@@ -450,8 +493,10 @@ signed config does not fund. A consumer can read `row["credited"]` on every row.
   the complete vector, including an unknown kind, an unfunded lane, an exception
   from an injected verifier, or a ledger failure;
 * one receipt earns at most once across the whole preview, even with no ledger;
-* a miner with two credited receipts in one lane keeps exactly one, chosen by
-  lowest `receipt_id` so the outcome does not depend on submission order;
+* a miner with two credited receipts in one lane keeps exactly one, the lowest
+  `receipt_id`, so the outcome does not depend on submission order;
+* a receipt that is not credited keeps its replay token, for every one of the five
+  reasons it might not be credited;
 * the configured burn hotkey is never a reward subject, and a receipt claiming it
   is refused before it can consume a replay token.
 

@@ -224,4 +224,15 @@ def test_every_gate_supplied_composes_and_reports_the_gates_applied():
     )
     assert out["audit"]["verdicts"]["pass"] == 1
     assert out["gates"]["omitted_gates"] == []
-    assert all(out["gates"]["applied"].values())
+    # Every gate was supplied...
+    assert all(out["gates"]["supplied"].values())
+    # ...but `applied` reports what actually ran, and a compute receipt carries no
+    # block window, so supplying `current_block` gated nothing here. Reporting it as
+    # applied would overstate the assurance behind this preview.
+    assert out["gates"]["applied"] == {
+        "measurement_policy": True,
+        "tcb_policy": True,
+        "advisory_policy": True,
+        "block_window": False,
+        "consumption_ledger": True,
+    }

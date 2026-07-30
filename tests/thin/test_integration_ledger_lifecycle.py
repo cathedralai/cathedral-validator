@@ -378,8 +378,11 @@ def test_the_seam_credits_one_receipt_once_within_a_preview():
         ],
         durable_ledger(),
     )
+    # Both submissions verify (it is the same signed receipt), and the once-only
+    # rule credits exactly one of them.
     verdicts = out["audit"]["verdicts"]
-    assert verdicts["pass"] == 1 and verdicts["fail"] == 1
+    assert verdicts["pass"] == 2 and verdicts["fail"] == 0
+    assert [r["credited"] for r in out["audit"]["receipts"]].count(True) == 1
     assert (
         len([w for w in out["feed"]["weights"] if w["miner_hotkey"] == "5CpuMiner"])
         == 1

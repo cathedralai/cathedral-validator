@@ -21,7 +21,7 @@ Install the optional dependency to enable it::
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -55,6 +55,12 @@ _REQUIRED_DISTILL_VERIFIER_PARAMETERS = frozenset(
         "allowed_advisories",
     }
 )
+
+# The authoritative pass defers consumption to `compose_integrated`, because that
+# is the only place that knows all five composition rules and so the only place
+# that can burn a one-time token for a contribution that is actually credited.
+# A pin whose composer cannot accept the ledger cannot be driven safely.
+_REQUIRED_DISTILL_COMPOSER_PARAMETERS = frozenset({"consumption_ledger"})
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -171,6 +177,23 @@ def _require_distill():
             + ", ".join(missing)
             + "; install the exact commit pinned by the integration extra"
         )
+    try:
+        composer = inspect.signature(integrated_feed.compose_integrated).parameters
+    except (TypeError, ValueError) as exc:
+        raise IntegrationUnavailable(
+            "the installed cathedral-distill composer contract cannot be inspected; "
+            "install the exact commit pinned by the integration extra"
+        ) from exc
+    missing = sorted(_REQUIRED_DISTILL_COMPOSER_PARAMETERS - set(composer))
+    if missing:
+        raise IntegrationUnavailable(
+            "the installed cathedral-distill composer contract is incompatible: "
+            "compose_integrated is missing "
+            + ", ".join(missing)
+            + ", so a deferred consumption cannot be recorded at the only point "
+            "that knows the contribution is credited; install the exact commit "
+            "pinned by the integration extra"
+        )
     return integrated_feed, signed_config
 
 
@@ -221,15 +244,17 @@ def _decide(
     """Verify one receipt with every failure contained to that receipt.
 
     The shared contract returns FAIL for the three typed receipt errors, but a
-    receipt can also fail *outside* them: an unknown kind, a lane the signed
-    allocation does not fund, an exception raised by an injected verifier or by
-    the ledger. Those escaped the seam unwrapped and aborted the whole preview,
-    so one malformed contribution destroyed every honest lane's vector too.
+    receipt can also fail *outside* them: an unknown kind, an exception raised by
+    an injected verifier or by the ledger. `verify_lane_receipt` raises
+    `IntegratedFeedError` for an unknown kind rather than returning a decision, so
+    without this containment one malformed contribution aborted the whole preview
+    and destroyed every honest lane's vector too.
     """
     if item.lane not in known_lanes:
-        # `compose_integrated` raises on an unfunded lane. A receipt naming a
-        # lane the config does not fund cannot earn, but it must not be able to
-        # abort the vector either.
+        # The composer drops a decision naming a lane the signed config does not
+        # know, so this is not containment: it is a seam policy that such a
+        # receipt is refused outright rather than verified and then dropped, so
+        # nothing about it reaches an injected verifier or the ledger.
         return _refused(
             integrated_feed,
             item,
@@ -266,75 +291,37 @@ def _decide(
     return decision
 
 
-def _deduplicate(integrated_feed, decisions: Sequence[Any]) -> list[Any]:
-    """Credit each receipt once and each miner once per lane, deterministically.
+def _composition_order(decisions: Sequence[Any]) -> list[int]:
+    """Positions of `decisions` in the canonical order the composer should see.
 
-    `compose_integrated` raises when a miner has two credited receipts in one
-    lane, which aborts the entire preview for a case that is not even
-    adversarial: a miner may legitimately hold two valid receipts in one epoch.
-    Resolve it here instead, and resolve it independently of submission order:
-    the lowest `receipt_id` is credited and every other candidate is refused with
-    an explicit reason. The same receipt replayed into two lanes earns once.
+    Deduplication is the composer's job, not this seam's. `compose_integrated`
+    applies all five drop rules itself, and it applies them INCREMENTALLY: a
+    contribution only claims its lane's per-miner slot at the moment it is
+    actually credited. Re-deriving the same rules here from a precomputed winner
+    map got that wrong, because a precomputed map cannot know that a candidate
+    lost its slot for an unrelated reason. One receipt tagged into two lanes took
+    the second lane's per-miner slot, was then refused there as already credited
+    elsewhere, and the miner's own second, entirely valid receipt in that lane was
+    refused for a reason that was not true: "miner already has a credited receipt
+    in lane X" naming a receipt that lane never credited.
+
+    What the seam owes the composer instead is a canonical ORDER, because the
+    composer's rules are first-wins and the caller's submission order must not
+    decide who earns. Sorting by `(receipt_id, lane, kind)` makes the outcome a
+    pure function of the receipt set:
+
+    * two credited receipts from one miner in one lane -> the lowest `receipt_id`
+      is credited, whichever order they were submitted in;
+    * one receipt tagged into several lanes -> it earns in the lowest lane id, and
+      the other lanes see it dropped without their slots being consumed.
+
+    Returns positions rather than reordering, so the audit trail can be restored
+    to submission order afterwards.
     """
-    winner_for_receipt: dict[str, tuple] = {}
-    winner_for_miner: dict[tuple[str, str], str] = {}
-    for d in decisions:
-        if not d.creditable:
-            continue
-        rank = (d.lane, d.kind)
-        if (
-            d.receipt_id not in winner_for_receipt
-            or rank < winner_for_receipt[d.receipt_id]
-        ):
-            winner_for_receipt[d.receipt_id] = rank
-        key = (d.lane, d.miner_hotkey)
-        if key not in winner_for_miner or d.receipt_id < winner_for_miner[key]:
-            winner_for_miner[key] = d.receipt_id
-
-    def refuse(decision, detail: str):
-        return integrated_feed.ReceiptDecision(
-            decision.lane,
-            decision.kind,
-            decision.receipt_id,
-            decision.miner_hotkey,
-            integrated_feed.FAIL,
-            Decimal(0),
-            detail,
-        )
-
-    out: list[Any] = []
-    credited_receipts: set[str] = set()
-    credited_miners: set[tuple[str, str]] = set()
-    for d in decisions:
-        if not d.creditable:
-            out.append(d)
-            continue
-        if d.receipt_id in credited_receipts or winner_for_receipt[d.receipt_id] != (
-            d.lane,
-            d.kind,
-        ):
-            out.append(
-                refuse(
-                    d,
-                    f"receipt {d.receipt_id} is credited once only; it is already "
-                    "credited elsewhere in this preview",
-                )
-            )
-            continue
-        key = (d.lane, d.miner_hotkey)
-        if key in credited_miners or winner_for_miner[key] != d.receipt_id:
-            out.append(
-                refuse(
-                    d,
-                    f"miner already has a credited receipt in lane {d.lane}; "
-                    f"{winner_for_miner[key]} is the credited one",
-                )
-            )
-            continue
-        credited_receipts.add(d.receipt_id)
-        credited_miners.add(key)
-        out.append(d)
-    return out
+    return sorted(
+        range(len(decisions)),
+        key=lambda i: (decisions[i].receipt_id, decisions[i].lane, decisions[i].kind),
+    )
 
 
 def _no_replay_sentinel():
@@ -469,63 +456,48 @@ def _claim_authoritative_epoch(
     return token
 
 
-def _apply_replay_gate(
+def _read_replay_gate(
     integrated_feed,
     decisions: Sequence[Any],
     *,
     ledger: Any,
-    source_epoch: int,
-    consume: bool,
     events: Any = None,
 ) -> list[Any]:
-    """Apply the once-only gate to the decisions that would be credited.
+    """Refuse any creditable receipt whose token is already on record. READ only.
 
-    Two modes, because a preview and an epoch's authoritative pass want opposite
-    things from the same ledger:
+    This gate never writes, in either mode. It answers the question "has this
+    receipt already been credited by an earlier pass", which is a read, and it
+    answers it before composition so a replay is a per-receipt ``FAIL`` with a
+    reason rather than a silently uncredited row.
 
-    * ``consume=False`` (default, inspection): the gate is a READ. A receipt whose
-      token is already on record is FAIL, and nothing is written, so running the
-      same preview any number of times returns the same vector. A read-only
-      preview that consumed its own evidence destroyed that evidence by being
-      looked at twice: the second run composed a 100% burn vector.
-    * ``consume=True`` (authoritative): the token is recorded, so the receipt
-      cannot be credited again by a later pass. The caller must first hold the
-      epoch-level authoritative claim; this function only records the winning
-      pass's selected receipt set.
+    **Recording the consumption is deliberately NOT done here.** It happens inside
+    ``compose_integrated``, which is the only place that knows all five of its drop
+    rules and therefore the only place that can burn a one-time token for a
+    contribution that is genuinely being credited. Consuming out here covered four
+    of those five rules and missed the fifth: a receipt aimed at a lane the signed
+    config enables but funds with zero had its token burned and was then dropped as
+    "allocated zero and cannot pay", so it earned nothing and could never be
+    credited again in any later epoch. That is denial of reward with no forgery,
+    which is the exact failure the shared contract moved consumption into
+    composition to prevent.
 
-    Either way the gate runs AFTER selection, over the already-selected set, so
-    nothing is spent on a contribution that will not be credited. Consuming during
-    verification instead made the outcome depend on submission order: the same
-    receipt offered to two funded lanes had its token burned by whichever
-    submission came first, so the composed vector changed when the caller merely
-    reordered its inputs.
-
-    The token is the `receipt_id`, which is what the shared contract makes
-    once-only; the `kind` column is metadata and mirrors the contract's naming.
-
-    A replay is a per-receipt FAIL, but a ledger that cannot record, cannot answer,
-    or reports a consume it did not record is a preview-level
-    ``IntegrationLedgerError``: it is shared infrastructure, and turning its outage
-    into one FAIL per receipt would compose a 100% burn vector and report PASS
-    while denying every legitimate miner.
+    A ledger that cannot answer is a preview-level ``IntegrationLedgerError``: it is
+    shared infrastructure, and turning its outage into one FAIL per receipt would
+    compose a 100% burn vector and report PASS while denying every legitimate miner.
     """
     if ledger is None:
         return list(decisions)
-
-    from cathedral_distill.consumption_ledger import ReplayError
-
-    def unusable(decision, reason: str) -> IntegrationLedgerError:
-        detail = (
-            f"replay ledger unusable while crediting {decision.receipt_id}: {reason}"
-        )
-        _emit(events, "INTEGRATION_LEDGER", status="FAIL", detail=detail)
-        return IntegrationLedgerError(detail)
 
     def recorded(decision) -> bool:
         try:
             return bool(ledger.is_consumed(decision.receipt_id))
         except Exception as exc:
-            raise unusable(decision, f"is_consumed failed: {exc}") from exc
+            detail = (
+                f"replay ledger unusable while screening {decision.receipt_id}: "
+                f"is_consumed failed: {exc}"
+            )
+            _emit(events, "INTEGRATION_LEDGER", status="FAIL", detail=detail)
+            raise IntegrationLedgerError(detail) from exc
 
     def replayed(decision):
         detail = f"token already consumed: {decision.receipt_id}"
@@ -553,102 +525,135 @@ def _apply_replay_gate(
         if not decision.creditable:
             out.append(decision)
             continue
-        if not consume:
-            # Inspection mode: read the gate, never write it.
-            out.append(replayed(decision) if recorded(decision) else decision)
-            continue
-        try:
-            ledger.consume(
-                decision.receipt_id,
-                kind=f"{decision.kind}_receipt_id",
-                source_epoch=source_epoch,
-            )
-        except ReplayError as exc:
-            # ReplayError covers both "already consumed" and "could not record".
-            # Ask the ledger which one it was instead of parsing its message: a
-            # token that is on record was a genuine replay, anything else means
-            # the consumption did not happen.
-            if not recorded(decision):
-                raise unusable(decision, f"consumption not recorded: {exc}") from exc
-            _emit(
-                events,
-                "INTEGRATION_REPLAY",
-                status="FAIL",
-                hotkey=decision.miner_hotkey,
-                lane=decision.lane,
-                receipt_id=decision.receipt_id,
-                detail=str(exc),
-            )
-            out.append(
-                integrated_feed.ReceiptDecision(
-                    decision.lane,
-                    decision.kind,
-                    decision.receipt_id,
-                    decision.miner_hotkey,
-                    integrated_feed.FAIL,
-                    Decimal(0),
-                    str(exc),
-                )
-            )
-            continue
-        except Exception as exc:
-            raise unusable(decision, f"{type(exc).__name__}: {exc}") from exc
-        if not recorded(decision):
-            # A ledger that reports a fresh consume without recording it fails
-            # OPEN: the same receipt would be creditable again in the next
-            # preview. Refuse the preview rather than credit on that basis.
-            raise unusable(
-                decision, "consume() reported success but the token is not on record"
-            )
-        out.append(decision)
+        out.append(replayed(decision) if recorded(decision) else decision)
     return out
 
 
-def _merged_receipt_audit(
-    composed_rows: Sequence[Mapping[str, Any]],
-    decisions: Sequence[Any],
+def _audit_ledger_invariants(
+    audit_rows: Sequence[Mapping[str, Any]],
+    deferred: Mapping[str, Any],
     *,
-    known_lanes: set[str],
-) -> list[dict[str, Any]]:
-    """One audit row per submission, in submission order, with uniform keys.
+    expected_credited: frozenset[str] | set[str],
+    ledger: Any,
+    events: Any = None,
+) -> None:
+    """Hold the authoritative pass's ledger effects to the audit it just produced.
 
-    A refusal against a lane the signed config does not fund cannot be composed,
-    so the seam builds that row itself. Appending those rows at the end left the
-    trail out of submission order and, worse, left them missing the keys the
-    composed rows carry, so a consumer reading `row["credited"]` crashed on
-    exactly the rows that describe the interesting cases.
+    Composition records consumptions itself, and it reports a consumption failure
+    as one dropped contribution. For a single receipt that is the right call, but
+    an outage drops every contribution the same way, which composes a 100% burn
+    vector and still returns successfully. So the effects are checked against
+    state, never against message text, once composition is done:
 
-    The composed rows arrive in the order of the composable decisions, so walking
-    the decisions and drawing from that iterator restores the original order
-    exactly, without matching on values that can repeat.
+    * the ledger must still answer at all (a liveness probe on a token that cannot
+      exist), because otherwise every drop is indistinguishable from an outage;
+    * a receipt credited anywhere must have its token on record, or the ledger
+      reported a consume it did not keep and the receipt is creditable again next
+      epoch;
+    * a receipt credited NOWHERE must not have its token on record, which is the
+      invariant whose violation was the zero-allocation token burn;
+    * every receipt the composer's five rules WOULD have credited must actually be
+      credited. ``expected_credited`` comes from composing the same decisions with
+      no ledger at all, so the composer is its own oracle: the two runs differ only
+      in the consume step, and a receipt that falls out of the second one lost its
+      credit to the ledger rather than to a rule. Without this, a ledger whose
+      writes fail turns into one dropped contribution per receipt and the pass
+      still returns a burn vector and calls itself a success.
+
+    The unit is the `receipt_id`, not the audit row. One receipt tagged into several
+    lanes produces several rows sharing one token, and exactly one of them is
+    credited: judging each row on its own would read the credited row's legitimate
+    consumption as the uncredited rows' stolen token.
+
+    Any violation is an ``IntegrationLedgerError``: the pass wrote something it
+    cannot stand behind, so its vector is not evidence of anything.
     """
-    composed = iter(composed_rows)
-    template = dict(composed_rows[0]) if composed_rows else {}
-    rows: list[dict[str, Any]] = []
-    for d in decisions:
-        if d.lane in known_lanes:
-            rows.append(dict(next(composed)))
+    if ledger is None or not deferred:
+        return
+
+    def fail(detail: str) -> IntegrationLedgerError:
+        _emit(events, "INTEGRATION_LEDGER", status="FAIL", detail=detail)
+        return IntegrationLedgerError(detail)
+
+    probe = f"{_AUTHORITATIVE_EPOCH_TOKEN_PREFIX}:liveness-probe:never-consumed"
+    try:
+        if ledger.is_consumed(probe):
+            raise fail(
+                "replay ledger reports a token that was never consumed as consumed; "
+                "its answers cannot be trusted for this pass"
+            )
+    except IntegrationLedgerError:
+        raise
+    except Exception as exc:
+        raise fail(
+            "replay ledger stopped answering during the authoritative pass, so a "
+            f"dropped contribution cannot be told from an outage: {exc}"
+        ) from exc
+
+    credited_anywhere: dict[str, bool] = {}
+    reasons: dict[str, str] = {}
+    for row in audit_rows:
+        receipt_id = row.get("receipt_id")
+        if receipt_id not in deferred:
             continue
-        row = {key: None for key in template}
-        row.update(
-            {
-                "receipt_id": d.receipt_id,
-                "kind": d.kind,
-                "lane": d.lane,
-                "verdict": d.verdict,
-                "detail": d.detail,
-                "miner_hotkey": d.miner_hotkey,
-                "work_units": str(d.work_units),
-                "lane_allocation": "0",
-                "final_weight": 0.0,
-                "credited": False,
-                "drop_reason": d.detail,
-            }
+        credited_anywhere[receipt_id] = credited_anywhere.get(
+            receipt_id, False
+        ) or bool(row.get("credited"))
+        if not row.get("credited") and row.get("drop_reason"):
+            reasons.setdefault(receipt_id, str(row["drop_reason"]))
+
+    lost = sorted(
+        receipt_id
+        for receipt_id, credited in credited_anywhere.items()
+        if not credited and receipt_id in expected_credited
+    )
+    if lost:
+        raise fail(
+            "the composer's own rules would have credited "
+            + ", ".join(lost)
+            + " and it did not, so the replay ledger refused the consumption rather "
+            "than any admission rule refusing the receipt: "
+            + "; ".join(
+                reasons.get(receipt_id, "no reason recorded") for receipt_id in lost
+            )
         )
-        rows.append(row)
-    # Uniform key set across every row, whoever built it.
-    keys = sorted({key for row in rows for key in row})
-    return [{key: row.get(key) for key in keys} for row in rows]
+
+    for receipt_id, credited in credited_anywhere.items():
+        try:
+            on_record = bool(ledger.is_consumed(receipt_id))
+        except Exception as exc:
+            raise fail(
+                f"replay ledger could not be read back for {receipt_id}: {exc}"
+            ) from exc
+        if credited and not on_record:
+            raise fail(
+                f"{receipt_id} was credited but its one-time token is not on record; "
+                "the consumption was reported and not kept, so the same receipt "
+                "would be creditable again in a later epoch"
+            )
+        if not credited and on_record:
+            raise fail(
+                f"{receipt_id} was credited nowhere but its one-time token was "
+                f"consumed ({reasons.get(receipt_id) or 'no reason recorded'}); the "
+                "receipt can never be credited again, so it has been denied its reward"
+            )
+
+
+def _restore_submission_order(
+    rows: Sequence[Mapping[str, Any]], order: Sequence[int]
+) -> list[dict[str, Any]]:
+    """Undo the composition sort so the audit trail reads in submission order.
+
+    The composer emits one row per decision it was given, in that order, so the
+    rows come back in canonical order. `order[position]` is the submission index
+    that row belongs to, which inverts the permutation exactly. Every row is the
+    composer's own, so they all carry the same keys, including the ones describing
+    a lane the signed config does not fund.
+    """
+    restored: list[dict[str, Any] | None] = [None] * len(rows)
+    for position, index in enumerate(order):
+        restored[index] = dict(rows[position])
+    return [row for row in restored if row is not None]
 
 
 def preview_integrated_vector(
@@ -714,7 +719,14 @@ def preview_integrated_vector(
       receipt whose lane share goes to burn, never another lane and never an
       aborted vector;
     * one receipt earns at most once across the whole preview, and a miner with
-      two credited receipts in one lane keeps exactly one, deterministically.
+      two credited receipts in one lane keeps exactly one, deterministically: the
+      composer's rules decide it and this seam supplies a canonical order, so the
+      outcome is a pure function of the receipt set and not of its order;
+    * a receipt that is not credited keeps its one-time replay token, for EVERY
+      reason it might not be credited, including a lane the signed config enables
+      but funds with zero. Consumption is deferred into ``compose_integrated``,
+      which is the only point that knows all five of its drop rules, and the
+      recorded effects are then checked back against the audit.
 
     Repeatable by default: the replay gate is a read unless
     ``consume_receipts=True``, so an operator can run the same preview as often as
@@ -825,7 +837,20 @@ def preview_integrated_vector(
         "replay_mode": "authoritative" if consume_receipts is True else "inspection",
         "authoritative_epoch_claim": None,
         "supplied": dict(gate_supplied),
-        "applied": {name: supplied[name] is not None for name in REQUIRED_REWARD_GATES},
+        # Genuinely applied: this gate ran against at least one receipt somewhere in
+        # the preview. Keyed like `supplied` so the two are directly comparable, and
+        # they DO differ: a compute-only preview with `current_block` passed reports
+        # block_window supplied=yes, applied=no, because no compute receipt reads it.
+        # An earlier revision computed this from "was the argument not None", which
+        # made it a second copy of `supplied` under a name that claimed more.
+        "applied": {
+            name: any(
+                applied_for_kind(kind)[name]
+                for kinds in kinds_in_lane.values()
+                for kind in kinds
+            )
+            for name in _GATE_NAMES
+        },
         "lanes": {
             lane: {
                 "allocation": str(alloc),
@@ -876,13 +901,21 @@ def preview_integrated_vector(
             detail="every required admission gate was applied",
         )
 
-    # 3. Verify every receipt WITHOUT consuming anything. Consumption is
-    #    irreversible, so it cannot happen while the credited set is still
-    #    undecided: a receipt offered to two lanes would otherwise have its token
-    #    burned by whichever submission the caller happened to list first, which
-    #    made the composed vector depend on input order. Every failure is
-    #    contained here: one malformed contribution can never abort the vector.
+    # 3. Verify every receipt. The authoritative pass DEFERS its consumption to
+    #    composition (`defer_consumption=True` marks the decision REPLAY_PENDING
+    #    without touching the ledger); an inspection pass verifies with no ledger
+    #    at all, so it can never write. Either way nothing is consumed here, because
+    #    consumption is irreversible and the credited set is still undecided. Every
+    #    failure is contained: one malformed contribution can never abort the vector.
     known_lanes = set(resolved.lane_allocations)
+    authoritative = consume_receipts is True
+    if authoritative and ledger is None:
+        detail = (
+            "an authoritative pass requires a usable durable consumption ledger "
+            "to claim the epoch, even when no receipt is creditable"
+        )
+        _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
+        raise IntegrationPolicyError(detail)
     verified = []
     for item in receipts:
         verified.append(
@@ -900,24 +933,26 @@ def preview_integrated_vector(
                 allowed_measurements=allowed_measurements,
                 allowed_tcb_statuses=allowed_tcb_statuses,
                 allowed_advisories=allowed_advisories,
+                # A deferred consumption needs the ledger threaded through the
+                # verifier so the decision carries REPLAY_PENDING and its source
+                # epoch; the contract reads nothing and writes nothing under it.
+                **(
+                    {"consumption_ledger": ledger, "defer_consumption": True}
+                    if authoritative
+                    else {}
+                ),
             )
         )
 
-    # 4. Select deterministically, and only then consume. One receipt earns once
-    #    across the whole preview, and a miner with two credited receipts in one
-    #    lane keeps exactly one; both cases raise inside `compose_integrated`,
-    #    which would abort the vector for every honest lane too. Selection reads
-    #    only the verified decisions, so it is a pure function of the receipt set
-    #    rather than of its order.
-    selected = _deduplicate(integrated_feed, verified)
-    if consume_receipts is True:
-        if ledger is None:
-            detail = (
-                "an authoritative pass requires a usable durable consumption ledger "
-                "to claim the epoch, even when no receipt is creditable"
-            )
-            _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
-            raise IntegrationPolicyError(detail)
+    # 4. Screen for receipts an EARLIER pass already credited, as a read. Then claim
+    #    the epoch, so exactly one pass per epoch can record anything at all.
+    #    Deduplication WITHIN this preview is not done here: composition owns all
+    #    five of its drop rules and applies them incrementally, so the seam only
+    #    owes it a canonical order (see `_composition_order`).
+    decisions = _read_replay_gate(
+        integrated_feed, verified, ledger=ledger, events=events
+    )
+    if authoritative:
         gates["authoritative_epoch_claim"] = _claim_authoritative_epoch(
             ledger,
             network=network,
@@ -925,14 +960,6 @@ def preview_integrated_vector(
             source_epoch=source_epoch,
             events=events,
         )
-    decisions = _apply_replay_gate(
-        integrated_feed,
-        selected,
-        ledger=ledger,
-        source_epoch=source_epoch,
-        consume=consume_receipts is True,
-        events=events,
-    )
     for decision in decisions:
         _emit(
             events,
@@ -947,23 +974,60 @@ def preview_integrated_vector(
         )
 
     # 5. Compose one deterministic vector (missing/invalid lane -> burn) + audit.
-    #    A refusal against a lane the config does not fund cannot be composed at
-    #    all (composition rejects the unknown lane, by design), so it is kept out
-    #    of the composition and folded back into the audit afterwards: no
-    #    contribution is lost from the trail, and no contribution can abort it.
-    composable = [d for d in decisions if d.lane in known_lanes]
-    unfunded = [d for d in decisions if d.lane not in known_lanes]
+    #    Every decision goes in, including one naming a lane the signed config does
+    #    not fund: composition drops it with a reason and still emits its audit row,
+    #    so the trail is complete and uniform without the seam rebuilding any row.
+    #    The authoritative pass hands composition the ledger, because composition is
+    #    the only point that knows a contribution is actually being credited and so
+    #    the only safe place to burn a one-time token.
+    order = _composition_order(decisions)
+    deferred = {
+        d.receipt_id: d
+        for d in decisions
+        if authoritative and d.replay == integrated_feed.REPLAY_PENDING
+    }
+    ordered = [decisions[i] for i in order]
     try:
-        out = integrated_feed.compose_integrated(resolved, composable)
+        # The composer as its own oracle: the same decisions with the deferred
+        # marker cleared and no ledger, which skips the consume step entirely and so
+        # credits exactly what the five admission rules allow. Comparing that with
+        # the real pass isolates a ledger refusal from a rule refusal without
+        # reading either one's message text.
+        expected_credited: set[str] = set()
+        if authoritative:
+            dry = integrated_feed.compose_integrated(
+                resolved,
+                [
+                    replace(d, replay=integrated_feed.REPLAY_NONE)
+                    if d.receipt_id in deferred
+                    else d
+                    for d in ordered
+                ],
+                consumption_ledger=None,
+            )
+            expected_credited = {
+                row["receipt_id"] for row in dry["audit"]["receipts"] if row["credited"]
+            }
+        out = integrated_feed.compose_integrated(
+            resolved,
+            ordered,
+            consumption_ledger=ledger if authoritative else None,
+        )
     except Exception as exc:  # composition must not be reachable with bad input
         _emit(events, "INTEGRATION_VECTOR", status="FAIL", detail=str(exc))
         raise IntegrationError(f"composition rejected: {exc}") from exc
     feed, audit = out["feed"], out["audit"]
-    audit["receipts"] = _merged_receipt_audit(
-        audit["receipts"], decisions, known_lanes=known_lanes
+    audit["receipts"] = _restore_submission_order(audit["receipts"], order)
+    # Composition reports a consume failure as one dropped contribution, which is
+    # right for one receipt and catastrophic for an outage. Check its ledger effects
+    # against the audit it just produced, by state.
+    _audit_ledger_invariants(
+        audit["receipts"],
+        deferred,
+        expected_credited=expected_credited,
+        ledger=ledger,
+        events=events,
     )
-    for d in unfunded:
-        audit["verdicts"][d.verdict.lower()] += 1
     for lane in audit["lanes"]:
         _emit(
             events,
