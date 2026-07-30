@@ -40,7 +40,7 @@ claim. The following observations remain blocking:
 | Evidence epoch producer | **FAIL** | The live epoch producer is wedged on `signed report policy_digest does not match supplied registry`; it is not producing a qualifying fresh epoch. |
 | Intel TDX worker | **FAIL** | The required worker is `TERMINATED`. Starting or replacing it is a paid production mutation and requires explicit authority. |
 | Producer revision | **FAIL** | Three values disagreed. The host exporter stamped `b77c7cfacab34de75b1102360f6e3fc1edf5b796` into every signed manifest, this repository pinned `fa39af97e738fdbed5c454f976b61246590b5794`, and the producer actually runs `655c264421a1f5f2e625a372a40f595aa1e114ab` from `/opt/cathedral-sn39/venvs/9540de44...`. The installed venv is the only value that is evidence rather than assertion, so every pin in this repository now reads `9540de44...`. The boundary stays FAIL until the host exporter is redeployed to derive its stamp from the installed venv basename instead of hardcoding it, because until then signed evidence still misstates what produced it and FULL provenance cannot match. |
-| Producer, enrollment, and controlled-package install contract | **NOT_PROVEN** | The exact final ownership, group, and mode contract for `/etc/cathedral/controlled/sn39-launch` has not been resolved. Do not infer permissions or install a substitute package. |
+| Producer, enrollment, and controlled-package install contract | **IMPLEMENTED; live release proof required** | The producer atomically selects `/var/lib/cathedral-validator-controlled-sn39/current`; its real epoch directory is `root:cathedral-validator-evidence` mode `2750` with root-owned mode-`0640` regular files, and the validator service receives only that supplementary read group. The immutable release still fails closed unless the live host proves this exact contract. |
 | Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It cannot authorize the launch weight. |
 | Root-signed release | **NOT_PROVEN** | The final release and its detached signature are absent. A mutable candidate or unsigned `release.json` is not a sealed release. |
 
@@ -443,11 +443,13 @@ For the final launch service, materialize only the two existing inputs:
    the configured Cathedral endpoints in
    `config/validator-mainnet-sn39-launch.toml`.
 2. The authorized controlled-disclosure package for that same manifest is
-   installed byte-for-byte at
-   `/etc/cathedral/controlled/sn39-launch` under the exact owner, group, and
-   mode contract accepted during final review and unavailable to untrusted
-   users. That contract is currently unresolved; this guide does not choose
-   values for it. The pinned verifier remains
+   installed byte-for-byte in an immutable epoch directory below
+   `/var/lib/cathedral-validator-controlled-sn39`, selected atomically by its
+   `current` symlink. The root is mode `2750`; epoch directories are
+   `root:cathedral-validator-evidence` mode `2750`; and regular package files
+   are root-owned, group `cathedral-validator-evidence`, mode `0640`, and never
+   symlinks. The validator unit receives that group only as a supplementary
+   read capability. The pinned verifier remains
    `/opt/cathedral-sn39/bin/cathedral-tdx-verifier`.
 
 Before the final weight test, record the canonical receipt JSON file for every
@@ -552,13 +554,18 @@ producer's build backend; the second disables build isolation, so Python cannot
 download an unpinned build tool while installing the byte-pinned producer
 archive. Install every reviewed config and unit before generating the manifest:
 
+The bootstrap is the host's resolved, versioned `/usr/bin/python3.12` regular
+file—not the `/usr/bin/python3` symlink. Builder, manifest, launcher, and
+systemd units all pin that same path and its digest, so an interpreter change
+fails closed instead of making symlink mode bits part of the trust decision.
+
 ```bash
 set -euo pipefail
 release_sha="<reviewed-tag-commit>"
 release="/opt/cathedral-sn39/releases/$release_sha"
 venv="/opt/cathedral-sn39/venvs/$release_sha"
 
-/usr/bin/python3 -m venv "$venv"
+/usr/bin/python3.12 -m venv "$venv"
 "$venv/bin/python" -m pip install \
   --require-hashes -r "$release/requirements/sn39-build.lock"
 "$venv/bin/python" -m pip install \
@@ -589,12 +596,13 @@ install -D -o root -g root -m 0644 \
 install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-sn39-validator.tmpfiles" \
   /etc/tmpfiles.d/cathedral-sn39-validator.conf
+install -d -o root -g root -m 0755 /etc/cathedral-validator
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39.toml" \
-  /etc/cathedral/validator-mainnet-sn39.toml
+  /etc/cathedral-validator/validator-mainnet-sn39.toml
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39-launch.toml" \
-  /etc/cathedral/validator-mainnet-sn39-launch.toml
+  /etc/cathedral-validator/validator-mainnet-sn39-launch.toml
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator.conf
 
@@ -649,8 +657,8 @@ case "$legacy_state" in
 esac
 systemctl daemon-reload
 
-manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"
-/usr/bin/python3 -I -E -s \
+manifest_tmp="$(mktemp /etc/cathedral-validator/sn39-release-manifest.json.XXXXXX)"
+/usr/bin/python3.12 -I -E -s \
   "$release/scripts/build_sn39_release_manifest.py" \
   --release "$release" \
   --release-sha "$release_sha" \
@@ -658,7 +666,7 @@ manifest_tmp="$(mktemp /etc/cathedral/sn39-release-manifest.json.XXXXXX)"
   > "$manifest_tmp"
 chown root:root "$manifest_tmp"
 chmod 0644 "$manifest_tmp"
-mv -f "$manifest_tmp" /etc/cathedral/sn39-release-manifest.json
+mv -f "$manifest_tmp" /etc/cathedral-validator/sn39-release-manifest.json
 ```
 
 Manifest schema v3 binds the pristine release, lock-created environment,
@@ -667,6 +675,27 @@ reviewed configs and units, verifier binary, and the resolved root-managed
 interpreter in isolated, environment-ignoring mode. The launcher then passes a
 fixed allowlisted child environment, so ambient variables cannot substitute
 settings, Python imports, or the shared submission journal.
+
+The environment commitment accepts a directory symlink only when its resolved
+target stays inside the same immutable environment. This covers the standard
+Linux `venv` layout (`lib64 -> lib`) while continuing to reject directory
+symlinks that escape to mutable or uncommitted trees.
+
+The builder and launcher also require every committed tree directory to be
+root-controlled and readable/searchable by the unprivileged service account,
+and every regular file to be root-controlled, single-linked, non-writable by
+group or world, and service-readable. This rejects a root-only staging
+directory before it can produce a manifest that the shipped unit cannot use.
+
+The non-secret validator configs and release manifest live under the dedicated
+root-owned, world-traversable `/etc/cathedral-validator` directory. They must
+not be installed under `/etc/cathedral`: production keeps that directory
+non-traversable by the validator account because it also contains producer
+signing keys and other service secrets.
+
+Git verification runs with `safe.directory` set to the exact manifest-selected
+release path. This lets the unprivileged validator verify a root-owned checkout
+without trusting any other repository or a wildcard safe-directory rule.
 
 The signing hotkey is intentionally outside the public release manifest:
 hashing a secret key into public artifacts would create a durable verifier for
@@ -857,8 +886,8 @@ sudo /usr/bin/python3 -I -E -s \
    signs the byte-canonical authorization with the separately protected
    release-attestation key, and writes:
 
-   - `/etc/cathedral/sn39-recurring-write-authorization.json`
-   - `/etc/cathedral/sn39-recurring-write-authorization.json.sig`
+   - `/etc/cathedral-validator/sn39-recurring-write-authorization.json`
+   - `/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig`
 
    Both files and their parent must remain root-owned and non-writable by group
    or world. The validator re-verifies their detached Ed25519 signature and

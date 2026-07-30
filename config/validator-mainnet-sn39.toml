@@ -36,50 +36,30 @@ max_submissions = 0
 root = "/var/lib/cathedral-validator"
 
 [provenance]
-mode = "authority"
+mode = "shadow"
 evidence_url = "https://api.cathedral.computer/v1/evidence"
-registry_keys = "/etc/cathedral-validator/provenance/registry-keys.json"
+registry_keys = "config/provenance/registry-keys.json"
 registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
-report_keys = "/etc/cathedral-validator/provenance/report-keys.json"
+report_keys = "config/provenance/report-keys.json"
 report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
-index_keys = "/etc/cathedral-validator/provenance/index-keys.json"
+index_keys = "config/provenance/index-keys.json"
 index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
 verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 source_revision = "655c264421a1f5f2e625a372a40f595aa1e114ab" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
 burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
-# The producer publishes the controlled mirror here, group-readable to
-# cathedral-validator-evidence. The launch-only path it replaced is not
-# provisioned on this host.
 controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
 verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
-# Mandatory in full mode. Every independent chain check is evaluated at the
-# producer-chosen candidate block; this bounds how stale that anchor may be.
-# Sized from measured export lag (~19 blocks) with ~10x headroom, 25x under
-# the immunity window it protects.
-max_anchor_lag_blocks = 600
-# Lowest assurance full mode will submit on. full_over_epoch restores the
-# never-submits-on-a-populated-subnet behaviour.
-min_assurance = "rewarded_set_proven"
 
 [launch]
-# Beta: waive the one-shot launch canary and ContinuousAuthorization. This is
-# a PROCESS control, not a correctness one. Clear it before any launch that has
-# to be auditable.
-beta_skip_launch_ceremony = true
 # Continuous operation keeps the full audit concurrent and non-blocking.
 # The one-shot launch service uses validator-mainnet-sn39-launch.toml instead.
 require_full_provenance_for_broadcast = false
 # This proves the one-shot launch but does not grant recurring write authority.
-# The separately signed /etc/cathedral/sn39-recurring-write-authorization.json
+# The separately signed
+# /etc/cathedral-validator/sn39-recurring-write-authorization.json
 # is also required before every reservation.
-# Paired with beta_skip_launch_ceremony below: both branches of
-# _continuous_transition_required must agree, or the waiver is inert.
-require_completed_launch_for_broadcast = false
+require_completed_launch_for_broadcast = true
 
 [logs]
-# The raw journal is private (0600, no reader group): it carries hotkeys,
-# receipts and caller-supplied fields. The status publisher reads the
-# sanitized projection below instead, which is group-readable by design.
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
-status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"

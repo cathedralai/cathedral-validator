@@ -4,7 +4,7 @@
 >
 > This repository is extracted from
 > [`cathedralai/cathedral`](https://github.com/cathedralai/cathedral) at commit
-> **`fd02392dc969bbea09e3107febb64f1f5f748391`**.
+> **`dabf10bcd5de76b6f98a6ce6772df2fc063da8db`**.
 >
 > - **Sync is one-way**, upstream to here. Nothing in this repo feeds back into
 >   `cathedralai/cathedral`, and no change should be made here first.
