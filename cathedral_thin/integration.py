@@ -22,10 +22,12 @@ Install the optional dependency to enable it::
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from cathedral_thin import cybergym_epoch_proof as _epoch_proof
+from cathedral_thin import cybergym_epoch_state as _epoch_state
+from cathedral_thin import cybergym_evidence_manifest as _evidence
 from hashlib import sha256
 import inspect
 import json
@@ -281,71 +283,122 @@ def _refused(integrated_feed, item: LaneReceipt, detail: str, *, hotkey: str = "
     )
 
 
-def _bind_to_epoch_proof(integrated_feed, decisions, *, proof, lanes):
-    """Bind the credited CyberGym set EXACTLY to the producer's attested scores.
+def _bind_to_epoch_proof(integrated_feed, decisions, *, proof, lanes, credited_rows):
+    """Bind each funded CyberGym lane's FINAL credited set and values to the proof.
 
-    Membership alone is not enough, and both holes were reachable:
+    ``credited_rows`` is the outcome of a DRY composition: the same decisions with
+    any deferred replay marker cleared and no ledger, so it credits exactly what the
+    five admission rules allow, after the replay read has already dropped anything a
+    previous pass consumed.
 
-    * A proof scoring two miners with only one receipt submitted let the submitted
-      miner take the WHOLE lane. A lane normalizes work units within itself, so an
-      absent contribution does not burn, it reallocates: the omitted miner's share
-      silently moves to whoever did submit. Reproduced before this fix at
-      weight 1.0 with nothing burned.
-    * A proof scoring a miner 0.0 still credited a positive receipt for that miner,
-      because zero was in the key set.
+    Three properties, each of which was a separate reward-theft route before:
 
-    So require the credited set to equal the producer's above-zero set, and each
-    credited contribution's work units to equal the score the producer attested for
-    that subject. Any mismatch refuses every CyberGym decision in the lane, which
-    forfeits the whole share to burn rather than paying a set the producer did not
-    attest. Burning the lane on an omission is deliberate: the alternative, paying
-    the present subset, is exactly the reallocation above. Making an omission burn
-    only the absent miner's portion would need the lane composer to take the
-    producer's total as its denominator, which is a shared-contract change and an
-    owner decision, recorded rather than invented here.
+    * **Keyed by (lane, hotkey), and by LANE not by kind.** The composer pays by
+      lane, and `lane` is a caller-supplied tag the shared contract deliberately
+      does not check against `kind`. Filtering this binding to cybergym-kind rows
+      therefore left a plain compute or distill receipt, tagged into the funded
+      CyberGym lane, invisible to the check AND exempt from the refusal: it took up
+      to 100% of a lane the producer never attested, while the gate reported
+      `bound: true`. Every credited row in a governed lane is bound, whatever its
+      kind, and a row whose kind the producer does not attest simply cannot match.
+    * **Per lane, not unioned.** Checking set equality against the union of all
+      governed lanes hid a per-lane mismatch: two funded CyberGym lanes could pay a
+      miner twice their share while the union still matched.
+    * **Every credited row, not one row per hotkey.** Keying by hotkey alone meant
+      that with several credited rows for one miner only the last survived the
+      value check, and which one that was depended on a sha256 tiebreak, so the same
+      inputs could bind or not bind.
+
+    Any mismatch refuses EVERY decision in that lane, so its whole share forfeits to
+    burn. Burning on an omission is deliberate: paying the present subset IS the
+    reallocation. This runs before the epoch claim and before any receipt token is
+    consumed.
     """
-    creditable = [
-        d
-        for d in decisions
-        if d.creditable and d.lane in lanes and str(d.kind) == "cybergym"
-    ]
-    credited = {d.miner_hotkey for d in creditable}
-    attested = set(proof.earning_hotkeys)
+    attested = dict(proof.scores)
+    earning = {k for k, v in attested.items() if float(v) > 0.0}
     problems: list[str] = []
-    if credited != attested:
-        missing = sorted(attested - credited)
-        extra = sorted(credited - attested)
+    bad_lanes: set[str] = set()
+
+    for lane in sorted(lanes):
+        rows = [
+            row
+            for row in credited_rows
+            if row.get("credited") and row.get("lane") == lane
+        ]
+        credited_here = {str(row.get("miner_hotkey")) for row in rows}
+        missing = sorted(earning - credited_here)
+        extra = sorted(credited_here - earning)
+        lane_problems: list[str] = []
         if missing:
-            problems.append(
-                "no verified receipt for producer-scored " + ",".join(missing)
+            lane_problems.append(
+                "no credited contribution for producer-scored " + ",".join(missing)
             )
         if extra:
-            problems.append(
+            lane_problems.append(
                 "credited but not scored above zero by the producer: " + ",".join(extra)
             )
-    for d in creditable:
-        expected = proof.scores.get(d.miner_hotkey)
-        if expected is None:
-            continue  # already reported as `extra` above
-        if Decimal(str(expected)) != Decimal(str(d.work_units)):
-            problems.append(
-                f"{d.miner_hotkey} work units {d.work_units} do not equal the "
-                f"producer's attested score {expected}"
+        for row in rows:
+            hotkey = str(row.get("miner_hotkey"))
+            expected = attested.get(hotkey)
+            if expected is None:
+                continue  # already reported as `extra`
+            # Exact equality against the value COMPOSED, per credited row.
+            if Decimal(str(expected)) != Decimal(str(row.get("work_units"))):
+                lane_problems.append(
+                    f"{hotkey} composed work units {row.get('work_units')} do not "
+                    f"equal the producer's attested score {expected}"
+                )
+        # REAL evidence binding, not a pin. Rebuild the canonical manifest from the
+        # receipts THIS validator admitted for THIS lane and require the producer's
+        # signed evidence_sha256 to equal it exactly. A producer that scored a
+        # different set, different amounts, or different receipts cannot produce a
+        # matching digest. An empty funded lane uses the deterministic empty-manifest
+        # digest, so "nobody scored" is attested rather than indistinguishable from a
+        # missing manifest. Per lane for the same reason the value check is: a union
+        # digest would let one lane's surplus mask another's shortfall.
+        try:
+            recomputed = _evidence.manifest_digest(
+                network=proof.network,
+                netuid=proof.netuid,
+                source_epoch=proof.source_epoch,
+                entries=[
+                    {
+                        "miner_hotkey": str(row.get("miner_hotkey")),
+                        "receipt_id": str(row.get("receipt_id")),
+                        "work_units": row.get("work_units"),
+                    }
+                    for row in rows
+                ],
             )
+        except _evidence.EvidenceManifestError as exc:
+            lane_problems.append(f"credited set cannot be digested: {exc}")
+            recomputed = None
+        if recomputed is not None and recomputed != str(proof.evidence_sha256).lower():
+            lane_problems.append(
+                "the signed evidence digest does not commit to the credited set: "
+                f"report says {proof.evidence_sha256}, the admitted receipts digest "
+                f"to {recomputed}"
+            )
+
+        if lane_problems:
+            bad_lanes.add(lane)
+            problems.append(f"{lane}: " + "; ".join(lane_problems))
+
     if not problems:
-        return list(decisions)
+        return list(decisions), None
 
     detail = (
-        "producer epoch proof does not match the credited set ("
-        + "; ".join(problems)
+        "producer epoch proof does not match the finally credited set ("
+        + " | ".join(problems)
         + f"); the lane's share burns for epoch {proof.source_epoch}"
     )
     out = []
     for d in decisions:
-        # Only rewrite decisions that would otherwise PAY. One that already failed
-        # keeps its own reason (window, signature, epoch): it is not paying either
-        # way, and overwriting it would erase the diagnosis an operator needs.
-        if d.creditable and d.lane in lanes and str(d.kind) == "cybergym":
+        # Refuse by LANE, whatever the kind: otherwise a foreign-kind receipt in a
+        # burning lane survives the refusal and takes the share the lane was
+        # supposed to forfeit. A decision that already failed keeps its own reason,
+        # since it is not paying either way and the diagnosis matters.
+        if d.creditable and d.lane in bad_lanes:
             out.append(
                 integrated_feed.ReceiptDecision(
                     d.lane,
@@ -359,7 +412,7 @@ def _bind_to_epoch_proof(integrated_feed, decisions, *, proof, lanes):
             )
         else:
             out.append(d)
-    return out
+    return out, detail
 
 
 def _decide(
@@ -842,6 +895,16 @@ def preview_integrated_vector(
     # anything unverifiable forfeits that lane's share to burn.
     cybergym_epoch_proof: Mapping[str, Any] | None = None,
     cybergym_epoch_proof_secret: str | None = None,
+    # Possessing the shared HMAC secret is not producer identity, so the operator
+    # pins WHICH producer this validator will compose. Required for a funded lane.
+    cybergym_expected_producer_hotkey: str | None = None,
+    # Optional pin for the signed evidence bundle digest.
+    cybergym_expected_evidence_sha256: str | None = None,
+    # Durable per-audience monotonic epoch state. REQUIRED for an authoritative pass
+    # on a funded lane: without it, epoch 12 then epoch 11 both compose and both earn,
+    # because each proof correctly names its own epoch and burns a distinct per-epoch
+    # token. That is an epoch rollback, and it re-pays a superseded scored set.
+    cybergym_epoch_state_path: str | None = None,
     events: Any = None,
 ) -> dict[str, Any]:
     """Verify the signed config and every lane receipt, then compose + audit one
@@ -1083,17 +1146,45 @@ def preview_integrated_vector(
         for lane in cybergym_lanes
         if resolved.lane_allocations.get(lane, Decimal(0)) > 0
     }
+    # A funded CyberGym lane with NO receipts at all still has to prove the epoch
+    # closed. Otherwise "the producer sent nothing" and "the epoch never finished"
+    # are indistinguishable, and an operator could fund the lane, submit nothing, and
+    # have it burn silently without anyone establishing which of the two happened.
+    # The share burns either way; the difference is whether the burn is evidenced.
+    funded_cybergym |= {
+        lane
+        for lane, allocation in resolved.lane_allocations.items()
+        if allocation > 0 and lane == LANE_CYBERGYM
+    }
     epoch_proof = None
     epoch_proof_error: str | None = None
     if funded_cybergym:
         try:
+            if not cybergym_expected_producer_hotkey:
+                raise _epoch_proof.EpochProofError(
+                    "producer_not_pinned",
+                    "a funded CyberGym lane requires cybergym_expected_producer_hotkey: "
+                    "the shared HMAC secret authenticates the body, it does not "
+                    "establish which producer signed it",
+                )
             epoch_proof = _epoch_proof.verify_epoch_proof(
                 cybergym_epoch_proof,
                 secret=cybergym_epoch_proof_secret,
                 network=network,
                 netuid=netuid,
                 source_epoch=source_epoch,
-                now=now,
+                # TRUSTED LOCAL time, deliberately not the bundle's `now`. The bundle
+                # is operator input; letting it set the clock would let a backdated
+                # bundle revive a stale proof, which is the freshness check's whole
+                # purpose. `now` still drives receipt freshness, which is bound by
+                # the signed receipt itself.
+                now=datetime.now(UTC),
+                expected_producer_hotkey=cybergym_expected_producer_hotkey,
+                expected_evidence_sha256=cybergym_expected_evidence_sha256,
+                # The pin is now optional defence in depth: the real binding is the
+                # manifest recomputation below, which does not depend on an operator
+                # typing a digest correctly.
+                require_evidence_pin=False,
             )
         except _epoch_proof.EpochProofError as exc:
             epoch_proof_error = (
@@ -1112,12 +1203,71 @@ def preview_integrated_vector(
             ),
             lanes=",".join(sorted(funded_cybergym)),
         )
+    proof_body_sha256 = None
+    proof_semantic_sha256 = None
+    if epoch_proof is not None and isinstance(cybergym_epoch_proof, Mapping):
+        raw_body = cybergym_epoch_proof.get("body")
+        if isinstance(raw_body, (str, bytes, bytearray)):
+            body_bytes = (
+                raw_body.encode("utf-8")
+                if isinstance(raw_body, str)
+                else bytes(raw_body)
+            )
+            proof_body_sha256 = sha256(body_bytes).hexdigest()
+            proof_semantic_sha256 = sha256(
+                _epoch_proof.canonical_bytes(
+                    {
+                        "producer_hotkey": epoch_proof.producer_hotkey,
+                        "network": epoch_proof.network,
+                        "netuid": epoch_proof.netuid,
+                        "source_epoch": epoch_proof.source_epoch,
+                        "generated_at": epoch_proof.generated_at,
+                        "complete": True,
+                        "score_units": epoch_proof.score_units,
+                        "scores": dict(epoch_proof.scores),
+                        "evidence_sha256": epoch_proof.evidence_sha256,
+                    }
+                )
+            ).hexdigest()
+
     gates["cybergym_epoch_proof"] = {
         "required": sorted(funded_cybergym),
         "verified": epoch_proof is not None,
+        "bound": None,
         "reason": epoch_proof_error,
-        "scored_hotkeys": (
+        # A count, so name it a count. It previously read `scored_hotkeys`, which
+        # invites a consumer to treat it as the set.
+        "scored_hotkey_count": (
             epoch_proof.score_count if epoch_proof is not None else None
+        ),
+        # The exact digests, persisted into the audit so an activation decision can
+        # point at WHICH bytes were authenticated rather than trusting that something
+        # was. `body_sha256` covers the exact authenticated bytes; `semantic_sha256`
+        # covers the normalized semantic document, which is what the producer's report
+        # digest is taken over on the Cathedral side.
+        "body_sha256": proof_body_sha256,
+        "semantic_sha256": proof_semantic_sha256,
+        # Surfaced so an operator reading the audit can see WHAT was attested and by
+        # whom, rather than having to trust that something was checked.
+        "producer_hotkey": (
+            epoch_proof.producer_hotkey if epoch_proof is not None else None
+        ),
+        "producer_pinned": bool(cybergym_expected_producer_hotkey),
+        "evidence_sha256": (
+            epoch_proof.evidence_sha256 if epoch_proof is not None else None
+        ),
+        "evidence_pinned": bool(cybergym_expected_evidence_sha256),
+        # Precise, so nobody reads the pin as provenance.
+        "evidence_binding": (
+            "recomputed from the admitted receipts as "
+            f"{_evidence.SCHEMA}: the signed evidence digest must equal the canonical "
+            "manifest over the finally credited (miner_hotkey, receipt_id, work_units) "
+            "set for this audience epoch"
+        ),
+        "score_units": (epoch_proof.score_units if epoch_proof is not None else None),
+        "authentication": (
+            "shared-secret HMAC: authenticates the body and binds it to this audience "
+            "and epoch. It is NOT public proof of producer identity."
         ),
     }
 
@@ -1173,14 +1323,6 @@ def preview_integrated_vector(
             )
         )
 
-    # 3c. Exact set/value binding to the producer's attested scores. Runs after
-    #     verification because it compares the work units the contract actually
-    #     verified, not what the receipt claimed.
-    if epoch_proof is not None and funded_cybergym:
-        verified = _bind_to_epoch_proof(
-            integrated_feed, verified, proof=epoch_proof, lanes=funded_cybergym
-        )
-
     # 4. Screen for receipts an EARLIER pass already credited, as a read. Then claim
     #    the epoch, so exactly one pass per epoch can record anything at all.
     #    Deduplication WITHIN this preview is not done here: composition owns all
@@ -1189,6 +1331,74 @@ def preview_integrated_vector(
     decisions = _read_replay_gate(
         integrated_feed, verified, ledger=ledger, events=events
     )
+    # 4b. Bind the producer epoch proof to the FINAL credited set, before the epoch
+    #     claim and before any token is consumed. A dry composition (deferred marker
+    #     cleared, no ledger) is the oracle for what the five admission rules will
+    #     actually credit AFTER the replay read has dropped anything a previous pass
+    #     consumed. Binding earlier let a replayed receipt drop out afterwards and
+    #     hand its share to the survivor.
+    if epoch_proof is not None and funded_cybergym:
+        probe_order = _composition_order(decisions)
+        probe = integrated_feed.compose_integrated(
+            resolved,
+            [
+                replace(d, replay=integrated_feed.REPLAY_NONE)
+                if d.replay == integrated_feed.REPLAY_PENDING
+                else d
+                for d in (decisions[i] for i in probe_order)
+            ],
+            consumption_ledger=None,
+        )
+        decisions, bind_detail = _bind_to_epoch_proof(
+            integrated_feed,
+            decisions,
+            proof=epoch_proof,
+            lanes=funded_cybergym,
+            credited_rows=probe["audit"]["receipts"],
+        )
+        gates["cybergym_epoch_proof"]["bound"] = bind_detail is None
+        if bind_detail is not None:
+            gates["cybergym_epoch_proof"]["reason"] = bind_detail
+            _emit(events, "INTEGRATION_EPOCH_PROOF", status="FAIL", detail=bind_detail)
+
+    # 4c. Durable monotonic epoch admission for the authoritative pass. Runs BEFORE
+    #     the epoch claim so a rolled-back or conflicting epoch claims nothing and
+    #     consumes nothing. Keyed by audience, so two subnets cannot interfere.
+    if authoritative and funded_cybergym and epoch_proof is not None:
+        if not cybergym_epoch_state_path:
+            detail = (
+                "an authoritative pass on a funded CyberGym lane requires "
+                "cybergym_epoch_state_path: without durable per-audience epoch state, "
+                "a later epoch does not stop an earlier one from composing again, and "
+                "each rollback burns its own distinct per-epoch token so replay "
+                "protection does not catch it"
+            )
+            _emit(events, "INTEGRATION_EPOCH_STATE", status="FAIL", detail=detail)
+            raise IntegrationPolicyError(detail)
+        try:
+            state = _epoch_state.CyberGymEpochState(cybergym_epoch_state_path)
+            state.admit(
+                network=network,
+                netuid=netuid,
+                source_epoch=source_epoch,
+                # The digest of the exact authenticated bytes, so re-running the same
+                # epoch is permitted only with byte-identical evidence.
+                proof_digest=sha256(
+                    _epoch_proof.canonical_bytes(
+                        {
+                            "signature": str(cybergym_epoch_proof.get("signature")),
+                            "body": str(cybergym_epoch_proof.get("body")),
+                        }
+                    )
+                ).hexdigest(),
+                recorded_at=now.astimezone(UTC).isoformat(),
+            )
+        except _epoch_state.EpochStateError as exc:
+            detail = f"{exc.reason}: {exc.detail}" if exc.detail else exc.reason
+            _emit(events, "INTEGRATION_EPOCH_STATE", status="FAIL", detail=detail)
+            raise IntegrationPolicyError(detail) from exc
+        gates["cybergym_epoch_proof"]["epoch_state"] = "admitted"
+
     if authoritative:
         gates["authoritative_epoch_claim"] = _claim_authoritative_epoch(
             ledger,

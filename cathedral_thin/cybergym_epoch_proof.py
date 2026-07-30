@@ -49,6 +49,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping
@@ -72,6 +73,25 @@ SEMANTIC_KEYS = (
 
 DEFAULT_MAX_AGE_SECS = 3600.0
 DEFAULT_MAX_FUTURE_SKEW_SECS = 120.0
+
+# Mirror cathedral's intake caps so the validator refuses what the intake would have
+# refused. A body this side accepts but the producer side would reject is a contract
+# divergence, and the looser side is the one an attacker aims at.
+MAX_BODY_BYTES = 65_536  # CATHEDRAL_CYBERGYM_INGEST_MAX_BODY_BYTES default
+MAX_SCORES = 8_192  # CATHEDRAL_CYBERGYM_INGEST_MAX_SCORES default
+MAX_HOTKEY_CHARS = 128  # intake's per-hotkey bound, also producer and network
+MAX_NETUID = 2**16 - 1  # cybergym_ingest.MAX_NETUID
+MAX_SOURCE_EPOCH = 2**31 - 1  # cybergym_ingest._MAX_SOURCE_EPOCH
+# The units string is part of the signed body. Pin it so a producer cannot switch
+# scales (points to fractions, say) without the change being visible here.
+#
+# This is the value Cathedral's contract, bridge and mounted-intake tests actually put
+# on the wire. Cathedral's intake only regex-checks the label, so it would accept any
+# well-formed string; this validator asserts the ONE scale it knows how to compose,
+# because a silent scale change is a silent reward change. An earlier revision pinned
+# an invented label that no producer emits, which rejected every real report.
+EXPECTED_SCORE_UNITS = "level_weighted_verified_solves"
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EpochProofError(RuntimeError):
@@ -196,8 +216,31 @@ def normalize(document: Any) -> dict:
             "epoch_not_complete",
             f"complete={complete!r}; only an epoch the producer closed may compose",
         )
-    if source_epoch < 0:
-        raise EpochProofError("invalid_document", "negative source_epoch")
+    # Exact parity with cathedral's intake: a body this side accepts but the intake
+    # would reject is a contract divergence, and the looser side is the one an
+    # attacker aims at.
+    if source_epoch < 0 or source_epoch > MAX_SOURCE_EPOCH:
+        raise EpochProofError("invalid_document", "source_epoch out of range")
+    if netuid < 0 or netuid > MAX_NETUID:
+        raise EpochProofError("invalid_document", "netuid out of range")
+    # Bound the RAW value before trimming. Checking only the trimmed length lets a
+    # caller pad an oversized field with whitespace to slip past the cap here while
+    # the intake, which bounds the raw string, would have refused it.
+    if not producer.strip() or len(producer) > MAX_HOTKEY_CHARS:
+        raise EpochProofError("invalid_document", "producer_hotkey length")
+    if not network.strip() or len(network) > MAX_HOTKEY_CHARS:
+        raise EpochProofError("invalid_document", "network length")
+    if score_units != EXPECTED_SCORE_UNITS:
+        raise EpochProofError(
+            "unexpected_score_units",
+            f"{score_units!r}; this validator composes {EXPECTED_SCORE_UNITS!r} only",
+        )
+    # fullmatch, not match: `match` anchors only the START, so a 64-hex prefix
+    # followed by anything at all would have passed.
+    if not _SHA256_HEX_RE.fullmatch(evidence):
+        raise EpochProofError("invalid_evidence_digest", "not exactly 64 lowercase hex")
+    if len(scores) > MAX_SCORES:
+        raise EpochProofError("too_many_scores", f"{len(scores)} > {MAX_SCORES}")
 
     try:
         parsed_at = datetime.fromisoformat(generated_at.strip().replace("Z", "+00:00"))
@@ -221,6 +264,9 @@ def normalize(document: Any) -> dict:
         score = float(value)
         if not math.isfinite(score) or score < 0.0:
             raise EpochProofError("invalid_score", "score value")
+        # Raw length first, for the same reason as producer/network above.
+        if len(hotkey) > MAX_HOTKEY_CHARS:
+            raise EpochProofError("invalid_score", "hotkey too long")
         normalized_hotkey = hotkey.strip()
         if not normalized_hotkey or normalized_hotkey in normalized_scores:
             raise EpochProofError("invalid_score", "score hotkey")
@@ -247,6 +293,9 @@ def verify_epoch_proof(
     netuid: int,
     source_epoch: int,
     now: datetime,
+    expected_producer_hotkey: str | None = None,
+    expected_evidence_sha256: str | None = None,
+    require_evidence_pin: bool = False,
     max_age_secs: float = DEFAULT_MAX_AGE_SECS,
     max_future_skew_secs: float = DEFAULT_MAX_FUTURE_SKEW_SECS,
 ) -> VerifiedEpochProof:
@@ -283,6 +332,10 @@ def verify_epoch_proof(
         raise EpochProofError("invalid_proof", "body must be text or bytes")
     if not body_bytes:
         raise EpochProofError("invalid_proof", "empty body")
+    if len(body_bytes) > MAX_BODY_BYTES:
+        raise EpochProofError(
+            "body_too_large", f"{len(body_bytes)} > {MAX_BODY_BYTES} bytes"
+        )
 
     # An unset secret must refuse, never pass. A rotated or missing secret makes the
     # proof unverifiable, and an unverifiable completeness claim is exactly the case
@@ -299,7 +352,18 @@ def verify_epoch_proof(
     # body it received. Non-canonical spacing or key order is therefore fine: what
     # is authenticated is the byte string the producer actually signed.
     expected = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(_strip_sha256_prefix(signature), expected):
+    supplied = _strip_sha256_prefix(signature)
+    # hmac.compare_digest raises TypeError on a non-ASCII str, so a signature with
+    # any non-ASCII byte would escape the typed-error boundary and surface as a crash
+    # instead of a clean authentication failure. Mirrors the intake, which returns 401
+    # rather than 500 for the same input.
+    try:
+        supplied.encode("ascii")
+    except UnicodeEncodeError:
+        raise EpochProofError(
+            "invalid_signature", "signature is not ASCII hex"
+        ) from None
+    if not hmac.compare_digest(supplied, expected):
         raise EpochProofError(
             "invalid_signature",
             "HMAC does not match the authenticated body under the configured secret",
@@ -319,6 +383,43 @@ def verify_epoch_proof(
             "wrong_audience",
             f"proof is for {document['network']}/{document['netuid']}, "
             f"composing {network}/{netuid}",
+        )
+    # Possessing the shared secret is NOT producer identity. The operator pins which
+    # producer this validator will compose, and a proof from any other hotkey is
+    # refused even though its HMAC verifies, because the secret alone cannot tell
+    # one holder from another.
+    if expected_producer_hotkey is not None and (
+        str(document["producer_hotkey"]) != str(expected_producer_hotkey)
+    ):
+        raise EpochProofError(
+            "unexpected_producer",
+            f"proof is from {document['producer_hotkey']!r}, "
+            f"this validator composes {expected_producer_hotkey!r} only",
+        )
+    # The signed evidence digest is producer-chosen: re-signing an arbitrary 64-hex
+    # string is trivial for whoever holds the secret, so on its own the field proves
+    # nothing. A funded lane therefore requires an operator pin.
+    #
+    # Be precise about what that pin is and is not. It anchors the digest to a value a
+    # human fixed, which stops an attacker-chosen digest from riding along. It is NOT
+    # artifact binding: nothing here fetches the evidence bundle and hashes it, so the
+    # digest is not proven to describe the work that was actually done. Real binding
+    # means deriving the digest from the durable artifact or result and comparing, and
+    # that is NOT IMPLEMENTED. Until it is, this gate must not be read as evidence
+    # provenance, and a rewarded activation should treat the artifact link as unproven.
+    if require_evidence_pin and not expected_evidence_sha256:
+        raise EpochProofError(
+            "evidence_not_pinned",
+            "a funded CyberGym lane requires cybergym_expected_evidence_sha256: the "
+            "signed evidence digest is producer-chosen and proves nothing unpinned",
+        )
+    if expected_evidence_sha256 is not None and (
+        str(document["evidence_sha256"]).lower()
+        != str(expected_evidence_sha256).lower()
+    ):
+        raise EpochProofError(
+            "unexpected_evidence_digest",
+            "the signed evidence digest does not match the pinned one",
         )
     if int(document["source_epoch"]) != int(source_epoch):
         raise EpochProofError(
