@@ -8,9 +8,9 @@ rather than trusted from the shared contract:
   already credited;
 * replay: the same receipt offered to two consecutive previews is refused the
   second time;
-* fail-open ledger: even if the ledger wrongly reports a fresh consume, the seam
-  itself still credits one receipt once, so replay protection is not a single
-  point of failure;
+* fail-open ledger: a ledger that reports a consume it did not record, or that
+  cannot be read back at all, is refused as a preview-level failure rather than
+  trusted, because within-preview deduplication cannot see across previews;
 * concurrency: two consumers racing one token, exactly one wins. That case is
   gated on CATHEDRAL_LEDGER_RACE_TEST=1 because the shipped ledger shares one
   connection with no busy timeout and does NOT hold under a real race; enabling
@@ -162,24 +162,81 @@ def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Defence in depth: the seam credits once even if the ledger fails open
+# A ledger that does not actually record is refused, not trusted
 # --------------------------------------------------------------------------- #
 
 
-def test_the_seam_credits_once_even_if_the_ledger_never_refuses(monkeypatch):
-    """A ledger that wrongly reports a fresh consume must not double-credit."""
+def test_a_no_op_ledger_is_refused_instead_of_credited(monkeypatch):
+    """Presence is not a gate: the consumption is read back before crediting.
+
+    Deduplication inside one preview hid this. Across two CONSECUTIVE previews the
+    seam had nothing left to dedupe against, so a ledger whose `consume` silently
+    did nothing let the same receipt earn twice.
+    """
     fx = IntegrationFixtures()
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)  # fails open
 
+    with pytest.raises(ig.IntegrationLedgerError, match="not on record"):
+        _preview(fx, _one(fx, receipt), ledger)
+
+
+def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypatch):
+    fx = IntegrationFixtures()
+    receipt = fx.cpu_receipt()
+    ledger = durable_ledger()
+    monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)
+
+    for _attempt in (1, 2):
+        with pytest.raises(ig.IntegrationLedgerError):
+            _preview(fx, _one(fx, receipt), ledger)
+    assert ledger.size() == 0  # nothing was credited on that basis
+
+
+def test_a_ledger_that_cannot_be_queried_is_refused_at_the_gate():
+    """An object that cannot record and read back is not replay protection."""
+
+    class WriteOnly:
+        def consume(self, *_a, **_kw):
+            return None
+
+    fx = IntegrationFixtures()
+    with pytest.raises(ig.IntegrationLedgerError, match="is_consumed"):
+        _preview(fx, _one(fx, fx.cpu_receipt()), WriteOnly())
+
+
+def test_the_contract_no_replay_marker_counts_as_no_ledger():
+    """NO_REPLAY_LEDGER is the contract's "no protection" marker, not a gate.
+
+    Accepting it as an applied ledger would let a funded lane preview with replay
+    protection switched off while reporting the ledger gate as satisfied.
+    """
+    no_replay = pytest.importorskip(
+        "cathedral_distill.consumption_ledger"
+    ).NO_REPLAY_LEDGER
+    fx = IntegrationFixtures()
+    with pytest.raises(ig.IntegrationPolicyError, match="consumption_ledger"):
+        _preview(fx, _one(fx, fx.cpu_receipt()), no_replay)
+
+    out = _preview(
+        fx, _one(fx, fx.cpu_receipt()), no_replay, allow_unpoliced_preview=True
+    )
+    assert out["gates"]["applied"]["consumption_ledger"] is False
+    assert "consumption_ledger" in out["gates"]["omitted_gates"]
+
+
+def test_the_seam_credits_one_receipt_once_within_a_preview():
+    """Deduplication is independent of the ledger, which is the second line."""
+    fx = IntegrationFixtures()
+    receipt = fx.cpu_receipt()
     out = _preview(
         fx,
         [
             ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt),
             ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt),
         ],
-        ledger,
+        durable_ledger(),
     )
     verdicts = out["audit"]["verdicts"]
     assert verdicts["pass"] == 1 and verdicts["fail"] == 1

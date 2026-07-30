@@ -48,10 +48,23 @@ class IntegrationPolicyError(IntegrationError):
     """
 
 
+class IntegrationLedgerError(IntegrationError):
+    """The replay ledger is not usable, or could not record a consumption.
+
+    Shared infrastructure failing is a preview-level failure, not a per-receipt
+    verdict. A ledger outage that is reported as one FAIL per receipt composes a
+    100% burn vector and still calls the preview a success, which denies every
+    legitimate miner while looking like a normal result.
+    """
+
+
 # The gates a funded (nonzero-allocation) lane must be able to apply. Each
-# allow-list is REQUIRED but MAY BE EMPTY: `frozenset()` is a deliberate
-# deny-everything policy, and it is a different state from `None`, which means
-# the operator never expressed a policy at all. Only the second is refused.
+# allow-list is REQUIRED but MAY BE EMPTY, and what empty means is per list:
+# an empty measurement or TCB-status allow-list denies every receipt (each
+# receipt carries exactly one of each), while an empty advisory allow-list admits
+# only receipts that carry no advisory at all (the check is a subset test). All
+# three are still different from `None`, which means the operator never expressed
+# a policy; only `None` is refused.
 REQUIRED_REWARD_GATES = (
     "allowed_measurements",
     "allowed_tcb_statuses",
@@ -251,6 +264,141 @@ def _deduplicate(integrated_feed, decisions: Sequence[Any]) -> list[Any]:
     return out
 
 
+def _no_replay_sentinel():
+    """The shared contract's typed "no replay protection" marker, if it ships one."""
+    try:
+        from cathedral_distill.consumption_ledger import NO_REPLAY_LEDGER
+    except ImportError:  # older contract without the sentinel
+        return None
+    return NO_REPLAY_LEDGER
+
+
+def _usable_ledger(ledger: Any) -> Any:
+    """Return a ledger that can actually record and answer, or None.
+
+    Presence is not a gate. `NO_REPLAY_LEDGER` is the contract's explicit "no
+    replay protection" marker, so it counts as no ledger rather than as an applied
+    one, and an object that cannot record or cannot be queried is refused outright
+    instead of being reported as a gate that ran.
+    """
+    if ledger is None:
+        return None
+    sentinel = _no_replay_sentinel()
+    if sentinel is not None and ledger is sentinel:
+        return None
+    missing = [
+        name
+        for name in ("consume", "is_consumed")
+        if not callable(getattr(ledger, name, None))
+    ]
+    if missing:
+        raise IntegrationLedgerError(
+            "the configured consumption ledger cannot be used: it does not implement "
+            + ", ".join(missing)
+            + ". A consumption that cannot be recorded and read back is not replay "
+            "protection; pass a cathedral_distill.consumption_ledger.ConsumptionLedger "
+            "on a durable path, or NO_REPLAY_LEDGER to state that this preview has none"
+        )
+    return ledger
+
+
+def _consume_selected(
+    integrated_feed,
+    decisions: Sequence[Any],
+    *,
+    ledger: Any,
+    source_epoch: int,
+    events: Any = None,
+) -> list[Any]:
+    """Consume the replay token of the decisions that will actually be credited.
+
+    Consumption is the one irreversible step in a preview, so it runs last, over
+    the already-selected set. Consuming during verification instead made the
+    outcome depend on submission order: the same signed receipt offered to two
+    funded lanes had its token burned by whichever submission came first, so the
+    lane that kept the receipt, and therefore the composed vector, changed when
+    the caller reordered its inputs. Nothing is consumed for a receipt that will
+    not be credited.
+
+    The token is the `receipt_id`, which is what the shared contract makes
+    once-only; the `kind` column is metadata and mirrors the contract's naming.
+
+    Every consumption is read back. A replay is a per-receipt FAIL, but a ledger
+    that cannot record, cannot answer, or reports success without recording is a
+    preview-level ``IntegrationLedgerError``: it is shared infrastructure, and
+    turning its outage into one FAIL per receipt would compose a 100% burn vector
+    and report PASS while denying every legitimate miner.
+    """
+    if ledger is None:
+        return list(decisions)
+
+    from cathedral_distill.consumption_ledger import ReplayError
+
+    def unusable(decision, reason: str) -> IntegrationLedgerError:
+        detail = (
+            f"replay ledger unusable while crediting {decision.receipt_id}: {reason}"
+        )
+        _emit(events, "INTEGRATION_LEDGER", status="FAIL", detail=detail)
+        return IntegrationLedgerError(detail)
+
+    def recorded(decision) -> bool:
+        try:
+            return bool(ledger.is_consumed(decision.receipt_id))
+        except Exception as exc:
+            raise unusable(decision, f"is_consumed failed: {exc}") from exc
+
+    out: list[Any] = []
+    for decision in decisions:
+        if not decision.creditable:
+            out.append(decision)
+            continue
+        try:
+            ledger.consume(
+                decision.receipt_id,
+                kind=f"{decision.kind}_receipt_id",
+                source_epoch=source_epoch,
+            )
+        except ReplayError as exc:
+            # ReplayError covers both "already consumed" and "could not record".
+            # Ask the ledger which one it was instead of parsing its message: a
+            # token that is on record was a genuine replay, anything else means
+            # the consumption did not happen.
+            if not recorded(decision):
+                raise unusable(decision, f"consumption not recorded: {exc}") from exc
+            _emit(
+                events,
+                "INTEGRATION_REPLAY",
+                status="FAIL",
+                hotkey=decision.miner_hotkey,
+                lane=decision.lane,
+                receipt_id=decision.receipt_id,
+                detail=str(exc),
+            )
+            out.append(
+                integrated_feed.ReceiptDecision(
+                    decision.lane,
+                    decision.kind,
+                    decision.receipt_id,
+                    decision.miner_hotkey,
+                    integrated_feed.FAIL,
+                    Decimal(0),
+                    str(exc),
+                )
+            )
+            continue
+        except Exception as exc:
+            raise unusable(decision, f"{type(exc).__name__}: {exc}") from exc
+        if not recorded(decision):
+            # A ledger that reports a fresh consume without recording it fails
+            # OPEN: the same receipt would be creditable again in the next
+            # preview. Refuse the preview rather than credit on that basis.
+            raise unusable(
+                decision, "consume() reported success but the token is not on record"
+            )
+        out.append(decision)
+    return out
+
+
 def preview_integrated_vector(
     *,
     burn_config: bytes,
@@ -296,6 +444,10 @@ def preview_integrated_vector(
     * a funded lane (nonzero allocation) with any of ``REQUIRED_REWARD_GATES``
       omitted raises ``IntegrationPolicyError`` unless
       ``allow_unpoliced_preview=True``;
+    * a replay ledger that cannot record, cannot be queried, or reports a consume
+      it did not record raises ``IntegrationLedgerError``: shared infrastructure
+      failing is a preview-level failure, never a per-receipt verdict that still
+      composes a vector;
     * a receipt whose subject is the configured burn hotkey is FAIL, never a
       reward subject;
     * an individual receipt that cannot be verified, for any reason including an
@@ -346,12 +498,13 @@ def preview_integrated_vector(
     # 2. Admission-gate audit. A funded lane must be able to apply the launch
     #    policy; omitting a gate is a deliberate opt-out or a refusal, never a
     #    silent default that reads as "policy verified".
+    ledger = _usable_ledger(consumption_ledger)
     supplied = {
         "allowed_measurements": allowed_measurements,
         "allowed_tcb_statuses": allowed_tcb_statuses,
         "allowed_advisories": allowed_advisories,
         "current_block": current_block,
-        "consumption_ledger": consumption_ledger,
+        "consumption_ledger": ledger,
     }
     omitted = [name for name in REQUIRED_REWARD_GATES if supplied[name] is None]
     reward_lanes = sorted(
@@ -370,7 +523,7 @@ def preview_integrated_vector(
                 "tcb_policy": allowed_tcb_statuses is not None,
                 "advisory_policy": allowed_advisories is not None,
                 "block_window": current_block is not None,
-                "consumption_ledger": consumption_ledger is not None,
+                "consumption_ledger": ledger is not None,
             }
             for lane, alloc in sorted(resolved.lane_allocations.items())
         },
@@ -382,8 +535,9 @@ def preview_integrated_vector(
             + " previewed without "
             + ", ".join(omitted)
             + "; pass allow_unpoliced_preview=True for a deliberately unpoliced "
-            "shadow preview, or supply the gate (an empty allow-list is a valid, "
-            "explicit deny-everything policy)"
+            "shadow preview, or supply the gate (an explicitly empty allow-list is "
+            "a valid policy: empty measurements or TCB statuses admit nothing, an "
+            "empty advisory list admits only advisory-free receipts)"
         )
         _emit(events, "INTEGRATION_POLICY", status="FAIL", detail=detail)
         raise IntegrationPolicyError(detail)
@@ -402,8 +556,12 @@ def preview_integrated_vector(
             detail="every required admission gate was applied",
         )
 
-    # 3. Independently verify each lane receipt. Every failure is contained here:
-    #    one malformed contribution can never abort the complete vector.
+    # 3. Verify every receipt WITHOUT consuming anything. Consumption is
+    #    irreversible, so it cannot happen while the credited set is still
+    #    undecided: a receipt offered to two lanes would otherwise have its token
+    #    burned by whichever submission the caller happened to list first, which
+    #    made the composed vector depend on input order. Every failure is
+    #    contained here: one malformed contribution can never abort the vector.
     known_lanes = set(resolved.lane_allocations)
     verified = []
     for item in receipts:
@@ -419,18 +577,26 @@ def preview_integrated_vector(
                 current_block=current_block,
                 gpu_attestation_verifier=gpu_attestation_verifier,
                 cpu_quote_verifier=cpu_quote_verifier,
-                consumption_ledger=consumption_ledger,
                 allowed_measurements=allowed_measurements,
                 allowed_tcb_statuses=allowed_tcb_statuses,
                 allowed_advisories=allowed_advisories,
             )
         )
 
-    # 4. Deduplicate before composing: one receipt earns once across the whole
-    #    preview, and a miner with two credited receipts in one lane keeps
-    #    exactly one. Both cases raise inside `compose_integrated`, which would
-    #    abort the vector for every honest lane too.
-    decisions = _deduplicate(integrated_feed, verified)
+    # 4. Select deterministically, and only then consume. One receipt earns once
+    #    across the whole preview, and a miner with two credited receipts in one
+    #    lane keeps exactly one; both cases raise inside `compose_integrated`,
+    #    which would abort the vector for every honest lane too. Selection reads
+    #    only the verified decisions, so it is a pure function of the receipt set
+    #    rather than of its order.
+    selected = _deduplicate(integrated_feed, verified)
+    decisions = _consume_selected(
+        integrated_feed,
+        selected,
+        ledger=ledger,
+        source_epoch=source_epoch,
+        events=events,
+    )
     for decision in decisions:
         _emit(
             events,
@@ -498,6 +664,7 @@ __all__ = [
     "IntegrationUnavailable",
     "IntegrationError",
     "IntegrationPolicyError",
+    "IntegrationLedgerError",
     "REQUIRED_REWARD_GATES",
     "DEFAULT_LANE_FOR_KIND",
     "LANE_COMPUTE_CPU",

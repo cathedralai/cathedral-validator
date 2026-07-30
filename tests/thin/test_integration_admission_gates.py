@@ -43,7 +43,13 @@ def test_preview_exposes_every_admission_gate_the_contract_implements():
 
 
 def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
-    """Proves the parameters are forwarded, not merely accepted and dropped."""
+    """Proves the parameters are forwarded, not merely accepted and dropped.
+
+    The consumption ledger is deliberately NOT among them: consumption is
+    irreversible, so the seam runs verification without it and consumes the
+    selected set afterwards. `test_the_ledger_is_used_after_selection_not_during`
+    covers that half.
+    """
     seen: dict = {}
     real = itf.verify_lane_receipt
 
@@ -54,7 +60,7 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
     monkeypatch.setattr(itf, "verify_lane_receipt", spy)
 
     fx = IntegrationFixtures()
-    ledger = object()
+    ledger = durable_ledger()
 
     def gpu_verifier(_evidence):
         return True
@@ -91,7 +97,6 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
         pass
 
     assert seen.get("current_block") == 123456
-    assert seen.get("consumption_ledger") is ledger
     assert seen.get("allowed_measurements") == frozenset(
         {"tdx-measurement-sha256:" + "a" * 64}
     )
@@ -99,6 +104,38 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
     assert seen.get("allowed_advisories") == frozenset()
     assert seen.get("gpu_attestation_verifier") is gpu_verifier
     assert seen.get("cpu_quote_verifier") is cpu_verifier
+    # verification must not consume: this receipt was refused by the policy above
+    assert ledger.size() == 0
+
+
+def test_the_ledger_is_used_after_selection_not_during():
+    """The credited receipt's token is consumed, and only that one."""
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipt = fx.cpu_receipt()
+    out = ig.preview_integrated_vector(
+        burn_config=fx.burn_config(),
+        allocation_config=fx.allocation_config(
+            [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+        ),
+        key_registry=fx.registry,
+        receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt)],
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        now=__import__("datetime").datetime(
+            2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+        ),
+        now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=ledger,
+    )
+    assert out["audit"]["verdicts"]["pass"] == 1
+    assert ledger.is_consumed(receipt["receipt_id"])
+    assert ledger.size() == 1
 
 
 def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():

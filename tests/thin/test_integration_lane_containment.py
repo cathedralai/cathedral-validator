@@ -145,7 +145,13 @@ def test_a_verifier_that_raises_fails_only_that_receipt():
     assert cpu["verdict"] == itf.FAIL
 
 
-def test_a_ledger_that_raises_an_unexpected_error_fails_only_that_receipt(monkeypatch):
+def test_a_ledger_outage_fails_the_preview_instead_of_burning_every_lane(monkeypatch):
+    """Shared infrastructure failing is not a per-receipt verdict.
+
+    Turning a ledger outage into one FAIL per receipt composed a 100% burn vector
+    and reported PASS, which denies every legitimate miner while looking like a
+    normal epoch. It is a preview-level failure.
+    """
     fx = IntegrationFixtures()
     ledger = durable_ledger()
 
@@ -153,20 +159,22 @@ def test_a_ledger_that_raises_an_unexpected_error_fails_only_that_receipt(monkey
         raise RuntimeError("ledger storage is unavailable")
 
     monkeypatch.setattr(ledger, "consume", explode)
-    out = _preview(
-        fx,
-        [
-            _good_cpu(fx),
-            ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, fx.distill_receipt()),
-        ],
-        consumption_ledger=ledger,
-    )
-    # no receipt is credited, no lane steals another lane's share, nothing aborts
-    assert out["feed"]["weights"] == []
-    assert out["audit"]["verdicts"]["fail"] == 2
-    assert out["feed"]["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(
-        100.0
-    )
+    with pytest.raises(
+        ig.IntegrationLedgerError, match="ledger storage is unavailable"
+    ):
+        _preview(
+            fx,
+            [
+                _good_cpu(fx),
+                ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, fx.distill_receipt()),
+            ],
+            consumption_ledger=ledger,
+        )
+
+
+def test_a_ledger_outage_is_reported_as_an_integration_error():
+    """Callers that already handle IntegrationError keep failing closed."""
+    assert issubclass(ig.IntegrationLedgerError, ig.IntegrationError)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +225,48 @@ def test_which_duplicate_wins_is_independent_of_submission_order():
         }
 
     assert credited([first, second]) == credited([second, first])
+
+
+def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
+    """With a ledger configured, consumption used to happen during verification,
+    so whichever submission the caller listed first burned the token and the OTHER
+    lane lost its contribution. Reversing the input moved the forced burn between
+    20% and 90%. Selection now completes before anything is consumed."""
+    fx = IntegrationFixtures()
+    receipt = fx.distill_receipt()
+    forward = ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, receipt)
+    reverse = ig.LaneReceipt(itf.KIND_DISTILL, LANE_CPU, receipt)
+
+    def summary(order):
+        out = _preview(fx, list(order), consumption_ledger=durable_ledger())
+        return (
+            out["feed"]["burn_snapshot"]["forced_burn_percentage"],
+            sorted((r["lane"], r["verdict"]) for r in out["audit"]["receipts"]),
+        )
+
+    assert summary([forward, reverse]) == summary([reverse, forward])
+    burn, verdicts = summary([forward, reverse])
+    # the receipt earns in exactly one lane; the other lane's share burns
+    assert [v for _lane, v in verdicts].count(itf.PASS) == 1
+    assert burn == pytest.approx(55.0)  # 0.10 base + the lane that earned nothing
+
+
+def test_a_receipt_that_is_not_credited_keeps_its_replay_token():
+    """Nothing is consumed for a contribution the preview will not credit."""
+    fx = IntegrationFixtures()
+    receipt = fx.cpu_receipt()
+    ledger = durable_ledger()
+    out = _preview(
+        fx,
+        [
+            ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt),
+            # same receipt, unfunded lane: refused, so it must not be consumed
+            ig.LaneReceipt(itf.KIND_COMPUTE_CPU, "lane_nobody_funded", receipt),
+        ],
+        consumption_ledger=ledger,
+    )
+    assert out["audit"]["verdicts"]["pass"] == 1
+    assert ledger.size() == 1  # exactly the credited receipt, nothing else
 
 
 def test_one_receipt_replayed_into_two_lanes_earns_once_without_a_ledger():
