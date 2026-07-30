@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 from cathedral_thin import cybergym_epoch_proof as ep
+from cathedral_thin import cybergym_evidence_manifest as ev
 
 pytest.importorskip("cathedral_distill.integrated_feed")
 pytest.importorskip("cathedral_distill.testing")
@@ -139,7 +140,26 @@ def _policy(fx, ledger=None, **over):
 
 PROOF_SECRET = "cybergym-epoch-proof-secret"
 PRODUCER = "5Producer"
-EVIDENCE_SHA256 = "c" * 64
+
+
+# No longer a literal: the report's evidence digest must equal the canonical manifest
+# over the credited set, so the fixture computes it the way a producer would.
+def entries_for(*receipts, work_units="12"):
+    """The manifest entries a producer would build for these receipts.
+
+    work_units defaults to 12 because that is what the fixture receipt derives, and the
+    manifest commits to the exact composed quantity.
+    """
+    return [
+        {
+            "miner_hotkey": r["miner_hotkey"],
+            "receipt_id": r["receipt_id"],
+            "work_units": work_units,
+        }
+        for r in receipts
+    ]
+
+
 # The label real producers put on the wire, taken from Cathedral's own contract,
 # bridge and mounted-intake fixtures rather than invented here.
 SCORE_UNITS = "level_weighted_verified_solves"
@@ -171,7 +191,8 @@ def epoch_proof(
     secret=PROOF_SECRET,
     tamper=None,
     body_text=None,
-    evidence_sha256=EVIDENCE_SHA256,
+    evidence_sha256=None,
+    entries=None,
 ):
     """The producer's signed epoch report, carried as the EXACT authenticated bytes.
 
@@ -191,7 +212,16 @@ def epoch_proof(
         "complete": complete,
         "score_units": SCORE_UNITS,
         "scores": dict(scores) if scores is not None else {m: score for m in miners},
-        "evidence_sha256": evidence_sha256,
+        "evidence_sha256": (
+            evidence_sha256
+            if evidence_sha256 is not None
+            else ev.manifest_digest(
+                network=network,
+                netuid=netuid,
+                source_epoch=epoch,
+                entries=entries if entries is not None else [],
+            )
+        ),
     }
     if tamper is not None:
         signed = dict(document)
@@ -229,10 +259,18 @@ def _preview(fx, receipts, **kw):
     # A funded CyberGym lane now requires a verified producer epoch-completeness
     # proof, so supply a valid one by default: each test below keeps testing the
     # property it was written for, and the proof-specific cases pass their own.
-    kw.setdefault("cybergym_epoch_proof", epoch_proof())
+    # Default to a proof that actually commits to the receipts under test, which is
+    # what a real producer emits. A test that wants a mismatch passes its own.
+    cyber = [item.receipt for item in receipts if str(item.kind) == itf.KIND_CYBERGYM]
+    kw.setdefault(
+        "cybergym_epoch_proof",
+        epoch_proof(
+            scores={r["miner_hotkey"]: 12.0 for r in cyber},
+            entries=entries_for(*cyber),
+        ),
+    )
     kw.setdefault("cybergym_epoch_proof_secret", PROOF_SECRET)
     kw.setdefault("cybergym_expected_producer_hotkey", PRODUCER)
-    kw.setdefault("cybergym_expected_evidence_sha256", EVIDENCE_SHA256)
     # Fill only ABSENT policy gates, so a test that deliberately passes a gate as
     # None still exercises the omission refusal.
     for name, value in _policy(fx).items():
@@ -374,9 +412,15 @@ def test_an_epoch_mismatched_receipt_is_refused():
 def _bundle(fx, tmp_path, receipts, **over):
     # A funded cybergym lane needs the producer proof in the bundle; the secret is
     # read from the environment by the CLI, never from the bundle file.
-    over.setdefault("cybergym_epoch_proof", epoch_proof())
+    cyber = [r["receipt"] for r in receipts if str(r.get("kind")) == "cybergym"]
+    over.setdefault(
+        "cybergym_epoch_proof",
+        epoch_proof(
+            scores={r["miner_hotkey"]: 12.0 for r in cyber},
+            entries=entries_for(*cyber),
+        ),
+    )
     over.setdefault("cybergym_expected_producer_hotkey", PRODUCER)
-    over.setdefault("cybergym_expected_evidence_sha256", EVIDENCE_SHA256)
     pub = base64.b64encode(fx.key.public_key().public_bytes_raw()).decode()
     bundle = {
         "network": "finney",
@@ -683,10 +727,13 @@ def test_a_work_unit_value_that_disagrees_with_the_attested_score_burns():
 
 def test_the_exact_matching_set_and_values_pay():
     fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
     out = _preview(
         fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
-        cybergym_epoch_proof=epoch_proof(scores={"5CyberMiner": 12.0}),
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=epoch_proof(
+            scores={"5CyberMiner": 12.0}, entries=entries_for(receipt)
+        ),
     )
     verdict, _ = _only_reason(out)
     assert verdict == itf.PASS
@@ -748,6 +795,7 @@ def _cathedral_contract():
 def test_the_validator_verifies_what_cathedrals_producer_actually_signs():
     contract = _cathedral_contract()
     fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
     document = {
         "producer_hotkey": "5Producer",
         "network": "finney",
@@ -757,7 +805,12 @@ def test_the_validator_verifies_what_cathedrals_producer_actually_signs():
         "complete": True,
         "score_units": SCORE_UNITS,
         "scores": {"5CyberMiner": 12.0},
-        "evidence_sha256": EVIDENCE_SHA256,
+        "evidence_sha256": ev.manifest_digest(
+            network="finney",
+            netuid=39,
+            source_epoch=SOURCE_EPOCH,
+            entries=entries_for(receipt),
+        ),
     }
     # Exactly what the producer puts on the wire and the intake authenticates.
     body = contract.canonical_report_bytes(
@@ -772,7 +825,7 @@ def test_the_validator_verifies_what_cathedrals_producer_actually_signs():
 
     out = _preview(
         fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
+        [_lane_receipt(receipt)],
         cybergym_epoch_proof={"body": body.decode("utf-8"), "signature": signature},
     )
     verdict, detail = _only_reason(out)
@@ -787,6 +840,7 @@ def test_a_noncanonical_wire_body_still_verifies_over_its_exact_bytes():
     # the byte string the producer signed, not a re-serialization of it.
     contract = _cathedral_contract()
     fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
     document = contract.normalize_semantic_document(
         {
             "producer_hotkey": "5Producer",
@@ -797,7 +851,12 @@ def test_a_noncanonical_wire_body_still_verifies_over_its_exact_bytes():
             "complete": True,
             "score_units": SCORE_UNITS,
             "scores": {"5CyberMiner": 12.0},
-            "evidence_sha256": EVIDENCE_SHA256,
+            "evidence_sha256": ev.manifest_digest(
+                network="finney",
+                netuid=39,
+                source_epoch=SOURCE_EPOCH,
+                entries=entries_for(receipt),
+            ),
         }
     )
     pretty = json.dumps(document, indent=2, sort_keys=True)  # NOT canonical
@@ -806,7 +865,7 @@ def test_a_noncanonical_wire_body_still_verifies_over_its_exact_bytes():
 
     out = _preview(
         fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
+        [_lane_receipt(receipt)],
         cybergym_epoch_proof={"body": pretty, "signature": signature},
     )
     verdict, detail = _only_reason(out)
@@ -995,7 +1054,6 @@ def test_a_backdated_bundle_cannot_revive_a_stale_proof():
         cybergym_epoch_proof=epoch_proof(generated_at=_fresh_iso(-7200)),
         cybergym_epoch_proof_secret=PROOF_SECRET,
         cybergym_expected_producer_hotkey=PRODUCER,
-        cybergym_expected_evidence_sha256=EVIDENCE_SHA256,
         **_policy(fx),
     )
     assert _cybergym_burned(out)
@@ -1016,10 +1074,11 @@ def test_a_funded_empty_epoch_still_requires_a_proof():
 def test_the_gate_report_exposes_what_was_attested():
     fx = _fixtures()
     out = _preview(fx, [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))])
+    # _preview derives a committing proof from the receipts, as a producer would.
     proof = out["gates"]["cybergym_epoch_proof"]
     assert proof["verified"] is True and proof["bound"] is True
     assert proof["producer_hotkey"] == PRODUCER and proof["producer_pinned"] is True
-    assert proof["evidence_sha256"] == "c" * 64
+    assert re.fullmatch(r"[0-9a-f]{64}", proof["evidence_sha256"])
     assert proof["score_units"] == SCORE_UNITS
     # the caveat travels with the evidence, so nobody reads this as public provenance
     assert "NOT public proof of producer identity" in proof["authentication"]
@@ -1028,35 +1087,81 @@ def test_the_gate_report_exposes_what_was_attested():
 # --------------------------------------------------------------------------- #
 # The five blockers an independent audit reproduced against d37f0e8
 # --------------------------------------------------------------------------- #
-def test_an_unpinned_evidence_digest_cannot_earn():
-    """A re-signed arbitrary digest earned weight 1.0 with evidence_pinned=false.
+def test_an_arbitrary_resigned_evidence_digest_cannot_earn():
+    """The digest must COMMIT to the credited set, not merely be well formed.
 
-    The signed evidence digest is PRODUCER-chosen, so whoever holds the secret can
-    re-sign any 64-hex string. Unpinned it proves nothing, so a funded lane now
-    requires the operator's pin and refuses without it.
+    Previously this field was producer-chosen and unbound, so a re-signed arbitrary
+    64-hex value earned weight 1.0. An operator pin only anchored it to a value a human
+    typed. Now the validator rebuilds the canonical manifest from the receipts it
+    admitted and requires exact equality, so no digest the producer invents can match
+    unless it describes exactly what is being paid.
     """
     fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
     out = _preview(
         fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
-        cybergym_epoch_proof=epoch_proof(evidence_sha256="d" * 64),
-        cybergym_expected_evidence_sha256=None,
-    )
-    assert out["feed"]["weights"] == [] and _cybergym_burned(out)
-    assert "evidence_not_pinned" in out["gates"]["cybergym_epoch_proof"]["reason"]
-
-
-def test_a_resigned_arbitrary_digest_is_refused_against_the_pin():
-    fx = _fixtures()
-    out = _preview(
-        fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
-        cybergym_epoch_proof=epoch_proof(evidence_sha256="d" * 64),
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=epoch_proof(
+            scores={"5CyberMiner": 12.0},
+            entries=entries_for(receipt),
+            evidence_sha256="d" * 64,  # well formed, commits to nothing
+        ),
     )
     assert out["feed"]["weights"] == [] and _cybergym_burned(out)
     assert (
-        "unexpected_evidence_digest" in out["gates"]["cybergym_epoch_proof"]["reason"]
+        "does not commit to the credited set"
+        in (out["gates"]["cybergym_epoch_proof"]["reason"])
     )
+
+
+def test_a_digest_over_a_different_amount_cannot_earn():
+    # The manifest commits to work_units, so inflating the attested amount changes the
+    # digest and the lane burns even though the set matches.
+    fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
+    out = _preview(
+        fx,
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=epoch_proof(
+            scores={"5CyberMiner": 12.0},
+            entries=entries_for(receipt, work_units="99"),
+        ),
+    )
+    assert out["feed"]["weights"] == [] and _cybergym_burned(out)
+
+
+def test_a_digest_over_a_different_receipt_cannot_earn():
+    # receipt_id commits to the signed batch, result and items_root, so swapping it
+    # changes the digest: the producer cannot attest work it did not score.
+    fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
+    other = cybergym_receipt(fx, miner="5OtherMiner")
+    forged = [
+        {
+            "miner_hotkey": receipt["miner_hotkey"],
+            "receipt_id": other["receipt_id"],
+            "work_units": "12",
+        }
+    ]
+    out = _preview(
+        fx,
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=epoch_proof(scores={"5CyberMiner": 12.0}, entries=forged),
+    )
+    assert out["feed"]["weights"] == [] and _cybergym_burned(out)
+
+
+def test_a_funded_empty_epoch_uses_the_deterministic_empty_manifest():
+    # "The producer scored nobody" is itself attestable, and distinguishable from a
+    # missing manifest, because the empty manifest has a deterministic digest.
+    fx = _fixtures()
+    out = _preview(fx, [], cybergym_epoch_proof=epoch_proof(scores={}, entries=[]))
+    gate = out["gates"]["cybergym_epoch_proof"]
+    assert gate["verified"] is True and gate["bound"] is True
+    assert gate["evidence_sha256"] == ev.empty_digest(
+        network="finney", netuid=39, source_epoch=SOURCE_EPOCH
+    )
+    assert _cybergym_burned(out)  # nothing scored, so the share still burns
 
 
 @pytest.mark.parametrize(
@@ -1173,10 +1278,13 @@ def test_the_canonical_unit_label_matches_what_producers_actually_emit():
 
 def test_a_real_producer_label_is_accepted_and_earns():
     fx = _fixtures()
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
     out = _preview(
         fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
-        cybergym_epoch_proof=epoch_proof(scores={"5CyberMiner": 12.0}),
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=epoch_proof(
+            scores={"5CyberMiner": 12.0}, entries=entries_for(receipt)
+        ),
     )
     verdict, detail = _only_reason(out)
     assert verdict == itf.PASS, detail
@@ -1186,17 +1294,15 @@ def test_a_real_producer_label_is_accepted_and_earns():
 def test_the_audit_persists_the_exact_proof_digests():
     # An activation decision has to be able to point at WHICH bytes were authenticated.
     fx = _fixtures()
-    proof = epoch_proof(scores={"5CyberMiner": 12.0})
-    out = _preview(
-        fx,
-        [_lane_receipt(cybergym_receipt(fx, miner="5CyberMiner"))],
-        cybergym_epoch_proof=proof,
-    )
+    receipt = cybergym_receipt(fx, miner="5CyberMiner")
+    proof = epoch_proof(scores={"5CyberMiner": 12.0}, entries=entries_for(receipt))
+    out = _preview(fx, [_lane_receipt(receipt)], cybergym_epoch_proof=proof)
     gate = out["gates"]["cybergym_epoch_proof"]
     assert (
         gate["body_sha256"] == hashlib.sha256(proof["body"].encode("utf-8")).hexdigest()
     )
     assert re.fullmatch(r"[0-9a-f]{64}", gate["semantic_sha256"])
     assert gate["scored_hotkey_count"] == 1
-    # and the evidence claim is not overstated
-    assert "NOT PROVEN" in gate["evidence_binding"]
+    # the evidence digest is really bound, not merely pinned
+    assert "recomputed from the admitted receipts" in gate["evidence_binding"]
+    assert ev.SCHEMA in gate["evidence_binding"]

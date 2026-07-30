@@ -27,6 +27,7 @@ from decimal import Decimal
 
 from cathedral_thin import cybergym_epoch_proof as _epoch_proof
 from cathedral_thin import cybergym_epoch_state as _epoch_state
+from cathedral_thin import cybergym_evidence_manifest as _evidence
 from hashlib import sha256
 import inspect
 import json
@@ -347,6 +348,38 @@ def _bind_to_epoch_proof(integrated_feed, decisions, *, proof, lanes, credited_r
                     f"{hotkey} composed work units {row.get('work_units')} do not "
                     f"equal the producer's attested score {expected}"
                 )
+        # REAL evidence binding, not a pin. Rebuild the canonical manifest from the
+        # receipts THIS validator admitted for THIS lane and require the producer's
+        # signed evidence_sha256 to equal it exactly. A producer that scored a
+        # different set, different amounts, or different receipts cannot produce a
+        # matching digest. An empty funded lane uses the deterministic empty-manifest
+        # digest, so "nobody scored" is attested rather than indistinguishable from a
+        # missing manifest. Per lane for the same reason the value check is: a union
+        # digest would let one lane's surplus mask another's shortfall.
+        try:
+            recomputed = _evidence.manifest_digest(
+                network=proof.network,
+                netuid=proof.netuid,
+                source_epoch=proof.source_epoch,
+                entries=[
+                    {
+                        "miner_hotkey": str(row.get("miner_hotkey")),
+                        "receipt_id": str(row.get("receipt_id")),
+                        "work_units": row.get("work_units"),
+                    }
+                    for row in rows
+                ],
+            )
+        except _evidence.EvidenceManifestError as exc:
+            lane_problems.append(f"credited set cannot be digested: {exc}")
+            recomputed = None
+        if recomputed is not None and recomputed != str(proof.evidence_sha256).lower():
+            lane_problems.append(
+                "the signed evidence digest does not commit to the credited set: "
+                f"report says {proof.evidence_sha256}, the admitted receipts digest "
+                f"to {recomputed}"
+            )
+
         if lane_problems:
             bad_lanes.add(lane)
             problems.append(f"{lane}: " + "; ".join(lane_problems))
@@ -1148,7 +1181,10 @@ def preview_integrated_vector(
                 now=datetime.now(UTC),
                 expected_producer_hotkey=cybergym_expected_producer_hotkey,
                 expected_evidence_sha256=cybergym_expected_evidence_sha256,
-                require_evidence_pin=True,
+                # The pin is now optional defence in depth: the real binding is the
+                # manifest recomputation below, which does not depend on an operator
+                # typing a digest correctly.
+                require_evidence_pin=False,
             )
         except _epoch_proof.EpochProofError as exc:
             epoch_proof_error = (
@@ -1223,8 +1259,10 @@ def preview_integrated_vector(
         "evidence_pinned": bool(cybergym_expected_evidence_sha256),
         # Precise, so nobody reads the pin as provenance.
         "evidence_binding": (
-            "operator-pinned only; NOT derived from or hashed against the durable "
-            "artifact or result, so the artifact link is NOT PROVEN"
+            "recomputed from the admitted receipts as "
+            f"{_evidence.SCHEMA}: the signed evidence digest must equal the canonical "
+            "manifest over the finally credited (miner_hotkey, receipt_id, work_units) "
+            "set for this audience epoch"
         ),
         "score_units": (epoch_proof.score_units if epoch_proof is not None else None),
         "authentication": (
