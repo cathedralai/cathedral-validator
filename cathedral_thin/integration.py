@@ -443,7 +443,9 @@ def preview_integrated_vector(
       event);
     * a funded lane (nonzero allocation) with any of ``REQUIRED_REWARD_GATES``
       omitted raises ``IntegrationPolicyError`` unless
-      ``allow_unpoliced_preview=True``;
+      ``allow_unpoliced_preview`` is the boolean ``True``; any other value is
+      itself refused, so a deserialized ``"false"`` cannot authorize an unpoliced
+      preview;
     * a replay ledger that cannot record, cannot be queried, or reports a consume
       it did not record raises ``IntegrationLedgerError``: shared infrastructure
       failing is a preview-level failure, never a per-receipt verdict that still
@@ -498,6 +500,19 @@ def preview_integrated_vector(
     # 2. Admission-gate audit. A funded lane must be able to apply the launch
     #    policy; omitting a gate is a deliberate opt-out or a refusal, never a
     #    silent default that reads as "policy verified".
+    #
+    #    The opt-out is checked by identity, not truthiness. Every non-empty
+    #    string is truthy in Python, so a config or CLI deserialization that
+    #    produced "false" or "0" would otherwise authorize exactly the unpoliced
+    #    preview the value says to avoid. Refuse to guess.
+    if allow_unpoliced_preview is not True and allow_unpoliced_preview is not False:
+        detail = (
+            "allow_unpoliced_preview must be the boolean True or False, not "
+            f"{type(allow_unpoliced_preview).__name__} {allow_unpoliced_preview!r}; "
+            "refusing to infer whether an unpoliced preview was authorized"
+        )
+        _emit(events, "INTEGRATION_POLICY", status="FAIL", detail=detail)
+        raise IntegrationPolicyError(detail)
     ledger = _usable_ledger(consumption_ledger)
     supplied = {
         "allowed_measurements": allowed_measurements,
@@ -513,7 +528,7 @@ def preview_integrated_vector(
     gates = {
         "reward_lanes": reward_lanes,
         "omitted_gates": omitted,
-        "unpoliced_preview": bool(allow_unpoliced_preview),
+        "unpoliced_preview": allow_unpoliced_preview is True,
         "applied": {name: supplied[name] is not None for name in REQUIRED_REWARD_GATES},
         "lanes": {
             lane: {
@@ -528,7 +543,7 @@ def preview_integrated_vector(
             for lane, alloc in sorted(resolved.lane_allocations.items())
         },
     }
-    if omitted and reward_lanes and not allow_unpoliced_preview:
+    if omitted and reward_lanes and allow_unpoliced_preview is not True:
         detail = (
             "funded reward lanes "
             + ", ".join(reward_lanes)

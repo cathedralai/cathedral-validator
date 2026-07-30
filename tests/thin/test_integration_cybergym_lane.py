@@ -125,9 +125,7 @@ def _policy(fx, ledger=None, **over):
         "allowed_tcb_statuses": frozenset({"UpToDate"}),
         "allowed_advisories": frozenset(),
         "current_block": IN_WINDOW,
-        "consumption_ledger": ledger
-        if ledger is not None
-        else durable_ledger(),
+        "consumption_ledger": ledger if ledger is not None else durable_ledger(),
     }
     gates.update(over)
     return gates

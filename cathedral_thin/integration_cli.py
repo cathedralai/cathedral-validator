@@ -22,9 +22,10 @@ Bundle shape:
       # "registry": { ...signed key registry... },
       # "trusted_roots": { "cathedral-root-1": "<base64 root pubkey>" },
 
-      # Admission policy. REQUIRED for any lane with a nonzero allocation; each
-      # allow-list may be an empty list, which is an explicit deny-everything
-      # policy and a different statement from leaving the key out.
+      # Admission policy. REQUIRED for any lane with a nonzero allocation. An
+      # empty list is a policy, not an omission, and what it admits is per list:
+      # empty measurements or TCB statuses admit nothing, while an empty advisory
+      # list admits only receipts that carry no advisory (it is a subset test).
       "allowed_measurements": ["tdx-measurement-sha256:..."],
       "allowed_tcb_statuses": ["UpToDate"],
       "allowed_advisories": [],
@@ -205,10 +206,11 @@ def run_bundle(
         receipts.append(LaneReceipt(kind, lane, item["receipt"]))
 
     # Admission policy from the bundle. A key that is absent means the operator
-    # expressed no policy; an empty list means an explicit deny-everything
-    # policy. Those are different states, and only the first is refused for a
-    # funded lane, because otherwise an enclave measurement nobody ever approved
-    # is credited PASS (the exact failure attestation.py exists to prevent).
+    # expressed no policy; an empty list is a policy (deny-all for measurements
+    # and TCB statuses, advisory-free-only for advisories). Those are different
+    # states, and only the first is refused for a funded lane, because otherwise
+    # an enclave measurement nobody ever approved is credited PASS (the exact
+    # failure attestation.py exists to prevent).
     def _set(key):
         value = bundle.get(key)
         if value is None:
@@ -243,7 +245,9 @@ def run_bundle(
             allowed_measurements=allowed_measurements,
             allowed_tcb_statuses=allowed_tcb_statuses,
             allowed_advisories=allowed_advisories,
-            allow_unpoliced_preview=bool(allow_unpoliced_preview),
+            # passed through uncoerced on purpose: bool("false") is True, so
+            # coercing here would turn a config mistake into an authorization
+            allow_unpoliced_preview=allow_unpoliced_preview,
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc

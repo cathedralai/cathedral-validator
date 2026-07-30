@@ -7,8 +7,12 @@ receipt that no launch policy ever admitted, which is exactly the evidence an
 activation decision would rest on.
 
 So: omission is refused for any lane with a nonzero allocation, unless the
-operator opts out in as many words. An EMPTY allow-list is not an omission, it is
-a deliberate deny-everything policy, and the two must stay distinguishable.
+operator opts out in as many words, as the boolean True and nothing else.
+
+An EMPTY allow-list is not an omission, it is a policy, and what that policy
+admits is per list: empty measurements or empty TCB statuses admit nothing (every
+receipt carries exactly one of each), while an empty advisory list admits only
+receipts that carry no advisory, because the advisory check is a subset test.
 """
 
 from __future__ import annotations
@@ -41,6 +45,20 @@ def _logger():
 
 def _events(buf):
     return [json.loads(line) for line in buf.getvalue().splitlines()]
+
+
+def _receipt_with_advisory(fx, advisory: str):
+    """A real signed CPU receipt whose TCB reports one advisory."""
+    from cathedral_distill import compute_receipt as cr
+
+    body = fx._compute_body(
+        "5CpuMiner",
+        "30",
+        {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_TDX},
+        cr.CPU_TEE_TDX,
+    )
+    body["tcb"]["advisory_ids"] = [advisory]
+    return cr.build_receipt(body, fx.key, signing_key_id="compute-1")
 
 
 def _policy(fx, **over):
@@ -129,8 +147,40 @@ def test_fully_policed_preview_records_every_gate_as_applied():
     assert policy["status"] == "PASS"
 
 
-def test_an_empty_allow_list_is_a_policy_and_is_enforced():
-    """`frozenset()` satisfies the gate and denies everything. `None` does not."""
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("false", id="string-false"),
+        pytest.param("0", id="string-zero"),
+        pytest.param("", id="empty-string"),
+        pytest.param(1, id="int-one"),
+        pytest.param(0, id="int-zero"),
+        pytest.param({"unpoliced": True}, id="object"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_the_opt_out_refuses_anything_that_is_not_a_boolean(value):
+    """Truthiness is not authorization.
+
+    Every non-empty string is truthy, so `allow_unpoliced_preview="false"` used to
+    produce a funded PASS preview with all five gates omitted: the exact opposite
+    of what the value says. A value that is not literally True or False is refused
+    rather than interpreted.
+    """
+    fx = IntegrationFixtures()
+    with pytest.raises(ig.IntegrationPolicyError, match="must be the boolean"):
+        _preview(fx, allow_unpoliced_preview=value)
+
+
+def test_the_opt_out_still_accepts_the_two_real_booleans():
+    fx = IntegrationFixtures()
+    assert _preview(fx, allow_unpoliced_preview=True)["gates"]["unpoliced_preview"]
+    with pytest.raises(ig.IntegrationPolicyError, match="previewed without"):
+        _preview(fx, allow_unpoliced_preview=False)
+
+
+def test_an_empty_measurement_allow_list_admits_nothing():
+    """Every receipt carries exactly one measurement, so empty denies all of them."""
     fx = IntegrationFixtures()
     out = _preview(fx, **_policy(fx, allowed_measurements=frozenset()))
     assert out["gates"]["omitted_gates"] == []  # expressed, not omitted
@@ -138,6 +188,56 @@ def test_an_empty_allow_list_is_a_policy_and_is_enforced():
     assert receipt["verdict"] == itf.FAIL
     assert "measurement is not admitted by policy" in receipt["detail"]
     assert out["feed"]["weights"] == []  # the lane's whole share burns
+
+
+def test_an_empty_tcb_status_allow_list_admits_nothing():
+    fx = IntegrationFixtures()
+    out = _preview(fx, **_policy(fx, allowed_tcb_statuses=frozenset()))
+    assert out["gates"]["omitted_gates"] == []
+    (receipt,) = out["audit"]["receipts"]
+    assert receipt["verdict"] == itf.FAIL
+    assert "tcb" in receipt["detail"]
+    assert out["feed"]["weights"] == []
+
+
+def test_an_empty_advisory_allow_list_admits_only_advisory_free_receipts():
+    """The advisory check is a subset test, so empty is NOT deny-everything.
+
+    An advisory-free receipt passes an empty advisory allow-list, and the fully
+    policed reference fixtures rely on exactly that. A receipt that carries an
+    advisory is refused until the advisory is named.
+    """
+    fx = IntegrationFixtures()
+    advisory = "INTEL-SA-00615"
+
+    clean = _preview(fx, **_policy(fx, allowed_advisories=frozenset()))
+    (admitted,) = clean["audit"]["receipts"]
+    assert admitted["verdict"] == itf.PASS  # no advisory to disallow
+
+    flagged = _preview(
+        fx,
+        receipts=[
+            ig.LaneReceipt(
+                itf.KIND_COMPUTE_CPU, LANE_CPU, _receipt_with_advisory(fx, advisory)
+            )
+        ],
+        **_policy(fx, allowed_advisories=frozenset()),
+    )
+    (refused,) = flagged["audit"]["receipts"]
+    assert refused["verdict"] == itf.FAIL
+    assert "advisor" in refused["detail"]
+
+    named = _preview(
+        fx,
+        receipts=[
+            ig.LaneReceipt(
+                itf.KIND_COMPUTE_CPU, LANE_CPU, _receipt_with_advisory(fx, advisory)
+            )
+        ],
+        **_policy(fx, allowed_advisories=frozenset({advisory})),
+    )
+    (allowed,) = named["audit"]["receipts"]
+    assert allowed["verdict"] == itf.PASS
 
 
 def test_an_unfunded_lane_needs_no_policy():

@@ -173,8 +173,8 @@ def test_preview_cli_unpoliced_opt_out_is_explicit_and_reported(tmp_path, capsys
     }
 
 
-def test_preview_cli_empty_allowlist_is_a_policy_not_an_omission(tmp_path):
-    """`[]` is a deliberate deny-everything policy, unlike a missing key."""
+def test_preview_cli_empty_measurement_list_is_a_policy_not_an_omission(tmp_path):
+    """An empty measurement list satisfies the gate and admits nothing."""
     fx = IntegrationFixtures()
     policy = _policy(fx, tmp_path)
     policy["allowed_measurements"] = []
@@ -187,6 +187,29 @@ def test_preview_cli_empty_allowlist_is_a_policy_not_an_omission(tmp_path):
     (receipt,) = result["audit"]["receipts"]
     assert receipt["verdict"] == "FAIL"
     assert "measurement" in receipt["detail"]
+
+
+def test_preview_cli_empty_advisory_list_still_admits_an_advisory_free_receipt(
+    tmp_path,
+):
+    """The reference launch policy has an EMPTY advisory list and still credits."""
+    fx = IntegrationFixtures()
+    policy = _policy(fx, tmp_path)
+    assert policy["allowed_advisories"] == []
+    path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path, **policy))
+    out = tmp_path / "out.json"
+    assert cli.main(["--bundle", path, "--out", str(out)]) == 0
+    (receipt,) = json.loads(out.read_text())["audit"]["receipts"]
+    assert receipt["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("value", ["false", "0", 1, {"unpoliced": True}])
+def test_run_bundle_refuses_a_non_boolean_opt_out(tmp_path, value):
+    """`bool("false")` is True, so the opt-out is never read as a truthy value."""
+    fx = IntegrationFixtures()
+    bundle = _funded_cpu_bundle(fx, tmp_path)
+    with pytest.raises(cli.PreviewError, match="must be the boolean"):
+        cli.run_bundle(bundle, allow_unpoliced_preview=value)
 
 
 def test_preview_cli_rejects_an_unknown_receipt_kind(tmp_path):

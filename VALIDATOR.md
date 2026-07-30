@@ -337,16 +337,44 @@ A lane with a **nonzero allocation is a reward lane**, so every gate in
 could not apply the launch policy is not evidence that a receipt would be admitted
 under it.
 
-An **empty** allow-list is not an omission. `frozenset()` (bundle `[]`) is a
-deliberate deny-everything policy: it satisfies the gate and refuses every receipt
-it does not name. `None` (bundle key absent) means no policy was ever expressed,
-and that is what gets refused.
+An **empty** allow-list is not an omission, it is a policy. `None` (bundle key
+absent) means no policy was ever expressed, and that is what gets refused. What an
+empty list *admits* is per list, so it is worth stating exactly:
+
+| Empty list | Effect |
+|------------|--------|
+| `allowed_measurements=frozenset()` | admits nothing: every receipt carries exactly one measurement, and it is not in the list |
+| `allowed_tcb_statuses=frozenset()` | admits nothing: same reasoning for `tcb.status` |
+| `allowed_advisories=frozenset()` | admits only receipts that carry **no** advisory. The check is a subset test, so an advisory-free receipt passes and any receipt reporting an advisory is refused until the advisory is named |
+
+A launch policy therefore looks like a real measurement list, a real TCB-status
+list, and usually an *empty* advisory list, which is the strict setting rather than
+a vacuous one.
 
 Shadow and exploratory previews stay usable through one explicit opt-out,
-`allow_unpoliced_preview=True` (CLI: `--allow-unpoliced-preview`). The omission is
-then recorded in `out["gates"]` and announced on stderr, so an unpoliced run can
-never be mistaken for a policed one. An unfunded lane (allocation `0`) needs no
-policy, because it cannot pay anyone.
+`allow_unpoliced_preview=True` (CLI: `--allow-unpoliced-preview`). It must be the
+boolean `True`: any other value, including the string `"false"` that a config
+round-trip can produce, is refused with `IntegrationPolicyError` rather than
+interpreted, because every non-empty string is truthy in Python and a truthiness
+test would turn a deserialization mistake into an authorization. The omission is
+recorded in `out["gates"]` and announced on stderr, so an unpoliced run can never
+be mistaken for a policed one. An unfunded lane (allocation `0`) needs no policy,
+because it cannot pay anyone.
+
+### The replay ledger must actually record
+
+`consumption_ledger` is checked by behaviour, not presence. It must implement
+`consume` and `is_consumed`, and every consumption is read back before the receipt
+is credited. A ledger that reports a consume it did not record, cannot be queried,
+or is unavailable raises `IntegrationLedgerError`, a preview-level failure: an
+outage reported as one `FAIL` per receipt would compose a 100% burn vector and
+still call the run a success, denying every legitimate miner. The shared contract's
+`NO_REPLAY_LEDGER` marker counts as *no* ledger, so a funded lane still refuses
+unless the operator also takes the unpoliced opt-out.
+
+Consumption happens only after selection is final, so a receipt that will not be
+credited never spends its replay token, and the composed vector does not depend on
+the order in which receipts were submitted.
 
 ### Lane boundary guarantees
 
