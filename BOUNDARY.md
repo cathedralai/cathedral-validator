@@ -28,13 +28,53 @@ The reader group moves to that surface. Files: `scaffold/events.py`,
 
 This should be upstreamed; until then, a re-sync must preserve it.
 
+## Divergences retired at the `dabf10b` sync
+
+Upstream absorbed five of the sixteen declared divergences, so they are no longer
+declared and the files are byte-identical again:
+
+| File | Why it can go |
+|---|---|
+| `config/validator-mainnet-sn39.toml` | #407 moved `controlled_dir` to the value this repo already carried |
+| `config/validator-mainnet-sn39-launch.toml` | same, via the launch profile |
+| `deploy/sn39/cathedral-validator-sn39-launch.service` | absorbed upstream |
+| `deploy/sn39/cathedral-validator-sn39-reconcile.service` | absorbed upstream |
+| `scripts/build_sn39_release_manifest.py` | see below — **partially** |
+
+`scripts/build_sn39_release_manifest.py` is the one that needed a judgement call
+rather than a merge. Upstream's #403-#406 rewrote `immutable_tree_digest` and, in
+passing, **broadened** directory symlinks from "only a venv `lib64 -> lib`" to "any
+symlink resolving inside the tree". Taking that wholesale would have loosened a
+control as a side effect of a sync, so the narrowing is re-applied on top of
+upstream's new ownership and mode checks, keeping upstream's `directory-symlink`
+digest label and root-relative target so the commitment stays byte-identical to
+upstream's for the shapes both accept. The file therefore stays a divergence, and
+`tests/thin/test_release_manifest_venv_symlinks.py` fails if a future sync drops the
+narrowing. Whether to keep narrowing is an owner decision; it is now a visible one.
+
+## Known: the render divergence costs 18 upstream publisher tests
+
+`scaffold/render.py` is a local addition, and `scaffold/validator_thin.py` /
+`scaffold/cli.py` diverge partly to drive it. Upstream's publisher tests assert the
+plain-text journal (`FEED fetch source=...`); this repo emits the rendered one, so
+18 tests in `test_validator_lifecycle.py`, `test_validator_thin_validated_supply.py`
+and `test_validator_two_mode.py` fail here and pass upstream.
+
+**These are not extraction defects and they predate the `dabf10b` sync** — all 18
+fail identically on the pre-sync tree. They were invisible before only because
+upstream failed them too at `fd02392d`; upstream has since fixed them, which is what
+made the gap appear. Recorded here so the next comparison does not read them as new,
+and so the real cost of the render divergence is written down: either the renderer
+gets upstreamed, or those assertions stay red in this repo.
+
 ## Derived-from
 
 | | |
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Final derived-from SHA** | **`fd02392dc969bbea09e3107febb64f1f5f748391`** (#399, "Reconcile the producer revision and make the deploy contract migration-safe") |
+| **Final derived-from SHA** | **`dabf10bcd5de76b6f98a6ce6772df2fc063da8db`** (#417, "give artifact adapters the publisher DB, not the mechanism DB") |
+| Previous derived-from | `fd02392dc969bbea09e3107febb64f1f5f748391` (#399) |
 
 Work began at `c8028af`. `fd02392d` merged mid-extraction, so the tree was
 re-synced to it before the first commit. Everything here reflects `fd02392d`.
@@ -295,18 +335,24 @@ Comparing a run here against a number written down earlier proves nothing.
 **Compare failure sets, back to back, same session.** Latest, publisher suite
 with the one deselection, control run immediately before:
 
-| Run | Result |
-|---|---|
-| Upstream `fd02392d` | 43 failed, 1102 passed, 1 deselected |
-| Here | 43 failed, 1102 passed, 1 deselected |
-| **Fails here, passes upstream** | **0** |
-| Fails upstream, passes here | 0 |
-| Failure sets | **byte-identical** |
+At the `dabf10b` sync the right control is **this repo before the sync**, not
+upstream: upstream fixed tests in those 11 commits that this repo's render divergence
+still fails, so an upstream comparison now shows a gap that the sync did not cause.
 
-So the extraction introduces no failures at all in the publisher suite. The one
-extraction-induced failure that does exist, `test_required_ci_collection_gate_returns_zero`,
-is the deselected upstream-CI guard described above; without the deselection the
-counts are 44 here against 43 upstream.
+| Run | Failures |
+|---|---|
+| Here, **pre-sync** (`873621a`) | 60 |
+| Here, **post-sync** (`dabf10b`) | 56 |
+| **New failures introduced by the sync** | **0** |
+| Failures the sync fixed | 4 |
+
+Against upstream `dabf10b` (38 failures) there are 18 that fail here and pass there.
+**All 18 also fail on the pre-sync tree**, so none is a sync defect; they are the
+render divergence, recorded above. The `fd02392d` extraction comparison — 43 vs 43,
+byte-identical failure sets, 0 either way — still stands as the extraction's own
+baseline. The one extraction-induced failure,
+`test_required_ci_collection_gate_returns_zero`, is the deselected upstream-CI guard
+described above.
 
 `tests/thin` and `tests/boundary` together: **137 passed** (128 and 9). These are
 stable; they need no network.
@@ -408,6 +454,31 @@ propagate. It touches nothing outside the manifest, so `README.md`,
 `BOUNDARY.md`, `pyproject.toml`, `.gitignore`, `.github/`, `tests/boundary/`,
 and `tools/` survive untouched.
 
+### Two traps the sync script had, and now does not
+
+Both were found by actually running a re-sync at `dabf10b`. Both were silent.
+
+**1. It deleted every local addition inside a synced directory.** Ten manifest
+entries are directories, and the script cleared each with `rm -rf` before recopying.
+Local files live inside several of them — the whole integration lane is
+`cathedral_thin/integration*.py` plus `tests/thin/test_integration_*.py`, none of
+which exists upstream. Measured on the real tree: **0 of 22 tracked local files
+survived**, and the script exited 0. `BOUNDARY.md` promised only that a re-sync
+"touches nothing outside the manifest", which was true and beside the point.
+
+Removals are now driven by `MANIFEST.origin.tsv`: only paths classed `identical` or
+`modified` are cleared, so an upstream deletion still propagates while a `local`
+addition survives. The script then asserts every `local` path still exists and aborts
+if one is missing, and refuses to run at all if the origin manifest is absent rather
+than guessing. `tools/sync-from-upstream.sh selftest <upstream>` proves all four
+properties.
+
+**2. It overwrote the declared divergences.** They are classed `modified`, so the
+clear-and-recopy replaced them with upstream's versions — including the event-log
+group split this file says "a re-sync must preserve". `manifest.sh verify` catches it
+(`DECLARED DIVERGENCE NOT FOUND AS modified`), so it is loud rather than silent, but
+the work of reconciling is manual. The procedure below now says so.
+
 ### Three files sit outside the manifest and will silently drift
 
 The sync script cannot see upstream changes to these, because they are not
@@ -435,6 +506,22 @@ script will overwrite it.
 ### After a re-sync
 
 1. Diff the three files above.
+1b. **Reconcile the declared divergences.** `manifest.sh verify` lists any that came
+   back as `identical`, which means the sync overwrote the local fix. For each, 3-way
+   merge base=`<old derived-from>`, ours=pre-sync HEAD, theirs=`<new derived-from>`:
+
+   ```sh
+   git -C /tmp/cathedral-upstream show <old-sha>:"$f" > /tmp/base
+   git show HEAD:"$f" > /tmp/ours
+   git -C /tmp/cathedral-upstream show <new-sha>:"$f" > /tmp/theirs
+   cp /tmp/ours "$f" && git merge-file "$f" /tmp/base /tmp/theirs
+   ```
+
+   At `dabf10b`, 9 of the 14 in-manifest divergences had upstream changes: 7 merged
+   cleanly, 2 conflicted, and 5 turned out to be absorbed upstream and were retired.
+   A conflict means upstream changed the same lines the local fix touches — decide
+   deliberately, and if the local rule is *narrower* than upstream's, keep it rather
+   than letting a sync loosen a control.
 2. `./tools/manifest.sh build /tmp/cathedral-upstream` then
    `./tools/manifest.sh verify /tmp/cathedral-upstream`. The build refuses to
    write a manifest containing an undeclared divergence, so a file that changed

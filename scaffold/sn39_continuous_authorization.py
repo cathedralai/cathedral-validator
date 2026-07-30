@@ -31,9 +31,13 @@ PURPOSE = "authorize bounded recurring set_mechanism_weights writes"
 RELEASE_KEY_ID = "cathedral-release-attestation-sn39-20260724"
 RELEASE_PUBLIC_KEY_BASE64 = "+yUHLO30+pc0ymdwLbqu+Y4aR4vxM2iGxrfBNEpLwd0="
 PRIVATE_SEED = Path("/etc/cathedral/release-attestation-signing-sn39-20260724.key")
-RELEASE_MANIFEST = Path("/etc/cathedral/sn39-release-manifest.json")
-AUTHORIZATION_PATH = Path("/etc/cathedral/sn39-recurring-write-authorization.json")
-SIGNATURE_PATH = Path("/etc/cathedral/sn39-recurring-write-authorization.json.sig")
+RELEASE_MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")
+AUTHORIZATION_PATH = Path(
+    "/etc/cathedral-validator/sn39-recurring-write-authorization.json"
+)
+SIGNATURE_PATH = Path(
+    "/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig"
+)
 AUTHORIZER_CONTEXT_ENV = "CATHEDRAL_SN39_RECURRING_AUTHORIZER_CONTEXT"
 RELEASE_SHA_ENV = "CATHEDRAL_SN39_RELEASE_SHA"
 RUNTIME_ROOT = "/var/lib/cathedral-validator"

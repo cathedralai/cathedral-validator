@@ -39,6 +39,12 @@ tracked() { git ls-files | grep -vE '^MANIFEST\.(sha256|origin\.tsv)$'; }
 # VALIDATOR.md diverges to document the default-OFF Compute+Distill integration
 # lane (cathedral-validator#1) — a validator-specific addition absent upstream.
 #
+# scripts/build_sn39_release_manifest.py keeps the venv directory-symlink NARROWING
+# after the dabf10b sync: upstream #403-#406 broadened directory symlinks to any
+# in-root target, and loosening a control as a side effect of a sync is not a
+# decision a sync gets to make. See BOUNDARY.md and
+# tests/thin/test_release_manifest_venv_symlinks.py.
+#
 # scaffold/provenance_audit.py carries the declared-authority relay-lane fix
 # (commit 6a9fec6); it diverges from the derived-from upstream and is declared here.
 ALLOWED_DIVERGENCE="pyproject.toml README.md VALIDATOR.md \
@@ -47,13 +53,9 @@ scaffold/cli.py \
 scaffold/validator_thin.py \
 scaffold/provenance_audit.py \
 scripts/publish_sn39_validator_status.py \
-config/validator-mainnet-sn39.toml \
 deploy/sn39/cathedral-validator-sn39.service \
 deploy/sn39/cathedral-sn39-public-status.service \
-config/validator-mainnet-sn39-launch.toml \
 deploy/sn39/cathedral-sn39-release-launcher.py \
-deploy/sn39/cathedral-validator-sn39-launch.service \
-deploy/sn39/cathedral-validator-sn39-reconcile.service \
 scripts/build_sn39_release_manifest.py"
 
 is_allowed_divergence() {

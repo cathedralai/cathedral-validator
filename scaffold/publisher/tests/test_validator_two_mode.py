@@ -6834,6 +6834,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     binary.write_bytes(b"reviewed-python-bytes")
     package.write_bytes(b"reviewed-cathedral-bytes")
     (venv / "bin/python").symlink_to("python-real")
+    (venv / "lib64").symlink_to("lib", target_is_directory=True)
     for directory in (
         venv,
         venv / "bin",
@@ -6845,7 +6846,82 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     binary.chmod(0o555)
     package.chmod(0o444)
 
+    monkeypatch.setattr(builder, "ROOT_UID", os.getuid())
     monkeypatch.setattr(launcher, "ROOT_UID", os.getuid())
+    assert builder.BOOTSTRAP_PYTHON == launcher.BOOTSTRAP_PYTHON
+    assert launcher.BOOTSTRAP_PYTHON == Path("/usr/bin/python3.12")
+    assert builder.INSTALL_ROOT == launcher.INSTALL_ROOT
+    assert launcher.INSTALL_ROOT == Path("/etc/cathedral-validator")
+    assert launcher.MANIFEST == (
+        Path("/etc/cathedral-validator/sn39-release-manifest.json")
+    )
+    assert set(launcher.CONFIGS.values()) == {
+        Path("/etc/cathedral-validator/validator-mainnet-sn39.toml"),
+        Path("/etc/cathedral-validator/validator-mainnet-sn39-launch.toml"),
+    }
+    assert validator_thin.SN39_LAUNCH_CONTROLLED_DIR == Path(
+        "/var/lib/cathedral-validator-controlled-sn39/current"
+    )
+    assert validator_thin.SN39_LAUNCH_APPROVAL_FILE == Path(
+        "/etc/cathedral-validator/sn39-launch-approval.json"
+    )
+    assert (
+        'MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")'
+        in (root / "scripts/finalize_sn39_public_release.py").read_text()
+    )
+    assert (
+        "CONTROLLED_ROOT = Path("
+        '"/var/lib/cathedral-validator-controlled-sn39/current")'
+        in (root / "scripts/finalize_sn39_public_release.py").read_text()
+    )
+    assert (
+        "RELEASE_MANIFEST = Path("
+        '"/etc/cathedral-validator/sn39-release-manifest.json")'
+        in (root / "scaffold/sn39_continuous_authorization.py").read_text()
+    )
+    for unit_name in (
+        "cathedral-validator-sn39.service",
+        "cathedral-validator-sn39-launch.service",
+    ):
+        unit = (root / "deploy/sn39" / unit_name).read_text("utf-8")
+        assert "SupplementaryGroups=cathedral-validator-evidence\n" in unit
+        assert (
+            "ReadOnlyPaths=/var/lib/cathedral-validator-controlled-sn39/current "
+            "/opt/cathedral-sn39/bin/cathedral-tdx-verifier\n"
+        ) in unit
+    git_calls: list[tuple[list[str], dict[str, object]]] = []
+    with pytest.MonkeyPatch.context() as git_patch:
+        git_patch.setattr(
+            launcher.subprocess,
+            "check_output",
+            lambda command, **kwargs: (
+                git_calls.append((command, kwargs)),
+                "reviewed\n",
+            )[1],
+        )
+        assert launcher._git_output(venv, "rev-parse", "HEAD") == "reviewed"
+    assert git_calls == [
+        (
+            [
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={venv}",
+                "rev-parse",
+                "HEAD",
+            ],
+            {
+                "cwd": venv,
+                "text": True,
+                "stderr": subprocess.DEVNULL,
+                "env": {"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            },
+        )
+    ]
+    assert (
+        (root / "deploy/sn39/cathedral-sn39-release-launcher.py")
+        .read_text()
+        .startswith("#!/usr/bin/python3.12 -I\n")
+    )
     with pytest.MonkeyPatch.context() as access_patch:
         access_patch.setattr(
             launcher.os,
@@ -6865,6 +6941,36 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     expected = builder.immutable_tree_digest(venv)
     assert launcher._immutable_tree_digest(venv) == expected
 
+    venv.chmod(0o700)
+    with pytest.raises(SystemExit, match="readable, and searchable"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(launcher.InstallError, match="root-controlled"):
+        launcher._immutable_tree_digest(venv)
+    venv.chmod(0o755)
+
+    package.chmod(0o400)
+    with pytest.raises(SystemExit, match="service-readable"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(
+        launcher.InstallError,
+        match="mutable or unsupported",
+    ):
+        launcher._immutable_tree_digest(venv)
+    package.chmod(0o444)
+
+    outside_directory = tmp_path / "outside-lib"
+    outside_directory.mkdir()
+    outside_directory.chmod(0o755)
+    (venv / "external-lib").symlink_to(
+        outside_directory,
+        target_is_directory=True,
+    )
+    with pytest.raises(SystemExit, match="symlink target is unsupported"):
+        builder.immutable_tree_digest(venv)
+    with pytest.raises(launcher.InstallError, match="unsafe target"):
+        launcher._immutable_tree_digest(venv)
+    (venv / "external-lib").unlink()
+
     package.chmod(0o644)
     package.write_bytes(b"substituted-cathedral-bytes")
     package.chmod(0o444)
@@ -6872,7 +6978,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
 
     external_link = tmp_path / "hard-linked-cathedral.py"
     os.link(package, external_link)
-    with pytest.raises(SystemExit, match="hard-linked file"):
+    with pytest.raises(SystemExit, match="single-linked"):
         builder.immutable_tree_digest(venv)
     with pytest.raises(
         launcher.InstallError,
@@ -6921,7 +7027,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "Group=cathedral-validator-log" in continuous_unit
     assert "EnvironmentFile=" not in continuous_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release continuous"
     ) in continuous_unit
     reconcile_unit = (
@@ -6931,7 +7037,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "Environment=HOME=/var/lib/cathedral-validator" in reconcile_unit
     assert "EnvironmentFile=" not in reconcile_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release reconcile"
     ) in reconcile_unit
     assert (
@@ -6944,7 +7050,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "EnvironmentFile=" not in launch_unit
     assert "TimeoutStartSec=20min" in launch_unit
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release launch"
     ) in launch_unit
     assert "After=network-online.target cathedral-thin-validator.service" in (
@@ -7009,10 +7115,15 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     # never been created.
     assert not [ln for ln in _directives(sysusers) if "cathedral-status" in ln]
     assert (
-        "ExecStart=/usr/bin/python3 -I -E -s "
+        "ExecStart=/usr/bin/python3.12 -I -E -s "
         "/usr/local/libexec/cathedral-sn39-release status"
     ) in status_unit
     release_guide = (root / "docs/SN39_MAINNET_RELEASE_20260724.md").read_text()
+    assert '/usr/bin/python3.12 -m venv "$venv"' in release_guide
+    assert (
+        "/usr/bin/python3.12 -I -E -s \\\n"
+        '  "$release/scripts/build_sn39_release_manifest.py"'
+    ) in release_guide
     assert (
         "/usr/local/libexec/cathedral-sn39-release finalize "
         "\\\n  /var/lib/cathedral-validator/journal-<64-hex-digest>.json"
