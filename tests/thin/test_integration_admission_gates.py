@@ -1,0 +1,238 @@
+"""The validator seam must be able to reach the admission gates distill ships.
+
+Before this change `preview_integrated_vector` accepted neither `current_block`,
+`consumption_ledger`, nor the signed measurement/TCB/advisory policy, so the
+validator's composition path was strictly weaker than `admission.verify_admission`
+for the same receipt, the exact asymmetry distill PR #8 was written to remove,
+reintroduced one repo downstream. A confidential-GPU launch cannot be gated on a
+preview that structurally cannot apply the launch policy.
+"""
+
+from __future__ import annotations
+
+import functools
+import inspect
+from pathlib import Path
+import re
+
+import pytest
+
+pytest.importorskip("cathedral_distill.integrated_feed")
+pytest.importorskip("cathedral_distill.testing")
+
+from cathedral_distill import integrated_feed as itf  # noqa: E402
+from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
+
+from cathedral_thin import integration as ig  # noqa: E402
+
+LANE_CPU = "cathedral_confidential_tdx"
+
+
+def test_the_integration_extra_pins_the_reviewed_distill_contract_commit():
+    pyproject = (Path(__file__).parents[2] / "pyproject.toml").read_text()
+    match = re.search(r"cathedral-distill\.git@([0-9a-f]{40})", pyproject)
+    assert match is not None, "integration extra must use one exact 40-character SHA"
+    assert match.group(1) == ig.DISTILL_CONTRACT_COMMIT
+
+
+def test_preview_exposes_every_admission_gate_the_contract_implements():
+    params = inspect.signature(ig.preview_integrated_vector).parameters
+    for name in (
+        "current_block",
+        "consumption_ledger",
+        "allowed_measurements",
+        "allowed_tcb_statuses",
+        "allowed_advisories",
+        # the injected evidence verifiers are admission gates too: without them
+        # a GPU receipt is NOT_PROVEN and a raw CPU quote is never re-checked
+        "gpu_attestation_verifier",
+        "cpu_quote_verifier",
+    ):
+        assert name in params, f"validator seam cannot reach the {name} gate"
+
+
+def test_the_installed_distill_contract_is_checked_before_receipts(monkeypatch):
+    """An older but importable pin must fail the whole preview, not look like burn."""
+
+    def old_verifier(
+        kind,
+        receipt,
+        *,
+        lane,
+        key_registry,
+        source_epoch,
+        now_iso=None,
+    ):
+        raise AssertionError("an incompatible verifier must never be called")
+
+    monkeypatch.setattr(itf, "verify_lane_receipt", old_verifier)
+    with pytest.raises(ig.IntegrationUnavailable, match="current_block"):
+        ig._require_distill()
+
+
+def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
+    """Proves the parameters are forwarded, not merely accepted and dropped.
+
+    The consumption ledger is deliberately NOT among them: consumption is
+    irreversible, so the seam runs verification without it and consumes the
+    selected set afterwards. `test_the_ledger_is_used_after_selection_not_during`
+    covers that half.
+    """
+    seen: dict = {}
+    real = itf.verify_lane_receipt
+
+    @functools.wraps(real)
+    def spy(kind, receipt, **kw):
+        seen.update(kw)
+        return real(kind, receipt, **kw)
+
+    monkeypatch.setattr(itf, "verify_lane_receipt", spy)
+
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+
+    def gpu_verifier(_evidence):
+        return True
+
+    def cpu_verifier(_evidence):
+        return True
+
+    try:
+        ig.preview_integrated_vector(
+            burn_config=fx.burn_config(),
+            allocation_config=fx.allocation_config(
+                [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+            ),
+            key_registry=fx.registry,
+            receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
+            network="finney",
+            netuid=39,
+            source_epoch=11,
+            now=__import__("datetime").datetime(
+                2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+            ),
+            now_iso="2026-07-25T12:30:00.000000Z",
+            current_block=123456,
+            consumption_ledger=ledger,
+            allowed_measurements=frozenset({"tdx-measurement-sha256:" + "a" * 64}),
+            allowed_tcb_statuses=frozenset({"UpToDate"}),
+            allowed_advisories=frozenset(),
+            gpu_attestation_verifier=gpu_verifier,
+            cpu_quote_verifier=cpu_verifier,
+        )
+    except Exception:
+        # The receipt may legitimately be refused by the policy we just supplied;
+        # what matters is that the gates were handed down to the verifier.
+        pass
+
+    assert seen.get("current_block") == 123456
+    assert seen.get("allowed_measurements") == frozenset(
+        {"tdx-measurement-sha256:" + "a" * 64}
+    )
+    assert seen.get("allowed_tcb_statuses") == frozenset({"UpToDate"})
+    assert seen.get("allowed_advisories") == frozenset()
+    assert seen.get("gpu_attestation_verifier") is gpu_verifier
+    assert seen.get("cpu_quote_verifier") is cpu_verifier
+    # verification must not consume: this receipt was refused by the policy above
+    assert ledger.size() == 0
+
+
+def test_the_ledger_is_used_after_selection_not_during():
+    """In the authoritative pass the credited receipt's token is consumed, and
+    only that one. Verification itself never consumes."""
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipt = fx.cpu_receipt()
+    out = ig.preview_integrated_vector(
+        burn_config=fx.burn_config(),
+        allocation_config=fx.allocation_config(
+            [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+        ),
+        key_registry=fx.registry,
+        receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt)],
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        now=__import__("datetime").datetime(
+            2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+        ),
+        now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=ledger,
+        consume_receipts=True,
+    )
+    assert out["audit"]["verdicts"]["pass"] == 1
+    assert ledger.is_consumed(receipt["receipt_id"])
+    assert ledger.size() == 2  # authoritative epoch claim + credited receipt
+
+
+def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
+    """A threaded verifier must be able to refuse, not merely be forwarded."""
+    fx = IntegrationFixtures()
+    out = ig.preview_integrated_vector(
+        burn_config=fx.burn_config(),
+        allocation_config=fx.allocation_config(
+            [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+        ),
+        key_registry=fx.registry,
+        receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        now=__import__("datetime").datetime(
+            2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+        ),
+        now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=durable_ledger(),
+        cpu_quote_verifier=lambda _evidence: False,
+    )
+    (receipt,) = out["audit"]["receipts"]
+    assert receipt["verdict"] == itf.FAIL
+    assert "quote did not verify" in receipt["detail"]
+
+
+def test_every_gate_supplied_composes_and_reports_the_gates_applied():
+    """The fully policed preview is the reference case for a funded lane."""
+    fx = IntegrationFixtures()
+    out = ig.preview_integrated_vector(
+        burn_config=fx.burn_config(),
+        allocation_config=fx.allocation_config(
+            [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
+        ),
+        key_registry=fx.registry,
+        receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        now=__import__("datetime").datetime(
+            2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
+        ),
+        now_iso="2026-07-25T12:30:00.000000Z",
+        current_block=123456,
+        allowed_measurements=frozenset({fx.tdx_measurement}),
+        allowed_tcb_statuses=frozenset({"UpToDate"}),
+        allowed_advisories=frozenset(),
+        consumption_ledger=durable_ledger(),
+    )
+    assert out["audit"]["verdicts"]["pass"] == 1
+    assert out["gates"]["omitted_gates"] == []
+    # Every gate was supplied...
+    assert all(out["gates"]["supplied"].values())
+    # ...but `applied` reports what actually ran, and a compute receipt carries no
+    # block window, so supplying `current_block` gated nothing here. Reporting it as
+    # applied would overstate the assurance behind this preview.
+    assert out["gates"]["applied"] == {
+        "measurement_policy": True,
+        "tcb_policy": True,
+        "advisory_policy": True,
+        "block_window": False,
+        "consumption_ledger": True,
+    }

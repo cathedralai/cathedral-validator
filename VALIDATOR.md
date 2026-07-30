@@ -287,13 +287,29 @@ The receipt/lane/config contract is shared with, and shipped by,
 [`cathedral-distill`](https://github.com/cathedralai/cathedral-distill); this repo's
 `cathedral_thin.integration` module drives it through the validator's own event
 pipeline (`INTEGRATION_CONFIG`, `INTEGRATION_RECEIPT`, `INTEGRATION_LANE`,
-`INTEGRATION_VECTOR`, each `PASS` / `FAIL` / `NOT_PROVEN`).
+`INTEGRATION_EPOCH_CLAIM`, `INTEGRATION_VECTOR`, each `PASS` / `FAIL` /
+`NOT_PROVEN` as applicable).
 
 > [!IMPORTANT]
 > This lane is **default OFF and non-writing**. It never touches the live
 > `validated_supply_v2` thin path and never calls `set_weights`; it composes and
 > audits a *preview* vector only. Enabling it as a live reward lane — and choosing
 > the allocation — is a separate owner decision.
+
+What "non-writing" means precisely, so the guarantee is not read wider than it is:
+the seam neither imports nor calls any chain writer in this repo. That is pinned by
+tests, in three parts: a fresh interpreter importing the seam or its CLI loads no
+`scaffold` module; an AST pass shows no import of `scaffold`, `bittensor` or a
+substrate client; and a full preview composes its vector with every writer entry
+point in this repo (`mechanism_weightset.set_weights`, `publish_next`,
+`ChainClient.set_weights`, `ChainClient.map_weights`,
+`validator_thin.set_weights_on_chain`, `_submit_exact_sn39_extrinsic`,
+`BittensorRuntime.submit_weights`) replaced by a trap that raises if touched. Each
+of those writers also refuses SN39 and finney on its own.
+
+It is not a sandbox. The GPU/CPU verifiers and the event logger are supplied by the
+caller and are run by the preview, with the caller's privileges; those callables are
+the operator's own code.
 
 Enable the optional dependency, then verify + preview from a signed burn/allocation
 config and a set of receipts:
@@ -310,17 +326,191 @@ out = preview_integrated_vector(
     key_registry=registry, receipts=[LaneReceipt(kind, lane, receipt), ...],
     network="finney", netuid=39, source_epoch=epoch,
     now=now_dt, now_iso=now_iso, gpu_attestation_verifier=verify_gpu, events=events,
+    # admission policy: required for any lane with a nonzero allocation
+    allowed_measurements=frozenset({...}), allowed_tcb_statuses=frozenset({"UpToDate"}),
+    allowed_advisories=frozenset(), current_block=finalized_block,
+    consumption_ledger=ConsumptionLedger("/var/lib/cathedral/consumption.sqlite"),
+    # consume_receipts=True atomically claims this epoch before consuming the
+    # selected receipts; the default reads the ledger and is safely repeatable
 )
 out["feed"]   # one deterministic pre-burn vector; a missing/invalid lane -> burn
 out["audit"]  # receipt -> verdict -> contribution -> allocation -> final weight
+out["gates"]  # per lane: which admission gates were actually applied
 ```
 
 What is verified before any weight: the burn/allocation config's signer,
 network/subnet target, freshness, rollback fence, and burn destination; and each
 receipt's anchored signing key, canonical `receipt_id`, replay/epoch binding,
-freshness, strict TDX/TCB, and — for a GPU receipt — the composite binding to a
+freshness, strict TDX/TCB, and, for a GPU receipt, the composite binding to a
 valid TDX CPU quote (a GPU attestation alone never admits). See the
 [shared contract](https://github.com/cathedralai/cathedral-distill/blob/main/docs/INTEGRATION_CONTRACT.md).
+
+### The preview fails closed on a missing policy
+
+A lane with a **nonzero allocation is a reward lane**, so every gate in
+`integration.REQUIRED_REWARD_GATES` must be supplied for it:
+`allowed_measurements`, `allowed_tcb_statuses`, `allowed_advisories`,
+`current_block`, `consumption_ledger`. Omit any one and the preview raises
+`IntegrationPolicyError` before verifying a single receipt, because a preview that
+could not apply the launch policy is not evidence that a receipt would be admitted
+under it.
+
+An **empty** allow-list is not an omission, it is a policy. `None` (bundle key
+absent) means no policy was ever expressed, and that is what gets refused. What an
+empty list *admits* is per list, so it is worth stating exactly:
+
+| Empty list | Effect |
+|------------|--------|
+| `allowed_measurements=frozenset()` | admits nothing: every receipt carries exactly one measurement, and it is not in the list |
+| `allowed_tcb_statuses=frozenset()` | admits nothing: same reasoning for `tcb.status` |
+| `allowed_advisories=frozenset()` | admits only receipts that carry **no** advisory. The check is a subset test, so an advisory-free receipt passes and any receipt reporting an advisory is refused until the advisory is named |
+
+A launch policy therefore looks like a real measurement list, a real TCB-status
+list, and usually an *empty* advisory list, which is the strict setting rather than
+a vacuous one.
+
+Shadow and exploratory previews stay usable through one explicit opt-out,
+`allow_unpoliced_preview=True` (CLI: `--allow-unpoliced-preview`). It must be the
+boolean `True`: any other value, including the string `"false"` that a config
+round-trip can produce, is refused with `IntegrationPolicyError` rather than
+interpreted, because every non-empty string is truthy in Python and a truthiness
+test would turn a deserialization mistake into an authorization. The omission is
+recorded in `out["gates"]` and announced on stderr, so an unpoliced run can never
+be mistaken for a policed one. An unfunded lane (allocation `0`) needs no policy,
+because it cannot pay anyone.
+
+### Inspection is repeatable; consumption is an explicit pass
+
+The replay gate has two modes, because a preview and an epoch's authoritative pass
+want opposite things from the same ledger.
+
+| Mode | How | Ledger | Repeatable |
+|------|-----|--------|------------|
+| Inspection (default) | `preview_integrated_vector(...)`, CLI as-is | read only | yes: N runs return an identical vector |
+| Authoritative | `consume_receipts=True`, CLI `--consume-receipts` | atomically claims the epoch, then records each credited receipt | exactly one winner; overlap/repeat is refused |
+
+Inspection still refuses a receipt whose token is already on record, so replay
+protection holds in both modes. What inspection does not do is spend the tokens:
+a preview that consumed its own evidence composed a 100% burn vector the second
+time it was run, which is the wrong property for a read-only document whose whole
+purpose is to be examined before activation. `out["gates"]["replay_mode"]`, the
+`authoritative_epoch_claim` field, and the CLI status line say which mode ran.
+
+The authoritative guarantee is deliberately narrow and fail-closed. Before any
+receipt token is mutated, the pass atomically consumes one claim token derived
+from `(network, netuid, source_epoch)`. Concurrent processes can both perform
+non-mutating verification, but exactly one can claim the epoch and proceed to
+receipt consumption; every other process raises `IntegrationLedgerError`.
+
+The epoch claim and the selected receipt tokens are not one database batch. If
+the winning process crashes after the claim, the claim remains durable and the
+epoch must be inspected and recovered by an operator. The software does not
+silently retry that epoch, because a retry could split the credited set between
+two competing vectors. This chooses a visibly withheld epoch over double credit
+or ambiguous authoritative output.
+
+### The replay ledger must actually record
+
+`consumption_ledger` is checked by behaviour, not presence. It must implement
+`consume` and `is_consumed`, and in the authoritative pass every consumption is read
+back against the audit the pass produced. A ledger that reports a consume it did not
+record, cannot be queried, or is unavailable raises `IntegrationLedgerError`, a
+preview-level failure: an outage reported as one `FAIL` per receipt would compose a
+100% burn vector and still call the run a success, denying every legitimate miner.
+The shared contract's `NO_REPLAY_LEDGER` marker counts as *no* ledger, so a funded
+lane still refuses unless the operator also takes the unpoliced opt-out.
+
+### Where the token is actually spent
+
+An uncredited receipt keeps its one-time token, and that has to hold for *every*
+reason it might not be credited. `compose_integrated` refuses a contribution on five
+grounds: an unknown lane, a lane funded with zero, a duplicate `receipt_id`, a miner
+already credited in that lane, and the burn hotkey as subject. It is the only place
+that knows all five, so it is the only safe place to burn a token, and that is where
+the authoritative pass burns it: the verifier is called with
+`defer_consumption=True`, which marks the decision `REPLAY_PENDING` without touching
+the ledger, and the ledger is handed to the composer.
+
+An earlier revision spent the token in the seam, before composition, having
+pre-refused four of those five grounds. The fifth is reachable from a valid signed
+config: an allocation is any decimal in `0..1`, so a lane can be *enabled and funded
+with zero*. A receipt aimed at one was credited by the seam, had its token burned,
+and was then dropped by the composer as "allocated zero and cannot pay". It earned
+nothing and could never be credited again in any later epoch. Deferring removes the
+whole class rather than adding a fifth check to a list that has to stay in sync.
+
+Two things are checked afterwards, by state rather than by reading any message:
+
+* every receipt the composer's own rules would have credited must actually be
+  credited. The seam re-composes the same decisions with no ledger, which skips the
+  consume step entirely, so the composer is its own oracle: a receipt that falls out
+  of the real pass lost its credit to the ledger, not to a rule. Without this, a
+  ledger whose writes fail becomes one dropped contribution per receipt and the pass
+  still returns a burn vector and calls itself a success.
+* a receipt credited anywhere must have its token on record, and a receipt credited
+  nowhere must not.
+
+Deduplication is the composer's, not the seam's. What the seam owes it is a
+canonical ORDER, because the composer's rules are first-wins and the caller's
+submission order must not decide who earns: decisions are composed sorted by
+`(receipt_id, lane, kind)`, and the audit trail is restored to submission order
+afterwards. Re-deriving those rules in the seam from a precomputed winner map got
+one case wrong that the composer gets right, because the composer claims a lane's
+per-miner slot only at the moment it credits: one receipt tagged into two lanes took
+the second lane's slot, was refused there as already credited elsewhere, and the
+miner's own second valid receipt in that lane was then refused citing a receipt that
+lane never credited.
+
+### Reading the gate report and the audit trail
+
+`out["gates"]` separates configuration from effect:
+
+* `supplied`: what the operator passed;
+* `applied`: which gates actually ran against at least one receipt in the preview;
+* per lane, one boolean per gate: what the receipts **in that lane** had applied;
+* per lane, `kinds`: the same per receipt kind.
+
+`supplied` and `applied` differ, and the difference is the point. `current_block`
+gates nothing for a compute or distill receipt (only a CyberGym receipt carries a
+block window), and the measurement/TCB/advisory policy gates nothing for a CyberGym
+receipt (it carries no TEE evidence of its own). A compute-only preview with
+`current_block` passed therefore reports `block_window` supplied and **not**
+applied. A report that echoed the arguments would say `block_window=yes` for a
+compute lane, and a `current_block=0` typo would look like an applied gate.
+
+`out["audit"]["receipts"]` has one row per submission, in submission order, and
+every row carries the same keys, including rows for lanes the signed config does not
+fund. A consumer can read `row["credited"]` on every row.
+
+Read `credited`, not `verdict`, to see who earned. `verdict` is the *verification*
+outcome, so a miner's second valid receipt in one lane is `PASS`: it verified, and it
+was simply not the one credited. `drop_reason` says why, and
+`replay_token_consumed` says whether its one-time token was spent.
+
+### Lane boundary guarantees
+
+* one malformed contribution forfeits only its own lane share; it can never abort
+  the complete vector, including an unknown kind, an unfunded lane, an exception
+  from an injected verifier, or a ledger failure;
+* one receipt earns at most once across the whole preview, even with no ledger;
+* a miner with two credited receipts in one lane keeps exactly one, the lowest
+  `receipt_id`, so the outcome does not depend on submission order;
+* a receipt that is not credited keeps its replay token, for every one of the five
+  reasons it might not be credited;
+* the configured burn hotkey is never a reward subject, and a receipt claiming it
+  is refused before it can consume a replay token.
+
+### CyberGym lane
+
+Each receipt kind has a canonical lane id
+(`integration.DEFAULT_LANE_FOR_KIND`), so a preview bundle may name the lane or
+take the default: `compute_cpu` -> `cathedral_confidential_tdx`, `compute_gpu` ->
+`cathedral_confidential_gpu`, `distill` -> `cathedral_distill`, `cybergym` ->
+`cathedral_cybergym`. A CyberGym receipt is authorized for a bounded
+`[valid_from_block, valid_until_block)` window, so `current_block` is what
+distinguishes an authorized receipt from an expired one. The CLI prints, per lane,
+whether the measurement/TCB/advisory policy, the block window and the ledger were
+applied.
 
 ## Further reading
 

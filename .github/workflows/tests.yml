@@ -111,10 +111,12 @@ jobs:
       # best-effort so a private/unpublished dependency skips rather than errors.
       - run: python -m pip install -e ".[test]"
       - run: python -m pip install -e ".[integration]" || echo "integration extra unavailable in CI; lane test will skip"
-      # Exit 5 = the lane test skipped because the extra is not installed; treat that
-      # as success here, but propagate any real failure (exit 1).
+      # Run the whole integration family, including contract-pin, replay,
+      # authoritative single-flight, containment, CLI, and no-chain-write
+      # regressions. If the private extra is unavailable, the modules report
+      # explicit skips; any test failure still propagates.
       - run: |
-          python -m pytest -q tests/thin/test_integration_lane.py || {
+          python -m pytest -q tests/thin/test_integration_*.py || {
             code=$?
-            [ "$code" = "5" ] && echo "integration lane test skipped (extra not installed)" || exit "$code"
+            [ "$code" = "5" ] && echo "integration tests skipped (extra not installed)" || exit "$code"
           }
