@@ -23,6 +23,7 @@ from cathedral_thin import integration_cli as cli  # noqa: E402
 LANE_CPU = "cathedral_confidential_tdx"
 LANE_DISTILL = "cathedral_distill"
 LANE_GPU = "cathedral_confidential_gpu"
+LANE_CYBERGYM = "cathedral_cybergym"
 
 
 def _policy(fx, tmp_path):
@@ -225,3 +226,28 @@ def test_preview_cli_rejects_an_unknown_receipt_kind(tmp_path):
         _bundle(fx, allocations, receipts, **_policy(fx, tmp_path)),
     )
     assert cli.main(["--bundle", path]) == 2
+
+
+def test_lanes_flag_prints_the_versioned_lane_surface(capsys):
+    # `--lanes` documents every lane in one place without needing a bundle, so an
+    # operator (or a miner) can read the whole configuration surface at once.
+    rc = cli.main(["--lanes"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema"] == "cathedral_validator_lane_contract_v1"
+    kinds = {lane["kind"]: lane for lane in out["lanes"]}
+    assert set(kinds) == {"compute_cpu", "compute_gpu", "distill", "cybergym"}
+    assert kinds["cybergym"]["lane_id"] == LANE_CYBERGYM
+    # the per-kind gates match what the contract actually reads
+    assert kinds["cybergym"]["reward_gates_read"] == [
+        "block_window",
+        "consumption_ledger",
+    ]
+    # a lane that cannot PASS burns its share; it is never renormalized
+    assert "burn" in out["unproven_lane_behavior"]
+
+
+def test_bundle_is_required_without_lanes(capsys):
+    rc = cli.main([])
+    assert rc == 2
+    assert "--bundle is required" in capsys.readouterr().err

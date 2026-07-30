@@ -149,6 +149,52 @@ _GATE_NAMES = (
 )
 
 
+# One versioned, documented description of every lane this runtime can compose,
+# so an operator (and a miner deciding what to submit) can read the whole lane
+# surface in one place instead of tracing kinds, lane ids and per-kind gates
+# across the shared contract. Adding a lane is a one-place edit here plus the
+# shared contract; it does not require either side to understand repo topology.
+# This is a documentation/consolidation view over the constants above, not a new
+# schema: the signed allocation config remains the authority on which lanes are
+# funded and by how much.
+LANE_CONTRACT_VERSION = "cathedral_validator_lane_contract_v1"
+
+_LANE_EVIDENCE_NOTE = {
+    "compute_cpu": "Intel TDX CPU assurance receipt; PASS needs a measurement/TCB/"
+    "advisory policy and a durable replay ledger.",
+    "compute_gpu": "GPU confidential-compute receipt; with no GPU attestation "
+    "verifier supplied it is reported NOT_PROVEN and its share burns.",
+    "distill": "Distill result receipt; PASS needs the admission policy and a "
+    "durable replay ledger.",
+    "cybergym": "CyberGym result receipt; the finalized block window IS the "
+    "authorization, so PASS needs current_block and a replay ledger.",
+}
+
+
+def describe_lanes() -> dict[str, Any]:
+    """Return the versioned lane surface: for each receipt kind, its canonical lane
+    id, the reward gates that kind actually reads, and a one-line evidence note.
+    A funded lane that cannot PASS (missing gate, no verifier, invalid/stale/absent
+    receipt) forfeits its share to burn; it is never renormalized onto other lanes.
+    This is the read-only "what lanes exist and what each needs" surface; the
+    ``--lanes`` CLI prints it."""
+    return {
+        "schema": LANE_CONTRACT_VERSION,
+        "distill_contract_commit": DISTILL_CONTRACT_COMMIT,
+        "required_reward_gates": list(REQUIRED_REWARD_GATES),
+        "unproven_lane_behavior": "forfeit share to burn (never renormalized)",
+        "lanes": [
+            {
+                "kind": kind,
+                "lane_id": DEFAULT_LANE_FOR_KIND[kind],
+                "reward_gates_read": sorted(GATES_READ_BY_KIND[kind]),
+                "evidence": _LANE_EVIDENCE_NOTE[kind],
+            }
+            for kind in DEFAULT_LANE_FOR_KIND
+        ],
+    }
+
+
 def _require_distill():
     try:
         from cathedral_distill import integrated_feed, signed_config  # noqa: F401
@@ -1058,6 +1104,8 @@ __all__ = [
     "REQUIRED_REWARD_GATES",
     "GATES_READ_BY_KIND",
     "DEFAULT_LANE_FOR_KIND",
+    "LANE_CONTRACT_VERSION",
+    "describe_lanes",
     "LANE_COMPUTE_CPU",
     "LANE_COMPUTE_GPU",
     "LANE_DISTILL",

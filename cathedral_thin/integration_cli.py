@@ -69,6 +69,7 @@ from cathedral_thin.integration import (
     IntegrationError,
     IntegrationUnavailable,
     LaneReceipt,
+    describe_lanes,
     preview_integrated_vector,
 )
 
@@ -295,7 +296,16 @@ def main(argv: list[str] | None = None) -> int:
         prog="cathedral-validator-integration-preview",
         description="Non-writing Compute+Distill integration preview (no chain writes).",
     )
-    parser.add_argument("--bundle", required=True, help="preview bundle JSON file")
+    parser.add_argument(
+        "--bundle", help="preview bundle JSON file (required unless --lanes)"
+    )
+    parser.add_argument(
+        "--lanes",
+        action="store_true",
+        help="print the versioned lane surface (every lane this runtime composes, "
+        "its canonical lane id, the reward gates it reads, and its evidence note) "
+        "and exit, without running a preview.",
+    )
     parser.add_argument(
         "--out", help="write the {feed, audit, gates} JSON here (default: stdout)"
     )
@@ -320,6 +330,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.lanes:
+        sys.stdout.write(json.dumps(describe_lanes(), indent=2, sort_keys=True) + "\n")
+        return 0
+    if not args.bundle:
+        sys.stderr.write("error: --bundle is required unless --lanes is given\n")
+        return 2
 
     try:
         bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
