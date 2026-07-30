@@ -98,9 +98,14 @@ def test_the_only_lazy_game_edges_are_the_two_known_publisher_call_sites():
             if module.split(".")[0] in FOREIGN_ROOTS:
                 edges.add((str(path.relative_to(REPO_ROOT)), lineno, module))
 
+    # Line numbers move whenever app.py is re-mirrored from upstream; the invariant is
+    # the SET: exactly these two lazy call sites, both game.arena, both inside
+    # scaffold/publisher/app.py. Updated for the 5c38016 mirror (3764 -> 3775,
+    # 4211 -> 4222); the count and the identity are unchanged, which is what this test
+    # exists to protect.
     assert edges == {
-        ("scaffold/publisher/app.py", 3764, "game.arena"),
-        ("scaffold/publisher/app.py", 4211, "game.arena"),
+        ("scaffold/publisher/app.py", 3775, "game.arena"),
+        ("scaffold/publisher/app.py", 4222, "game.arena"),
     }, f"the set of SAT-lane import sites changed: {sorted(edges)}"
 
 
