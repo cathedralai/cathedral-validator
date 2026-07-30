@@ -299,7 +299,20 @@ def _child_environment(
         "PYTHONNOUSERSITE": "1",
     }
     if mode in {"preflight", "launch", "continuous", "reconcile"}:
-        environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"] = "cathedral-validator-log"
+        # The reader group belongs on the SANITIZED projection, never on the raw
+        # journal. The raw journal carries hotkeys, receipts and caller-supplied
+        # fields and stays 0600; the sanitized status file is what the public
+        # status service (running as a different account) is meant to read.
+        #
+        # This launcher builds the COMPLETE environment for os.execve, so the
+        # unit's own `Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=` never reaches
+        # the child: whatever is set here is the whole access decision. Setting
+        # JSONL_GROUP here inverted the split that cathedral-validator-sn39.service
+        # (and 04d6b3b) established, making the raw journal group-readable at 0640
+        # while leaving the projection at 0600 and therefore unreadable by the
+        # reader it exists for. ProtectSystem=strict does not compensate: it makes
+        # /var/log read-only, not hidden, so the DAC mode is the access decision.
+        environment["CATHEDRAL_VALIDATOR_STATUS_GROUP"] = "cathedral-validator-log"
         # Presentation-only pass-through. The child writes to journald, never a
         # tty, so without these the operator stream is monochrome and laid out
         # for a width nobody has. Neither value reaches any decision; the
