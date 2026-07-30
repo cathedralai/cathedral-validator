@@ -89,6 +89,31 @@ DEFAULT_LANE_FOR_KIND = {
     "cybergym": LANE_CYBERGYM,
 }
 
+# Which gates each receipt kind actually reads in the shared contract. Supplying a
+# gate a kind never reads does not gate anything, so the report must not claim it
+# did: `current_block` is inert for a compute or distill receipt (only a CyberGym
+# receipt carries a block window), and the measurement/TCB/advisory policy is inert
+# for a CyberGym receipt (it carries no TEE evidence of its own).
+GATES_READ_BY_KIND = {
+    "compute_cpu": frozenset(
+        {"measurement_policy", "tcb_policy", "advisory_policy", "consumption_ledger"}
+    ),
+    "compute_gpu": frozenset(
+        {"measurement_policy", "tcb_policy", "advisory_policy", "consumption_ledger"}
+    ),
+    "distill": frozenset(
+        {"measurement_policy", "tcb_policy", "advisory_policy", "consumption_ledger"}
+    ),
+    "cybergym": frozenset({"block_window", "consumption_ledger"}),
+}
+_GATE_NAMES = (
+    "measurement_policy",
+    "tcb_policy",
+    "advisory_policy",
+    "block_window",
+    "consumption_ledger",
+)
+
 
 def _require_distill():
     try:
@@ -302,32 +327,44 @@ def _usable_ledger(ledger: Any) -> Any:
     return ledger
 
 
-def _consume_selected(
+def _apply_replay_gate(
     integrated_feed,
     decisions: Sequence[Any],
     *,
     ledger: Any,
     source_epoch: int,
+    consume: bool,
     events: Any = None,
 ) -> list[Any]:
-    """Consume the replay token of the decisions that will actually be credited.
+    """Apply the once-only gate to the decisions that would be credited.
 
-    Consumption is the one irreversible step in a preview, so it runs last, over
-    the already-selected set. Consuming during verification instead made the
-    outcome depend on submission order: the same signed receipt offered to two
-    funded lanes had its token burned by whichever submission came first, so the
-    lane that kept the receipt, and therefore the composed vector, changed when
-    the caller reordered its inputs. Nothing is consumed for a receipt that will
-    not be credited.
+    Two modes, because a preview and an epoch's authoritative pass want opposite
+    things from the same ledger:
+
+    * ``consume=False`` (default, inspection): the gate is a READ. A receipt whose
+      token is already on record is FAIL, and nothing is written, so running the
+      same preview any number of times returns the same vector. A read-only
+      preview that consumed its own evidence destroyed that evidence by being
+      looked at twice: the second run composed a 100% burn vector.
+    * ``consume=True`` (authoritative): the token is recorded, so the receipt
+      cannot be credited again by a later pass. This is the one pass per epoch
+      that is allowed to mutate the ledger.
+
+    Either way the gate runs AFTER selection, over the already-selected set, so
+    nothing is spent on a contribution that will not be credited. Consuming during
+    verification instead made the outcome depend on submission order: the same
+    receipt offered to two funded lanes had its token burned by whichever
+    submission came first, so the composed vector changed when the caller merely
+    reordered its inputs.
 
     The token is the `receipt_id`, which is what the shared contract makes
     once-only; the `kind` column is metadata and mirrors the contract's naming.
 
-    Every consumption is read back. A replay is a per-receipt FAIL, but a ledger
-    that cannot record, cannot answer, or reports success without recording is a
-    preview-level ``IntegrationLedgerError``: it is shared infrastructure, and
-    turning its outage into one FAIL per receipt would compose a 100% burn vector
-    and report PASS while denying every legitimate miner.
+    A replay is a per-receipt FAIL, but a ledger that cannot record, cannot answer,
+    or reports a consume it did not record is a preview-level
+    ``IntegrationLedgerError``: it is shared infrastructure, and turning its outage
+    into one FAIL per receipt would compose a 100% burn vector and report PASS
+    while denying every legitimate miner.
     """
     if ledger is None:
         return list(decisions)
@@ -347,10 +384,35 @@ def _consume_selected(
         except Exception as exc:
             raise unusable(decision, f"is_consumed failed: {exc}") from exc
 
+    def replayed(decision):
+        detail = f"token already consumed: {decision.receipt_id}"
+        _emit(
+            events,
+            "INTEGRATION_REPLAY",
+            status="FAIL",
+            hotkey=decision.miner_hotkey,
+            lane=decision.lane,
+            receipt_id=decision.receipt_id,
+            detail=detail,
+        )
+        return integrated_feed.ReceiptDecision(
+            decision.lane,
+            decision.kind,
+            decision.receipt_id,
+            decision.miner_hotkey,
+            integrated_feed.FAIL,
+            Decimal(0),
+            detail,
+        )
+
     out: list[Any] = []
     for decision in decisions:
         if not decision.creditable:
             out.append(decision)
+            continue
+        if not consume:
+            # Inspection mode: read the gate, never write it.
+            out.append(replayed(decision) if recorded(decision) else decision)
             continue
         try:
             ledger.consume(
@@ -399,6 +461,53 @@ def _consume_selected(
     return out
 
 
+def _merged_receipt_audit(
+    composed_rows: Sequence[Mapping[str, Any]],
+    decisions: Sequence[Any],
+    *,
+    known_lanes: set[str],
+) -> list[dict[str, Any]]:
+    """One audit row per submission, in submission order, with uniform keys.
+
+    A refusal against a lane the signed config does not fund cannot be composed,
+    so the seam builds that row itself. Appending those rows at the end left the
+    trail out of submission order and, worse, left them missing the keys the
+    composed rows carry, so a consumer reading `row["credited"]` crashed on
+    exactly the rows that describe the interesting cases.
+
+    The composed rows arrive in the order of the composable decisions, so walking
+    the decisions and drawing from that iterator restores the original order
+    exactly, without matching on values that can repeat.
+    """
+    composed = iter(composed_rows)
+    template = dict(composed_rows[0]) if composed_rows else {}
+    rows: list[dict[str, Any]] = []
+    for d in decisions:
+        if d.lane in known_lanes:
+            rows.append(dict(next(composed)))
+            continue
+        row = {key: None for key in template}
+        row.update(
+            {
+                "receipt_id": d.receipt_id,
+                "kind": d.kind,
+                "lane": d.lane,
+                "verdict": d.verdict,
+                "detail": d.detail,
+                "miner_hotkey": d.miner_hotkey,
+                "work_units": str(d.work_units),
+                "lane_allocation": "0",
+                "final_weight": 0.0,
+                "credited": False,
+                "drop_reason": d.detail,
+            }
+        )
+        rows.append(row)
+    # Uniform key set across every row, whoever built it.
+    keys = sorted({key for row in rows for key in row})
+    return [{key: row.get(key) for key in keys} for row in rows]
+
+
 def preview_integrated_vector(
     *,
     burn_config: bytes,
@@ -431,6 +540,11 @@ def preview_integrated_vector(
     # deliberately runs without the launch policy. A funded lane refuses
     # otherwise: omission must be an act, never a default.
     allow_unpoliced_preview: bool = False,
+    # A preview READS the replay ledger by default and writes nothing, so it can
+    # be run repeatedly and returns the same vector every time. Recording the
+    # consumption is the authoritative pass, at most once per epoch, and has to be
+    # asked for.
+    consume_receipts: bool = False,
     events: Any = None,
 ) -> dict[str, Any]:
     """Verify the signed config and every lane receipt, then compose + audit one
@@ -459,8 +573,16 @@ def preview_integrated_vector(
     * one receipt earns at most once across the whole preview, and a miner with
       two credited receipts in one lane keeps exactly one, deterministically.
 
-    ``gates`` records, per lane, which admission gates were actually applied, so
-    an operator can see a policy omission instead of inferring it from silence.
+    Repeatable by default: the replay gate is a read unless
+    ``consume_receipts=True``, so an operator can run the same preview as often as
+    they like and get the same vector. ``consume_receipts=True`` is the
+    authoritative pass, which records each credited receipt so it cannot be
+    credited again; run it at most once per epoch.
+
+    ``gates`` records, per lane AND per receipt kind, which admission gates were
+    actually applied to the receipts in that lane, so an operator sees the gates
+    that ran rather than the arguments that were supplied. ``audit["receipts"]`` is
+    in submission order and every row carries the same keys.
     """
     integrated_feed, signed_config = _require_distill()
 
@@ -505,14 +627,18 @@ def preview_integrated_vector(
     #    string is truthy in Python, so a config or CLI deserialization that
     #    produced "false" or "0" would otherwise authorize exactly the unpoliced
     #    preview the value says to avoid. Refuse to guess.
-    if allow_unpoliced_preview is not True and allow_unpoliced_preview is not False:
-        detail = (
-            "allow_unpoliced_preview must be the boolean True or False, not "
-            f"{type(allow_unpoliced_preview).__name__} {allow_unpoliced_preview!r}; "
-            "refusing to infer whether an unpoliced preview was authorized"
-        )
-        _emit(events, "INTEGRATION_POLICY", status="FAIL", detail=detail)
-        raise IntegrationPolicyError(detail)
+    for name, value in (
+        ("allow_unpoliced_preview", allow_unpoliced_preview),
+        ("consume_receipts", consume_receipts),
+    ):
+        if value is not True and value is not False:
+            detail = (
+                f"{name} must be the boolean True or False, not "
+                f"{type(value).__name__} {value!r}; refusing to infer whether "
+                "an unpoliced or authoritative run was authorized"
+            )
+            _emit(events, "INTEGRATION_POLICY", status="FAIL", detail=detail)
+            raise IntegrationPolicyError(detail)
     ledger = _usable_ledger(consumption_ledger)
     supplied = {
         "allowed_measurements": allowed_measurements,
@@ -525,20 +651,53 @@ def preview_integrated_vector(
     reward_lanes = sorted(
         lane for lane, alloc in resolved.lane_allocations.items() if alloc > 0
     )
+    # What was supplied, and separately what each lane's receipts actually read.
+    # Reporting a supplied argument as an applied gate overstates the assurance:
+    # `current_block` gates nothing for a compute receipt, so a lane of compute
+    # receipts must not print block_window=yes just because a number was passed.
+    gate_supplied = {
+        "measurement_policy": allowed_measurements is not None,
+        "tcb_policy": allowed_tcb_statuses is not None,
+        "advisory_policy": allowed_advisories is not None,
+        "block_window": current_block is not None,
+        "consumption_ledger": ledger is not None,
+    }
+    kinds_in_lane: dict[str, set[str]] = {
+        lane: set() for lane in resolved.lane_allocations
+    }
+    for item in receipts:
+        if item.lane in kinds_in_lane:
+            kinds_in_lane[item.lane].add(str(item.kind))
+
+    def applied_for_kind(kind: str) -> dict[str, bool]:
+        read = GATES_READ_BY_KIND.get(kind, frozenset())
+        return {name: gate_supplied[name] and name in read for name in _GATE_NAMES}
+
     gates = {
         "reward_lanes": reward_lanes,
         "omitted_gates": omitted,
         "unpoliced_preview": allow_unpoliced_preview is True,
+        "replay_mode": "authoritative" if consume_receipts is True else "inspection",
+        "supplied": dict(gate_supplied),
         "applied": {name: supplied[name] is not None for name in REQUIRED_REWARD_GATES},
         "lanes": {
             lane: {
                 "allocation": str(alloc),
                 "reward_lane": alloc > 0,
-                "measurement_policy": allowed_measurements is not None,
-                "tcb_policy": allowed_tcb_statuses is not None,
-                "advisory_policy": allowed_advisories is not None,
-                "block_window": current_block is not None,
-                "consumption_ledger": ledger is not None,
+                "kinds": {
+                    kind: applied_for_kind(kind)
+                    for kind in sorted(kinds_in_lane.get(lane, ()))
+                },
+                # supplied is the operator's configuration; the per-gate booleans
+                # below are what the receipts in THIS lane actually had applied.
+                "supplied": dict(gate_supplied),
+                **{
+                    name: any(
+                        applied_for_kind(kind)[name]
+                        for kind in kinds_in_lane.get(lane, ())
+                    )
+                    for name in _GATE_NAMES
+                },
             }
             for lane, alloc in sorted(resolved.lane_allocations.items())
         },
@@ -605,11 +764,12 @@ def preview_integrated_vector(
     #    only the verified decisions, so it is a pure function of the receipt set
     #    rather than of its order.
     selected = _deduplicate(integrated_feed, verified)
-    decisions = _consume_selected(
+    decisions = _apply_replay_gate(
         integrated_feed,
         selected,
         ledger=ledger,
         source_epoch=source_epoch,
+        consume=consume_receipts is True,
         events=events,
     )
     for decision in decisions:
@@ -638,20 +798,10 @@ def preview_integrated_vector(
         _emit(events, "INTEGRATION_VECTOR", status="FAIL", detail=str(exc))
         raise IntegrationError(f"composition rejected: {exc}") from exc
     feed, audit = out["feed"], out["audit"]
+    audit["receipts"] = _merged_receipt_audit(
+        audit["receipts"], decisions, known_lanes=known_lanes
+    )
     for d in unfunded:
-        audit["receipts"].append(
-            {
-                "receipt_id": d.receipt_id,
-                "kind": d.kind,
-                "lane": d.lane,
-                "verdict": d.verdict,
-                "detail": d.detail,
-                "miner_hotkey": d.miner_hotkey,
-                "work_units": str(d.work_units),
-                "lane_allocation": "0",
-                "final_weight": 0.0,
-            }
-        )
         audit["verdicts"][d.verdict.lower()] += 1
     for lane in audit["lanes"]:
         _emit(

@@ -88,10 +88,14 @@ def test_preview_cli_composes_cpu_and_distill(tmp_path):
     assert audit["schema"] == "cathedral_integration_audit_v1"
     # per-lane gate visibility: the operator sees which gates actually ran
     assert result["gates"]["omitted_gates"] == []
+    assert result["gates"]["replay_mode"] == "inspection"
     for lane in (LANE_CPU, LANE_DISTILL):
         row = result["gates"]["lanes"][lane]
         assert row["reward_lane"] and row["measurement_policy"]
-        assert row["block_window"] and row["consumption_ledger"]
+        assert row["consumption_ledger"]
+        # the block window was configured but neither kind in these lanes reads it
+        assert row["supplied"]["block_window"] is True
+        assert row["block_window"] is False
 
 
 def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):

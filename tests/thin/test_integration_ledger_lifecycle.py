@@ -6,8 +6,9 @@ rather than trusted from the shared contract:
 
 * restart: the ledger is a file, so a validator restart must not forget what it
   already credited;
-* replay: the same receipt offered to two consecutive previews is refused the
-  second time;
+* repeatability: a preview READS the ledger, so running it any number of times
+  returns the same vector, and only the explicit authoritative pass records;
+* replay: a receipt recorded by the authoritative pass is refused afterwards;
 * fail-open ledger: a ledger that reports a consume it did not record, or that
   cannot be read back at all, is refused as a preview-level failure rather than
   trusted, because within-preview deduplication cannot see across previews;
@@ -73,6 +74,11 @@ def _preview(fx, receipts, ledger, **kw):
     )
 
 
+def _authoritative(fx, receipts, ledger, **kw):
+    """The one pass per epoch that is allowed to record consumption."""
+    return _preview(fx, receipts, ledger, consume_receipts=True, **kw)
+
+
 def _one(fx, receipt):
     return [ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt)]
 
@@ -87,15 +93,15 @@ def _verdict(out):
 # --------------------------------------------------------------------------- #
 
 
-def test_a_replayed_receipt_is_refused_by_the_second_preview():
+def test_a_replayed_receipt_is_refused_after_the_authoritative_pass():
     fx = IntegrationFixtures()
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
 
-    first = _preview(fx, _one(fx, receipt), ledger)
+    first = _authoritative(fx, _one(fx, receipt), ledger)
     assert _verdict(first)["verdict"] == itf.PASS
 
-    second = _preview(fx, _one(fx, receipt), ledger)
+    second = _preview(fx, _one(fx, receipt), ledger)  # inspection sees the record
     refused = _verdict(second)
     assert refused["verdict"] == itf.FAIL
     assert "already consumed" in refused["detail"]
@@ -109,7 +115,9 @@ def test_ledger_state_survives_a_restart_and_still_refuses_the_replay(tmp_path):
     path = str(tmp_path / "consumption.sqlite")
 
     before = ConsumptionLedger(path)
-    assert _verdict(_preview(fx, _one(fx, receipt), before))["verdict"] == itf.PASS
+    assert (
+        _verdict(_authoritative(fx, _one(fx, receipt), before))["verdict"] == itf.PASS
+    )
     assert before.size() == 1
     before.close()  # the validator process exits here
 
@@ -127,7 +135,7 @@ def test_a_fresh_receipt_still_passes_after_a_restart(tmp_path):
     path = str(tmp_path / "consumption.sqlite")
     before = ConsumptionLedger(path)
     assert (
-        _verdict(_preview(fx, _one(fx, fx.cpu_receipt(work_units="30")), before))[
+        _verdict(_authoritative(fx, _one(fx, fx.cpu_receipt(work_units="30")), before))[
             "verdict"
         ]
         == itf.PASS
@@ -135,7 +143,7 @@ def test_a_fresh_receipt_still_passes_after_a_restart(tmp_path):
     before.close()
 
     after = ConsumptionLedger(path)
-    out = _preview(fx, _one(fx, fx.cpu_receipt(work_units="31")), after)
+    out = _authoritative(fx, _one(fx, fx.cpu_receipt(work_units="31")), after)
     assert _verdict(out)["verdict"] == itf.PASS
     assert after.size() == 2
 
@@ -147,7 +155,7 @@ def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
     ledger = ConsumptionLedger(str(tmp_path / "consumption.sqlite"))
 
     refused = _verdict(
-        _preview(
+        _authoritative(
             fx,
             _one(fx, receipt),
             ledger,
@@ -158,7 +166,73 @@ def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
     assert not ledger.is_consumed(receipt["receipt_id"])
 
     # policy corrected: the same receipt is still creditable
-    assert _verdict(_preview(fx, _one(fx, receipt), ledger))["verdict"] == itf.PASS
+    assert (
+        _verdict(_authoritative(fx, _one(fx, receipt), ledger))["verdict"] == itf.PASS
+    )
+
+
+# --------------------------------------------------------------------------- #
+# A preview is repeatable: inspecting the evidence must not destroy it
+# --------------------------------------------------------------------------- #
+
+
+def test_repeated_previews_return_an_identical_vector():
+    """The activation evidence must survive being looked at.
+
+    A preview that consumed its own tokens composed a 100% burn vector on the
+    second run, so the operator who checked their work twice saw a different, and
+    wrong, answer. The default gate is a read.
+    """
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipts = _one(fx, fx.cpu_receipt())
+
+    runs = [_preview(fx, receipts, ledger) for _ in range(4)]
+    first = runs[0]
+    for out in runs[1:]:
+        assert out["feed"] == first["feed"]
+        assert out["audit"] == first["audit"]
+    assert _verdict(first)["verdict"] == itf.PASS
+    assert ledger.size() == 0  # nothing was recorded by any of them
+
+
+def test_inspection_mode_reports_itself_and_authoritative_mode_says_so():
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipts = _one(fx, fx.cpu_receipt())
+    assert _preview(fx, receipts, ledger)["gates"]["replay_mode"] == "inspection"
+    assert (
+        _authoritative(fx, receipts, ledger)["gates"]["replay_mode"] == "authoritative"
+    )
+
+
+def test_the_authoritative_pass_records_and_a_later_inspection_sees_it():
+    fx = IntegrationFixtures()
+    ledger = durable_ledger()
+    receipt = fx.cpu_receipt()
+
+    inspected = _preview(fx, _one(fx, receipt), ledger)
+    assert _verdict(inspected)["verdict"] == itf.PASS
+    assert ledger.size() == 0
+
+    authoritative = _authoritative(fx, _one(fx, receipt), ledger)
+    assert _verdict(authoritative)["verdict"] == itf.PASS
+    assert ledger.size() == 1
+    # and the vector the authoritative pass wrote matches what inspection showed
+    assert authoritative["feed"] == inspected["feed"]
+
+    after = _preview(fx, _one(fx, receipt), ledger)
+    assert _verdict(after)["verdict"] == itf.FAIL
+    assert "already consumed" in _verdict(after)["detail"]
+
+
+@pytest.mark.parametrize("value", ["false", "0", 1, {"consume": True}])
+def test_the_authoritative_mode_needs_a_real_boolean(value):
+    fx = IntegrationFixtures()
+    with pytest.raises(ig.IntegrationPolicyError, match="must be the boolean"):
+        _preview(
+            fx, _one(fx, fx.cpu_receipt()), durable_ledger(), consume_receipts=value
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -179,7 +253,7 @@ def test_a_no_op_ledger_is_refused_instead_of_credited(monkeypatch):
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)  # fails open
 
     with pytest.raises(ig.IntegrationLedgerError, match="not on record"):
-        _preview(fx, _one(fx, receipt), ledger)
+        _authoritative(fx, _one(fx, receipt), ledger)
 
 
 def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypatch):
@@ -190,7 +264,7 @@ def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypat
 
     for _attempt in (1, 2):
         with pytest.raises(ig.IntegrationLedgerError):
-            _preview(fx, _one(fx, receipt), ledger)
+            _authoritative(fx, _one(fx, receipt), ledger)
     assert ledger.size() == 0  # nothing was credited on that basis
 
 

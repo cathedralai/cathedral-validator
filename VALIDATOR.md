@@ -314,6 +314,8 @@ out = preview_integrated_vector(
     allowed_measurements=frozenset({...}), allowed_tcb_statuses=frozenset({"UpToDate"}),
     allowed_advisories=frozenset(), current_block=finalized_block,
     consumption_ledger=ConsumptionLedger("/var/lib/cathedral/consumption.sqlite"),
+    # consume_receipts=True only for the epoch's one authoritative pass; the
+    # default reads the ledger, so this call can be repeated safely
 )
 out["feed"]   # one deterministic pre-burn vector; a missing/invalid lane -> burn
 out["audit"]  # receipt -> verdict -> contribution -> allocation -> final weight
@@ -361,20 +363,57 @@ recorded in `out["gates"]` and announced on stderr, so an unpoliced run can neve
 be mistaken for a policed one. An unfunded lane (allocation `0`) needs no policy,
 because it cannot pay anyone.
 
+### Inspection is repeatable; consumption is an explicit pass
+
+The replay gate has two modes, because a preview and an epoch's authoritative pass
+want opposite things from the same ledger.
+
+| Mode | How | Ledger | Repeatable |
+|------|-----|--------|------------|
+| Inspection (default) | `preview_integrated_vector(...)`, CLI as-is | read only | yes: N runs return an identical vector |
+| Authoritative | `consume_receipts=True`, CLI `--consume-receipts` | records each credited receipt | run at most once per epoch |
+
+Inspection still refuses a receipt whose token is already on record, so replay
+protection holds in both modes. What inspection does not do is spend the tokens:
+a preview that consumed its own evidence composed a 100% burn vector the second
+time it was run, which is the wrong property for a read-only document whose whole
+purpose is to be examined before activation. `out["gates"]["replay_mode"]` and the
+CLI status line say which mode ran.
+
 ### The replay ledger must actually record
 
 `consumption_ledger` is checked by behaviour, not presence. It must implement
-`consume` and `is_consumed`, and every consumption is read back before the receipt
-is credited. A ledger that reports a consume it did not record, cannot be queried,
-or is unavailable raises `IntegrationLedgerError`, a preview-level failure: an
-outage reported as one `FAIL` per receipt would compose a 100% burn vector and
-still call the run a success, denying every legitimate miner. The shared contract's
-`NO_REPLAY_LEDGER` marker counts as *no* ledger, so a funded lane still refuses
-unless the operator also takes the unpoliced opt-out.
+`consume` and `is_consumed`, and in the authoritative pass every consumption is
+read back before the receipt is credited. A ledger that reports a consume it did
+not record, cannot be queried, or is unavailable raises `IntegrationLedgerError`, a
+preview-level failure: an outage reported as one `FAIL` per receipt would compose a
+100% burn vector and still call the run a success, denying every legitimate miner.
+The shared contract's `NO_REPLAY_LEDGER` marker counts as *no* ledger, so a funded
+lane still refuses unless the operator also takes the unpoliced opt-out.
 
-Consumption happens only after selection is final, so a receipt that will not be
-credited never spends its replay token, and the composed vector does not depend on
-the order in which receipts were submitted.
+The gate runs only after selection is final, so a receipt that will not be credited
+never spends its replay token, and the composed vector does not depend on the order
+in which receipts were submitted.
+
+### Reading the gate report and the audit trail
+
+`out["gates"]` separates configuration from effect:
+
+* `supplied`: what the operator passed;
+* per lane, one boolean per gate: what the receipts **in that lane** actually had
+  applied;
+* per lane, `kinds`: the same per receipt kind.
+
+They differ, and the difference is the point. `current_block` gates nothing for a
+compute or distill receipt (only a CyberGym receipt carries a block window), and
+the measurement/TCB/advisory policy gates nothing for a CyberGym receipt (it
+carries no TEE evidence of its own). A report that echoed the arguments would say
+`block_window=yes` for a compute lane, and a `current_block=0` typo would look like
+an applied gate.
+
+`out["audit"]["receipts"]` has one row per submission, in submission order, and
+every row carries the same keys, including the seam-built refusals for lanes the
+signed config does not fund. A consumer can read `row["credited"]` on every row.
 
 ### Lane boundary guarantees
 

@@ -175,6 +175,17 @@ def test_a_policed_cybergym_receipt_passes_and_reports_its_gates():
     lane = out["gates"]["lanes"][LANE_CYBERGYM]
     assert lane["reward_lane"] and lane["block_window"] and lane["consumption_ledger"]
     assert out["gates"]["omitted_gates"] == []
+    # honest per-kind reporting: a cybergym receipt carries no TEE evidence, so
+    # the measurement/TCB/advisory policy gates nothing for it even when supplied
+    assert lane["supplied"]["measurement_policy"] is True
+    assert lane["measurement_policy"] is False
+    assert lane["kinds"][itf.KIND_CYBERGYM] == {
+        "measurement_policy": False,
+        "tcb_policy": False,
+        "advisory_policy": False,
+        "block_window": True,
+        "consumption_ledger": True,
+    }
 
 
 def test_the_cybergym_lane_refuses_to_preview_without_the_block_window():

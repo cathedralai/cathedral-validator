@@ -43,6 +43,11 @@ Fail-closed by default: a funded lane whose measurement/TCB/advisory policy, blo
 window, or consumption ledger is missing is REFUSED. `--allow-unpoliced-preview` is
 the deliberate opt-out for a shadow run, and it says so on stderr and in the output.
 
+Repeatable by default: the replay ledger is READ, never written, so running the same
+bundle again returns the same vector. `--consume-receipts` is the authoritative pass
+that records each credited receipt so it can never be credited again; run it at most
+once per epoch, and use the plain form for inspection.
+
 A GPU lane with no attestation verifier is reported NOT_PROVEN. A CLI cannot carry
 a live verifier callable, so a real GPU proof runs through the library API, not here.
 """
@@ -140,24 +145,46 @@ def _open_ledger(bundle: dict):
         ) from exc
 
 
+_GATE_LABELS = (
+    ("measurement", "measurement_policy"),
+    ("tcb", "tcb_policy"),
+    ("advisory", "advisory_policy"),
+    ("block_window", "block_window"),
+    ("ledger", "consumption_ledger"),
+)
+
+
+def _flags(row: dict) -> str:
+    return " ".join(
+        f"{label}={'yes' if row[key] else 'no'}" for label, key in _GATE_LABELS
+    )
+
+
 def _gate_status(gates: dict) -> str:
-    """One operator-facing line per lane: which gates actually ran."""
+    """Per lane and per receipt kind: which gates actually ran.
+
+    A supplied argument is not an applied gate. `current_block` gates nothing for
+    a compute or distill receipt, and the measurement/TCB/advisory policy gates
+    nothing for a cybergym receipt, so the per-kind lines are what an activation
+    decision should read; `supplied` is the configuration that produced them.
+    """
     lines = [
-        "lane gates applied (measurement/tcb/advisory policy, block window, ledger):"
+        f"replay mode: {gates['replay_mode']}"
+        + (
+            " (tokens recorded; run this at most once per epoch)"
+            if gates["replay_mode"] == "authoritative"
+            else " (nothing is consumed; safe to re-run)"
+        ),
+        "configured: " + _flags(gates["supplied"]),
+        "gates applied (measurement/tcb/advisory policy, block window, ledger):",
     ]
     for lane, row in gates["lanes"].items():
-        flags = " ".join(
-            f"{name}={'yes' if row[key] else 'no'}"
-            for name, key in (
-                ("measurement", "measurement_policy"),
-                ("tcb", "tcb_policy"),
-                ("advisory", "advisory_policy"),
-                ("block_window", "block_window"),
-                ("ledger", "consumption_ledger"),
-            )
-        )
         role = "reward" if row["reward_lane"] else "unfunded"
-        lines.append(f"  {lane} [{role} allocation={row['allocation']}] {flags}")
+        lines.append(f"  {lane} [{role} allocation={row['allocation']}] {_flags(row)}")
+        for kind, applied in row["kinds"].items():
+            lines.append(f"    {kind}: {_flags(applied)}")
+        if not row["kinds"]:
+            lines.append("    no receipts in this lane; its share burns")
     if gates["omitted_gates"]:
         lines.append(
             "  UNPOLICED: " + ", ".join(gates["omitted_gates"]) + " not applied; "
@@ -168,7 +195,10 @@ def _gate_status(gates: dict) -> str:
 
 
 def run_bundle(
-    bundle: dict, *, allow_unpoliced_preview: bool = False
+    bundle: dict,
+    *,
+    allow_unpoliced_preview: bool = False,
+    consume_receipts: bool = False,
 ) -> dict[str, Any]:
     for field in (
         "network",
@@ -248,6 +278,7 @@ def run_bundle(
             # passed through uncoerced on purpose: bool("false") is True, so
             # coercing here would turn a config mistake into an authorization
             allow_unpoliced_preview=allow_unpoliced_preview,
+            consume_receipts=consume_receipts,
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc
@@ -273,6 +304,17 @@ def main(argv: list[str] | None = None) -> int:
             "not evidence that a receipt would be admitted under a launch policy."
         ),
     )
+    parser.add_argument(
+        "--consume-receipts",
+        action="store_true",
+        help=(
+            "the AUTHORITATIVE pass: record each credited receipt in the replay "
+            "ledger so it can never be credited again. Without this flag the "
+            "preview only reads the ledger, so it can be re-run and returns the "
+            "same vector every time. Run the authoritative pass at most once per "
+            "epoch."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -280,7 +322,9 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(bundle, dict):
             raise PreviewError("bundle must be a JSON object")
         result = run_bundle(
-            bundle, allow_unpoliced_preview=args.allow_unpoliced_preview
+            bundle,
+            allow_unpoliced_preview=args.allow_unpoliced_preview,
+            consume_receipts=args.consume_receipts,
         )
     except (PreviewError, OSError, ValueError) as exc:
         sys.stderr.write(f"error: {exc}\n")

@@ -132,19 +132,49 @@ def test_the_documented_opt_out_keeps_a_shadow_preview_usable():
     assert policy["status"] == "NOT_PROVEN"
 
 
-def test_fully_policed_preview_records_every_gate_as_applied():
+def test_fully_policed_preview_reports_the_gates_its_receipts_actually_read():
+    """Supplied is not applied.
+
+    A compute receipt carries no block window, so `current_block` gates nothing for
+    it. Reporting block_window=yes for a lane of compute receipts overstated the
+    assurance in the one document an activation decision reads, and a
+    `current_block=0` typo looked like an applied gate.
+    """
     fx = IntegrationFixtures()
     events, buf = _logger()
     out = _preview(fx, events=events, **_policy(fx))
     assert out["audit"]["verdicts"]["pass"] == 1
     assert out["gates"]["omitted_gates"] == []
     assert out["gates"]["reward_lanes"] == [LANE_CPU]
+    # everything the operator configured
+    assert all(out["gates"]["supplied"].values())
     lane = out["gates"]["lanes"][LANE_CPU]
     assert lane["reward_lane"] is True
     assert lane["measurement_policy"] and lane["tcb_policy"] and lane["advisory_policy"]
-    assert lane["block_window"] and lane["consumption_ledger"]
+    assert lane["consumption_ledger"]
+    # ... and the honest part: the block window was supplied but never read here
+    assert lane["block_window"] is False
+    assert lane["supplied"]["block_window"] is True
+    assert lane["kinds"] == {
+        itf.KIND_COMPUTE_CPU: {
+            "measurement_policy": True,
+            "tcb_policy": True,
+            "advisory_policy": True,
+            "block_window": False,
+            "consumption_ledger": True,
+        }
+    }
     policy = next(e for e in _events(buf) if e["event"] == "INTEGRATION_POLICY")
     assert policy["status"] == "PASS"
+
+
+def test_a_lane_with_no_receipts_reports_no_gates_applied():
+    fx = IntegrationFixtures()
+    out = _preview(fx, receipts=[], **_policy(fx))
+    lane = out["gates"]["lanes"][LANE_CPU]
+    assert lane["kinds"] == {}
+    assert not any(lane[name] for name in ig._GATE_NAMES)
+    assert all(lane["supplied"].values())
 
 
 @pytest.mark.parametrize(

@@ -169,6 +169,7 @@ def test_a_ledger_outage_fails_the_preview_instead_of_burning_every_lane(monkeyp
                 ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, fx.distill_receipt()),
             ],
             consumption_ledger=ledger,
+            consume_receipts=True,
         )
 
 
@@ -238,7 +239,12 @@ def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
     reverse = ig.LaneReceipt(itf.KIND_DISTILL, LANE_CPU, receipt)
 
     def summary(order):
-        out = _preview(fx, list(order), consumption_ledger=durable_ledger())
+        out = _preview(
+            fx,
+            list(order),
+            consumption_ledger=durable_ledger(),
+            consume_receipts=True,  # the mode where the ordering bug appeared
+        )
         return (
             out["feed"]["burn_snapshot"]["forced_burn_percentage"],
             sorted((r["lane"], r["verdict"]) for r in out["audit"]["receipts"]),
@@ -264,6 +270,7 @@ def test_a_receipt_that_is_not_credited_keeps_its_replay_token():
             ig.LaneReceipt(itf.KIND_COMPUTE_CPU, "lane_nobody_funded", receipt),
         ],
         consumption_ledger=ledger,
+        consume_receipts=True,
     )
     assert out["audit"]["verdicts"]["pass"] == 1
     assert ledger.size() == 1  # exactly the credited receipt, nothing else
@@ -286,6 +293,52 @@ def test_one_receipt_replayed_into_two_lanes_earns_once_without_a_ledger():
     assert len(weights) == 1
     refused = next(r for r in out["audit"]["receipts"] if r["verdict"] == itf.FAIL)
     assert "credited once only" in refused["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# The audit trail stays machine-readable
+# --------------------------------------------------------------------------- #
+
+
+def test_every_audit_row_carries_the_same_keys_in_submission_order():
+    """A consumer iterating the audit must not crash on the interesting rows.
+
+    Seam-built refusals (a lane the config does not fund) used to be appended at
+    the end with fewer keys than the composed rows, so `row["credited"]` raised
+    KeyError on exactly the rows that explain a dropped contribution.
+    """
+    fx = IntegrationFixtures()
+    good = fx.cpu_receipt()
+    unfunded = fx.distill_receipt()
+    duplicate = fx.cpu_receipt()  # same subject and receipt as `good`
+    submitted = [
+        ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, good),
+        ig.LaneReceipt(itf.KIND_DISTILL, "lane_nobody_funded", unfunded),
+        ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, duplicate),
+        ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, {"junk": True}),
+    ]
+    rows = _preview(fx, submitted)["audit"]["receipts"]
+
+    assert len(rows) == len(submitted)
+    keys = {frozenset(row) for row in rows}
+    assert len(keys) == 1, "audit rows do not share one key set"
+    for row in rows:  # the key a consumer reads on the dropped rows
+        assert "credited" in row and isinstance(row["credited"], bool)
+    # submission order is preserved, including the seam-built refusal in slot 2
+    assert [row["lane"] for row in rows] == [
+        LANE_CPU,
+        "lane_nobody_funded",
+        LANE_CPU,
+        LANE_DISTILL,
+    ]
+    assert [row["kind"] for row in rows] == [
+        itf.KIND_COMPUTE_CPU,
+        itf.KIND_DISTILL,
+        itf.KIND_COMPUTE_CPU,
+        itf.KIND_DISTILL,
+    ]
+    credited = [row for row in rows if row["credited"]]
+    assert len(credited) == 1 and credited[0]["receipt_id"] == good["receipt_id"]
 
 
 # --------------------------------------------------------------------------- #

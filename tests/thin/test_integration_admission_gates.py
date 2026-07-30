@@ -109,7 +109,8 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
 
 
 def test_the_ledger_is_used_after_selection_not_during():
-    """The credited receipt's token is consumed, and only that one."""
+    """In the authoritative pass the credited receipt's token is consumed, and
+    only that one. Verification itself never consumes."""
     fx = IntegrationFixtures()
     ledger = durable_ledger()
     receipt = fx.cpu_receipt()
@@ -132,6 +133,7 @@ def test_the_ledger_is_used_after_selection_not_during():
         allowed_tcb_statuses=frozenset({"UpToDate"}),
         allowed_advisories=frozenset(),
         consumption_ledger=ledger,
+        consume_receipts=True,
     )
     assert out["audit"]["verdicts"]["pass"] == 1
     assert ledger.is_consumed(receipt["receipt_id"])
