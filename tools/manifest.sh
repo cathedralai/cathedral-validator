@@ -45,6 +45,11 @@ tracked() { git ls-files | grep -vE '^MANIFEST\.(sha256|origin\.tsv)$'; }
 # decision a sync gets to make. See BOUNDARY.md and
 # tests/thin/test_release_manifest_venv_symlinks.py.
 #
+# config/validator-mainnet-sn39.toml carries [logs].status_jsonl, the sanitized
+# projection BOUNDARY.md requires. Upstream has no such split, so this file must
+# diverge; without it cathedral-sn39-public-status.service can never satisfy its
+# ConditionPathExists and silently skips.
+#
 # scaffold/provenance_audit.py carries the declared-authority relay-lane fix
 # (commit 6a9fec6); it diverges from the derived-from upstream and is declared here.
 ALLOWED_DIVERGENCE="pyproject.toml README.md VALIDATOR.md \
@@ -56,7 +61,8 @@ scripts/publish_sn39_validator_status.py \
 deploy/sn39/cathedral-validator-sn39.service \
 deploy/sn39/cathedral-sn39-public-status.service \
 deploy/sn39/cathedral-sn39-release-launcher.py \
-scripts/build_sn39_release_manifest.py"
+scripts/build_sn39_release_manifest.py \
+config/validator-mainnet-sn39.toml"
 
 is_allowed_divergence() {
   local needle="$1" p

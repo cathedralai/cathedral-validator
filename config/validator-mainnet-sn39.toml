@@ -63,3 +63,10 @@ require_completed_launch_for_broadcast = true
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+# The sanitized projection. BOUNDARY.md declares this divergence must survive a
+# re-sync: the raw journal above carries hotkeys, receipts and caller-supplied
+# fields and stays 0600, while this allowlisted projection is what the public
+# status service reads. Dropping it does not merely lose a file, it makes
+# cathedral-sn39-public-status.service unstartable, because its
+# ConditionPathExists names exactly this path and nothing would ever create it.
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"
