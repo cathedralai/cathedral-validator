@@ -295,6 +295,21 @@ pipeline (`INTEGRATION_CONFIG`, `INTEGRATION_RECEIPT`, `INTEGRATION_LANE`,
 > audits a *preview* vector only. Enabling it as a live reward lane — and choosing
 > the allocation — is a separate owner decision.
 
+What "non-writing" means precisely, so the guarantee is not read wider than it is:
+the seam neither imports nor calls any chain writer in this repo. That is pinned by
+tests, in three parts: a fresh interpreter importing the seam or its CLI loads no
+`scaffold` module; an AST pass shows no import of `scaffold`, `bittensor` or a
+substrate client; and a full preview composes its vector with every writer entry
+point in this repo (`mechanism_weightset.set_weights`, `publish_next`,
+`ChainClient.set_weights`, `ChainClient.map_weights`,
+`validator_thin.set_weights_on_chain`, `_submit_exact_sn39_extrinsic`,
+`BittensorRuntime.submit_weights`) replaced by a trap that raises if touched. Each
+of those writers also refuses SN39 and finney on its own.
+
+It is not a sandbox. The GPU/CPU verifiers and the event logger are supplied by the
+caller and are run by the preview, with the caller's privileges; those callables are
+the operator's own code.
+
 Enable the optional dependency, then verify + preview from a signed burn/allocation
 config and a set of receipts:
 

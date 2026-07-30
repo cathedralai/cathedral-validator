@@ -1,14 +1,20 @@
-"""The integration preview cannot reach a chain writer. Proven, not asserted.
+"""The seam itself neither imports nor calls a chain writer. Proven, not asserted.
 
-`cathedral_thin.integration` documents itself as non-writing and default-OFF, and
-the repo's chain writers hard-refuse SN39. Those are the two properties an owner
-activation decision leans on, so they are pinned here as tests:
+The exact claim these tests support, stated narrowly on purpose:
 
-1. structural: neither the seam nor its CLI imports scaffold at all, so no import
-   path exists from the integration lane to a writer;
-2. the writers refuse SN39 and finney on their own, independently of this lane;
-3. behavioural: a full preview runs with every writer replaced by a booby trap
-   that raises if touched, and still composes its vector.
+1. structural: neither the seam nor its CLI imports scaffold, bittensor or a
+   substrate client, in a fresh interpreter or by AST, so no import path from the
+   integration lane to any writer in this repo exists;
+2. every chain writer this repo ships refuses SN39 and finney on its own, whatever
+   calls it;
+3. behavioural: a full preview composes its vector with every writer entry point in
+   this repo replaced by a trap that raises if touched.
+
+What is NOT claimed: that no code can write weights during a preview. The caller
+supplies the GPU/CPU verifiers and the event logger, and a preview runs them. Those
+callables are the operator's own code, run with the operator's own privileges, and
+this seam does not sandbox them. The guarantee is about the seam, not about
+arbitrary injected code.
 """
 
 from __future__ import annotations
@@ -27,7 +33,9 @@ from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
 from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
+from cathedral_thin import validator as thin_validator  # noqa: E402
 from scaffold import chain as scaffold_chain  # noqa: E402
+from scaffold import validator_thin  # noqa: E402
 from scaffold.publisher import mechanism_weightset as mws  # noqa: E402
 
 NOW_DT = datetime(2026, 7, 25, 12, 30, tzinfo=UTC)
@@ -110,9 +118,38 @@ def test_scaffold_chain_writer_refuses_sn39_even_when_broadcast_is_requested():
     assert "disabled on SN39" in result["reason"]
 
 
+def test_the_thin_validator_writer_refuses_sn39():
+    """The canonical thin path refuses SN39 before touching a chain client."""
+    import asyncio
+
+    runtime = thin_validator.BittensorRuntime.__new__(thin_validator.BittensorRuntime)
+    runtime.netuid = 39
+    with pytest.raises(Exception, match="disabled on SN39"):
+        asyncio.run(runtime.submit_weights(object()))
+
+
 # --------------------------------------------------------------------------- #
-# 3. A full preview runs with every writer booby-trapped
+# 3. A full preview runs with every writer in this repo booby-trapped
 # --------------------------------------------------------------------------- #
+
+# Every module-level or class-level entry point in this repo that can submit a
+# weight vector. The list is asserted to exist, so a renamed writer fails here
+# rather than silently escaping the trap.
+_WRITERS = (
+    (mws, "set_weights"),
+    (mws, "publish_next"),
+    (scaffold_chain.ChainClient, "set_weights"),
+    (scaffold_chain.ChainClient, "map_weights"),
+    (validator_thin, "set_weights_on_chain"),
+    (validator_thin, "_submit_exact_sn39_extrinsic"),
+)
+
+
+def test_the_writer_inventory_is_complete():
+    for owner, name in _WRITERS:
+        assert callable(getattr(owner, name)), f"{owner}.{name} is not callable"
+    # the thin validator's writer is a coroutine method on its runtime wrapper
+    assert callable(thin_validator.BittensorRuntime.submit_weights)
 
 
 def _policed(fx):
@@ -125,14 +162,13 @@ def _policed(fx):
     }
 
 
-def test_preview_completes_with_every_chain_writer_booby_trapped(monkeypatch):
+def test_preview_completes_with_every_writer_in_this_repo_booby_trapped(monkeypatch):
     def trap(*_args, **_kw):
         raise AssertionError("the preview reached a chain writer")
 
-    monkeypatch.setattr(mws, "set_weights", trap)
-    monkeypatch.setattr(mws, "publish_next", trap)
-    monkeypatch.setattr(scaffold_chain.ChainClient, "set_weights", trap)
-    monkeypatch.setattr(scaffold_chain.ChainClient, "map_weights", trap)
+    for owner, name in _WRITERS:
+        monkeypatch.setattr(owner, name, trap)
+    monkeypatch.setattr(thin_validator.BittensorRuntime, "submit_weights", trap)
 
     fx = IntegrationFixtures()
     out = ig.preview_integrated_vector(
