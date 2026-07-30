@@ -58,12 +58,15 @@ provenance = [
 # (see the integration job in .github/workflows/tests.yml) until an org secret
 # is added or cathedral-distill goes public.
 #
-# Pinned to the immutable companion-PR commit (mirrors the provenance extra's
-# discipline: never a mutable branch ref). Update ONLY together with a review
-# of what changed on cathedral-distill#18, and re-pin to distill's main once
-# that PR merges.
+# Pinned to an immutable commit on cathedral-distill main (mirrors the provenance
+# extra's discipline: never a mutable branch ref). cathedral-distill#18 has
+# merged, so this now tracks distill's main tip (79e9370); the modules this repo
+# imports (integrated_feed, signed_config, consumption_ledger, receipt_keys,
+# testing) are byte-identical to the prior #18 pin. Update ONLY together with a
+# review of what changed, and keep DISTILL_CONTRACT_COMMIT in integration.py in
+# lockstep (a test asserts they match).
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@8cbb4b39d24d227ee9b517aa86c80624fae6f6e8",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@79e93705c5fe39015b67d404ae7f8204635a708f",
 ]
 
 # Validator-side entry points only. The upstream repo additionally ships
