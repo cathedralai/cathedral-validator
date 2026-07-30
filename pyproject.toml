@@ -59,14 +59,21 @@ provenance = [
 # is added or cathedral-distill goes public.
 #
 # Pinned to an immutable commit on cathedral-distill main (mirrors the provenance
-# extra's discipline: never a mutable branch ref). cathedral-distill#18 has
-# merged, so this now tracks distill's main tip (79e9370); the modules this repo
-# imports (integrated_feed, signed_config, consumption_ledger, receipt_keys,
-# testing) are byte-identical to the prior #18 pin. Update ONLY together with a
-# review of what changed, and keep DISTILL_CONTRACT_COMMIT in integration.py in
+# extra's discipline: never a mutable branch ref). Re-pinned past distill#22-#28
+# (9 commits since the prior 79e9370 pin). Of the modules this repo imports
+# (integrated_feed, signed_config, consumption_ledger, receipt_keys, testing),
+# only integrated_feed.py changed: verify_lane_receipt's `consumption_ledger`
+# lost its `None` default and is now a required keyword (distill#28 D-4 -- the
+# old default silently returned PASS/REPLAY_NONE with no ledger, so a caller
+# that never learned the keyword existed had no replay gate at all). Compatible
+# as-is: every call site here already passes consumption_ledger explicitly,
+# either a real ledger with defer_consumption=True or the NO_REPLAY_LEDGER
+# sentinel via _no_replay_sentinel_or_none(). Verified byte-identical: signed_config,
+# consumption_ledger, receipt_keys, testing. Update ONLY together with a review
+# of what changed, and keep DISTILL_CONTRACT_COMMIT in integration.py in
 # lockstep (a test asserts they match).
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@79e93705c5fe39015b67d404ae7f8204635a708f",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b7929b69668ca34dd150029bb9d2c5198a339ada",
 ]
 
 # Validator-side entry points only. The upstream repo additionally ships
