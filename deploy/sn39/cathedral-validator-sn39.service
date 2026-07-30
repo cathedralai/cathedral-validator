@@ -14,9 +14,13 @@ User=cathedral-validator
 # difference from the launch and reconcile units is deliberate. LogsDirectory=
 # below creates /var/log/cathedral-validator 0750 owned by this process's
 # primary group, and cathedral-sn39-public-status.service reads
-# validator-events.jsonl out of it using SupplementaryGroups=cathedral-validator-log.
+# validator-status.jsonl, the SANITIZED projection, out of it using
+# SupplementaryGroups=cathedral-validator-log. It does NOT read
+# validator-events.jsonl: the raw journal carries hotkeys, receipts and arbitrary
+# caller-supplied fields and stays 0600 with no reader group.
 # Setting this to cathedral-validator to match the one-shots would leave the
-# status publisher unable to read the stream it exists to publish. The one-shots
+# status publisher unable to traverse the directory holding the stream it
+# exists to publish. The one-shots
 # write their own LogsDirectory that nothing else reads, so they have no reason
 # to widen their primary group.
 Group=cathedral-validator-log
