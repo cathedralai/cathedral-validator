@@ -36,7 +36,16 @@ Bundle shape:
       # `complete: true` says that epoch finished scoring. Verified here against
       # $CATHEDRAL_CYBERGYM_SCORES_HMAC_SECRET, this audience and this epoch;
       # absent/stale/tampered/incomplete forfeits the cybergym share to burn.
-      "cybergym_epoch_proof": {"document": { ... }, "signature": "sha256=..."},
+      # `body` is the EXACT authenticated bytes the producer signed and the
+      # publisher intake authenticated, NOT a re-serializable object: the HMAC is
+      # taken over those bytes on both sides.
+      "cybergym_epoch_proof": {"body": "<exact authenticated JSON text>",
+                               "signature": "sha256=..."},
+      # REQUIRED for a funded cybergym lane. Shared-secret HMAC authenticates the
+      # body; it does not establish identity, so the producer is pinned here.
+      "cybergym_expected_producer_hotkey": "5Producer",
+      # Optional pin for the signed evidence bundle digest.
+      "cybergym_expected_evidence_sha256": "<64 hex>",
 
       "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
                      "receipt": { ... }},
@@ -171,6 +180,43 @@ def _flags(row: dict) -> str:
     )
 
 
+def _epoch_proof_status(gates: dict) -> list[str]:
+    """Human-readable epoch-proof status, so an operator can see what was attested.
+
+    An activation decision rests on this preview, so the proof's producer, evidence
+    digest, units and whether it BOUND to the credited set have to be legible
+    without reading JSON.
+    """
+    proof = gates.get("cybergym_epoch_proof")
+    if not proof or not proof.get("required"):
+        return []
+    lines = ["cybergym producer epoch proof:"]
+    if proof.get("verified"):
+        lines.append(
+            f"  verified for {', '.join(proof['required'])}"
+            f" | producer={proof.get('producer_hotkey')}"
+            f" (pinned={'yes' if proof.get('producer_pinned') else 'NO'})"
+            f" | scored={proof.get('scored_hotkey_count')}"
+            f" | units={proof.get('score_units')}"
+        )
+        lines.append(
+            f"  evidence={proof.get('evidence_sha256')}"
+            f" (pinned={'yes' if proof.get('evidence_pinned') else 'no'})"
+        )
+        lines.append(f"  evidence binding: {proof.get('evidence_binding')}")
+        lines.append(f"  body sha256={proof.get('body_sha256')}")
+        lines.append(f"  semantic sha256={proof.get('semantic_sha256')}")
+        bound = proof.get("bound")
+        lines.append(
+            "  bound to the credited set: "
+            + ("yes" if bound else ("NO, the lane burns" if bound is False else "n/a"))
+        )
+    else:
+        lines.append(f"  NOT VERIFIED: {proof.get('reason')}; the lane's share burns")
+    lines.append("  " + str(proof.get("authentication", "")))
+    return lines
+
+
 def _gate_status(gates: dict) -> str:
     """Per lane and per receipt kind: which gates actually ran.
 
@@ -204,6 +250,7 @@ def _gate_status(gates: dict) -> str:
             "this preview is not evidence that a receipt would be admitted under a "
             "real launch policy"
         )
+    lines.extend(_epoch_proof_status(gates))
     return "\n".join(lines)
 
 
@@ -298,6 +345,14 @@ def run_bundle(
             cybergym_epoch_proof=bundle.get("cybergym_epoch_proof"),
             cybergym_epoch_proof_secret=os.environ.get(
                 _epoch_proof.EPOCH_PROOF_SECRET_ENV
+            ),
+            # Which producer this validator will compose. The shared secret
+            # authenticates the body; it cannot say who holds it.
+            cybergym_expected_producer_hotkey=bundle.get(
+                "cybergym_expected_producer_hotkey"
+            ),
+            cybergym_expected_evidence_sha256=bundle.get(
+                "cybergym_expected_evidence_sha256"
             ),
         )
     except IntegrationUnavailable as exc:
