@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
+
+from cathedral_thin import cybergym_epoch_proof as _epoch_proof
 from hashlib import sha256
 import inspect
 import json
@@ -279,6 +281,87 @@ def _refused(integrated_feed, item: LaneReceipt, detail: str, *, hotkey: str = "
     )
 
 
+def _bind_to_epoch_proof(integrated_feed, decisions, *, proof, lanes):
+    """Bind the credited CyberGym set EXACTLY to the producer's attested scores.
+
+    Membership alone is not enough, and both holes were reachable:
+
+    * A proof scoring two miners with only one receipt submitted let the submitted
+      miner take the WHOLE lane. A lane normalizes work units within itself, so an
+      absent contribution does not burn, it reallocates: the omitted miner's share
+      silently moves to whoever did submit. Reproduced before this fix at
+      weight 1.0 with nothing burned.
+    * A proof scoring a miner 0.0 still credited a positive receipt for that miner,
+      because zero was in the key set.
+
+    So require the credited set to equal the producer's above-zero set, and each
+    credited contribution's work units to equal the score the producer attested for
+    that subject. Any mismatch refuses every CyberGym decision in the lane, which
+    forfeits the whole share to burn rather than paying a set the producer did not
+    attest. Burning the lane on an omission is deliberate: the alternative, paying
+    the present subset, is exactly the reallocation above. Making an omission burn
+    only the absent miner's portion would need the lane composer to take the
+    producer's total as its denominator, which is a shared-contract change and an
+    owner decision, recorded rather than invented here.
+    """
+    creditable = [
+        d
+        for d in decisions
+        if d.creditable and d.lane in lanes and str(d.kind) == "cybergym"
+    ]
+    credited = {d.miner_hotkey for d in creditable}
+    attested = set(proof.earning_hotkeys)
+    problems: list[str] = []
+    if credited != attested:
+        missing = sorted(attested - credited)
+        extra = sorted(credited - attested)
+        if missing:
+            problems.append(
+                "no verified receipt for producer-scored " + ",".join(missing)
+            )
+        if extra:
+            problems.append(
+                "credited but not scored above zero by the producer: " + ",".join(extra)
+            )
+    for d in creditable:
+        expected = proof.scores.get(d.miner_hotkey)
+        if expected is None:
+            continue  # already reported as `extra` above
+        if Decimal(str(expected)) != Decimal(str(d.work_units)):
+            problems.append(
+                f"{d.miner_hotkey} work units {d.work_units} do not equal the "
+                f"producer's attested score {expected}"
+            )
+    if not problems:
+        return list(decisions)
+
+    detail = (
+        "producer epoch proof does not match the credited set ("
+        + "; ".join(problems)
+        + f"); the lane's share burns for epoch {proof.source_epoch}"
+    )
+    out = []
+    for d in decisions:
+        # Only rewrite decisions that would otherwise PAY. One that already failed
+        # keeps its own reason (window, signature, epoch): it is not paying either
+        # way, and overwriting it would erase the diagnosis an operator needs.
+        if d.creditable and d.lane in lanes and str(d.kind) == "cybergym":
+            out.append(
+                integrated_feed.ReceiptDecision(
+                    d.lane,
+                    d.kind,
+                    d.receipt_id,
+                    d.miner_hotkey,
+                    integrated_feed.FAIL,
+                    Decimal(0),
+                    detail,
+                )
+            )
+        else:
+            out.append(d)
+    return out
+
+
 def _decide(
     integrated_feed,
     item: LaneReceipt,
@@ -377,6 +460,16 @@ def _no_replay_sentinel():
     except ImportError:  # older contract without the sentinel
         return None
     return NO_REPLAY_LEDGER
+
+
+def _no_replay_sentinel_or_none() -> Any:
+    """The contract's typed "no replay protection" marker, or None on an older pin.
+
+    Passing the sentinel explicitly is what makes the inspection path forward
+    compatible with a contract that requires an explicit replay decision, while
+    still working against a pin that predates the sentinel.
+    """
+    return _no_replay_sentinel()
 
 
 def _usable_ledger(ledger: Any) -> Any:
@@ -739,6 +832,16 @@ def preview_integrated_vector(
     # consumption is the authoritative pass, at most once per epoch, and has to be
     # asked for.
     consume_receipts: bool = False,
+    # Producer epoch-completeness proof for the CyberGym lane. Verifying each
+    # receipt answers "is this contribution real"; it never answered "did the
+    # producer finish scoring this epoch, and is this the complete scored set".
+    # cathedral-distill records that in its own local cybergym_epoch_status table,
+    # which does not cross the authenticated HTTP boundary, so the validator has to
+    # verify the producer's signed report for itself or it cannot tell a partial
+    # epoch from an epoch nobody solved. Required for a FUNDED CyberGym lane;
+    # anything unverifiable forfeits that lane's share to burn.
+    cybergym_epoch_proof: Mapping[str, Any] | None = None,
+    cybergym_epoch_proof_secret: str | None = None,
     events: Any = None,
 ) -> dict[str, Any]:
     """Verify the signed config and every lane receipt, then compose + audit one
@@ -962,8 +1065,79 @@ def preview_integrated_vector(
         )
         _emit(events, "INTEGRATION_EPOCH_CLAIM", status="FAIL", detail=detail)
         raise IntegrationPolicyError(detail)
+    # 3b. Producer epoch completeness, verified here rather than assumed.
+    #     A CyberGym receipt proves one miner's solve; it cannot prove the producer
+    #     finished scoring the epoch. If the CyberGym lane is FUNDED and any
+    #     cybergym receipt is present, the signed report that says `complete: true`
+    #     must verify against this audience and this epoch, and every credited
+    #     subject must appear in the set the producer attested to. Anything else
+    #     (absent, stale, future-dated, tampered, wrong audience/epoch, not
+    #     complete, unverifiable secret) refuses those receipts, so the lane's
+    #     share forfeits to burn while every honest lane still composes.
+    cybergym_kinds = {"cybergym"}
+    cybergym_lanes = {
+        item.lane for item in receipts if str(item.kind) in cybergym_kinds
+    }
+    funded_cybergym = {
+        lane
+        for lane in cybergym_lanes
+        if resolved.lane_allocations.get(lane, Decimal(0)) > 0
+    }
+    epoch_proof = None
+    epoch_proof_error: str | None = None
+    if funded_cybergym:
+        try:
+            epoch_proof = _epoch_proof.verify_epoch_proof(
+                cybergym_epoch_proof,
+                secret=cybergym_epoch_proof_secret,
+                network=network,
+                netuid=netuid,
+                source_epoch=source_epoch,
+                now=now,
+            )
+        except _epoch_proof.EpochProofError as exc:
+            epoch_proof_error = (
+                f"{exc.reason}: {exc.detail}" if exc.detail else exc.reason
+            )
+        except Exception as exc:  # noqa: BLE001 - never abort honest lanes
+            epoch_proof_error = f"{type(exc).__name__}: {exc}"
+        _emit(
+            events,
+            "INTEGRATION_EPOCH_PROOF",
+            status="PASS" if epoch_proof is not None else "FAIL",
+            detail=epoch_proof_error
+            or (
+                f"producer {epoch_proof.producer_hotkey} closed epoch "
+                f"{epoch_proof.source_epoch} with {epoch_proof.score_count} scored"
+            ),
+            lanes=",".join(sorted(funded_cybergym)),
+        )
+    gates["cybergym_epoch_proof"] = {
+        "required": sorted(funded_cybergym),
+        "verified": epoch_proof is not None,
+        "reason": epoch_proof_error,
+        "scored_hotkeys": (
+            epoch_proof.score_count if epoch_proof is not None else None
+        ),
+    }
+
     verified = []
     for item in receipts:
+        if (
+            str(item.kind) in cybergym_kinds
+            and item.lane in funded_cybergym
+            and epoch_proof is None
+        ):
+            verified.append(
+                _refused(
+                    integrated_feed,
+                    item,
+                    "no verified producer epoch-completeness proof for this epoch "
+                    f"({epoch_proof_error}); the lane's share burns rather than "
+                    "paying a possibly partial epoch",
+                )
+            )
+            continue
         verified.append(
             _decide(
                 integrated_feed,
@@ -982,12 +1156,29 @@ def preview_integrated_vector(
                 # A deferred consumption needs the ledger threaded through the
                 # verifier so the decision carries REPLAY_PENDING and its source
                 # epoch; the contract reads nothing and writes nothing under it.
+                #
+                # In inspection mode the seam runs its own replay gate afterwards
+                # (`_read_replay_gate`), so the per-receipt verifier does no replay
+                # work. State that with the contract's typed opt-out instead of by
+                # omission: the shared contract is closing a fail-open default where
+                # an omitted ledger silently meant "no replay protection", and an
+                # omission would then raise for every receipt, contain to a FAIL, and
+                # compose a plausible 100% burn vector. NO_REPLAY_LEDGER is accepted
+                # by both the current and the hardened contract.
                 **(
                     {"consumption_ledger": ledger, "defer_consumption": True}
                     if authoritative
-                    else {}
+                    else {"consumption_ledger": _no_replay_sentinel_or_none()}
                 ),
             )
+        )
+
+    # 3c. Exact set/value binding to the producer's attested scores. Runs after
+    #     verification because it compares the work units the contract actually
+    #     verified, not what the receipt claimed.
+    if epoch_proof is not None and funded_cybergym:
+        verified = _bind_to_epoch_proof(
+            integrated_feed, verified, proof=epoch_proof, lanes=funded_cybergym
         )
 
     # 4. Screen for receipts an EARLIER pass already credited, as a read. Then claim

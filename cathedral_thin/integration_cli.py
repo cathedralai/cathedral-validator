@@ -32,6 +32,12 @@ Bundle shape:
       "current_block": 6000100,           # finalized height for the block window
       "ledger_path": "/var/lib/cathedral/consumption.sqlite",   # replay ledger
 
+      # REQUIRED for a funded cybergym lane: the producer's signed report whose
+      # `complete: true` says that epoch finished scoring. Verified here against
+      # $CATHEDRAL_CYBERGYM_SCORES_HMAC_SECRET, this audience and this epoch;
+      # absent/stale/tampered/incomplete forfeits the cybergym share to burn.
+      "cybergym_epoch_proof": {"document": { ... }, "signature": "sha256=..."},
+
       "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
                      "receipt": { ... }},
                     # "lane" may be omitted: each kind has a canonical lane id
@@ -59,11 +65,13 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cathedral_thin import cybergym_epoch_proof as _epoch_proof
 from cathedral_thin.integration import (
     DEFAULT_LANE_FOR_KIND,
     IntegrationError,
@@ -284,6 +292,13 @@ def run_bundle(
             # coercing here would turn a config mistake into an authorization
             allow_unpoliced_preview=allow_unpoliced_preview,
             consume_receipts=consume_receipts,
+            # The producer's signed epoch-completeness report travels in the bundle
+            # (it is what crosses the HTTP boundary); the shared secret comes from
+            # the environment so it never lands in a bundle file on disk.
+            cybergym_epoch_proof=bundle.get("cybergym_epoch_proof"),
+            cybergym_epoch_proof_secret=os.environ.get(
+                _epoch_proof.EPOCH_PROOF_SECRET_ENV
+            ),
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc
