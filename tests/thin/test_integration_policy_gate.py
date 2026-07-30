@@ -23,8 +23,8 @@ pytest.importorskip("cathedral_distill.integrated_feed")
 pytest.importorskip("cathedral_distill.testing")
 
 from cathedral_distill import integrated_feed as itf  # noqa: E402
-from cathedral_distill.consumption_ledger import ConsumptionLedger  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
 from scaffold.events import EventLogger  # noqa: E402
@@ -49,7 +49,7 @@ def _policy(fx, **over):
         "allowed_tcb_statuses": frozenset({"UpToDate"}),
         "allowed_advisories": frozenset(),
         "current_block": 6_000_100,
-        "consumption_ledger": ConsumptionLedger(":memory:"),
+        "consumption_ledger": durable_ledger(),
     }
     gates.update(over)
     return gates

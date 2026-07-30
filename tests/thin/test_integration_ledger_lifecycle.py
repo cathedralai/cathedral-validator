@@ -35,6 +35,7 @@ from cathedral_distill.consumption_ledger import (  # noqa: E402
     ReplayError,
 )
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
 
@@ -89,7 +90,7 @@ def _verdict(out):
 def test_a_replayed_receipt_is_refused_by_the_second_preview():
     fx = IntegrationFixtures()
     receipt = fx.cpu_receipt()
-    ledger = ConsumptionLedger(":memory:")
+    ledger = durable_ledger()
 
     first = _preview(fx, _one(fx, receipt), ledger)
     assert _verdict(first)["verdict"] == itf.PASS
@@ -169,7 +170,7 @@ def test_the_seam_credits_once_even_if_the_ledger_never_refuses(monkeypatch):
     """A ledger that wrongly reports a fresh consume must not double-credit."""
     fx = IntegrationFixtures()
     receipt = fx.cpu_receipt()
-    ledger = ConsumptionLedger(":memory:")
+    ledger = durable_ledger()
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)  # fails open
 
     out = _preview(

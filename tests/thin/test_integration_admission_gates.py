@@ -18,8 +18,8 @@ pytest.importorskip("cathedral_distill.integrated_feed")
 pytest.importorskip("cathedral_distill.testing")
 
 from cathedral_distill import integrated_feed as itf  # noqa: E402
-from cathedral_distill.consumption_ledger import ConsumptionLedger  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
 
@@ -122,7 +122,7 @@ def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
         allowed_measurements=frozenset({fx.tdx_measurement}),
         allowed_tcb_statuses=frozenset({"UpToDate"}),
         allowed_advisories=frozenset(),
-        consumption_ledger=ConsumptionLedger(":memory:"),
+        consumption_ledger=durable_ledger(),
         cpu_quote_verifier=lambda _evidence: False,
     )
     (receipt,) = out["audit"]["receipts"]
@@ -151,7 +151,7 @@ def test_every_gate_supplied_composes_and_reports_the_gates_applied():
         allowed_measurements=frozenset({fx.tdx_measurement}),
         allowed_tcb_statuses=frozenset({"UpToDate"}),
         allowed_advisories=frozenset(),
-        consumption_ledger=ConsumptionLedger(":memory:"),
+        consumption_ledger=durable_ledger(),
     )
     assert out["audit"]["verdicts"]["pass"] == 1
     assert out["gates"]["omitted_gates"] == []

@@ -25,9 +25,9 @@ from cathedral_distill import cybergym_batch as cb  # noqa: E402
 from cathedral_distill import cybergym_receipt as cr  # noqa: E402
 from cathedral_distill import cybergym_validator as cv  # noqa: E402
 from cathedral_distill import integrated_feed as itf  # noqa: E402
-from cathedral_distill.consumption_ledger import ConsumptionLedger  # noqa: E402
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures, digest  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
 from cathedral_thin import integration_cli as cli  # noqa: E402
@@ -127,7 +127,7 @@ def _policy(fx, ledger=None, **over):
         "current_block": IN_WINDOW,
         "consumption_ledger": ledger
         if ledger is not None
-        else ConsumptionLedger(":memory:"),
+        else durable_ledger(),
     }
     gates.update(over)
     return gates

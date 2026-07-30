@@ -23,8 +23,8 @@ pytest.importorskip("cathedral_distill.integrated_feed")
 pytest.importorskip("cathedral_distill.testing")
 
 from cathedral_distill import integrated_feed as itf  # noqa: E402
-from cathedral_distill.consumption_ledger import ConsumptionLedger  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
 from scaffold.events import EventLogger  # noqa: E402
@@ -147,7 +147,7 @@ def test_a_verifier_that_raises_fails_only_that_receipt():
 
 def test_a_ledger_that_raises_an_unexpected_error_fails_only_that_receipt(monkeypatch):
     fx = IntegrationFixtures()
-    ledger = ConsumptionLedger(":memory:")
+    ledger = durable_ledger()
 
     def explode(*_args, **_kw):
         raise RuntimeError("ledger storage is unavailable")
@@ -273,7 +273,7 @@ def test_the_burn_hotkey_cannot_earn_weight():
 def test_a_burn_subject_receipt_never_reaches_the_ledger():
     """It is refused before consumption, so it cannot burn its own token."""
     fx = IntegrationFixtures()
-    ledger = ConsumptionLedger(":memory:")
+    ledger = durable_ledger()
     receipt = fx.cpu_receipt(subject=BURN_HOTKEY)
     out = _preview(
         fx,
