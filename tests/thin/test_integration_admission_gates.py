@@ -3,7 +3,7 @@
 Before this change `preview_integrated_vector` accepted neither `current_block`,
 `consumption_ledger`, nor the signed measurement/TCB/advisory policy, so the
 validator's composition path was strictly weaker than `admission.verify_admission`
-for the same receipt — the exact asymmetry distill PR #8 was written to remove,
+for the same receipt, the exact asymmetry distill PR #8 was written to remove,
 reintroduced one repo downstream. A confidential-GPU launch cannot be gated on a
 preview that structurally cannot apply the launch policy.
 """
