@@ -23,20 +23,39 @@ The reader group moves to that surface. Files: `scaffold/events.py`,
 `scripts/publish_sn39_validator_status.py`,
 `config/validator-mainnet-sn39.toml`,
 `deploy/sn39/cathedral-validator-sn39.service`,
-`deploy/sn39/cathedral-sn39-public-status.service`. Pinned by
-`tests/thin/test_status_sanitization.py`.
+`deploy/sn39/cathedral-sn39-public-status.service`, and
+`deploy/sn39/cathedral-sn39-release-launcher.py`.
+
+The launcher is part of this contract and not an afterthought: it builds the
+COMPLETE environment for `os.execve`, so the unit's own `Environment=` never reaches
+the child and whatever the launcher sets is the entire access decision. It once set
+`CATHEDRAL_VALIDATOR_JSONL_GROUP` and never `CATHEDRAL_VALIDATOR_STATUS_GROUP`,
+which inverted the split: the raw journal came out 0640 group-readable while the
+projection stayed 0600 and unreadable by the reader it exists for.
+
+Pinned by `tests/thin/test_status_sanitization.py`,
+`tests/thin/test_status_stream_contract.py` (all three files together) and
+`tests/thin/test_launcher_log_group_split.py`.
 
 This should be upstreamed; until then, a re-sync must preserve it.
 
 ## Divergences retired at the `dabf10b` sync
 
-Upstream absorbed five of the sixteen declared divergences, so they are no longer
-declared and the files are byte-identical again:
+Upstream absorbed four of the declared divergences, so they are no longer declared
+and the files are byte-identical again.
+
+**`config/validator-mainnet-sn39.toml` is NOT among them.** An earlier revision of
+this section listed it as retired while the section above listed it as part of the
+active status-split divergence, and that contradiction is what licensed a re-sync to
+copy upstream over it: `[logs].status_jsonl` was dropped, nothing wrote the sanitized
+projection, and `cathedral-sn39-public-status.service` could never satisfy its
+`ConditionPathExists`, so systemd recorded the condition as skipped rather than
+failed and the public status stream stopped silently. It remains declared, and
+`tools/sync-from-upstream.sh` now refuses to overwrite any declared divergence.
 
 | File | Why it can go |
 |---|---|
-| `config/validator-mainnet-sn39.toml` | #407 moved `controlled_dir` to the value this repo already carried |
-| `config/validator-mainnet-sn39-launch.toml` | same, via the launch profile |
+| `config/validator-mainnet-sn39-launch.toml` | #407 moved `controlled_dir` to the value this repo already carried |
 | `deploy/sn39/cathedral-validator-sn39-launch.service` | absorbed upstream |
 | `deploy/sn39/cathedral-validator-sn39-reconcile.service` | absorbed upstream |
 | `scripts/build_sn39_release_manifest.py` | see below — **partially** |

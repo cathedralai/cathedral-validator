@@ -65,6 +65,14 @@ jobs:
       - name: Prove the verifier rejects tampering
         run: ./tools/manifest.sh selftest /tmp/cathedral-upstream
 
+      # The sync tool had no gating coverage at all, which is how a re-sync
+      # silently reverted a declared divergence (config/validator-mainnet-sn39.toml
+      # lost [logs].status_jsonl, and the public status unit could then never
+      # satisfy its ConditionPathExists). Its selftest proves a local addition
+      # survives AND that a declared divergence is never overwritten.
+      - name: Prove a sync preserves local additions and declared divergences
+        run: ./tools/sync-from-upstream.sh selftest /tmp/cathedral-upstream
+
   publisher:
     # Advisory, not gating. The publisher suite carries failures inherited from
     # upstream in any environment without PostgreSQL and outbound network. They
