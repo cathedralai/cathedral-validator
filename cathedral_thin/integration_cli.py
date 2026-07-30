@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.out).write_text(text, encoding="utf-8")
     else:
         sys.stdout.write(text)
-    sys.stderr.write("preview only — no chain write\n")
+    sys.stderr.write("preview only, no chain write\n")
     return 0
 
 

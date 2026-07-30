@@ -12,10 +12,11 @@ rather than trusted from the shared contract:
 * fail-open ledger: a ledger that reports a consume it did not record, or that
   cannot be read back at all, is refused as a preview-level failure rather than
   trusted, because within-preview deduplication cannot see across previews;
-* concurrency: two consumers racing one token, exactly one wins. That case is
-  gated on CATHEDRAL_LEDGER_RACE_TEST=1 because the shipped ledger shares one
-  connection with no busy timeout and does NOT hold under a real race; enabling
-  it belongs to the cross-repo phase once the ledger fix lands.
+* concurrency: two consumers racing one token, exactly one wins. Gated on
+  CATHEDRAL_LEDGER_RACE_TEST=1 because it depends on the ledger implementation
+  rather than on this seam: the version pinned by the '.[integration]' extra shares
+  one connection with no busy timeout and does NOT hold, while a fixed ledger does.
+  The cross-repo phase turns it on once the pin moves.
 """
 
 from __future__ import annotations
@@ -328,11 +329,12 @@ def test_the_seam_credits_one_receipt_once_within_a_preview():
 @pytest.mark.skipif(
     os.environ.get(RACE_ENV) != "1",
     reason=(
-        f"set {RACE_ENV}=1 to run the concurrent-consumption race. The pinned "
-        "consumption ledger shares one connection with no busy timeout, so "
+        f"set {RACE_ENV}=1 to run the concurrent-consumption race. It measures the "
+        "ledger implementation, not this seam: the ledger pinned by the "
+        "'.[integration]' extra shares one connection with no busy timeout, so "
         "racing consumers report several successful consumes for one token and "
-        "raise sqlite operational errors. Enable this in the cross-repo phase, "
-        "once the ledger atomicity fix lands."
+        "raise sqlite operational errors, while a per-connection BEGIN IMMEDIATE "
+        "ledger passes. Turn it on in the cross-repo phase, once the pin moves."
     ),
 )
 def test_exactly_one_racing_consumer_wins_the_same_token(tmp_path):

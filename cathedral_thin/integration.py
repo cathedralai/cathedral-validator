@@ -831,6 +831,7 @@ __all__ = [
     "IntegrationPolicyError",
     "IntegrationLedgerError",
     "REQUIRED_REWARD_GATES",
+    "GATES_READ_BY_KIND",
     "DEFAULT_LANE_FOR_KIND",
     "LANE_COMPUTE_CPU",
     "LANE_COMPUTE_GPU",
