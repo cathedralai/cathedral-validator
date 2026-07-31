@@ -4,7 +4,7 @@
 >
 > This repository is extracted from
 > [`cathedralai/cathedral`](https://github.com/cathedralai/cathedral) at commit
-> **`aa791358601f9ef2e95c5ac5e717c77c17963dbd`**.
+> **`7f3888a8ff93105e8c717b830bd1d70e23f6a58f`**.
 >
 > `MANIFEST.origin.tsv` records the same SHA and CI clones upstream at it, so the
 > two cannot drift apart silently. If they ever disagree, the manifest is right —
@@ -104,24 +104,28 @@ than introduced by the extraction. `BOUNDARY.md` describes how to re-verify that
 after a sync — by comparing failure *sets* between this repo and an upstream
 checkout, never counts.
 
-> **The order-dependent half is fixed** ([#17](https://github.com/cathedralai/cathedral-validator/issues/17),
-> [#20](https://github.com/cathedralai/cathedral-validator/issues/20), fixed upstream in
-> `cathedral#420`). This section used to attribute the whole failure set to "no
-> PostgreSQL and no outbound network". It never fitted: a missing database does not
-> care how the run is split across processes, and roughly half the failures vanished
-> when each file ran in its own process.
+> **The publisher baseline is now one cause, not five.** This section used to
+> attribute the whole failure set to "no PostgreSQL and no outbound network". It
+> never fitted: a missing database does not care how the run is split across
+> processes, and roughly half the failures vanished when each file ran in its own
+> process ([#17](https://github.com/cathedralai/cathedral-validator/issues/17),
+> [#20](https://github.com/cathedralai/cathedral-validator/issues/20)).
 >
-> The cause was one process-wide rate limiter keyed on client IP — which under
-> `TestClient` is the same `testclient` for every request — so the whole session
-> shared one 120-request, 60-second budget. Measured here: **62 failed with 61
-> responses carrying a 429, now 28 with none**, and the one-process failure set is
-> now **identical, test for test**, to running each file separately. The count used
-> to move with machine speed, which is why two reproductions of the same bug reported
-> 69 and 64.
+> Fully provisioned (`[test,publisher,provenance]`), still with no database and no
+> network, at derived-from `7f3888a`:
 >
-> The remaining 28 are genuine and are described in `BOUNDARY.md`: 18 from the render
-> divergence, one from the authority-mode config, and a handful that need PostgreSQL,
-> outbound network, or the `provenance` extra. A failure outside that set is new.
+> | | |
+> |---|---|
+> | Upstream | **1393 passed, 0 failed** |
+> | Here | **26 failed, 1366 passed** |
+>
+> All 26 are the render divergence, confined to `test_validator_two_mode.py`,
+> `test_validator_thin_validated_supply.py` and `test_validator_lifecycle.py`.
+> **A failure outside those three files is new.** `BOUNDARY.md` lists them and the
+> four separate causes that used to be mixed into the number — a process-wide rate
+> limiter, a test coupling the relay profile to the operator's `provenance`, a
+> canary that could not import its own dependencies inside a virtualenv, and three
+> tests predating the thin-admit split.
 
 ## Entry points
 

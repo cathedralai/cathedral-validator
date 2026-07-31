@@ -71,34 +71,33 @@ upstream's for the shapes both accept. The file therefore stays a divergence, an
 `tests/thin/test_release_manifest_venv_symlinks.py` fails if a future sync drops the
 narrowing. Whether to keep narrowing is an owner decision; it is now a visible one.
 
-## Known: the authority-mode config costs one upstream publisher test
+## Retired: the authority-mode config no longer costs a publisher test
 
 `config/validator-mainnet-sn39.toml` is a declared divergence and sets
 `[provenance] mode = "authority"`. Upstream's copy is `shadow`.
 
-`scaffold/publisher/tests/test_sn39_launch_gate_matrix.py::test_shipped_relay_profile_runs_without_a_launch`
-asserts the shipped relay profile is byte-identical to the operator profile across a
-list of trust-bearing fields, and that list includes `provenance`. Upstream both
-profiles are `shadow`, so it passes there. Here the operator profile is `authority`
-and the relay profile is `shadow` — deliberately, because the relay config says so
-in its own words: *"Relays MUST stay in shadow. 'authority' submits an independent
-recomputation instead of Cathedral's signed vector; that originates weights and
-therefore requires the root-signed launch and recurring-write authorization."* So
-the assertion fails here, and it fails for the right reason: the two profiles are
-supposed to differ on exactly that field.
+This used to cost
+`test_sn39_launch_gate_matrix.py::test_shipped_relay_profile_runs_without_a_launch`,
+which asserted the shipped relay profile was byte-identical to the operator
+profile across a list of trust-bearing fields -- and that list included
+`provenance`. That is the one field the two profiles are *supposed* to disagree
+on: a relay must stay `shadow`, while an operator running the authority lane
+sets `authority`, and the difference is exactly what the launch gate is scoped
+to. The assertion therefore said the opposite of its intent, and passed upstream
+only because both shipped profiles happen to be `shadow`.
 
-**This is not an extraction defect, and not new.** It fails identically at
-`873621a`, before the `dabf10b` re-sync. It appeared to be "fixed" for one window
-only because that re-sync wrongly reverted the operator profile to `shadow` — the
-regression #13 later restored. In other words this red test was, briefly, the only
-visible symptom of a real config regression, and masking it is what made the
-regression invisible.
+**Fixed upstream in `cathedral#422`** rather than forked here: `provenance` is
+out of that list, and the relay's own guarantee is asserted directly
+(`args.provenance == "shadow"`), which holds whatever the operator profile says.
+Confirmed by reproducing the downstream condition in the upstream tree -- with
+upstream's operator config temporarily set to `authority`, the test failed
+before the change and passed after.
 
-The test is correct **upstream**. Forking it here would carry a mirror divergence
-for something upstream has no reason to change, so it stays red and is recorded
-here instead. The fix that would work in both places is to drop `provenance` from
-the byte-identical list and assert the relay's own guarantee directly
-(`args.provenance == "shadow"`), which is upstream's call to make.
+Measured after the fix: setting this repo's operator profile back to `shadow`
+changes the publisher failure set **not at all**. The authority-mode divergence
+costs zero tests. `test_mainnet_launch_bundle_is_byte_pinned_and_shadow_by_default`
+still fails, but on the byte-pinning half -- the config diverges from the pinned
+digest, which is true regardless of mode -- so it belongs to the section below.
 
 ## Known: the provenance pin's form costs one assertion, not one test
 
@@ -122,20 +121,49 @@ is which line it stops on. Verified by running it at `a369c9b` (pre-#22) and
 reading the failure — `CATHEDRAL_VALIDATOR_STATUS_GROUP` vs
 `CATHEDRAL_VALIDATOR_JSONL_GROUP`, not the pin.
 
-## Known: the render divergence costs 18 upstream publisher tests
+## Known: the render divergence is now the WHOLE publisher failure set
 
 `scaffold/render.py` is a local addition, and `scaffold/validator_thin.py` /
 `scaffold/cli.py` diverge partly to drive it. Upstream's publisher tests assert the
 plain-text journal (`FEED fetch source=...`); this repo emits the rendered one, so
-18 tests in `test_validator_lifecycle.py`, `test_validator_thin_validated_supply.py`
-and `test_validator_two_mode.py` fail here and pass upstream.
+they fail here and pass upstream.
 
-**These are not extraction defects and they predate the `dabf10b` sync** — all 18
+**These are not extraction defects and they predate the `dabf10b` sync** — they
 fail identically on the pre-sync tree. They were invisible before only because
 upstream failed them too at `fd02392d`; upstream has since fixed them, which is what
-made the gap appear. Recorded here so the next comparison does not read them as new,
-and so the real cost of the render divergence is written down: either the renderer
-gets upstreamed, or those assertions stay red in this repo.
+made the gap appear.
+
+### The current baseline, measured
+
+In a fully provisioned environment (`[test,publisher,provenance]`, no PostgreSQL,
+no outbound network) at derived-from `7f3888a`:
+
+| | |
+|---|---|
+| Upstream `scaffold/publisher/tests` | **1393 passed, 0 failed** |
+| Here | **26 failed, 1366 passed** |
+
+All 26 sit in exactly three files — `test_validator_two_mode.py` (16),
+`test_validator_thin_validated_supply.py` (9), `test_validator_lifecycle.py` (1) —
+and every one of them is this divergence. Nothing else in the publisher suite fails
+here any more, so the comparison rule below has become sharp: **a failure outside
+those three files is new, and a failure inside them should be checked against this
+list rather than assumed.**
+
+Getting here removed four separate causes that used to be mixed into the number,
+each of which had been read at some point as "inherited, environmental":
+
+| Was failing | Actually |
+|---|---|
+| ~34 across many files | one process-wide rate limiter shared by the whole session (`cathedral#420`) |
+| `test_sn39_launch_gate_matrix.py` | a test coupling the relay profile to the operator's `provenance` (`cathedral#422`) |
+| `test_confidential_cpu_publisher_canary.py` (3) | the canary could not import its dependencies inside a venv at all (`cathedral#423`) |
+| `test_v2_solver_metadata.py` (3) | tests predating the thin-admit split (`cathedral#423`) |
+| `test_snapshot_candidates.py` | needed the `provenance` extra, which could not install (#16 / #22) |
+
+So the real cost of the render divergence is now written down without anything
+else hiding inside it: either the renderer gets upstreamed, or those 26
+assertions stay red here.
 
 ## Derived-from
 
@@ -143,8 +171,9 @@ gets upstreamed, or those assertions stay red in this repo.
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Current derived-from SHA** | **`aa791358601f9ef2e95c5ac5e717c77c17963dbd`** (#420, "give each test its own rate-limit budget") |
-| Previous derived-from | `ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51` (#418, compose-time staleness ceiling) |
+| **Current derived-from SHA** | **`7f3888a8ff93105e8c717b830bd1d70e23f6a58f`** (#423, "the confidential CPU canary cannot run inside a virtualenv") |
+| Previous derived-from | `aa791358601f9ef2e95c5ac5e717c77c17963dbd` (#420, per-test rate-limit budget) |
+| Before that | `ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51` (#418, compose-time staleness ceiling) |
 | Before that | `5c380162ba1a786ebf8c7f5ca70941e9688ce2ba` (#413, CyberGym scores bridge) |
 | Before that | `dabf10bcd5de76b6f98a6ce6772df2fc063da8db` (#417, "give artifact adapters the publisher DB, not the mechanism DB") |
 | Before that | `fd02392dc969bbea09e3107febb64f1f5f748391` (#399) |
