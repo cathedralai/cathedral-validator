@@ -48,15 +48,19 @@ provenance = [
 # independently verify Compute (TDX CPU + confidential GPU) and Distill receipts and
 # PREVIEW one audited vector — non-writing, never the live thin path.
 #
-# cathedral-distill is PRIVATE, unlike cathedralconfidential above: a plain
-# `archive/<ref>.tar.gz` URL 404s unauthenticated regardless of pinning, because
-# pip's HTTP downloader never consults git credentials. The `git+https://` VCS
-# form below does — `pip install` delegates to the local `git` binary, which
-# uses whatever credentials (SSH agent, stored HTTPS token, credential manager)
-# the caller already has for github.com, so this installs for anyone with real
-# repo access; CI has none configured yet, so it correctly still skips there
-# (see the integration job in .github/workflows/tests.yml) until an org secret
-# is added or cathedral-distill goes public.
+# cathedral-distill is PUBLIC, so this extra installs unauthenticated — no token,
+# no SSH agent, no org secret. It was private when this was written, which is why
+# the integration CI job used to tolerate the extra failing to install; that job
+# gates now (see .github/workflows/tests.yml).
+#
+# The `git+https://…@<commit-sha>` form is kept deliberately over the
+# `archive/<ref>.tar.gz#sha256=` form used by the provenance extra above. A GitHub
+# auto-generated tarball embeds the repository name as its top-level directory, so
+# renaming the repo changes the archive bytes and invalidates a hash pin that
+# nothing inside the repository touched — which is exactly what broke the
+# provenance extra when cathedralconfidential became cathedral-compute
+# (cathedral-validator#16). A commit SHA IS the immutable pin: this extra came
+# through both that rename and cathedral-distill's move to public unchanged.
 #
 # Pinned to an immutable commit on cathedral-distill main (mirrors the provenance
 # extra's discipline: never a mutable branch ref). Re-pinned past distill#22-#28
