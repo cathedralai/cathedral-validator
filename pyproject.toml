@@ -59,6 +59,22 @@ test = [
 # `uv` installed it regardless. So the break was invisible to half the toolchain,
 # which is its own argument against carrying a second digest.
 #
+# RECONCILED at the aa79135 sync, deliberately NOT adopting upstream's version.
+# cathedral#421 fixed the same break upstream by moving the digest to 2384833b…
+# and keeping the tarball form. Upstream has no choice there: its copy of this pin
+# has to match requirements/sn39-reproduction.lock, and `pip --require-hashes`
+# rejects VCS requirements outright, so a hash-locked file cannot use a commit pin.
+# This repo does not ship that constraint into the extra, so it keeps the form that
+# a rename cannot invalidate at all. The two are pinned to the SAME COMMIT and
+# resolve to the same bytes; only the addressing differs.
+#
+# The visible cost of the divergence: upstream's
+# test_immutable_install_binds_venv_and_masks_legacy_writer asserts
+# `"#sha256=" + EXPECTED_CATHEDRAL_ARCHIVE_SHA256 in pyproject`, which cannot hold
+# here. That test already failed in this repo before this change, on a different
+# assertion (the status/jsonl log-group split), so this costs no additional test.
+# Recorded in BOUNDARY.md rather than left to be rediscovered.
+#
 # Update ONLY together with the reviewed release process (never a mutable ref).
 provenance = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@655c264421a1f5f2e625a372a40f595aa1e114ab",
