@@ -71,6 +71,35 @@ upstream's for the shapes both accept. The file therefore stays a divergence, an
 `tests/thin/test_release_manifest_venv_symlinks.py` fails if a future sync drops the
 narrowing. Whether to keep narrowing is an owner decision; it is now a visible one.
 
+## Known: the authority-mode config costs one upstream publisher test
+
+`config/validator-mainnet-sn39.toml` is a declared divergence and sets
+`[provenance] mode = "authority"`. Upstream's copy is `shadow`.
+
+`scaffold/publisher/tests/test_sn39_launch_gate_matrix.py::test_shipped_relay_profile_runs_without_a_launch`
+asserts the shipped relay profile is byte-identical to the operator profile across a
+list of trust-bearing fields, and that list includes `provenance`. Upstream both
+profiles are `shadow`, so it passes there. Here the operator profile is `authority`
+and the relay profile is `shadow` — deliberately, because the relay config says so
+in its own words: *"Relays MUST stay in shadow. 'authority' submits an independent
+recomputation instead of Cathedral's signed vector; that originates weights and
+therefore requires the root-signed launch and recurring-write authorization."* So
+the assertion fails here, and it fails for the right reason: the two profiles are
+supposed to differ on exactly that field.
+
+**This is not an extraction defect, and not new.** It fails identically at
+`873621a`, before the `dabf10b` re-sync. It appeared to be "fixed" for one window
+only because that re-sync wrongly reverted the operator profile to `shadow` — the
+regression #13 later restored. In other words this red test was, briefly, the only
+visible symptom of a real config regression, and masking it is what made the
+regression invisible.
+
+The test is correct **upstream**. Forking it here would carry a mirror divergence
+for something upstream has no reason to change, so it stays red and is recorded
+here instead. The fix that would work in both places is to drop `provenance` from
+the byte-identical list and assert the relay's own guarantee directly
+(`args.provenance == "shadow"`), which is upstream's call to make.
+
 ## Known: the render divergence costs 18 upstream publisher tests
 
 `scaffold/render.py` is a local addition, and `scaffold/validator_thin.py` /
