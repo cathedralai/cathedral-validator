@@ -93,7 +93,11 @@ pytest scaffold/publisher/tests
 ```
 
 If `tests/thin` reports **241 passed, 9 skipped**, the `integration` extra is
-missing and the integration lane did not run. See Install above.
+missing and the integration lane did not run. See Install above. Run with `-rs`
+and each of the nine skips says so and names the extra to install.
+
+CI installs `integration` on the gating job too, so those 168 tests gate rather
+than quietly skipping ([#19](https://github.com/cathedralai/cathedral-validator/issues/19)).
 
 The publisher suite carries pre-existing failures, inherited from upstream rather
 than introduced by the extraction. `BOUNDARY.md` describes how to re-verify that

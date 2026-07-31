@@ -24,8 +24,14 @@ import pytest
 from cathedral_thin import cybergym_epoch_proof as ep
 from cathedral_thin import cybergym_evidence_manifest as ev
 
-pytest.importorskip("cathedral_distill.integrated_feed")
-pytest.importorskip("cathedral_distill.testing")
+_NEEDS_CONTRACT = (
+    "needs the shared cathedral-distill contract: pip install -e '.[integration]'. "
+    "Without it this module is skipped whole, and the nine modules that do so "
+    "together drop ~168 thin tests without failing anything."
+)
+
+pytest.importorskip("cathedral_distill.integrated_feed", reason=_NEEDS_CONTRACT)
+pytest.importorskip("cathedral_distill.testing", reason=_NEEDS_CONTRACT)
 
 from cathedral_distill import cybergym as cg  # noqa: E402
 from cathedral_distill import cybergym_batch as cb  # noqa: E402

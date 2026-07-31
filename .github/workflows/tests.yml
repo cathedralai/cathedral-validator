@@ -25,13 +25,43 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install the validator with its test and publisher extras
-        run: python -m pip install -e ".[test,publisher]"
+      # `integration` is included deliberately. Without it nine tests/thin
+      # modules importorskip the shared cathedral-distill contract and this job
+      # sees 241 passed / 9 skipped instead of 409 / 4 -- 168 tests, roughly 40%
+      # of the thin suite, silently not running on the gating path. They are
+      # whole-module skips, one line each, so the summary looks unremarkable.
+      #
+      # The Integration lane job below also runs those files and gates on them,
+      # so this is belt AND braces on purpose: that job selects them by the
+      # glob test_integration_*.py, and a future contract-dependent test named
+      # anything else would be covered by neither job. Here the whole directory
+      # runs, so coverage does not depend on a filename.
+      - name: Install the validator with its test, publisher and integration extras
+        run: python -m pip install -e ".[test,publisher,integration]"
 
       - name: Lint the thin subnet tree
         run: |
           ruff check cathedral_thin tests/thin
           ruff format --check cathedral_thin tests/thin
+
+      # A skipped contract is a failure here, not a pass. Without this an
+      # importorskip turns an uninstallable dependency into a green run
+      # reporting "9 skipped", which is exactly how 168 tests stop running
+      # without anyone noticing.
+      - name: Refuse to pass on a skipped contract
+        run: |
+          python - <<'PY'
+          import importlib, sys
+          for module in ("cathedral_distill.integrated_feed", "cathedral_distill.testing"):
+              try:
+                  importlib.import_module(module)
+              except ImportError as exc:
+                  sys.exit(
+                      f"{module} did not import ({exc}). tests/thin gates on the "
+                      "shared contract; a skip here is a failure, not a pass."
+                  )
+          print("shared contract imported; the full thin suite will run")
+          PY
 
       - name: Thin subnet tests
         run: python -m pytest -q tests/thin
