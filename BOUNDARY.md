@@ -121,8 +121,18 @@ gets upstreamed, or those assertions stay red in this repo.
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Final derived-from SHA** | **`dabf10bcd5de76b6f98a6ce6772df2fc063da8db`** (#417, "give artifact adapters the publisher DB, not the mechanism DB") |
-| Previous derived-from | `fd02392dc969bbea09e3107febb64f1f5f748391` (#399) |
+| **Current derived-from SHA** | **`ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51`** (#418, "apply the compose-time staleness ceiling that nothing supplied") |
+| Previous derived-from | `5c380162ba1a786ebf8c7f5ca70941e9688ce2ba` (#413, CyberGym scores bridge) |
+| Before that | `dabf10bcd5de76b6f98a6ce6772df2fc063da8db` (#417, "give artifact adapters the publisher DB, not the mechanism DB") |
+| Before that | `fd02392dc969bbea09e3107febb64f1f5f748391` (#399) |
+
+This table is prose and a human keeps it current, so it can go stale — and it did.
+Between the `5c38016` sync and the `ebc65f0` one, `README.md` still said `dabf10b`
+while `MANIFEST.origin.tsv` already said `5c38016`, and nothing complained. The
+manifest is the machine-checked record: CI reads the SHA out of it, clones upstream
+at exactly that commit, and fails if a single mirrored byte differs. **When this
+table and the manifest disagree, the manifest is right.** Step 6 of the re-sync
+checklist below exists to keep them from disagreeing at all.
 
 Work began at `c8028af`. `fd02392d` merged mid-extraction, so the tree was
 re-synced to it before the first commit. Everything here reflects `fd02392d`.

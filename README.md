@@ -4,7 +4,11 @@
 >
 > This repository is extracted from
 > [`cathedralai/cathedral`](https://github.com/cathedralai/cathedral) at commit
-> **`dabf10bcd5de76b6f98a6ce6772df2fc063da8db`**.
+> **`ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51`**.
+>
+> `MANIFEST.origin.tsv` records the same SHA and CI clones upstream at it, so the
+> two cannot drift apart silently. If they ever disagree, the manifest is right —
+> it is the one a machine checks.
 >
 > - **Sync is one-way**, upstream to here. Nothing in this repo feeds back into
 >   `cathedralai/cathedral`, and no change should be made here first.
@@ -64,25 +68,27 @@ that never ran. They are whole-module skips, one line each, so the count looks
 unremarkable while roughly 40% of the thin suite is missing. The extra is public
 and installs unauthenticated.
 
-The `provenance` extra pulls the sha256-locked `cathedral-compute` package that the
+The `provenance` extra pulls the commit-pinned `cathedral-compute` package that the
 full-provenance audit path needs:
 
 ```sh
 python -m pip install -e ".[provenance]"
 ```
 
-> **This extra currently fails to install** ([#16](https://github.com/cathedralai/cathedral-validator/issues/16)).
-> Its pin is a GitHub auto-generated tarball, and those embed the repository name as
-> the archive's top-level directory — so renaming `cathedralconfidential` to
-> `cathedral-compute` changed the bytes and invalidated the digest, with nothing
-> inside the repository having changed. It fails as a hash mismatch, which reads
-> like tampering rather than like a moved URL.
+> This extra used to fail to install ([#16](https://github.com/cathedralai/cathedral-validator/issues/16), fixed
+> in [#22](https://github.com/cathedralai/cathedral-validator/pull/22)). Its pin was a
+> GitHub auto-generated tarball with a sha256, and those archives embed the repository
+> name as their top-level directory — so renaming `cathedralconfidential` to
+> `cathedral-compute` changed the bytes and invalidated the digest while nothing inside
+> the repository changed. It surfaced as a hash mismatch, which reads like tampering
+> rather than like a moved URL, and it broke asymmetrically: `pip` refused, `uv`
+> installed it anyway. It is pinned by commit SHA now, which a rename cannot invalidate.
 
 ## Test
 
 ```sh
 pytest tests/thin        # thin validator — 409 passed, 4 skipped with [integration]
-pytest tests/boundary    # the SAT lane stays out — 9 passed
+pytest tests/boundary    # the SAT lane stays out, the derived-from SHA agrees — 12 passed
 pytest scaffold/publisher/tests
 ```
 
