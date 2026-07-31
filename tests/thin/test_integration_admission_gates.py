@@ -17,8 +17,14 @@ import re
 
 import pytest
 
-pytest.importorskip("cathedral_distill.integrated_feed")
-pytest.importorskip("cathedral_distill.testing")
+_NEEDS_CONTRACT = (
+    "needs the shared cathedral-distill contract: pip install -e '.[integration]'. "
+    "Without it this module is skipped whole, and the nine modules that do so "
+    "together drop ~168 thin tests without failing anything."
+)
+
+pytest.importorskip("cathedral_distill.integrated_feed", reason=_NEEDS_CONTRACT)
+pytest.importorskip("cathedral_distill.testing", reason=_NEEDS_CONTRACT)
 
 from cathedral_distill import integrated_feed as itf  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
