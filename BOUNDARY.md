@@ -100,6 +100,28 @@ here instead. The fix that would work in both places is to drop `provenance` fro
 the byte-identical list and assert the relay's own guarantee directly
 (`args.provenance == "shadow"`), which is upstream's call to make.
 
+## Known: the provenance pin's form costs one assertion, not one test
+
+`pyproject.toml`'s `provenance` extra is pinned by commit SHA over `git+https://`,
+while upstream pins the same commit as a GitHub tarball with a `#sha256=`. Both
+resolve to identical bytes; only the addressing differs.
+
+Upstream has no choice: its copy of that pin must match
+`requirements/sn39-reproduction.lock`, and `pip --require-hashes` rejects VCS
+requirements outright, so a hash-locked file cannot use a commit pin. This repo
+does not carry that constraint into the extra, so it uses the form a repository
+rename cannot invalidate — which is not hypothetical, since the tarball form is
+exactly what broke in #16 and again in `cathedral#421`.
+
+The cost is one assertion inside
+`test_validator_two_mode.py::test_immutable_install_binds_venv_and_masks_legacy_writer`,
+which requires `"#sha256=" + EXPECTED_CATHEDRAL_ARCHIVE_SHA256` to appear in
+`pyproject.toml`. **It costs no additional test**: that test already failed here
+before #22, on an earlier assertion about the log-group env split, so what changed
+is which line it stops on. Verified by running it at `a369c9b` (pre-#22) and
+reading the failure — `CATHEDRAL_VALIDATOR_STATUS_GROUP` vs
+`CATHEDRAL_VALIDATOR_JSONL_GROUP`, not the pin.
+
 ## Known: the render divergence costs 18 upstream publisher tests
 
 `scaffold/render.py` is a local addition, and `scaffold/validator_thin.py` /
@@ -121,8 +143,9 @@ gets upstreamed, or those assertions stay red in this repo.
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Current derived-from SHA** | **`ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51`** (#418, "apply the compose-time staleness ceiling that nothing supplied") |
-| Previous derived-from | `5c380162ba1a786ebf8c7f5ca70941e9688ce2ba` (#413, CyberGym scores bridge) |
+| **Current derived-from SHA** | **`aa791358601f9ef2e95c5ac5e717c77c17963dbd`** (#420, "give each test its own rate-limit budget") |
+| Previous derived-from | `ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51` (#418, compose-time staleness ceiling) |
+| Before that | `5c380162ba1a786ebf8c7f5ca70941e9688ce2ba` (#413, CyberGym scores bridge) |
 | Before that | `dabf10bcd5de76b6f98a6ce6772df2fc063da8db` (#417, "give artifact adapters the publisher DB, not the mechanism DB") |
 | Before that | `fd02392dc969bbea09e3107febb64f1f5f748391` (#399) |
 
