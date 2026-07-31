@@ -4,7 +4,7 @@
 >
 > This repository is extracted from
 > [`cathedralai/cathedral`](https://github.com/cathedralai/cathedral) at commit
-> **`7f3888a8ff93105e8c717b830bd1d70e23f6a58f`**.
+> **`7864c2787c74c3d5fdf2ac4e1795dbcbaecf035c`**.
 >
 > `MANIFEST.origin.tsv` records the same SHA and CI clones upstream at it, so the
 > two cannot drift apart silently. If they ever disagree, the manifest is right —
@@ -120,7 +120,11 @@ emits the rendered one. It is confined to three files —
 `test_snapshot_candidates.py`, which raises `ModuleNotFoundError: No module
 named 'cathedral'` without the `provenance` extra and passes with it.
 
-**So a failure outside those four files is new.**
+**So a failure outside those four files is new.** That rule earned its keep
+immediately: the first CI run after it was written reported 22, and the extra one
+was a real defect — a test whose forgery only forged ~94% of the time, because it
+edited the last base64 character of an HMAC whose final character carries just 4
+significant bits. Fixed upstream in `cathedral#424`; see `BOUNDARY.md`.
 
 > **How the environment story died.** It never fitted: a missing database does
 > not care how a run is split across processes, yet roughly half the failures

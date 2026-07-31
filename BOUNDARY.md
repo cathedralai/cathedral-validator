@@ -150,6 +150,30 @@ here any more, so the comparison rule below has become sharp: **a failure outsid
 those three files is new, and a failure inside them should be checked against this
 list rather than assumed.**
 
+### The rule caught something the day it was written
+
+The first CI run after this was documented reported **22**, not 21 -- one extra,
+in `test_solution_manifest_v2.py`, a fifth file. That is precisely what the rule
+says to look at, and looking was right.
+
+It was a test whose forgery did not always forge. It tampered with a submit
+token by replacing the last base64 character, but the signature is a 32-byte
+HMAC in unpadded base64url: 43 characters carrying 258 bits, of which decoding
+discards 2. So `{A,B,C,D}` all decode to the same 32 bytes, and whenever the real
+last character was one of those four the "forged" token was still valid and the
+submission was accepted. 4 of 64 characters, ~6.2% of runs, verified
+exhaustively across the whole alphabet.
+
+It passed locally in three different environments and had not appeared in the
+two previous CI runs, so on its own it read as drift. Fixed upstream in
+`cathedral#424` by flipping a bit in the DECODED signature, and asserting the
+forged token actually differs before sending it. 0/64 after.
+
+Worth recording for what it says about this baseline: **a deterministic count is
+not a deterministic suite.** What found this was comparing against a known SET,
+not a known number -- a count of 22 means nothing without knowing 21 of them were
+expected and which the twenty-second was.
+
 Getting here removed four separate causes that used to be mixed into the number,
 each of which had been read at some point as "inherited, environmental":
 
@@ -171,7 +195,8 @@ assertions stay red here.
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Current derived-from SHA** | **`7f3888a8ff93105e8c717b830bd1d70e23f6a58f`** (#423, "the confidential CPU canary cannot run inside a virtualenv") |
+| **Current derived-from SHA** | **`7864c2787c74c3d5fdf2ac4e1795dbcbaecf035c`** (#424, "the forged submit token did not always forge") |
+| Previous derived-from | `7f3888a8ff93105e8c717b830bd1d70e23f6a58f` (#423, canary virtualenv fix) |
 | Previous derived-from | `aa791358601f9ef2e95c5ac5e717c77c17963dbd` (#420, per-test rate-limit budget) |
 | Before that | `ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51` (#418, compose-time staleness ceiling) |
 | Before that | `5c380162ba1a786ebf8c7f5ca70941e9688ce2ba` (#413, CyberGym scores bridge) |
