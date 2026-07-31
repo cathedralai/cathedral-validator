@@ -436,11 +436,32 @@ Method: run the same suites in this repo and in an upstream checkout at
 then diff the failure sets. Anything failing here but passing there is an
 extraction defect.
 
-**The absolute failure count is not stable and must not be used as the check.**
-The publisher suite's inherited failures are dominated by tests that need
-PostgreSQL and outbound network. Across runs on one machine within an hour, the
-same suite produced 44, 43, and once 15 failures depending on network conditions.
-Comparing a run here against a number written down earlier proves nothing.
+**Compare failure SETS, not counts** — but the reason written here was wrong, and
+the wrong reason is worth keeping visible.
+
+This section used to say the count was unstable because the failures "are
+dominated by tests that need PostgreSQL and outbound network", citing 44, 43 and
+once 15 failures on one machine within an hour, "depending on network
+conditions". The instability was real. The explanation was not.
+
+A run of this suite produces **zero** psycopg2 or connection errors — measured,
+not assumed, and reported independently from a clean Hetzner box before being
+reproduced here. The variance came from `ratelimit._state`, a process-wide
+limiter keyed on client IP that under `TestClient` is the same `testclient` for
+every request in the session: one 120-request, 60-second budget shared by ~1300
+tests running in about 60 seconds. The count therefore moved with **machine
+speed**, which is exactly the "depending on network conditions" pattern
+misdiagnosed above. Three machines measured the same bug as 69, 64 and 62.
+
+Fixed upstream in `cathedral#420`, so **the count is now deterministic**: one
+process and one-file-per-process produce the identical set, confirmed on two
+machines. Compare sets anyway — a count cannot tell you that a new failure
+replaced an old one.
+
+The lesson generalises: an explanation that predicts the wrong *shape* of
+variance is wrong even when the variance is real. "Needs a database" does not
+predict a number that changes with how the run is split across processes, and
+nobody checked.
 
 **Compare failure sets, back to back, same session.** Latest, publisher suite
 with the one deselection, control run immediately before:

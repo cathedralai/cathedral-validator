@@ -99,33 +99,46 @@ and each of the nine skips says so and names the extra to install.
 CI installs `integration` on the gating job too, so those 168 tests gate rather
 than quietly skipping ([#19](https://github.com/cathedralai/cathedral-validator/issues/19)).
 
-The publisher suite carries pre-existing failures, inherited from upstream rather
-than introduced by the extraction. `BOUNDARY.md` describes how to re-verify that
-after a sync — by comparing failure *sets* between this repo and an upstream
-checkout, never counts.
+The publisher suite carries pre-existing failures. They are not caused by the
+extraction, and — despite what this file said for a long time — **none of them
+needs PostgreSQL or outbound network.** A run produces *zero* psycopg2 or
+connection errors.
 
-> **The publisher baseline is now one cause, not five.** This section used to
-> attribute the whole failure set to "no PostgreSQL and no outbound network". It
-> never fitted: a missing database does not care how the run is split across
-> processes, and roughly half the failures vanished when each file ran in its own
-> process ([#17](https://github.com/cathedralai/cathedral-validator/issues/17),
-> [#20](https://github.com/cathedralai/cathedral-validator/issues/20)).
+What they actually are depends only on which extras you installed:
+
+| Install | Result | Cause |
+|---|---|---|
+| `.[test,publisher,provenance]` | **26 failed**, 1366 passed, 0 skipped | all 26 the render divergence |
+| `.[test,publisher,integration]` | **21 failed**, 1349 passed, 22 skipped | 20 render divergence + 1 needing `provenance` |
+| upstream, same machine | **1393 passed, 0 failed** | — |
+
+The render divergence: `scaffold/render.py` is a local addition, and upstream's
+tests assert the plain-text journal (`FEED fetch source=...`) while this repo
+emits the rendered one. It is confined to three files —
+`test_validator_two_mode.py`, `test_validator_thin_validated_supply.py`,
+`test_validator_lifecycle.py`. The twenty-first is
+`test_snapshot_candidates.py`, which raises `ModuleNotFoundError: No module
+named 'cathedral'` without the `provenance` extra and passes with it.
+
+**So a failure outside those four files is new.**
+
+> **How the environment story died.** It never fitted: a missing database does
+> not care how a run is split across processes, yet roughly half the failures
+> vanished when each file ran in its own process
+> ([#17](https://github.com/cathedralai/cathedral-validator/issues/17),
+> [#20](https://github.com/cathedralai/cathedral-validator/issues/20)). The cause
+> was one process-wide rate limiter keyed on client IP — the same `testclient`
+> for every request — so ~1300 tests shared a single 120-request, 60-second
+> budget against a suite that runs in about 60 seconds. The count moved with
+> *machine speed*, which is why three machines measured the same bug as 69, 64
+> and 62.
 >
-> Fully provisioned (`[test,publisher,provenance]`), still with no database and no
-> network, at derived-from `7f3888a`:
->
-> | | |
-> |---|---|
-> | Upstream | **1393 passed, 0 failed** |
-> | Here | **26 failed, 1366 passed** |
->
-> All 26 are the render divergence, confined to `test_validator_two_mode.py`,
-> `test_validator_thin_validated_supply.py` and `test_validator_lifecycle.py`.
-> **A failure outside those three files is new.** `BOUNDARY.md` lists them and the
-> four separate causes that used to be mixed into the number — a process-wide rate
-> limiter, a test coupling the relay profile to the operator's `provenance`, a
-> canary that could not import its own dependencies inside a virtualenv, and three
-> tests predating the thin-admit split.
+> Five separate causes have since come out of that number: the rate limiter
+> (`cathedral#420`), a test coupling the relay profile to the operator's
+> `provenance` (`#422`), a canary that could not import its own dependencies
+> inside a virtualenv at all (`#423`), three tests predating the thin-admit split
+> (`#423`), and one pin that could not install (#16 / #22). `BOUNDARY.md` has the
+> detail and the re-verification method.
 
 ## Entry points
 

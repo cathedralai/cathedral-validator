@@ -104,11 +104,32 @@ jobs:
         run: ./tools/sync-from-upstream.sh selftest /tmp/cathedral-upstream
 
   publisher:
-    # Advisory, not gating. The publisher suite carries failures inherited from
-    # upstream in any environment without PostgreSQL and outbound network. They
-    # are not caused by the extraction: the same tests fail identically in an
-    # upstream checkout, verified at fd02392d. This job exists to make drift
-    # visible, so a NEW failure can be told apart from the inherited set.
+    # Advisory, not gating. This job exists to make drift visible, so a NEW
+    # failure can be told apart from the expected set.
+    #
+    # It used to say the failures were "inherited from upstream in any
+    # environment without PostgreSQL and outbound network". That is measurably
+    # false and was never true: a run of this suite produces ZERO psycopg2 or
+    # connection errors. Reported independently from a clean Hetzner box and
+    # reproduced here.
+    #
+    # What the failures actually are, in THIS job's environment
+    # (.[test,publisher,integration], no provenance extra) -- 21 of them:
+    #
+    #   20  the render divergence. scaffold/render.py is a local addition and
+    #       upstream's tests assert the plain-text journal ("FEED fetch
+    #       source=..."), while this repo emits the rendered one. Confined to
+    #       test_validator_two_mode.py, test_validator_thin_validated_supply.py
+    #       and test_validator_lifecycle.py.
+    #    1  test_snapshot_candidates.py: ModuleNotFoundError: No module named
+    #       'cathedral'. Needs the provenance extra, which this job does not
+    #       install. It passes with it.
+    #
+    # So a failure OUTSIDE those four files is new, and worth reading. The
+    # baseline is deterministic now (cathedral#420 removed a process-wide rate
+    # limiter that made the count move with machine speed), so the count is
+    # stable run to run -- but compare SETS, because the count cannot tell you
+    # a new failure replaced an old one. See BOUNDARY.md.
     #
     # test_required_ci_collection_gate_returns_zero is deselected because it
     # asserts on upstream's .github/workflows/two-mode-provenance.yml, which
