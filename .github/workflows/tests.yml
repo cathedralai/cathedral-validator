@@ -99,32 +99,48 @@ jobs:
             --deselect scaffold/publisher/tests/test_validator_two_mode.py::test_required_ci_collection_gate_returns_zero
 
   integration:
-    # Advisory. Exercises the default-OFF Compute+Distill integration lane against
-    # the shared contract shipped by cathedral-distill (the '.[integration]' extra).
-    # The integration dependency is fetched best-effort: while cathedral-distill is
-    # private (or its contract is not yet on main), the extra will not install and
-    # the lane test SKIPS cleanly (it importorskips the contract modules). Once the
-    # dependency is CI-reachable, the same job runs the test for real. See VALIDATOR.md.
-    name: Integration lane (advisory)
+    # GATING. Exercises the default-OFF Compute+Distill integration lane against the
+    # shared contract shipped by cathedral-distill (the '.[integration]' extra).
+    #
+    # This was advisory while cathedral-distill was private: the extra could not
+    # install in CI, the modules importorskipped, and a hard failure would have been
+    # a permissions artefact rather than a real result. cathedral-distill is public
+    # now and the extra installs unauthenticated, so the only reason to tolerate a
+    # skip is gone.
+    #
+    # Tolerating it was not free. These ~168 tests cover replay/consumption ordering,
+    # epoch-proof binding to the credited set, and the lane-id guard -- reward-path
+    # correctness, all of it. Under `continue-on-error` a genuine regression there
+    # reported green. They gate now.
+    name: Integration lane
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
-      # base + test always install (so pytest is present); the integration extra is
-      # best-effort so a private/unpublished dependency skips rather than errors.
-      - run: python -m pip install -e ".[test]"
-      - run: python -m pip install -e ".[integration]" || echo "integration extra unavailable in CI; lane test will skip"
-      # Run the whole integration family, including contract-pin, replay,
-      # authoritative single-flight, containment, CLI, and no-chain-write
-      # regressions. If the private extra is unavailable, the modules report
-      # explicit skips; any test failure still propagates.
-      - run: |
-          python -m pytest -q tests/thin/test_integration_*.py || {
-            code=$?
-            [ "$code" = "5" ] && echo "integration tests skipped (extra not installed)" || exit "$code"
-          }
+      # No `|| true`: the extra is public and installable, so a failure here is a
+      # real break (a bad pin, an unreachable dependency) and must not be swallowed.
+      - run: python -m pip install -e ".[test,integration]"
+      # Fail if the contract modules did NOT import. Without this an importorskip
+      # turns a broken dependency into a green run reporting "9 skipped", which is
+      # exactly how 168 tests can silently stop running.
+      - name: Refuse to pass on a skipped contract
+        run: |
+          python - <<'PY'
+          import importlib, sys
+          for module in ("cathedral_distill.integrated_feed", "cathedral_distill.testing"):
+              try:
+                  importlib.import_module(module)
+              except ImportError as exc:
+                  sys.exit(
+                      f"{module} did not import ({exc}). The integration lane gates on "
+                      "the shared contract; a skip here is a failure, not a pass."
+                  )
+          print("shared contract imported; the lane will run for real")
+          PY
+      # The whole integration family: contract-pin, replay, authoritative
+      # single-flight, containment, CLI, and no-chain-write regressions.
+      - run: python -m pytest -q tests/thin/test_integration_*.py

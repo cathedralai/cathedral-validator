@@ -54,28 +54,55 @@ Python 3.11 or 3.12.
 
 ```sh
 python -m venv .venv && . .venv/bin/activate
-python -m pip install -e ".[test,publisher]"
+python -m pip install -e ".[test,publisher,integration]"
 ```
 
-The `provenance` extra pulls the sha256-locked `cathedralconfidential` package
-that the full-provenance audit path needs:
+**Include `integration`.** Without it, nine `tests/thin` modules cannot import the
+shared `cathedral-distill` contract and skip at import time, so `pytest tests/thin`
+reports **241 passed, 9 skipped** instead of **409 passed, 4 skipped** — 168 tests
+that never ran. They are whole-module skips, one line each, so the count looks
+unremarkable while roughly 40% of the thin suite is missing. The extra is public
+and installs unauthenticated.
+
+The `provenance` extra pulls the sha256-locked `cathedral-compute` package that the
+full-provenance audit path needs:
 
 ```sh
 python -m pip install -e ".[provenance]"
 ```
 
+> **This extra currently fails to install** ([#16](https://github.com/cathedralai/cathedral-validator/issues/16)).
+> Its pin is a GitHub auto-generated tarball, and those embed the repository name as
+> the archive's top-level directory — so renaming `cathedralconfidential` to
+> `cathedral-compute` changed the bytes and invalidated the digest, with nothing
+> inside the repository having changed. It fails as a hash mismatch, which reads
+> like tampering rather than like a moved URL.
+
 ## Test
 
 ```sh
-pytest tests/thin        # thin validator
-pytest tests/boundary    # the SAT lane stays out
+pytest tests/thin        # thin validator — 409 passed, 4 skipped with [integration]
+pytest tests/boundary    # the SAT lane stays out — 9 passed
 pytest scaffold/publisher/tests
 ```
 
-The publisher suite carries pre-existing failures in a plain environment with no
-PostgreSQL and no outbound network. They are inherited from upstream, not
-introduced by the extraction, and the same tests fail identically in an upstream
-checkout. `BOUNDARY.md` describes how to re-verify that after a sync.
+If `tests/thin` reports **241 passed, 9 skipped**, the `integration` extra is
+missing and the integration lane did not run. See Install above.
+
+The publisher suite carries pre-existing failures, inherited from upstream rather
+than introduced by the extraction. `BOUNDARY.md` describes how to re-verify that
+after a sync — by comparing failure *sets* between this repo and an upstream
+checkout, never counts.
+
+> **Not all of them are environmental.** This section used to attribute the whole
+> failure set to "no PostgreSQL and no outbound network". Two independent
+> reproductions measured roughly half of it disappearing when each file runs in its
+> own process (69→36 and 64→32 on different machines), with a signature of HTTP 429
+> and `rate_limited` — shared in-process rate-limiter state leaking between modules,
+> so the failure set depends on collection order rather than on the environment.
+> Tracked in [#17](https://github.com/cathedralai/cathedral-validator/issues/17).
+> Until that is fixed, a contributor cannot reliably tell a real regression from a
+> neighbouring module's leftovers by running the suite in one process.
 
 ## Entry points
 
