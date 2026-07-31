@@ -4,7 +4,7 @@
 >
 > This repository is extracted from
 > [`cathedralai/cathedral`](https://github.com/cathedralai/cathedral) at commit
-> **`7864c2787c74c3d5fdf2ac4e1795dbcbaecf035c`**.
+> **`7657adcae82644a3af4b211ed2396749bd057fa2`**.
 >
 > `MANIFEST.origin.tsv` records the same SHA and CI clones upstream at it, so the
 > two cannot drift apart silently. If they ever disagree, the manifest is right —
@@ -120,7 +120,12 @@ emits the rendered one. It is confined to three files —
 `test_snapshot_candidates.py`, which raises `ModuleNotFoundError: No module
 named 'cathedral'` without the `provenance` extra and passes with it.
 
-**So a failure outside those four files is new.** That rule earned its keep
+**So a failure outside those four files is new.** Two things have proved that rule
+already: a forged-token test that only forged ~94% of the time (`cathedral#424`),
+and a cross-*suite* order dependency — `test_client_ip_mode.py` used
+`asyncio.get_event_loop()`, which `asyncio.run()` unsets, so it passed alone and
+failed after `tests/thin` (`cathedral#425`). Running all three suites in one
+process now gives the **same failure set** as the publisher suite alone. That rule earned its keep
 immediately: the first CI run after it was written reported 22, and the extra one
 was a real defect — a test whose forgery only forged ~94% of the time, because it
 edited the last base64 character of an HMAC whose final character carries just 4
