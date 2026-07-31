@@ -195,7 +195,8 @@ assertions stay red here.
 |---|---|
 | Upstream | `cathedralai/cathedral` |
 | Extraction started at | `c8028af479861a61072b20fc2f93620b9c599fe7` (#398) |
-| **Current derived-from SHA** | **`7864c2787c74c3d5fdf2ac4e1795dbcbaecf035c`** (#424, "the forged submit token did not always forge") |
+| **Current derived-from SHA** | **`7657adcae82644a3af4b211ed2396749bd057fa2`** (#425, "the client-IP test must not need an ambient event loop") |
+| Previous derived-from | `7864c2787c74c3d5fdf2ac4e1795dbcbaecf035c` (#424, forged-token flake) |
 | Previous derived-from | `7f3888a8ff93105e8c717b830bd1d70e23f6a58f` (#423, canary virtualenv fix) |
 | Previous derived-from | `aa791358601f9ef2e95c5ac5e717c77c17963dbd` (#420, per-test rate-limit budget) |
 | Before that | `ebc65f0de6e01b6582f25fe71bf0b3ac4f04ad51` (#418, compose-time staleness ceiling) |
