@@ -37,11 +37,31 @@ test = [
 ]
 # Full-provenance validator mode: independently verifies Cathedral's published
 # evidence chain (policy registry, signed score reports, assurance receipts)
-# and recomputes the weight vector. Pin a release tag before shipping.
-# Pinned to the immutable launch-candidate commit; update ONLY together
-# with the reviewed release process (never a mutable branch ref).
+# and recomputes the weight vector.
+#
+# Pinned by COMMIT SHA over a `git+https://` URL, not by sha256 over a GitHub
+# auto-generated tarball. The tarball form was tried and broke
+# (cathedral-validator#16): GitHub builds those archives with the repository name
+# as the top-level directory, so renaming cathedralconfidential -> cathedral-compute
+# changed the archive bytes and invalidated the digest while nothing inside the
+# repository changed. Both URLs still serve byte-identical files
+# (2384833b…), and the commit pin was always fine — only the digest went stale.
+#
+# That failure mode is the reason for the form, not just the URL. A stale digest
+# surfaces as "THESE PACKAGES DO NOT MATCH THE HASHES … someone may have tampered
+# with them", which reads as an attack rather than as a moved URL, and it is a
+# second thing to maintain that a rename can invalidate on its own. A commit SHA
+# IS the immutable pin: content-addressed by git, unaffected by the repository
+# name. The integration extra below has used this form throughout and came through
+# both that rename and cathedral-distill's move to public untouched.
+#
+# It also failed asymmetrically: `pip` enforced the fragment and refused, while
+# `uv` installed it regardless. So the break was invisible to half the toolchain,
+# which is its own argument against carrying a second digest.
+#
+# Update ONLY together with the reviewed release process (never a mutable ref).
 provenance = [
-    "cathedral @ https://github.com/cathedralai/cathedralconfidential/archive/655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz#sha256=befc572f459c2d80af7ce18013cb4d3649716f143da0a6a86a4a8b96f84b88fb",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@655c264421a1f5f2e625a372a40f595aa1e114ab",
 ]
 # Default-OFF Compute+Distill integration lane (cathedral-validator#1). Pulls the
 # shared receipt/lane/config contract from cathedral-distill so this validator can
