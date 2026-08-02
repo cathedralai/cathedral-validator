@@ -43,6 +43,9 @@ mechanism = "validated_supply_v1"
 burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
 controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
 verifier_binary = "/opt/cathedral-sn39/bin/cathedral-tdx-verifier"
+# preflight-launch promotes this one-shot profile to authority mode. Bound the
+# producer-selected candidate block exactly as the continuous profile does.
+max_anchor_lag_blocks = 600
 
 [launch]
 require_full_provenance_for_broadcast = true
