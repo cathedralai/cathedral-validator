@@ -109,6 +109,13 @@ def test_compute_release_pin_is_coherent_across_every_authority_site() -> None:
         config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
         assert config["provenance"]["source_revision"] == COMPUTE_REVISION
 
+    for relative in (
+        "config/validator-mainnet-sn39-launch.toml",
+        "config/validator-mainnet-sn39.toml",
+    ):
+        config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
+        assert config["provenance"]["max_anchor_lag_blocks"] == 600
+
 
 def test_release_builder_binds_required_public_key_files(
     tmp_path: pathlib.Path,
