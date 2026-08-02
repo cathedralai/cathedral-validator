@@ -35,7 +35,7 @@ cannot reach the configured assurance, it writes nothing and says why.
 
 ```
 # on the workstation
-git -C ~/Documents/PROJECTS/cathedral-computer-validator bundle create /tmp/rel-<sha>.bundle HEAD
+git -C ~/Documents/PROJECTS/cathedral-validator bundle create /tmp/rel-<sha>.bundle HEAD
 gcloud compute scp /tmp/rel-<sha>.bundle polaris-tdx-7e93d5de:/tmp/ --project polaris-tdx-attest --zone us-central1-b --tunnel-through-iap
 # on the host
 sudo /opt/cathedral-sn39/releases/current/deploy/sn39/beta/install.sh /tmp/rel-<sha>.bundle <sha>

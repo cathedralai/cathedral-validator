@@ -2,13 +2,9 @@
 Description=Publish sanitized Cathedral SN39 validator status
 After=cathedral-validator-sn39.service
 # This unit is paired with cathedral-validator-sn39.service and reads the event
-# log that unit writes. Before the validator cutover that log does not exist,
-# and this condition means systemd SKIPS the unit rather than failing it. A
-# skipped oneshot reports no error anywhere, so installing this unit early
-# looks identical to installing a working one. It is not a substitute for the
-# pre-cutover publisher: the live host runs its own status publisher against
-# the current validator's event stream, and that unit must stay in place until
-# step 8 of the staged cutover replaces it.
+# sanitized status log that unit writes. If the validator has not produced a
+# status record, systemd skips this publisher instead of emitting invented
+# health data.
 ConditionPathExists=/var/log/cathedral-validator/validator-status.jsonl
 
 [Service]

@@ -3507,7 +3507,7 @@ def test_mainnet_launch_bundle_is_byte_pinned_and_shadow_by_default() -> None:
         "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
     )
     assert config["provenance"]["source_revision"] == (
-        "655c264421a1f5f2e625a372a40f595aa1e114ab"
+        "26ebdbb885746f1835ea67ff314e384b4838560f"
     )
 
     for config_key, (name, digest) in expected.items():
@@ -5641,7 +5641,7 @@ def _frozen_cross_binding_fixture() -> tuple[dict[str, object], dict[str, object
             "block": 100,
             "block_hash": "0x" + "a" * 64,
         },
-        "source_revision": "655c264421a1f5f2e625a372a40f595aa1e114ab",
+        "source_revision": "26ebdbb885746f1835ea67ff314e384b4838560f",
         "reward_mechanism": checkpoint["reward_mechanism"],
         "policy_registry": {
             "release": checkpoint["policy_release"],
@@ -6822,6 +6822,13 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         + [{"metadata": {"name": "pip", "version": "26.0"}}]
     }
     builder.validate_installed_distributions(inspected, expected_distributions)
+    builder.validate_compute_console_scripts(
+        ["cathedral", "cathedral-compute-validator", "cathedral-miner"]
+    )
+    with pytest.raises(SystemExit, match="overwrites cathedral-validator"):
+        builder.validate_compute_console_scripts(
+            ["cathedral", "cathedral-validator", "cathedral-miner"]
+        )
     inspected["installed"][0]["metadata"]["version"] = "0.0.0-substituted"
     with pytest.raises(SystemExit, match="differs from the hash lock"):
         builder.validate_installed_distributions(inspected, expected_distributions)
@@ -7056,6 +7063,12 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     assert "After=network-online.target cathedral-thin-validator.service" in (
         launch_unit
     )
+    for presentation_variable in (
+        "CATHEDRAL_VALIDATOR_FORCE_COLOR",
+        "COLUMNS",
+        "NO_COLOR",
+    ):
+        monkeypatch.delenv(presentation_variable, raising=False)
     child_environment = launcher._child_environment()
     assert set(child_environment) == {
         "HOME",
@@ -7064,15 +7077,15 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
         "LC_ALL",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",
-        "CATHEDRAL_VALIDATOR_JSONL_GROUP",
+        "CATHEDRAL_VALIDATOR_STATUS_GROUP",
     }
     assert (
-        child_environment["CATHEDRAL_VALIDATOR_JSONL_GROUP"]
+        child_environment["CATHEDRAL_VALIDATOR_STATUS_GROUP"]
         == "cathedral-validator-log"
     )
     status_environment = launcher._child_environment("status")
     assert status_environment["HOME"] == "/var/lib/cathedral-public-evidence"
-    assert "CATHEDRAL_VALIDATOR_JSONL_GROUP" not in status_environment
+    assert "CATHEDRAL_VALIDATOR_STATUS_GROUP" not in status_environment
     launch_environment = launcher._child_environment(
         "launch",
         release_sha="a" * 40,
@@ -7130,7 +7143,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     ) in release_guide
     assert '"$release/scripts/finalize_sn39_public_release.py"' not in release_guide
     assert (
-        "ReadOnlyPaths=/var/log/cathedral-validator/validator-events.jsonl"
+        "ReadOnlyPaths=/var/log/cathedral-validator/validator-status.jsonl"
         in status_unit
     )
     assert "ReadWritePaths=/var/lib/cathedral-public-evidence/logs" in status_unit
@@ -7144,7 +7157,7 @@ def test_immutable_install_binds_venv_and_masks_legacy_writer(
     # Units that declare the same LogsDirectory= must declare the same Group=.
     # systemd applies the unit's User:Group to a logs directory it manages, so
     # a mismatch lets whichever unit ran last silently re-group the directory
-    # and revoke the status publisher's group read on validator-events.jsonl.
+    # and revoke the status publisher's group read on validator-status.jsonl.
     _logs_dir_group: dict[str, set[str]] = {}
     for _unit_name in (
         "cathedral-validator-sn39.service",

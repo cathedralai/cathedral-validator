@@ -79,14 +79,14 @@ surface serves. The current exact pins are recorded in
 ```toml
 [provenance]
 mode = "shadow"                     # or "authority"
-registry_keys = "/etc/cathedral/pins/registry-keys.json"
+registry_keys = "/etc/cathedral-validator/provenance/registry-keys.json"
 registry_keys_digest = "sha256:<from the release notes>"
-report_keys = "/etc/cathedral/pins/report-keys.json"
+report_keys = "/etc/cathedral-validator/provenance/report-keys.json"
 report_keys_digest = "sha256:<...>"
-index_keys = "/etc/cathedral/pins/index-keys.json"
+index_keys = "/etc/cathedral-validator/provenance/index-keys.json"
 index_keys_digest = "sha256:<...>"
 verifier_digest = "sha256:<pinned implementation digest>"
-source_revision = "<pinned cathedralconfidential commit>"
+source_revision = "<pinned cathedral-compute commit>"
 mechanism = "validated_supply_v1"   # fixed 10% burn is part of this version
 burn_hotkey = "<configured burn destination ss58>"
 # FULL assurance additionally requires:
@@ -95,7 +95,7 @@ verifier_binary = "<local pinned verifier binary>"
 ```
 
 Key files map `key_id -> base64 32-byte Ed25519 public key`. The dependency
-on `cathedralconfidential` is pinned to an immutable commit in
+on `cathedral-compute` is pinned to an immutable commit archive in
 `pyproject.toml` (`[provenance]` extra); upgrade only through the reviewed
 release process.
 

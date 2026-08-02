@@ -15,9 +15,9 @@ cathedral-thin-e2e --pretty
 python -m pytest -q tests/thin
 ```
 
-## Cathedral Confidential score classes
+## Cathedral Compute score classes
 
-Cathedral Confidential can now export a frozen epoch directly as a
+Cathedral Compute exports a frozen epoch as a
 `cathedral_score_class_report_v1`. Positive `verified_work_units` are accepted
 only when the ledger contains the exact atomically stored
 `cathedral_assurance_receipt_v2`; zero rows remain in the complete snapshot to
@@ -31,25 +31,25 @@ keeps upload retries and mirror repair from looking like source equivocation.
 An out-of-grammar work-unit value zeros only its own entry with an explicit
 reason rather than invalidating the whole class.
 
-From the Cathedral Confidential checkout, run the local cross-repository proof:
+From the Cathedral Compute checkout, run the local cross-repository proof:
 
 ```console
-PYTHONPATH="$PWD:/path/to/cathedralsubnet-production-ready" \
+PYTHONPATH="$PWD:/path/to/cathedral-validator" \
   /path/to/python scripts/thin_subnet_e2e.py \
-  --validator-repo /path/to/cathedralsubnet-production-ready \
+  --validator-repo /path/to/cathedral-validator \
   --pretty
 ```
 
 The proof supplies external report bytes through the validator's normal strict
 parser and Ed25519 verification path. It also records receipt provenance in the
 weight decision and proves an altered metric is rejected. See
-`cathedralconfidential/docs/THIN_SUBNET_INTEGRATION.md` for the producer command
+`cathedral-compute/docs/THIN_SUBNET_INTEGRATION.md` for the producer command
 and remaining assumptions.
 
 Acceptance is `"ok": true`, all thin-subnet tests passing, zero owner-hosted
 services, positive honest weights, rejected copy/replay/identity attacks, and a
 pending vector that survives restart and confirms on retry. The E2E also signs
-a Cathedral Confidential-shaped report, assigns its class from verified work
+a Cathedral Compute-shaped report, assigns its class from verified work
 units, composes fixed 60/40 budgets, writes the decision record, and binds that
 record into the retried vector.
 
@@ -177,7 +177,7 @@ cathedral-thin-validator --broadcast
 
 ### Optional score classes
 
-The default is 100% local SAT. To let Cathedral Confidential or another
+The default is 100% local SAT. To let Cathedral Compute or another
 component contribute a class, copy the canonical example and replace its
 network, netuid, locations, allocation, and test-only public key:
 
@@ -210,7 +210,7 @@ management, publish only the derived public key, freeze a canonical unsigned
 report from their epoch transaction, and sign it with
 `cathedral-thin-score-report`. The report contains facts, reason codes, and
 evidence references; it never contains a wallet key or chain transaction.
-Cathedral Confidential must export `verified_work_units` and exact assurance
+Cathedral Compute must export `verified_work_units` and exact assurance
 receipt IDs/digests rather than wrap its older normalized HMAC score stream.
 The complete schema, key rotation, source compromise, and residual-trust rules
 are in [`THIN_SCORE_CLASSES.md`](THIN_SCORE_CLASSES.md).

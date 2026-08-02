@@ -4,7 +4,7 @@
 # The provenance verifier runs concurrently in shadow mode and never delays
 # the thin submission. It reports FULL only when the operator supplies the
 # controlled raw-evidence package; public receipts alone remain
-# receipts_only. See docs/SN39_MAINNET_RELEASE_20260724.md for the exact
+# receipts_only. See VALIDATOR.md and docs/PROVENANCE.md for the current
 # release boundary and controlled-disclosure procedure.
 
 [network]
@@ -45,7 +45,7 @@ report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7
 index_keys = "/etc/cathedral-validator/provenance/index-keys.json"
 index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
 verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
-source_revision = "655c264421a1f5f2e625a372a40f595aa1e114ab" # pragma: allowlist secret
+source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
 burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
 # The producer publishes the controlled mirror here, group-readable to

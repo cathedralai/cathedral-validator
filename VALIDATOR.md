@@ -102,8 +102,8 @@ installation.
 For source review and non-writing testing only:
 
 ```bash
-git clone https://github.com/cathedralai/cathedral.git
-cd cathedral
+git clone https://github.com/cathedralai/cathedral-validator.git
+cd cathedral-validator
 
 python3.11 -m venv .venv
 . .venv/bin/activate
@@ -113,7 +113,7 @@ python -m pip install -e '.[provenance]'
 cp config/validator.toml my-validator.toml
 ```
 
-The project distribution is currently built from this repository; there is no
+The project distribution is built from this repository. There is no
 published `cathedralsubnet` PyPI package. A copied sample config is suitable
 for review and previews only. Public launch operators must use the immutable
 release configuration and installation named by the launch notice.
@@ -514,7 +514,7 @@ applied.
 
 ## Further reading
 
-- [SN39 Intel TDX CPU mainnet release boundary](docs/SN39_MAINNET_RELEASE_20260724.md)
+- [2026-07-24 SN39 Intel TDX CPU release record](docs/SN39_MAINNET_RELEASE_20260724.md)
 - [Full-provenance verification](docs/PROVENANCE.md)
 - [Score-class contract](docs/THIN_SCORE_CLASSES.md)
 - [Threat model](docs/THIN_SUBNET_DESIGN.md)

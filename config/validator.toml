@@ -63,7 +63,7 @@ mechanism = "validated_supply_v1"
 # signed vector):
 # controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
 # verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
-# source_revision = "655c264421a1f5f2e625a372a40f595aa1e114ab"
+# source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f"
 # burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 [logs]

@@ -36,8 +36,8 @@ jobs:
       # glob test_integration_*.py, and a future contract-dependent test named
       # anything else would be covered by neither job. Here the whole directory
       # runs, so coverage does not depend on a filename.
-      - name: Install the validator with its test, publisher and integration extras
-        run: python -m pip install -e ".[test,publisher,integration]"
+      - name: Install the validator with all release-contract extras
+        run: python -m pip install -e ".[test,publisher,provenance,integration]"
 
       - name: Lint the thin subnet tree
         run: |
@@ -72,68 +72,16 @@ jobs:
       - name: Compile every tracked Python file
         run: git ls-files '*.py' | xargs python -m py_compile
 
-  manifest:
-    # Exercises the origin manifest against a real upstream clone, and proves
-    # the verifier actually gates rather than printing success unconditionally.
-    name: Origin manifest
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Clone upstream at the derived-from SHA
-        run: |
-          set -euo pipefail
-          sha=$(awk '/^# Upstream:/ {print $NF}' MANIFEST.origin.tsv)
-          echo "derived-from: $sha"
-          git clone --quiet https://github.com/cathedralai/cathedral.git /tmp/cathedral-upstream
-          git -C /tmp/cathedral-upstream checkout --quiet "$sha"
-
-      - name: Verify byte-identity against upstream
-        run: ./tools/manifest.sh verify /tmp/cathedral-upstream
-
-      - name: Prove the verifier rejects tampering
-        run: ./tools/manifest.sh selftest /tmp/cathedral-upstream
-
-      # The sync tool had no gating coverage at all, which is how a re-sync
-      # silently reverted a declared divergence (config/validator-mainnet-sn39.toml
-      # lost [logs].status_jsonl, and the public status unit could then never
-      # satisfy its ConditionPathExists). Its selftest proves a local addition
-      # survives AND that a declared divergence is never overwritten.
-      - name: Prove a sync preserves local additions and declared divergences
-        run: ./tools/sync-from-upstream.sh selftest /tmp/cathedral-upstream
+      - name: Verify the canonical source manifest
+        run: python tools/source_manifest.py
 
   publisher:
-    # Advisory, not gating. This job exists to make drift visible, so a NEW
-    # failure can be told apart from the expected set.
-    #
-    # It used to say the failures were "inherited from upstream in any
-    # environment without PostgreSQL and outbound network". That is measurably
-    # false and was never true: a run of this suite produces ZERO psycopg2 or
-    # connection errors. Reported independently from a clean Hetzner box and
-    # reproduced here.
-    #
-    # What the failures actually are, in THIS job's environment
-    # (.[test,publisher,integration], no provenance extra) -- 21 of them:
-    #
-    #   20  the render divergence. scaffold/render.py is a local addition and
-    #       upstream's tests assert the plain-text journal ("FEED fetch
-    #       source=..."), while this repo emits the rendered one. Confined to
-    #       test_validator_two_mode.py, test_validator_thin_validated_supply.py
-    #       and test_validator_lifecycle.py.
-    #    1  test_snapshot_candidates.py: ModuleNotFoundError: No module named
-    #       'cathedral'. Needs the provenance extra, which this job does not
-    #       install. It passes with it.
-    #
-    # So a failure OUTSIDE those four files is new, and worth reading. The
-    # baseline is deterministic now (cathedral#420 removed a process-wide rate
-    # limiter that made the count move with machine speed), so the count is
-    # stable run to run -- but compare SETS, because the count cannot tell you
-    # a new failure replaced an old one. See BOUNDARY.md.
-    #
+    # Advisory legacy-publisher compatibility suite. It is not a release gate.
+    # The required validator, boundary, pin, and integration checks run in the
+    # gating jobs above and below. Publisher failures remain visible here until
+    # their fixtures are reconciled with the canonical validator output.
     # test_required_ci_collection_gate_returns_zero is deselected because it
-    # asserts on upstream's .github/workflows/two-mode-provenance.yml, which
-    # this repo deliberately does not carry. See BOUNDARY.md.
+    # asserts on a workflow this canonical repository does not ship.
     name: Publisher suite (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -17,28 +17,20 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[-_.]+")
 BOOTSTRAP_PYTHON = Path("/usr/bin/python3.12")
 INSTALL_ROOT = Path("/etc/cathedral-validator")
+PROVENANCE_INSTALL_ROOT = INSTALL_ROOT / "provenance"
 ROOT_UID = 0
 EXPECTED_VERIFIER_BINARY = (
     "sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 )
-# The producer repository was renamed cathedralconfidential -> cathedral-compute.
-# GitHub's auto-generated archives embed the repository name as their top-level
-# directory, so the rename changed these bytes while nothing inside the
-# repository changed: the same commit now unpacks to
-# cathedral-compute-655c2644.../ and hashes to 2384833b... . The old URL still
-# resolves (GitHub redirects it) and serves byte-identical content, so the URL
-# below is updated for accuracy rather than reachability -- it is the DIGEST
-# that had to move, and it would have had to move whichever URL we kept.
-#
-# The commit is unchanged and remains the truthful identity of the producer
-# code; only the packaging of it moved. See docs/SN39_LAUNCH_CUTOVER_20260726.md
-# for why the venv basename is the value all of these pins derive from.
+# The exact Compute archive installed into the immutable validator environment.
+# This revision reserves `cathedral-validator` for scaffold.cli and exposes its
+# worker-side publisher as `cathedral-compute-validator`.
 EXPECTED_CATHEDRAL_URL = (
     "https://github.com/cathedralai/cathedral-compute/archive/"
-    "655c264421a1f5f2e625a372a40f595aa1e114ab.tar.gz"
+    "26ebdbb885746f1835ea67ff314e384b4838560f.tar.gz"
 )
 EXPECTED_CATHEDRAL_ARCHIVE_SHA256 = (
-    "2384833be9ece20d4946aecd0b499eaee0e292994d1275a54d1d52c029836a9b"
+    "02b95787cf2247d264bb45b1938b20ff005b1ac127261264dfe5e5a9b4aab240"
 )
 RELEASE_FILES = (
     "config/validator-mainnet-sn39.toml",
@@ -308,6 +300,32 @@ def validate_installed_distributions(
         )
 
 
+def validate_compute_console_scripts(names: list[str]) -> None:
+    """The Compute dependency must never own the Validator command."""
+    if any(not isinstance(name, str) for name in names):
+        raise SystemExit("Compute console-script metadata is malformed")
+    if "cathedral-validator" in names:
+        raise SystemExit(
+            "pinned Cathedral Compute dependency overwrites cathedral-validator"
+        )
+
+
+def validate_installed_release_files(pairs: tuple[tuple[Path, Path], ...]) -> None:
+    """Require every external release file to match its reviewed source bytes."""
+    for installed, reviewed in pairs:
+        try:
+            installed_bytes = installed.read_bytes()
+            reviewed_bytes = reviewed.read_bytes()
+        except OSError as exc:
+            raise SystemExit(
+                f"required release file is unavailable: {installed}"
+            ) from exc
+        if installed_bytes != reviewed_bytes:
+            raise SystemExit(
+                f"installed file differs from reviewed release: {installed}"
+            )
+
+
 def verify_locked_environment(
     venv: Path,
     reproduction_lock: Path,
@@ -336,6 +354,39 @@ def verify_locked_environment(
         document,
         expected_locked_distributions(reproduction_lock, build_lock),
     )
+    try:
+        entry_points_raw = subprocess.check_output(
+            [
+                str(python),
+                "-I",
+                "-E",
+                "-s",
+                "-c",
+                (
+                    "import importlib.metadata as m,json;"
+                    "d=m.distribution('cathedral');"
+                    "print(json.dumps(sorted(e.name for e in d.entry_points "
+                    "if e.group=='console_scripts')))"
+                ),
+            ],
+            text=True,
+            timeout=30,
+            env={
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+        entry_points = json.loads(entry_points_raw)
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
+        raise SystemExit("cannot inspect Cathedral Compute console scripts") from exc
+    if not isinstance(entry_points, list):
+        raise SystemExit("Compute console-script metadata is malformed")
+    validate_compute_console_scripts(entry_points)
 
 
 def git(root: Path, *args: str) -> str:
@@ -365,6 +416,21 @@ def main() -> int:
         "--launch-config",
         type=Path,
         default=INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+    )
+    parser.add_argument(
+        "--registry-keys",
+        type=Path,
+        default=PROVENANCE_INSTALL_ROOT / "registry-keys.json",
+    )
+    parser.add_argument(
+        "--report-keys",
+        type=Path,
+        default=PROVENANCE_INSTALL_ROOT / "report-keys.json",
+    )
+    parser.add_argument(
+        "--index-keys",
+        type=Path,
+        default=PROVENANCE_INSTALL_ROOT / "index-keys.json",
     )
     parser.add_argument(
         "--verifier",
@@ -439,6 +505,9 @@ def main() -> int:
     config_pairs = (
         (args.continuous_config, root / "config/validator-mainnet-sn39.toml"),
         (args.launch_config, root / "config/validator-mainnet-sn39-launch.toml"),
+        (args.registry_keys, root / "config/provenance/registry-keys.json"),
+        (args.report_keys, root / "config/provenance/report-keys.json"),
+        (args.index_keys, root / "config/provenance/index-keys.json"),
         (
             args.launcher,
             root / "deploy/sn39/cathedral-sn39-release-launcher.py",
@@ -466,11 +535,7 @@ def main() -> int:
         (args.sysusers, root / "deploy/sn39/cathedral-sn39-validator.sysusers"),
         (args.tmpfiles, root / "deploy/sn39/cathedral-sn39-validator.tmpfiles"),
     )
-    for installed, reviewed in config_pairs:
-        if installed.read_bytes() != reviewed.read_bytes():
-            raise SystemExit(
-                f"installed file differs from reviewed release: {installed}"
-            )
+    validate_installed_release_files(config_pairs)
     if digest(args.verifier) != EXPECTED_VERIFIER_BINARY:
         raise SystemExit("installed verifier binary differs from the launch pin")
     try:
@@ -495,6 +560,9 @@ def main() -> int:
     external_files = {
         str(args.continuous_config): digest(args.continuous_config),
         str(args.launch_config): digest(args.launch_config),
+        str(args.registry_keys): digest(args.registry_keys),
+        str(args.report_keys): digest(args.report_keys),
+        str(args.index_keys): digest(args.index_keys),
         str(args.verifier): digest(args.verifier),
         str(args.launcher): digest(args.launcher),
         str(args.continuous_unit): digest(args.continuous_unit),
