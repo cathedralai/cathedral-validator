@@ -1,5 +1,9 @@
 # SN39 Intel TDX CPU mainnet release
 
+This file records the 2026-07-24 release ceremony and its evidence. It is not
+the current operator guide. Use the repository README and `VALIDATOR.md` for
+current operation. Recheck every live fact before a new release or broadcast.
+
 The only authorized public claim, and only after the tagged launch submission
 gate below is **PASS**, is:
 
@@ -8,7 +12,7 @@ gate below is **PASS**, is:
 This release deliberately makes no GPU, general confidential-compute, or
 whole-epoch FULL-provenance claim.
 
-## Current launch boundary
+## Recorded launch boundary
 
 | Gate | Status | Evidence |
 |---|---|---|
@@ -29,7 +33,7 @@ stream are published at:
 - `https://api.cathedral.computer/v1/evidence/logs/validator-events.jsonl`
 - `https://api.cathedral.computer/v1/evidence/index.json`
 
-## Current operational blockers
+## Recorded operational blockers
 
 The software candidate is not the final launch release, and this document does
 not authorize remediation, infrastructure spend, a chain write, or a public
@@ -39,7 +43,7 @@ claim. The following observations remain blocking:
 |---|---|---|
 | Evidence epoch producer | **FAIL** | The live epoch producer is wedged on `signed report policy_digest does not match supplied registry`; it is not producing a qualifying fresh epoch. |
 | Intel TDX worker | **FAIL** | The required worker is `TERMINATED`. Starting or replacing it is a paid production mutation and requires explicit authority. |
-| Producer revision | **FAIL** | Three values disagreed. The host exporter stamped `b77c7cfacab34de75b1102360f6e3fc1edf5b796` into every signed manifest, this repository pinned `fa39af97e738fdbed5c454f976b61246590b5794`, and the producer actually runs `655c264421a1f5f2e625a372a40f595aa1e114ab` from `/opt/cathedral-sn39/venvs/9540de44...`. The installed venv is the only value that is evidence rather than assertion, so every pin in this repository now reads `9540de44...`. The boundary stays FAIL until the host exporter is redeployed to derive its stamp from the installed venv basename instead of hardcoding it, because until then signed evidence still misstates what produced it and FULL provenance cannot match. |
+| Producer revision | **FAIL** | On 2026-07-24, three values disagreed. The host exporter stamped `b77c7cfacab34de75b1102360f6e3fc1edf5b796`, this repository had pinned `fa39af97e738fdbed5c454f976b61246590b5794`, and the installed producer ran `655c264421a1f5f2e625a372a40f595aa1e114ab`. The current source pin is `26ebdbb885746f1835ea67ff314e384b4838560f`. A live release stays blocked until the installed producer and fresh signed evidence prove the same current revision. |
 | Producer, enrollment, and controlled-package install contract | **IMPLEMENTED; live release proof required** | The producer atomically selects `/var/lib/cathedral-validator-controlled-sn39/current`; its real epoch directory is `root:cathedral-validator-evidence` mode `2750` with root-owned mode-`0640` regular files, and the validator service receives only that supplementary read group. The immutable release still fails closed unless the live host proves this exact contract. |
 | Public launch evidence | **NOT_PROVEN** | The currently published evidence is stale and the current vector is empty/all-burn. It cannot authorize the launch weight. |
 | Root-signed release | **NOT_PROVEN** | The final release and its detached signature are absent. A mutable candidate or unsigned `release.json` is not a sealed release. |
@@ -471,7 +475,7 @@ producer has published the new epoch and delivered its matching controlled
 package, the launch evidence boundary remains **NOT_PROVEN** and
 `cathedral-validator-sn39-launch.service` must not be started.
 
-## Immutable release
+## Immutable release inputs
 
 This table describes the required final release, not the current candidate.
 Do not create the tag, install the validator, or sign the release while either
@@ -482,13 +486,13 @@ installation contracts have been reviewed together.
 
 | Component | Revision or digest |
 |---|---|
-| SN39 validator | tag `sn39-mainnet-tdx-20260724`; the exact commit is bound by the root-signed public release |
-| Cathedral Confidential producer | `655c264421a1f5f2e625a372a40f595aa1e114ab` |
+| SN39 validator | The exact Cathedral Validator commit is bound by the root-signed public release |
+| Cathedral Compute producer | `26ebdbb885746f1835ea67ff314e384b4838560f` |
 | Registry key bundle | `sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512` |
 | Score-report key bundle | `sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70` |
 | Evidence-index key bundle | `sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611` |
 | Release-attestation key bundle | `sha256:1a60a22de160853d460b22853a426d0534fab4df0fe9f89e5859d60bb4ed3d12` |
-| Reproduction dependency lock | `sha256:765f90428c0fbdb8fc58f03e82edd6dd9ea1cc50bd685dc2bdbbecef30aa1624` |
+| Reproduction dependency lock | `sha256:8da5fb9c913d0eaca713dd98f2e15df20e3b8bc59305d51387ad37f18770538e` |
 | Build-backend dependency lock | `sha256:b212eed198712c8f54ad6250dc64575485bef5c3c311d71ee3c24a2c80396912` |
 | Verifier binary blob | `sha256:35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb` |
 | Verifier implementation | `sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f` |
@@ -504,8 +508,8 @@ current weight feed and does not write to the chain:
 
 ```bash
 set -euo pipefail
-git clone https://github.com/cathedralai/cathedral.git
-cd cathedral
+git clone https://github.com/cathedralai/cathedral-validator.git
+cd cathedral-validator
 git fetch --tags origin
 # Release gate: this must resolve before the launch is announced.
 release_commit="$(
@@ -537,10 +541,9 @@ configuration, and Git revision are verified as one release.
 The environment is deliberately outside the checkout and bytecode is disabled:
 the reproducer rejects modified, untracked, **or ignored** files before using
 the repository revision. The direct runner binds imports to its own checkout
-and then verifies that checkout against the signed release. The provenance
-dependency still carries a legacy console-script name, so an older reused
-environment can otherwise resolve `cathedral-validator` to the wrong package.
-A fresh environment plus `python -m scaffold.cli` is deterministic.
+and then verifies that checkout against the signed release. The pinned Compute
+dependency reserves `cathedral-validator` for this repository. The release
+builder rejects a Compute package that claims the command.
 
 ## Install the final reviewed release
 
@@ -603,6 +606,17 @@ install -D -o root -g root -m 0644 \
 install -D -o root -g root -m 0644 \
   "$release/config/validator-mainnet-sn39-launch.toml" \
   /etc/cathedral-validator/validator-mainnet-sn39-launch.toml
+install -d -o root -g root -m 0755 \
+  /etc/cathedral-validator/provenance
+install -D -o root -g root -m 0644 \
+  "$release/config/provenance/registry-keys.json" \
+  /etc/cathedral-validator/provenance/registry-keys.json
+install -D -o root -g root -m 0644 \
+  "$release/config/provenance/report-keys.json" \
+  /etc/cathedral-validator/provenance/report-keys.json
+install -D -o root -g root -m 0644 \
+  "$release/config/provenance/index-keys.json" \
+  /etc/cathedral-validator/provenance/index-keys.json
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator.conf
 

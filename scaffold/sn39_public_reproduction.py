@@ -29,7 +29,7 @@ PUBLIC_REPRODUCTION_DEADLINE_SECS = 120.0
 EXPECTED_POLICY_KEY_HEX = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"  # pragma: allowlist secret
 EXPECTED_POLICY_KEY_ID = "cathedral-weight-policy"
 EXPECTED_PRODUCER_REVISION = (
-    "655c264421a1f5f2e625a372a40f595aa1e114ab"  # pragma: allowlist secret
+    "26ebdbb885746f1835ea67ff314e384b4838560f"  # pragma: allowlist secret
 )
 EXPECTED_REPORT_KEY_ID = "cathedral-score-sn39-20260724"
 FINNEY_GENESIS_HASH = (
@@ -49,7 +49,7 @@ EXPECTED_RELEASE_PINS = {
         "sha256:1a60a22de160853d460b22853a426d0534fab4df0fe9f89e5859d60bb4ed3d12"
     ),
     "reproduction_dependencies": (
-        "sha256:765f90428c0fbdb8fc58f03e82edd6dd9ea1cc50bd685dc2bdbbecef30aa1624"
+        "sha256:8da5fb9c913d0eaca713dd98f2e15df20e3b8bc59305d51387ad37f18770538e"
     ),
     "reproduction_build_dependencies": (
         "sha256:b212eed198712c8f54ad6250dc64575485bef5c3c311d71ee3c24a2c80396912"
@@ -2094,7 +2094,7 @@ EXPECTED_STARTUP = {
         "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
     ),
     "provenance_source_revision": (
-        "655c264421a1f5f2e625a372a40f595aa1e114ab"  # pragma: allowlist secret
+        "26ebdbb885746f1835ea67ff314e384b4838560f"  # pragma: allowlist secret
     ),
     "provenance_mechanism": "validated_supply_v1",
 }

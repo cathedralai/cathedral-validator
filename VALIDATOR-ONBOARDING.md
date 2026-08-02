@@ -1,63 +1,44 @@
-# Run a Cathedral SN39 validator (thin mode)
+# Review Cathedral Validator
 
-One page. You follow Cathedral's signed score feed; your validator verifies it
-cryptographically before every write and refuses anything it cannot prove.
+This repository is the sole source for Cathedral Validator software and
+operator releases. The default path is read-only. A broadcast needs a reviewed
+immutable release and a candidate that passes every gate in the same cycle.
 
-## What you need
-
-- A Bittensor wallet registered on SN39 with a validator permit and stake
-- Python 3.11+, a machine that stays on
-- This repository at current `main`
-
-## Install and run
+## Local review
 
 ```bash
-git clone <repo-url> cathedral-validator && cd cathedral-validator
-python3 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/python -m scaffold.cli serve \
-  --config config/validator.toml --mode thin \
-  --wallet-name <your-wallet> --wallet-hotkey <your-hotkey>
+git clone https://github.com/cathedralai/cathedral-validator.git
+cd cathedral-validator
+python3 -m venv .venv
+.venv/bin/pip install -e ".[test,provenance,integration]"
+.venv/bin/python -m pytest -q tests/thin tests/boundary
+.venv/bin/cathedral-validator serve \
+  --config config/validator.toml \
+  --mode thin \
+  --offline \
+  --once
 ```
 
-That is a **dry run**: it fetches, verifies, and prints what it *would* write,
-touching nothing on chain. Watch a few ticks. When the output looks right,
-add `--broadcast`.
+This checks source and prints a synthetic dry-run vector. It does not connect
+to a wallet or write to a chain.
 
-## What it verifies before every write
+## Production path
 
-- The feed is signed by Cathedral's published key (pinned in the default
-  config; check it against `https://api.cathedral.computer/.well-known/cathedral-jwks.json`)
-- Fresh, unexpired, and newer than anything it applied before (replay-fenced)
-- The exact `validated_supply_v1` contract: 90% attested compute / 10% burn,
-  burn destination equal to the live subnet owner
-- Target UIDs provably stable for the write's whole lifetime
+Use the immutable Linux release process in `VALIDATOR.md`. Before a write,
+prove all of these from one cycle:
 
-If any check fails, it writes nothing and prints one line saying why.
+- one active writer
+- a registered validator hotkey with a permit
+- fresh admitted miner evidence
+- a signed, nonempty vector
+- the owner-controlled allocation and burn destination
+- complete hotkey-to-UID mapping
+- the same vector in dry-run and submission preflight
+- durable rollback and attempt state
 
-## What it never does
+Do not turn a review command into a broadcast command by adding a flag. Record
+the release, candidate, dry run, operator authorization, transaction, inclusion
+block, events, and resulting weights.
 
-- Never takes the burn destination from the feed on faith
-- Never writes twice for the same attempt (durable attempt journal)
-- Never guesses: an unprovable outcome halts, restarts, and re-proves the
-  exact transaction rather than resubmitting
-
-## Reading the log
-
-```
-   chain     block 8717865 · epoch in 65m · last write 25m ago
-   feed      v…638983 · signed · fresh · fence ok
-   weights   163 90.0% · 204 10.0% burn
-   submit    0x6653be08…de8c8 · block 8715784 · finalized
-   ✓ weights written · in 41s
-```
-
-`✗ waiting out the chain's write cooldown` is the chain's own once-per-20-min
-rule, not an error. The validator runs continuously and paces itself.
-
-## Questions
-
-Contact Fred. Full mode (independent recomputation from raw TDX evidence)
-is the default for operators with evidence access; `--mode thin` is the
-explicit choice for everyone else and carries every verification listed
-above. Public evidence sufficient for anyone to run full is planned; until
-then thin is the on-ramp.
+See `README.md` for orientation, `VALIDATOR.md` for operation, `REVIEW.md` for
+review gates, and `BOUNDARY.md` for ownership and trust boundaries.

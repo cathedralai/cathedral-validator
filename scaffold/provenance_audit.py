@@ -905,9 +905,8 @@ def run_audit(
         except ImportError as exc:
             raise ProvenanceUnavailable(
                 "the cathedral provenance package is not installed",
-                "pip install 'cathedralsubnet[provenance]' (or pip install "
-                "'cathedral @ git+https://github.com/cathedralai/"
-                "cathedralconfidential.git')",
+                "install the reviewed Cathedral Validator release with its "
+                "provenance extra",
             ) from exc
 
         load_index, load_blob = _fetcher(settings, deadline=audit_deadline)
