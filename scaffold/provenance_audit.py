@@ -47,8 +47,13 @@ MECHANISM_DEFAULT = "validated_supply_v1"
 # validator_thin.MECHANISM_BURN_FRACTION by the operator's own pinned mechanism,
 # never by the id the manifest claims, so acceptance cannot move the burn.
 MECHANISM_ACCEPTED = {
-    "validated_supply_v1": ("validated_supply_v1", "validated_supply_v2"),
-    "validated_supply_v2": ("validated_supply_v2",),
+    "validated_supply_v1": (
+        "validated_supply_v1",
+        "validated_supply_v2",
+        "validated_supply_v3",
+    ),
+    "validated_supply_v2": ("validated_supply_v2", "validated_supply_v3"),
+    "validated_supply_v3": ("validated_supply_v3",),
 }
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Hard bound on the recent-chain walk (mirrors the signed index's own

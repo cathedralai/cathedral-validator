@@ -2130,51 +2130,12 @@ def _latest(events: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     )
 
 
-def assert_current_dry_run(
-    path: Path,
-) -> dict[str, Any]:
-    """Validate one time-dependent, no-write dry run against the current feed."""
-    events = _load_events(path)
-    startup = _latest(events, "STARTUP")
-    if startup is None or startup.get("status") != "INFO":
-        raise ReproductionError("missing STARTUP event")
-    startup_detail = str(startup.get("detail", ""))
-    if (
-        "submission_authority=thin" not in startup_detail
-        or "provenance=shadow" not in startup_detail
-    ):
-        raise ReproductionError("validator did not run in thin/shadow mode")
-    mismatched_startup = [
-        name
-        for name, expected in EXPECTED_STARTUP.items()
-        if startup.get(name) != expected
-    ]
-    if mismatched_startup:
-        raise ReproductionError(
-            "resolved launch pins differ: " + ", ".join(mismatched_startup)
-        )
+def _assert_current_dry_run_v2(submission: dict[str, Any]) -> str:
+    """Validate the launch-locked v2 90/10 no-write thin result.
 
-    failures = {
-        "TICK_FAILED",
-        "PROVENANCE_AUDIT_FAIL",
-        "PROVENANCE_VECTOR_MISMATCH",
-        "PROVENANCE_AUDIT_UNRESOLVED",
-    }
-    startup_index = events.index(startup)
-    observed_failures = [
-        str(event.get("event"))
-        for event in events[startup_index:]
-        if event.get("event") in failures
-        or event.get("status") in {"FAIL", "NOT_PROVEN"}
-    ]
-    if observed_failures:
-        raise ReproductionError(
-            "fail-closed event(s) observed: " + ", ".join(observed_failures)
-        )
-
-    submission = _latest(events[startup_index:], "WEIGHTS_DRY_RUN")
-    if submission is None or submission.get("status") != "PASS":
-        raise ReproductionError("missing successful no-write thin result")
+    Returns the burn-share label ("0.10") on success; raises on any drift from
+    the dynamically resolved rewarded/burn 90/10 boundary.
+    """
     burn_share = submission.get("burn_share")
     uid_weights = submission.get("uid_weights")
     mapping_block = submission.get("mapping_block")
@@ -2244,6 +2205,115 @@ def assert_current_dry_run(
         raise ReproductionError(
             "thin result is not the dynamically resolved rewarded/burn 90/10 boundary"
         )
+    return "0.10"
+
+
+def _assert_current_dry_run_v3(submission: dict[str, Any]) -> str:
+    """Validate a v3 (70% Intel TDX / 30% CyberGym / 0% fixed burn) thin result.
+
+    Returns the burn-share label ("0.00") on success. v3 emits a multi-UID
+    vector (TDX miners at 70%, CyberGym miners at 30%, forfeited/ineligible lane
+    mass to the resolved burn UID) with a 0% FIXED burn, so this checks the
+    economically load-bearing facts — burn share 0, lane shares 0.70/0.30, and
+    a full UID vector that sums to 1.0 — rather than the launch's 2-UID
+    65535/7282 wire quantization, which v3 does not use.
+    """
+    burn_share = submission.get("burn_share")
+    uid_weights = submission.get("uid_weights")
+    intel_tdx_share = submission.get("intel_tdx_share")
+    cybergym_share = submission.get("cybergym_share")
+    mapping_block = submission.get("mapping_block")
+    if (
+        submission.get("authority") != "thin"
+        or isinstance(burn_share, bool)
+        or not isinstance(burn_share, (int, float))
+        or not math.isclose(float(burn_share), 0.0, rel_tol=0.0, abs_tol=1e-12)
+        or not isinstance(uid_weights, dict)
+        or not uid_weights
+        or any(
+            not _is_finite_number(value) or float(value) < 0.0
+            for value in uid_weights.values()
+        )
+        or not math.isclose(
+            math.fsum(float(value) for value in uid_weights.values()),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or not _is_finite_number(intel_tdx_share)
+        or not math.isclose(
+            float(intel_tdx_share), 0.70, rel_tol=0.0, abs_tol=1e-12
+        )
+        or not _is_finite_number(cybergym_share)
+        or not math.isclose(
+            float(cybergym_share), 0.30, rel_tol=0.0, abs_tol=1e-12
+        )
+        or isinstance(mapping_block, bool)
+        or not isinstance(mapping_block, int)
+        or mapping_block <= 0
+        or isinstance(submission.get("validator_uid"), bool)
+        or not isinstance(submission.get("validator_uid"), int)
+        or str(submission.get("validator_uid")) in uid_weights
+        or not isinstance(submission.get("validator_hotkey"), str)
+        or not submission.get("validator_hotkey")
+    ):
+        raise ReproductionError(
+            "thin result is not the v3 70/30/0 Intel TDX / CyberGym / burn split"
+        )
+    return "0.00"
+
+
+def assert_current_dry_run(
+    path: Path,
+) -> dict[str, Any]:
+    """Validate one time-dependent, no-write dry run against the current feed."""
+    events = _load_events(path)
+    startup = _latest(events, "STARTUP")
+    if startup is None or startup.get("status") != "INFO":
+        raise ReproductionError("missing STARTUP event")
+    startup_detail = str(startup.get("detail", ""))
+    if (
+        "submission_authority=thin" not in startup_detail
+        or "provenance=shadow" not in startup_detail
+    ):
+        raise ReproductionError("validator did not run in thin/shadow mode")
+    mismatched_startup = [
+        name
+        for name, expected in EXPECTED_STARTUP.items()
+        if startup.get(name) != expected
+    ]
+    if mismatched_startup:
+        raise ReproductionError(
+            "resolved launch pins differ: " + ", ".join(mismatched_startup)
+        )
+
+    failures = {
+        "TICK_FAILED",
+        "PROVENANCE_AUDIT_FAIL",
+        "PROVENANCE_VECTOR_MISMATCH",
+        "PROVENANCE_AUDIT_UNRESOLVED",
+    }
+    startup_index = events.index(startup)
+    observed_failures = [
+        str(event.get("event"))
+        for event in events[startup_index:]
+        if event.get("event") in failures
+        or event.get("status") in {"FAIL", "NOT_PROVEN"}
+    ]
+    if observed_failures:
+        raise ReproductionError(
+            "fail-closed event(s) observed: " + ", ".join(observed_failures)
+        )
+
+    submission = _latest(events[startup_index:], "WEIGHTS_DRY_RUN")
+    if submission is None or submission.get("status") != "PASS":
+        raise ReproductionError("missing successful no-write thin result")
+    # v2 (90/10) stays the default no-write contract; a v3 (70/30/0) result is
+    # accepted only when the thin run explicitly stamps contract_version=v3.
+    if submission.get("contract_version") == "validated_supply_v3":
+        burn_share_label = _assert_current_dry_run_v3(submission)
+    else:
+        burn_share_label = _assert_current_dry_run_v2(submission)
 
     provenance = _latest(events[startup_index:], "PROVENANCE_AUDIT_PASS")
     if provenance is None or provenance.get("status") != "PASS":
@@ -2255,7 +2325,7 @@ def assert_current_dry_run(
 
     return {
         "authority": "thin",
-        "burn_share": "0.10",
+        "burn_share": burn_share_label,
         "chain_write": False,
         "provenance": "shadow",
         "current_dry_run": "PASS",

@@ -1408,6 +1408,19 @@ def _provenance_uid_weights(
     Cathedral's signed vector. All-or-nothing mapping; nonfinite, negative,
     duplicate, or unmappable weights reject the whole vector.
     """
+    if mechanism == "validated_supply_v3":
+        # Authority/FULL mode re-derives a SINGLE-lane vector (TDX + fixed burn)
+        # from cathedral.provenance.verify_and_recompute. The v3 contract adds a
+        # second (CyberGym) lane whose independent recompute needs the
+        # cathedral-distill producer contract, which is not wired into this
+        # single-lane recomposition. Fail closed rather than pay the whole
+        # recomputed TDX lane as if it were 100% of emission.
+        raise wire.VectorError(
+            "authority-mode FULL re-derivation of validated_supply_v3 is not "
+            "supported: the CyberGym lane requires the cathedral-distill "
+            "recompute contract. Run v3 in shadow/thin mode (signed-vector "
+            "re-derivation via vector_to_uid_weights) until that is wired."
+        )
     burn_fraction = MECHANISM_BURN_FRACTION.get(mechanism)
     if burn_fraction is None:
         raise wire.VectorError(f"mechanism {mechanism!r} has no pinned burn contract")
@@ -2673,16 +2686,17 @@ def _confidential_primary_meta(payload: dict[str, Any]) -> dict[str, Any] | None
     return cp
 
 
-def _confidential_primary_to_uid_weights(
+def _confidential_primary_scores(
     payload: dict[str, Any], cp: dict[str, Any], hotkey_to_uid: dict[str, int]
 ) -> dict[int, float]:
-    """Map a signed confidential-primary vector to UID weights, all-or-nothing.
+    """Map a signed confidential-primary vector to per-UID scores (mass 1.0).
 
     Every positive signed hotkey MUST map to exactly one current metagraph UID.
     Duplicate hotkeys, duplicate UIDs, nonfinite/negative attribution, and
     metadata/sum drift all reject the whole vector. There is no partial apply
-    and no fallback. The signed burn is applied ONLY after a fully successful
-    mapping.
+    and no fallback. NO burn is applied here — the caller decides how the
+    confidential lane's mass is placed: v2 applies the fixed 10% burn, v3 scales
+    the lane to 70%. A degraded / mass-0 signed vector yields an EMPTY dict.
     """
     snap = payload["burn_snapshot"]
     confidential_mass = float(cp["confidential_mass"])
@@ -2774,6 +2788,18 @@ def _confidential_primary_to_uid_weights(
         mapped_uids.add(uid)
         scores[uid] = weight
 
+    return scores
+
+
+def _confidential_primary_to_uid_weights(
+    payload: dict[str, Any], cp: dict[str, Any], hotkey_to_uid: dict[str, int]
+) -> dict[int, float]:
+    """Map a signed confidential-primary vector to UID weights, all-or-nothing.
+
+    The signed burn is applied ONLY after a fully successful mapping.
+    """
+    snap = payload["burn_snapshot"]
+    scores = _confidential_primary_scores(payload, cp, hotkey_to_uid)
     # Signed burn applied ONLY after a fully successful mapping.
     return apply_burn(
         scores,
@@ -2786,27 +2812,40 @@ def _confidential_primary_to_uid_weights(
 # contract is applied; every other vector shape (legacy, v3 blend) is rejected.
 REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1 = "confidential_primary_v1"
 REQUIRE_POLICY_VALIDATED_SUPPLY_V1 = "validated_supply_v1"
+REQUIRE_POLICY_VALIDATED_SUPPLY_V3 = "validated_supply_v3"
 REQUIRE_POLICY_CHOICES = (
     REQUIRE_POLICY_CONFIDENTIAL_PRIMARY_V1,
     REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
+    REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
 )
 
 
-def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Validate the launch-locked 90% TDX plus 10% fixed-burn contract.
+def _validated_supply_common(policy: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Burn-destination checks shared by every validated_supply contract.
+
+    The burn hotkey must be present, match the snapshot, and NOT pin a UID (it is
+    resolved by hotkey against the tick's metagraph). The per-contract fixed burn
+    percentage is checked by the version-specific validator.
+    """
+    burn_hotkey = policy["burn_hotkey"]
+    snap = payload.get("burn_snapshot") or {}
+    if not isinstance(burn_hotkey, str) or not burn_hotkey:
+        raise wire.VectorError("validated_supply burn_hotkey is missing")
+    if snap.get("burn_hotkey") != burn_hotkey:
+        raise wire.VectorError("validated_supply burn_hotkey does not match snapshot")
+    if snap.get("burn_uid") is not None:
+        raise wire.VectorError("validated_supply burn destination must not pin a UID")
+
+
+def _validated_supply_v2_meta(
+    policy: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the launch-locked 90% TDX plus 10% fixed-burn contract (v2).
 
     Contract v2 makes the current launch boundary explicit: only Intel TDX can
     earn the 90% supply allocation and 10% is unconditionally burned. No GPU
     capability or future admission is represented by this signed payload.
     """
-    metadata = payload.get("policy_metadata") or {}
-    if not isinstance(metadata, dict):
-        return None
-    policy = metadata.get("validated_supply")
-    if policy is None:
-        return None
-    if not isinstance(policy, dict):
-        raise wire.VectorError("validated_supply metadata must be an object")
     expected = {
         "contract_version",
         "intel_tdx_allocation",
@@ -2815,8 +2854,6 @@ def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
     if set(policy) != expected:
         raise wire.VectorError("validated_supply metadata fields mismatch")
-    if policy["contract_version"] != "v2":
-        raise wire.VectorError("validated_supply unsupported contract_version")
     try:
         tdx = float(policy["intel_tdx_allocation"])
         fixed_burn = float(policy["fixed_burn_allocation"])
@@ -2828,14 +2865,8 @@ def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
         raise wire.VectorError("validated_supply fixed burn allocation must equal 0.10")
     if not math.isclose(tdx + fixed_burn, 1.0, rel_tol=0.0, abs_tol=1e-12):
         raise wire.VectorError("validated_supply allocations must sum to 1")
-    burn_hotkey = policy["burn_hotkey"]
+    _validated_supply_common(policy, payload)
     snap = payload.get("burn_snapshot") or {}
-    if not isinstance(burn_hotkey, str) or not burn_hotkey:
-        raise wire.VectorError("validated_supply burn_hotkey is missing")
-    if snap.get("burn_hotkey") != burn_hotkey:
-        raise wire.VectorError("validated_supply burn_hotkey does not match snapshot")
-    if snap.get("burn_uid") is not None:
-        raise wire.VectorError("validated_supply burn destination must not pin a UID")
     try:
         burn_percentage = float(snap["forced_burn_percentage"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -2843,6 +2874,77 @@ def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not math.isclose(burn_percentage, 10.0, rel_tol=0.0, abs_tol=1e-12):
         raise wire.VectorError("validated_supply fixed burn allocation must burn 10%")
     return policy
+
+
+def _validated_supply_v3_meta(
+    policy: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the coordinated 70% TDX / 30% CyberGym / 0% fixed-burn contract.
+
+    v3 burns NO fixed share, but the burn hotkey is still the SINK for forfeited
+    or ineligible lane mass, so it must still be present and unpinned; the fixed
+    burn percentage in the snapshot must be exactly 0.
+    """
+    expected = {
+        "contract_version",
+        "intel_tdx_allocation",
+        "cybergym_allocation",
+        "fixed_burn_allocation",
+        "burn_hotkey",
+    }
+    if set(policy) != expected:
+        raise wire.VectorError("validated_supply v3 metadata fields mismatch")
+    try:
+        tdx = float(policy["intel_tdx_allocation"])
+        cyber = float(policy["cybergym_allocation"])
+        fixed_burn = float(policy["fixed_burn_allocation"])
+    except (TypeError, ValueError) as exc:
+        raise wire.VectorError("validated_supply allocations must be numeric") from exc
+    if not math.isclose(tdx, 0.70, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            "validated_supply v3 Intel TDX allocation must equal 0.70"
+        )
+    if not math.isclose(cyber, 0.30, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            "validated_supply v3 CyberGym allocation must equal 0.30"
+        )
+    if not math.isclose(fixed_burn, 0.0, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            "validated_supply v3 fixed burn allocation must equal 0.0"
+        )
+    if not math.isclose(tdx + cyber + fixed_burn, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply v3 allocations must sum to 1")
+    _validated_supply_common(policy, payload)
+    snap = payload.get("burn_snapshot") or {}
+    try:
+        burn_percentage = float(snap["forced_burn_percentage"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise wire.VectorError("validated_supply burn percentage is missing") from exc
+    if not math.isclose(burn_percentage, 0.0, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError("validated_supply v3 fixed burn allocation must burn 0%")
+    return policy
+
+
+def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Detect and validate the signed validated_supply contract (v2 or v3).
+
+    Returns the policy dict, or None when no validated_supply block is present.
+    Raises VectorError on any malformed/unsupported contract (never falls back).
+    """
+    metadata = payload.get("policy_metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    policy = metadata.get("validated_supply")
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        raise wire.VectorError("validated_supply metadata must be an object")
+    version = policy.get("contract_version")
+    if version == "v2":
+        return _validated_supply_v2_meta(policy, payload)
+    if version == "v3":
+        return _validated_supply_v3_meta(policy, payload)
+    raise wire.VectorError("validated_supply unsupported contract_version")
 
 
 def _resolve_burn_hotkey(
@@ -2866,6 +2968,148 @@ def _resolve_burn_hotkey(
     return resolved
 
 
+def _validated_supply_v3_to_uid_weights(
+    payload: dict[str, Any],
+    policy: dict[str, Any],
+    cp: dict[str, Any] | None,
+    hotkey_to_uid: dict[str, int],
+) -> dict[int, float]:
+    """Map a v3 (70% Intel TDX + 30% CyberGym + 0% fixed burn) vector to UID weights.
+
+    Intel TDX lane: the signed confidential-primary rows, mapped hotkey->UID and
+    scaled to intel_tdx_allocation (0.70). A degraded/revoked confidential lane
+    (empty scores) sinks its whole 70% to the burn UID.
+
+    CyberGym lane: the uid-keyed ``policy_metadata["cybergym_lane"]`` produced by
+    ``cybergym_bridge.cybergym_allocation`` — re-verified here: its mass equals
+    cybergym_allocation (0.30), contributing miners never collide with the burn
+    UID, and any forfeited mass sits on the burn UID resolved from the burn
+    hotkey against THIS tick's metagraph. Together the two lanes sum to 1.0. No
+    fixed burn is applied (0%); the burn UID collects only forfeited lane mass.
+    """
+    snap = payload["burn_snapshot"]
+    burn_uid = snap.get("burn_uid")
+    if burn_uid is None:
+        raise wire.VectorError("validated_supply v3 requires a resolved burn UID")
+    burn_uid = int(burn_uid)
+    tdx_alloc = float(policy["intel_tdx_allocation"])
+    cyber_alloc = float(policy["cybergym_allocation"])
+
+    # ---- Intel TDX lane (confidential-primary rows scaled to 70%) ----
+    if cp is None:
+        raise wire.VectorError(
+            "validated_supply v3 requires confidential_primary evidence"
+        )
+    tdx_scores = _confidential_primary_scores(payload, cp, hotkey_to_uid)
+    result: dict[int, float] = {}
+    tdx_forfeited = 0.0
+    if tdx_scores:
+        tdx_mass = math.fsum(tdx_scores.values())
+        if not math.isclose(tdx_mass, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise wire.VectorError(
+                f"validated_supply v3 Intel TDX mass {tdx_mass!r} != 1.0"
+            )
+        for uid, weight in tdx_scores.items():
+            if uid == burn_uid:
+                raise wire.VectorError(
+                    "validated_supply v3 Intel TDX hotkey resolves to burn UID"
+                )
+            result[uid] = result.get(uid, 0.0) + weight * tdx_alloc
+    else:
+        # Degraded/revoked confidential lane: the whole 70% sinks to burn.
+        tdx_forfeited = tdx_alloc
+
+    # ---- CyberGym lane (uid-keyed, 30%) ----
+    metadata = payload.get("policy_metadata") or {}
+    lane = metadata.get("cybergym_lane")
+    if not isinstance(lane, dict):
+        raise wire.VectorError("validated_supply v3 missing cybergym_lane metadata")
+    expected_lane_fields = {
+        "fraction",
+        "weights",
+        "contributing_fraction",
+        "forfeited_fraction",
+        "burn_uid",
+        "cybergym",
+    }
+    if set(lane) != expected_lane_fields:
+        raise wire.VectorError("validated_supply v3 cybergym_lane fields mismatch")
+    try:
+        lane_fraction = float(lane["fraction"])
+        lane_forfeited = float(lane["forfeited_fraction"] or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "validated_supply v3 cybergym_lane fraction/forfeited invalid"
+        ) from exc
+    if not math.isclose(lane_fraction, cyber_alloc, rel_tol=0.0, abs_tol=1e-12):
+        raise wire.VectorError(
+            f"validated_supply v3 cybergym_lane fraction {lane_fraction!r} != "
+            f"{cyber_alloc!r}"
+        )
+    raw_weights = lane["weights"]
+    if not isinstance(raw_weights, dict):
+        raise wire.VectorError(
+            "validated_supply v3 cybergym_lane weights must be an object"
+        )
+    lane_weights: dict[int, float] = {}
+    for raw_uid, raw_weight in raw_weights.items():
+        try:
+            uid = int(raw_uid)
+            weight = float(raw_weight)
+        except (TypeError, ValueError) as exc:
+            raise wire.VectorError(
+                "validated_supply v3 cybergym_lane weight invalid"
+            ) from exc
+        if not math.isfinite(weight) or weight < 0.0:
+            raise wire.VectorError(
+                "validated_supply v3 cybergym_lane weight out of range"
+            )
+        if uid in lane_weights:
+            raise wire.VectorError(
+                f"validated_supply v3 cybergym_lane duplicate uid {uid}"
+            )
+        lane_weights[uid] = weight
+    lane_mass = math.fsum(lane_weights.values())
+    if not math.isclose(lane_mass, cyber_alloc, rel_tol=0.0, abs_tol=1e-9):
+        raise wire.VectorError(
+            f"validated_supply v3 cybergym_lane mass {lane_mass!r} != {cyber_alloc!r}"
+        )
+    lane_burn_uid = lane["burn_uid"]
+    if lane_forfeited > 0.0:
+        if lane_burn_uid is None or int(lane_burn_uid) != burn_uid:
+            # The forfeited share was resolved to a burn UID that is no longer the
+            # burn hotkey's UID this tick (recycled UID / moved hotkey). Fail
+            # closed rather than pay the forfeited share to whoever holds it now.
+            raise wire.VectorError(
+                "validated_supply v3 cybergym_lane burn UID does not match the "
+                "current burn hotkey"
+            )
+    for uid, weight in lane_weights.items():
+        if uid == burn_uid:
+            # The forfeited CyberGym share; it must match the declared forfeited
+            # fraction and is added to the burn sink below (not as a miner share).
+            if not math.isclose(weight, lane_forfeited, rel_tol=0.0, abs_tol=1e-9):
+                raise wire.VectorError(
+                    "validated_supply v3 cybergym_lane burn weight != forfeited "
+                    "fraction"
+                )
+            continue
+        result[uid] = result.get(uid, 0.0) + weight
+
+    # ---- Burn sink: 0% fixed + all forfeited lane mass ----
+    burn_total = tdx_forfeited + lane_forfeited
+    if burn_total > 0.0:
+        result[burn_uid] = result.get(burn_uid, 0.0) + burn_total
+
+    if not result:
+        raise wire.VectorError("validated_supply v3 produced an empty vector")
+    total = math.fsum(result.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise wire.VectorError(f"validated_supply v3 weights sum {total!r} != 1.0")
+    # Normalize away any sub-1e-9 float drift so the wire vector sums to exactly 1.0.
+    return {uid: weight / total for uid, weight in result.items()}
+
+
 def vector_to_uid_weights(
     payload: dict[str, Any],
     hotkey_to_uid: dict[str, int],
@@ -2877,6 +3121,9 @@ def vector_to_uid_weights(
     payload = _resolve_burn_hotkey(original_payload, hotkey_to_uid)
     snap = payload["burn_snapshot"]
     cp = _confidential_primary_meta(payload)
+    supply_version = (
+        validated_supply.get("contract_version") if validated_supply else None
+    )
     # Pinned validators apply ONLY confidential_primary v1. A vector without a
     # valid v1 policy block is rejected here; a malformed block already raised
     # in _confidential_primary_meta. The legacy and v3 branches below are
@@ -2894,11 +3141,34 @@ def vector_to_uid_weights(
                 "validator pinned to validated_supply_v1 but vector carries "
                 "no validated_supply policy block"
             )
+        # A v1-pinned validator refuses any allocation drift, INCLUDING an
+        # upgraded v3 contract: rolling to v3 is a coordinated re-pin, never a
+        # silent acceptance under the launch pin.
+        if supply_version != "v2":
+            raise wire.VectorError(
+                "validator pinned to validated_supply_v1 rejects "
+                f"contract_version {supply_version!r}"
+            )
         if cp is None:
             raise wire.VectorError(
                 "validated_supply_v1 requires confidential_primary evidence"
             )
         return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
+    if require_policy == REQUIRE_POLICY_VALIDATED_SUPPLY_V3:
+        if validated_supply is None or supply_version != "v3":
+            raise wire.VectorError(
+                "validator pinned to validated_supply_v3 but vector carries no v3 "
+                "validated_supply policy block"
+            )
+        return _validated_supply_v3_to_uid_weights(
+            payload, validated_supply, cp, hotkey_to_uid
+        )
+    # Unpinned: a signed v3 contract is applied through its own lane mapper before
+    # the legacy confidential/base paths.
+    if supply_version == "v3":
+        return _validated_supply_v3_to_uid_weights(
+            payload, validated_supply, cp, hotkey_to_uid
+        )
     if cp is not None:
         return _confidential_primary_to_uid_weights(payload, cp, hotkey_to_uid)
     v3_rows = _confidential_tdx_v3_rows(payload)
