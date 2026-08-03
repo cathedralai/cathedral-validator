@@ -16,6 +16,7 @@ import json
 import re
 import hashlib
 import hmac
+from pathlib import Path
 
 from datetime import UTC, datetime
 
@@ -33,13 +34,9 @@ _NEEDS_CONTRACT = (
 pytest.importorskip("cathedral_distill.integrated_feed", reason=_NEEDS_CONTRACT)
 pytest.importorskip("cathedral_distill.testing", reason=_NEEDS_CONTRACT)
 
-from cathedral_distill import cybergym as cg  # noqa: E402
-from cathedral_distill import cybergym_batch as cb  # noqa: E402
-from cathedral_distill import cybergym_receipt as cr  # noqa: E402
-from cathedral_distill import cybergym_validator as cv  # noqa: E402
 from cathedral_distill import integrated_feed as itf  # noqa: E402
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
-from cathedral_distill.testing import IntegrationFixtures, digest  # noqa: E402
+from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
 from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
@@ -57,10 +54,6 @@ VALID_UNTIL_BLOCK = 460
 IN_WINDOW = 200
 PAST_WINDOW = 999
 
-_DISCLOSED = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
-_CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
-
-
 def _fixtures():
     """Fixtures whose registry also resolves the cybergym signing key id."""
     fx = IntegrationFixtures(source_epoch=SOURCE_EPOCH)
@@ -73,56 +66,11 @@ def _fixtures():
 
 def cybergym_receipt(fx, *, miner="5CyberMiner", epoch=SOURCE_EPOCH):
     """A real signed CyberGym receipt, built through the shared contract."""
-    tasks = [
-        cb.PooledTask(
-            task_id=f"arvo:{n}",
-            level=cg.Level(level),
-            binary_digest=digest(f"bin-{n}"),
-            disclosed_at=_DISCLOSED,
-        )
-        for n, level in enumerate((0, 1, 2), start=1)
-    ]
-    nonce = cb.derive_batch_nonce(
-        block=VALID_FROM_BLOCK,
-        block_hash="0x" + "cd" * 32,
-        network="finney",
-        netuid=39,
+    return fx.cybergym_receipt(
+        miner,
         source_epoch=epoch,
-        miner_hotkey=miner,
-        model_commitment=digest("ckpt"),
-    )
-    batch = cb.draw_batch(
-        cb.TaskPool(tasks), size=3, nonce=nonce, as_of=_DISCLOSED, cutoff=_CUTOFF
-    )
-    submissions = [
-        cg.PoCSubmission(
-            task_id=task.task_id,
-            poc_sha256=cr.holdout_digest([task.task_id]),
-            result=cv.verify_poc(
-                task,
-                b"poc-" + task.task_id.encode(),
-                lambda tid, poc, mode: (
-                    1 if (tid in ("arvo:1", "arvo:2") and mode == "vul") else 0
-                ),
-            ),
-        )
-        for task in batch.tasks
-    ]
-    score = cg.score_batch(batch.batch_id, list(batch.tasks), submissions)
-    return cr.build_receipt(
-        score,
-        network="finney",
-        netuid=39,
-        source_epoch=epoch,
-        validator_hotkey="5Validator",
-        miner_hotkey=miner,
-        nonce=nonce,
-        holdout_digest_value=cr.holdout_digest(list(batch.task_ids)),
         valid_from_block=VALID_FROM_BLOCK,
         valid_until_block=VALID_UNTIL_BLOCK,
-        issued_at="2026-07-27T12:00:00.000000Z",
-        private_key=fx.key,
-        signing_key_id="cybergym-1",
     )
 
 
@@ -473,6 +421,27 @@ def test_a_bundle_can_omit_the_lane_and_still_reach_the_cybergym_lane(
     assert "block_window=yes" in status and "ledger=yes" in status
 
 
+def test_the_cli_passes_durable_epoch_state_to_an_authoritative_cybergym_run(
+    tmp_path, monkeypatch
+):
+    """Regression: the library required this path but the CLI silently dropped it."""
+    monkeypatch.setenv(ep.EPOCH_PROOF_SECRET_ENV, PROOF_SECRET)
+    fx = _fixtures()
+    state_path = tmp_path / "cybergym-epochs.sqlite"
+    bundle = _bundle(
+        fx,
+        tmp_path,
+        [{"kind": "cybergym", "receipt": cybergym_receipt(fx)}],
+        cybergym_epoch_state_path=str(state_path),
+    )
+
+    result = cli.run_bundle(bundle, consume_receipts=True)
+
+    assert result["gates"]["replay_mode"] == "authoritative"
+    assert result["gates"]["cybergym_epoch_proof"]["epoch_state"] == "admitted"
+    assert state_path.is_file()
+
+
 def test_the_cli_reports_a_stale_window_per_lane(tmp_path, monkeypatch):
     monkeypatch.setenv(ep.EPOCH_PROOF_SECRET_ENV, PROOF_SECRET)
     fx = _fixtures()
@@ -520,6 +489,51 @@ def test_a_verified_epoch_proof_lets_the_lane_pay(fx=None):
     assert verdict == itf.PASS
     assert out["gates"]["cybergym_epoch_proof"]["verified"] is True
     assert out["gates"]["cybergym_epoch_proof"]["required"] == [LANE_CYBERGYM]
+
+
+def test_distill_closed_store_report_verifies_and_binds_end_to_end(tmp_path):
+    """The real producer exporter feeds this independent consumer, not a fixture."""
+    producer = pytest.importorskip(
+        "cathedral_distill.cybergym_score_report",
+        reason="merge cathedral-distill score exporter before updating the pinned commit",
+    )
+    score_store_module = pytest.importorskip("cathedral_distill.cybergym_scores")
+    fx = _fixtures()
+    receipt = cybergym_receipt(fx)
+    store = score_store_module.CyberGymScoreStore(str(tmp_path / "scores.sqlite"))
+    store.record(receipt)
+    store.mark_epoch(
+        SOURCE_EPOCH,
+        state=score_store_module.EPOCH_CLOSED,
+        scored_miners=1,
+        at=_fresh_iso(),
+    )
+    document = producer.build_score_report(
+        store,
+        network="finney",
+        netuid=39,
+        source_epoch=SOURCE_EPOCH,
+        producer_hotkey=PRODUCER,
+    )
+    body = producer.canonical_report_bytes(document)
+    proof = {
+        "body": body.decode("utf-8"),
+        "signature": producer.body_hmac(body, PROOF_SECRET),
+    }
+
+    out = _preview(
+        fx,
+        [_lane_receipt(receipt)],
+        cybergym_epoch_proof=proof,
+    )
+
+    (audited,) = out["audit"]["receipts"]
+    assert audited["verdict"] == itf.PASS
+    assert out["gates"]["cybergym_epoch_proof"]["verified"] is True
+    assert out["gates"]["cybergym_epoch_proof"]["bound"] is True
+    assert out["gates"]["cybergym_epoch_proof"]["body_sha256"] == hashlib.sha256(
+        body
+    ).hexdigest()
 
 
 def test_a_missing_proof_burns_the_lane():
@@ -766,9 +780,9 @@ def test_a_prior_failure_keeps_its_own_reason():
 # between what cathedral's producer/intake actually authenticates and what this
 # validator recomputes. These drive cathedral's own cybergym_contract module.
 # --------------------------------------------------------------------------- #
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 _CATHEDRAL_CONTRACT_PATH = (
-    "/Users/dreamboat/Documents/PROJECTS/cathedral-fable-prs-20260729/repos/cathedral"
-    "/scaffold/publisher/cybergym_contract.py"
+    _WORKSPACE_ROOT / "cathedral/scaffold/publisher/cybergym_contract.py"
 )
 
 
@@ -786,12 +800,10 @@ def _cathedral_contract():
     the sibling checked out.
     """
     import importlib.util
-    import os
-
-    if not os.path.exists(_CATHEDRAL_CONTRACT_PATH):
+    if not _CATHEDRAL_CONTRACT_PATH.exists():
         pytest.skip("cathedral sibling checkout not present")
     spec = importlib.util.spec_from_file_location(
-        "_cathedral_cybergym_contract", _CATHEDRAL_CONTRACT_PATH
+        "_cathedral_cybergym_contract", str(_CATHEDRAL_CONTRACT_PATH)
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1254,13 +1266,7 @@ def test_the_canonical_unit_label_matches_what_producers_actually_emit():
     sides, which is why this test asserts the label against Cathedral's OWN fixtures
     rather than against a constant defined here.
     """
-    import pathlib
-    import re
-
-    cathedral_tests = pathlib.Path(
-        "/Users/dreamboat/Documents/PROJECTS/cathedral-fable-prs-20260729/repos/cathedral"
-        "/scaffold/publisher/tests"
-    )
+    cathedral_tests = _WORKSPACE_ROOT / "cathedral/scaffold/publisher/tests"
     if not cathedral_tests.exists():
         pytest.skip("cathedral sibling checkout not present")
     emitted = set()

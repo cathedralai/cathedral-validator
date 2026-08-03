@@ -1,6 +1,6 @@
 """`cathedral-validator-integration-preview` — a NON-WRITING operator preview.
 
-Runs the default-OFF Compute+Distill integration lane over inputs from one JSON
+Runs the default-OFF Compute+Distill+CyberGym integration lane over inputs from one JSON
 bundle and prints the composed feed + audit trail. It verifies the signed burn +
 allocation config and every lane receipt, composes one deterministic vector (a
 missing/invalid lane's share goes to burn), and emits the audit — but it never
@@ -46,6 +46,9 @@ Bundle shape:
       "cybergym_expected_producer_hotkey": "5Producer",
       # Optional pin for the signed evidence bundle digest.
       "cybergym_expected_evidence_sha256": "<64 hex>",
+      # REQUIRED with --consume-receipts for a funded CyberGym lane. This durable
+      # state rejects epoch rollback and same-epoch conflicting proofs.
+      "cybergym_epoch_state_path": "/var/lib/cathedral/cybergym-epochs.sqlite",
 
       "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
                      "receipt": { ... }},
@@ -354,6 +357,11 @@ def run_bundle(
             cybergym_expected_evidence_sha256=bundle.get(
                 "cybergym_expected_evidence_sha256"
             ),
+            # Authoritative CyberGym admission needs a durable monotonic epoch
+            # fence. The library has always enforced it, but the CLI previously
+            # dropped this bundle field, making every authoritative CyberGym run
+            # fail even when the operator supplied the state path.
+            cybergym_epoch_state_path=bundle.get("cybergym_epoch_state_path"),
         )
     except IntegrationUnavailable as exc:
         raise PreviewError(str(exc)) from exc
@@ -364,7 +372,10 @@ def run_bundle(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cathedral-validator-integration-preview",
-        description="Non-writing Compute+Distill integration preview (no chain writes).",
+        description=(
+            "Non-writing Compute+Distill+CyberGym integration preview "
+            "(no chain writes)."
+        ),
     )
     parser.add_argument(
         "--bundle", help="preview bundle JSON file (required unless --lanes)"

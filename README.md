@@ -97,6 +97,7 @@ the pinned Linux verifier and the controlled evidence package.
 - [Validator runbook](VALIDATOR.md)
 - [Provenance contract](docs/PROVENANCE.md)
 - [Thin validator operations](docs/THIN_SUBNET_RUNBOOK.md)
+- [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
 - [Design and trust boundaries](docs/THIN_SUBNET_DESIGN.md)
 - [Miner error contract](docs/MINER_ERROR_CONTRACT.md)
 
