@@ -13,16 +13,18 @@ path, and broadcast gates.
 
 On every cycle the validator:
 
-1. fetches the signed Cathedral weight candidate;
-2. verifies its signature, audience, freshness, rollback fence, and policy;
-3. checks the configured Compute and Distill evidence boundary;
-4. resolves hotkeys against the current SN39 metagraph;
-5. applies the fixed burn contract and owner-controlled allocations;
-6. prints and records the exact UID vector; and
+1. independently recomputes the weight vector from Cathedral's controlled
+   Compute and Distill evidence — it submits only what it can prove itself;
+2. enforces the signature, freshness, rollback fence, and policy;
+3. resolves eligible hotkeys against the current SN39 metagraph;
+4. applies the fixed burn contract and owner-controlled allocations;
+5. prints and records the exact UID vector;
+6. when nothing is independently proven, writes nothing and idles as a passive
+   listener, waiting for the next epoch's evidence; and
 7. stops at dry-run unless the operator explicitly enables broadcast.
 
 A registered miner, an online worker, or a self-reported score does not earn
-weight. Evidence must pass the active validator policy.
+weight. Evidence must be independently reproducible or it is not scored.
 
 ## Install for review and dry-run
 
@@ -80,25 +82,25 @@ policy-correct, mapped to the intended UIDs, and identical to the reviewed
 candidate. Broadcast also requires the immutable Linux release, the registered
 validator hotkey, one-writer protection, and explicit operator authorization.
 
-## Evidence modes
+## How it verifies
 
-| Mode | Weight authority | Host requirements |
-|---|---|---|
-| `shadow` | Signed thin vector | Python runtime and chain access for dry-run |
-| `authority` | Independent replay from controlled evidence | Linux x86-64, pinned verifier, controlled evidence tree |
-| `off` | Signed thin vector | Independent provenance audit disabled |
+The validator runs one way. It independently recomputes the weight vector from
+Cathedral's controlled evidence and submits only what it can prove for itself —
+it never trusts a score it cannot reproduce. Every cycle enforces the signature,
+freshness, the policy-version fence, the burn contract and destination, and
+uid-replacement safety. Anything not independently proven is simply not scored;
+when nothing is proven, the validator writes nothing and idles until the next
+epoch's evidence arrives.
 
-The validator host does not need Intel TDX for the signed-vector path. Compute
-workers need TDX when their policy requires TDX evidence. Authority replay needs
-the pinned Linux verifier and the controlled evidence package.
+Running the validator needs Linux x86-64, the pinned verifier, and the
+controlled evidence package. Compute workers need Intel TDX when their policy
+requires TDX evidence; the validator host itself does not.
 
 ## Operator documents
 
 - [Validator runbook](VALIDATOR.md)
 - [Provenance contract](docs/PROVENANCE.md)
-- [Thin validator operations](docs/THIN_SUBNET_RUNBOOK.md)
 - [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
-- [Design and trust boundaries](docs/THIN_SUBNET_DESIGN.md)
 - [Miner error contract](docs/MINER_ERROR_CONTRACT.md)
 
 ## Repository boundary
