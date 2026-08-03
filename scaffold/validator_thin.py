@@ -109,6 +109,13 @@ class _PostSignedSubmissionMismatch(wire.VectorError):
     """A signed attempt has a positive receipt or execution contradiction."""
 
 
+class _NothingToScoreYet(wire.VectorError):
+    """No paid hotkey was independently proven this epoch. This is NOT a failure:
+    the validator verified there is nothing to submit and should idle until the
+    next epoch's evidence arrives. A passive listener waiting for a job, not a
+    fault to fail loudly on."""
+
+
 EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # A full attempt (preflight, feed, gates, provenance audit) spends most of a
 # 12s Finney block between sampling the finalized head and reaching the
@@ -1750,9 +1757,12 @@ def _run_provenance_stage(
                 remediation="provide the controlled package and verifier pins",
             )
             _lifecycle("PROVENANCE not proven", detail)
-            raise wire.VectorError(
-                "full mode requires every paid hotkey to be raw-replayed; this "
-                "epoch did not reach that and nothing was submitted"
+            # Not a failure: a full validator that finds nothing independently
+            # proven this epoch has nothing to score. It idles and waits for the
+            # next job rather than failing closed loudly.
+            raise _NothingToScoreYet(
+                "nothing to score yet: no paid hotkey was independently proven "
+                "this epoch; waiting for the next job"
             )
         # RESERVE FIRST, under ONE flock hold covering the index line, the
         # policy line, the report line, and the chain identity. Only a
@@ -9275,6 +9285,24 @@ def run(args) -> int:
                 # Restart enters the dedicated receipt-recovery path before any new
                 # tick can reserve or sign another submission.
                 return 1
+            except _NothingToScoreYet as e:
+                # Passive-listener state: the validator ran a full, correct check
+                # and there is simply nothing to score this epoch. Report it as a
+                # calm waiting status, not a failure, and stay up for the next tick.
+                tick_ok = True
+                render.outcome(True, "waiting for a job — nothing to score this epoch")
+                _get_events(args).event(
+                    "WAITING_FOR_JOB",
+                    stage="result",
+                    status=NOT_PROVEN,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "No submission this epoch by design: nothing was "
+                        "independently proven, so there is nothing to score. The "
+                        "validator stays up and re-checks on the next interval."
+                    ),
+                )
+                break
             except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
                 render.outcome(False, f"tick failed: {stable_error(e)}")
                 _get_events(args).event(
