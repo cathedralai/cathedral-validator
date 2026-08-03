@@ -34,9 +34,13 @@ _NEEDS_CONTRACT = (
 pytest.importorskip("cathedral_distill.integrated_feed", reason=_NEEDS_CONTRACT)
 pytest.importorskip("cathedral_distill.testing", reason=_NEEDS_CONTRACT)
 
+from cathedral_distill import cybergym as cg  # noqa: E402
+from cathedral_distill import cybergym_batch as cb  # noqa: E402
+from cathedral_distill import cybergym_receipt as cr  # noqa: E402
+from cathedral_distill import cybergym_validator as cv  # noqa: E402
 from cathedral_distill import integrated_feed as itf  # noqa: E402
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
-from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
+from cathedral_distill.testing import IntegrationFixtures, digest  # noqa: E402
 from _durable_ledger import durable_ledger  # noqa: E402
 
 from cathedral_thin import integration as ig  # noqa: E402
@@ -54,6 +58,10 @@ VALID_UNTIL_BLOCK = 460
 IN_WINDOW = 200
 PAST_WINDOW = 999
 
+_DISCLOSED = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+_CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+
+
 def _fixtures():
     """Fixtures whose registry also resolves the cybergym signing key id."""
     fx = IntegrationFixtures(source_epoch=SOURCE_EPOCH)
@@ -66,11 +74,67 @@ def _fixtures():
 
 def cybergym_receipt(fx, *, miner="5CyberMiner", epoch=SOURCE_EPOCH):
     """A real signed CyberGym receipt, built through the shared contract."""
-    return fx.cybergym_receipt(
-        miner,
+    if hasattr(fx, "cybergym_receipt"):
+        return fx.cybergym_receipt(
+            miner,
+            source_epoch=epoch,
+            valid_from_block=VALID_FROM_BLOCK,
+            valid_until_block=VALID_UNTIL_BLOCK,
+        )
+
+    # Keep this test lane compatible with the validator's immutable Distill pin.
+    # Once the producer PR is merged and that pin moves, the shared fixture above
+    # becomes the only path taken.
+    tasks = [
+        cb.PooledTask(
+            task_id=f"arvo:{n}",
+            level=cg.Level(level),
+            binary_digest=digest(f"bin-{n}"),
+            disclosed_at=_DISCLOSED,
+        )
+        for n, level in enumerate((0, 1, 2), start=1)
+    ]
+    nonce = cb.derive_batch_nonce(
+        block=VALID_FROM_BLOCK,
+        block_hash="0x" + "cd" * 32,
+        network="finney",
+        netuid=39,
         source_epoch=epoch,
+        miner_hotkey=miner,
+        model_commitment=digest("ckpt"),
+    )
+    batch = cb.draw_batch(
+        cb.TaskPool(tasks), size=3, nonce=nonce, as_of=_DISCLOSED, cutoff=_CUTOFF
+    )
+    submissions = [
+        cg.PoCSubmission(
+            task_id=task.task_id,
+            poc_sha256=cr.holdout_digest([task.task_id]),
+            result=cv.verify_poc(
+                task,
+                b"poc-" + task.task_id.encode(),
+                lambda tid, poc, mode: (
+                    1 if (tid in ("arvo:1", "arvo:2") and mode == "vul") else 0
+                ),
+            ),
+        )
+        for task in batch.tasks
+    ]
+    score = cg.score_batch(batch.batch_id, list(batch.tasks), submissions)
+    return cr.build_receipt(
+        score,
+        network="finney",
+        netuid=39,
+        source_epoch=epoch,
+        validator_hotkey="5Validator",
+        miner_hotkey=miner,
+        nonce=nonce,
+        holdout_digest_value=cr.holdout_digest(list(batch.task_ids)),
         valid_from_block=VALID_FROM_BLOCK,
         valid_until_block=VALID_UNTIL_BLOCK,
+        issued_at="2026-07-27T12:00:00.000000Z",
+        private_key=fx.key,
+        signing_key_id="cybergym-1",
     )
 
 
@@ -531,9 +595,10 @@ def test_distill_closed_store_report_verifies_and_binds_end_to_end(tmp_path):
     assert audited["verdict"] == itf.PASS
     assert out["gates"]["cybergym_epoch_proof"]["verified"] is True
     assert out["gates"]["cybergym_epoch_proof"]["bound"] is True
-    assert out["gates"]["cybergym_epoch_proof"]["body_sha256"] == hashlib.sha256(
-        body
-    ).hexdigest()
+    assert (
+        out["gates"]["cybergym_epoch_proof"]["body_sha256"]
+        == hashlib.sha256(body).hexdigest()
+    )
 
 
 def test_a_missing_proof_burns_the_lane():
@@ -800,6 +865,7 @@ def _cathedral_contract():
     the sibling checked out.
     """
     import importlib.util
+
     if not _CATHEDRAL_CONTRACT_PATH.exists():
         pytest.skip("cathedral sibling checkout not present")
     spec = importlib.util.spec_from_file_location(
