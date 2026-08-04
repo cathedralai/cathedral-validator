@@ -3035,6 +3035,7 @@ def _validated_supply_v3_to_uid_weights(
         "contributing_fraction",
         "forfeited_fraction",
         "burn_uid",
+        "uid_hotkeys",
         "cybergym",
     }
     if set(lane) != expected_lane_fields:
@@ -3074,6 +3075,29 @@ def _validated_supply_v3_to_uid_weights(
                 f"validated_supply v3 cybergym_lane duplicate uid {uid}"
             )
         lane_weights[uid] = weight
+    raw_uid_hotkeys = lane["uid_hotkeys"]
+    if not isinstance(raw_uid_hotkeys, dict):
+        raise wire.VectorError(
+            "validated_supply v3 cybergym_lane uid_hotkeys must be an object"
+        )
+    try:
+        uid_hotkeys = {int(uid): str(hotkey) for uid, hotkey in raw_uid_hotkeys.items()}
+    except (TypeError, ValueError) as exc:
+        raise wire.VectorError(
+            "validated_supply v3 cybergym_lane uid_hotkey binding invalid"
+        ) from exc
+    if set(uid_hotkeys) != set(lane_weights) or any(
+        not hotkey for hotkey in uid_hotkeys.values()
+    ):
+        raise wire.VectorError(
+            "validated_supply v3 cybergym_lane uid_hotkey bindings mismatch"
+        )
+    for uid, hotkey in uid_hotkeys.items():
+        if hotkey_to_uid.get(hotkey) != uid:
+            raise wire.VectorError(
+                "validated_supply v3 cybergym_lane recipient UID does not match "
+                "the current hotkey"
+            )
     lane_mass = math.fsum(lane_weights.values())
     if not math.isclose(lane_mass, cyber_alloc, rel_tol=0.0, abs_tol=1e-9):
         raise wire.VectorError(
