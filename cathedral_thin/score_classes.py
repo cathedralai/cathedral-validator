@@ -1120,8 +1120,7 @@ def _validate_compute_candidate_snapshot(value: Any, *, entries: list[str]) -> N
         not isinstance(hotkeys, list)
         or len(hotkeys) > MAX_REPORT_ENTRIES
         or any(
-            not isinstance(hotkey, str)
-            or not 1 <= len(hotkey.encode("utf-8")) <= 512
+            not isinstance(hotkey, str) or not 1 <= len(hotkey.encode("utf-8")) <= 512
             for hotkey in hotkeys
         )
         or hotkeys != sorted(set(hotkeys))
