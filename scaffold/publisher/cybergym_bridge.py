@@ -257,6 +257,64 @@ def resolve_burn_destination(
     return uid, meta
 
 
+def resolve_recipient_hotkeys(
+    store: Store,
+    *,
+    uids: set[int],
+    now: datetime,
+) -> tuple[dict[int, str] | None, dict[str, Any]]:
+    """Resolve every allocation recipient through one fresh snapshot.
+
+    A signed UID weight is not a durable recipient identity: a deregistered UID
+    can be assigned to another hotkey before the validator applies the vector.
+    V3 therefore carries the hotkey observed for every recipient and refuses to
+    compose when a current, one-to-one mapping cannot be proven.
+    """
+    expected_uids = {int(uid) for uid in uids}
+    meta: dict[str, Any] = {
+        "reason": "ok",
+        "recipient_uid_count": len(expected_uids),
+    }
+    if not expected_uids:
+        return {}, meta
+
+    fresh, snapshot_meta = _load_fresh_metagraph_hotkeys(store, now=now)
+    meta["snapshot"] = {
+        key: snapshot_meta.get(key)
+        for key in ("snapshot_fresh", "snapshot_hotkey_count", "snapshot_updated_at")
+    }
+    if fresh is None:
+        meta["reason"] = "recipient_snapshot_unavailable"
+        return None, meta
+
+    network = os.environ.get(NETWORK_ENV, "finney")
+    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    by_uid: dict[int, set[str]] = {uid: set() for uid in expected_uids}
+    for row in store.query(
+        "SELECT hotkey, uid FROM metagraph_hotkeys WHERE network=? AND netuid=?",
+        (network, netuid),
+    ):
+        hotkey = str(row["hotkey"])
+        if hotkey not in fresh or row["uid"] is None:
+            continue
+        uid = int(row["uid"])
+        if uid in by_uid:
+            by_uid[uid].add(hotkey)
+
+    missing = sorted(uid for uid, hotkeys in by_uid.items() if not hotkeys)
+    ambiguous = {
+        uid: sorted(hotkeys)
+        for uid, hotkeys in by_uid.items()
+        if len(hotkeys) != 1
+    }
+    if missing or ambiguous:
+        meta["reason"] = "recipient_uid_hotkey_mismatch"
+        meta["missing_uids"] = missing
+        meta["ambiguous_uids"] = ambiguous
+        return None, meta
+    return {uid: next(iter(hotkeys)) for uid, hotkeys in by_uid.items()}, meta
+
+
 def cybergym_allocation(
     store: Store,
     *,
@@ -278,6 +336,7 @@ def cybergym_allocation(
                        ``burn_destination_unresolved``;
       ``weights``: ``{uid: weight}`` INCLUDING the burn uid's forfeited
                        share, or ``{}`` when the caller must keep its V1 vector;
+      ``uid_hotkeys``: fresh UID-to-hotkey bindings for every weight recipient;
       ``forfeited_fraction`` and ``contributing_fraction``: the explicit split;
       ``burn_uid``: where the forfeited share went, resolved by hotkey;
       ``burn``: how that destination was resolved, or why it was refused;
@@ -296,6 +355,7 @@ def cybergym_allocation(
         "enabled": bool(spec.enabled),
         "fraction": float(spec.weight_fraction),
         "weights": {},
+        "uid_hotkeys": {},
         "forfeited_fraction": 0.0,
         "contributing_fraction": 0.0,
         "burn_uid": None,
@@ -335,32 +395,49 @@ def cybergym_allocation(
     if forfeited <= 0.0:
         result["status"] = "ok" if weights else "no_contribution"
         result["weights"] = dict(weights)
+    else:
+        destination, burn_meta = resolve_burn_destination(store, now=now)
+        result["burn"] = burn_meta
+        if destination is None:
+            # Fail closed: with no PROVEN burn identity, allocating anything would
+            # either hand the forfeited share to other miners or pay whichever miner
+            # currently holds a guessed UID.
+            logger.warning(
+                "cybergym_allocation: forfeited_fraction=%.6f but the burn "
+                "destination is unresolved (%s); returning an empty allocation "
+                "(caller keeps V1)",
+                forfeited, burn_meta.get("reason"),
+            )
+            result["status"] = "burn_destination_unresolved"
+            result["weights"] = {}
+            return result
+
+        allocated = dict(weights)
+        destination = int(destination)
+        if destination in allocated:
+            # A burn uid that also earned mechanism weight would blur the two; keep
+            # the burn share additive and record that it happened.
+            result["burn_uid_also_scored"] = True
+        allocated[destination] = allocated.get(destination, 0.0) + forfeited
+        result["weights"] = allocated
+        result["burn_uid"] = destination
+        result["status"] = "ok"
+
+    if result["status"] != "ok":
         return result
 
-    destination, burn_meta = resolve_burn_destination(store, now=now)
-    result["burn"] = burn_meta
-    if destination is None:
-        # Fail closed: with no PROVEN burn identity, allocating anything would
-        # either hand the forfeited share to other miners or pay whichever miner
-        # currently holds a guessed UID.
+    uid_hotkeys, identity_meta = resolve_recipient_hotkeys(
+        store, uids={int(uid) for uid in result["weights"]}, now=now
+    )
+    result["identity"] = identity_meta
+    if uid_hotkeys is None:
         logger.warning(
-            "cybergym_allocation: forfeited_fraction=%.6f but the burn "
-            "destination is unresolved (%s); returning an empty allocation "
-            "(caller keeps V1)",
-            forfeited, burn_meta.get("reason"),
+            "cybergym_allocation: recipient identities are unresolved (%s); "
+            "returning an empty allocation (caller keeps V1)",
+            identity_meta.get("reason"),
         )
-        result["status"] = "burn_destination_unresolved"
+        result["status"] = "recipient_identity_unresolved"
         result["weights"] = {}
         return result
-
-    allocated = dict(weights)
-    destination = int(destination)
-    if destination in allocated:
-        # A burn uid that also earned mechanism weight would blur the two; keep
-        # the burn share additive and record that it happened.
-        result["burn_uid_also_scored"] = True
-    allocated[destination] = allocated.get(destination, 0.0) + forfeited
-    result["weights"] = allocated
-    result["burn_uid"] = destination
-    result["status"] = "ok"
+    result["uid_hotkeys"] = uid_hotkeys
     return result
