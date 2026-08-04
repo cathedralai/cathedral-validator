@@ -36,7 +36,7 @@ from typing import Any, Callable, Mapping, Sequence
 _STAGE = "INTEGRATION"
 _AUTHORITATIVE_EPOCH_TOKEN_KIND = "integration_authoritative_epoch"
 _AUTHORITATIVE_EPOCH_TOKEN_PREFIX = "cathedral-integration-authoritative-epoch-v1"
-DISTILL_CONTRACT_COMMIT = "a80119cb21c2e1ba4da4d05a500387f2d8ca0e4b"
+DISTILL_CONTRACT_COMMIT = "6203fc18e5dd0fa0a2ba4124cb7ed380bfb77cdc"
 
 # This seam passes these named gates into the shared Distill contract. An older
 # pin that merely imports but does not accept one of them must fail before any

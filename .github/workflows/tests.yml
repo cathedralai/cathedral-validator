@@ -52,7 +52,11 @@ jobs:
         run: |
           python - <<'PY'
           import importlib, sys
-          for module in ("cathedral_distill.integrated_feed", "cathedral_distill.testing"):
+          for module in (
+              "cathedral_distill.integrated_feed",
+              "cathedral_distill.testing",
+              "cathedral_distill.cybergym_score_report",
+          ):
               try:
                   importlib.import_module(module)
               except ImportError as exc:
@@ -122,7 +126,7 @@ jobs:
           cache: pip
       # No `|| true`: the extra is public and installable, so a failure here is a
       # real break (a bad pin, an unreachable dependency) and must not be swallowed.
-      - run: python -m pip install -e ".[test,integration]"
+      - run: python -m pip install -e ".[test,publisher,integration]"
       # Fail if the contract modules did NOT import. Without this an importorskip
       # turns a broken dependency into a green run reporting "9 skipped", which is
       # exactly how 168 tests can silently stop running.
@@ -130,7 +134,11 @@ jobs:
         run: |
           python - <<'PY'
           import importlib, sys
-          for module in ("cathedral_distill.integrated_feed", "cathedral_distill.testing"):
+          for module in (
+              "cathedral_distill.integrated_feed",
+              "cathedral_distill.testing",
+              "cathedral_distill.cybergym_score_report",
+          ):
               try:
                   importlib.import_module(module)
               except ImportError as exc:
@@ -143,3 +151,7 @@ jobs:
       # The whole integration family: contract-pin, replay, authoritative
       # single-flight, containment, CLI, and no-chain-write regressions.
       - run: python -m pytest -q tests/thin/test_integration_*.py
+      # This boundary test intentionally is not named test_integration_*.py.
+      # Keep it explicit: it drives the immutable Distill report producer,
+      # loopback intake, restart/idempotence, and the non-writing preview.
+      - run: python -m pytest -q tests/thin/test_cybergym_prelaunch_e2e.py

@@ -18,16 +18,11 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-import pytest
-
-pytest.importorskip(
-    "cathedral_distill.cybergym_score_report",
-    reason="merge the Distill report producer before updating the immutable pin",
-)
-uvicorn = pytest.importorskip("uvicorn")
+import uvicorn
 
 from fastapi import FastAPI  # noqa: E402
 
+from cathedral_distill import cybergym_score_report  # noqa: E402
 from cathedral_distill import operator_cli as distill_cli  # noqa: E402
 from cathedral_distill.cybergym_scores import (  # noqa: E402
     EPOCH_CLOSED,
@@ -158,6 +153,10 @@ def _bundle(fx, receipt, proof, tmp_path) -> dict:
 def test_distill_commands_to_restarted_intake_to_stateful_validator_preview(
     tmp_path, monkeypatch, capsys
 ):
+    # A missing report producer is a broken immutable contract, not a skipped
+    # E2E. The direct import above and this assertion keep that requirement
+    # visible in the process-level path.
+    assert callable(cybergym_score_report.build_score_report)
     _publisher_env(monkeypatch)
     fx = IntegrationFixtures(network=NETWORK, netuid=NETUID, source_epoch=SOURCE_EPOCH)
     receipt = fx.cybergym_receipt()
