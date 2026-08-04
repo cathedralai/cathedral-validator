@@ -1037,11 +1037,61 @@ def _recompute_uid_safety(
         prunable_nonimmune_count
         > min_nonimmune_uids + max(0, maximum_era_registrations - free_uid_slots)
     )
+    # Eviction-DEPTH proof — the third independent sufficient condition the
+    # validator applies and publishes. Recomputed here from archive state (not
+    # trusted from the release) using the validator's own implementation, so
+    # this reproduction accepts exactly what the validator accepted.
+    from scaffold.validator_thin import _eviction_depths
+
+    def _metric_series(name: str) -> list[float]:
+        raw = getattr(metagraph, name, None)
+        if raw is None:
+            return [0.0] * len(uids)
+        values = [float(value) for value in raw]
+        if len(values) != len(uids):
+            raise ReproductionError(f"{name} does not cover the registered set")
+        return values
+
+    prune_incentive = dict(zip(hotkeys, _metric_series("I")))
+    prune_stake = dict(zip(hotkeys, _metric_series("S")))
+    prune_emission = dict(zip(hotkeys, _metric_series("E")))
+    prunable_rows = [
+        (uid, hotkey, registered_at)
+        for uid, hotkey, registered_at in zip(uids, hotkeys, registration_blocks)
+        if registered_at + immunity_period <= block
+        and hotkey not in owner_immortal_hotkeys
+    ]
+    era_prunable_count = sum(
+        registered_at + immunity_period <= block + MORTAL_PERIOD_BLOCKS
+        and hotkey not in owner_immortal_hotkeys
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+    )
+    worst_case_evictions = min(
+        max(0, maximum_era_registrations - free_uid_slots),
+        max(0, era_prunable_count - min_nonimmune_uids),
+    )
+    eviction_depth = _eviction_depths(
+        prunable_rows,
+        {
+            hotkey: (
+                float(prune_incentive.get(hotkey, 0.0)),
+                float(prune_stake.get(hotkey, 0.0)),
+                float(prune_emission.get(hotkey, 0.0)),
+            )
+            for _, hotkey, _ in prunable_rows
+        },
+    )
+    eviction_safe_hotkeys = {
+        hotkey
+        for hotkey, depth in eviction_depth.items()
+        if depth >= worst_case_evictions
+    }
     replacement_safe_hotkeys = (
         set(hotkeys)
         if capacity_protects_all
         else owner_immortal_hotkeys
         | (temporally_immune_hotkeys if nonimmune_buffer_protects_immunity else set())
+        | eviction_safe_hotkeys
     )
     target_rows = [
         (int(mapping["rewarded_uid"]), str(mapping["rewarded_hotkey"])),
