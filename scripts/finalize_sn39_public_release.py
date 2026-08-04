@@ -280,7 +280,7 @@ def _require_attested_state(
         or not isinstance(broadcast_intent, dict)
         or not isinstance(receipt, dict)
         or not isinstance(attempt, str)
-        or SHA256.fullmatch(attempt.removeprefix("sha256:")) is None
+        or SHA256.fullmatch(attempt) is None
     ):
         raise ReleaseError(
             "journal has no finalized thin submission with durable broadcast "
