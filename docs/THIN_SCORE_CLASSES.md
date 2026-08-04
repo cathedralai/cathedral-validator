@@ -90,8 +90,12 @@ class or registration stanza from their local policy.
 
 ## Signed report contract
 
-`cathedral_score_class_report_v1` is canonical JSON signed with a locally
-pinned Ed25519 key. It binds:
+`cathedral_score_class_report_v1` is the legacy canonical JSON grammar signed
+with a locally pinned Ed25519 key. The validator policy pins one exact
+`report_schema` per external class; it never silently upgrades or falls back
+between grammars. Compute uses `cathedral_score_class_report_v2`, which adds a
+signed candidate-snapshot binding that must exactly cover the report entries.
+The selected grammar binds:
 
 - network, netuid, class ID, source ID, source epoch, and completeness;
 - generated/expiry times and an exclusive Subtensor block window;

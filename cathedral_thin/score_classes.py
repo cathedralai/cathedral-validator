@@ -35,6 +35,7 @@ from .core import ThinSubnetError, coldkey_collapsed_weights
 
 
 REPORT_SCHEMA = "cathedral_score_class_report_v1"
+COMPUTE_REPORT_SCHEMA_V2 = "cathedral_score_class_report_v2"
 POLICY_SCHEMA = "cathedral_score_policy_v1"
 DECISION_SCHEMA = "cathedral_weight_decision_v1"
 REGISTRATION_SCHEMA = "cathedral_owner_score_registration_v1"
@@ -52,13 +53,15 @@ MAX_METRICS_PER_ENTRY = 32
 _IDENTIFIER_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _DIGEST_RE = re.compile(r"(?:sha256|receipt-sha256):[0-9a-f]{64}")
+_SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_BLOCK_HASH_RE = re.compile(r"[0-9a-f]{64}")
 _DECIMAL_RE = re.compile(r"(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,12})?")
 _TIME_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z"
 )
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
-_REPORT_KEYS = frozenset(
+_REPORT_V1_KEYS = frozenset(
     {
         "schema",
         "network",
@@ -80,6 +83,8 @@ _REPORT_KEYS = frozenset(
         "signature",
     }
 )
+_REPORT_V2_KEYS = _REPORT_V1_KEYS | frozenset({"candidate_snapshot"})
+_CANDIDATE_SNAPSHOT_KEYS = frozenset({"digest", "block", "block_hash", "hotkeys"})
 _ENTRY_KEYS = frozenset(
     {
         "miner_hotkey",
@@ -109,6 +114,7 @@ _EXTERNAL_CLASS_KEYS = frozenset(
         "assignment",
     }
 )
+_EXTERNAL_CLASS_OPTIONAL_KEYS = frozenset({"report_schema"})
 _REGISTERED_EXTERNAL_CLASS_KEYS = frozenset(
     {
         "class_id",
@@ -124,6 +130,7 @@ _REGISTERED_EXTERNAL_CLASS_KEYS = frozenset(
         "owner_registration",
     }
 )
+_REGISTERED_EXTERNAL_CLASS_OPTIONAL_KEYS = frozenset({"report_schema"})
 _OWNER_REGISTRATION_POLICY_KEYS = frozenset(
     {
         "source_netuid",
@@ -360,6 +367,10 @@ class ExternalClassPolicy:
     max_block_span: int
     require_evidence: bool
     assignment: AssignmentPolicy
+    # A source class accepts exactly one signed report grammar. Keeping the
+    # choice in the validator policy prevents a v1/v2 downgrade at the
+    # producer boundary while retaining an explicit legacy compatibility path.
+    report_schema: str = REPORT_SCHEMA
     owner_registration: OwnerRegistrationPolicy | None = None
     kind: str = "external"
 
@@ -531,6 +542,12 @@ def _positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _report_schema(value: Any) -> str:
+    if value not in {REPORT_SCHEMA, COMPUTE_REPORT_SCHEMA_V2}:
+        raise ThinSubnetError("external class report_schema is unsupported")
+    return str(value)
+
+
 def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePolicy:
     policy_path = Path(path).expanduser()
     try:
@@ -578,8 +595,12 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
             expected = _LOCAL_CLASS_KEYS
         elif "owner_registration" in raw_class:
             expected = _REGISTERED_EXTERNAL_CLASS_KEYS
+            if "report_schema" in raw_class:
+                expected |= _REGISTERED_EXTERNAL_CLASS_OPTIONAL_KEYS
         else:
             expected = _EXTERNAL_CLASS_KEYS
+            if "report_schema" in raw_class:
+                expected |= _EXTERNAL_CLASS_OPTIONAL_KEYS
         _require_exact_keys(raw_class, expected, "score class")
         class_id = _identifier(raw_class["class_id"], "class id")
         if class_id in seen:
@@ -600,6 +621,7 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
         if kind != "external":
             raise ThinSubnetError("class kind must be local_sat or external")
         source_id = _identifier(raw_class["source_id"], "source id")
+        report_schema = _report_schema(raw_class.get("report_schema", REPORT_SCHEMA))
         for name in ("max_age_seconds", "max_future_seconds", "max_block_span"):
             _positive_int(raw_class[name], name)
         if not isinstance(raw_class["require_evidence"], bool):
@@ -669,6 +691,7 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
                 max_block_span=raw_class["max_block_span"],
                 require_evidence=raw_class["require_evidence"],
                 assignment=_parse_assignment(raw_class["assignment"]),
+                report_schema=report_schema,
                 owner_registration=owner_registration,
             )
         )
@@ -1071,6 +1094,47 @@ def _parse_entry(value: Any) -> ScoreEntry:
     return ScoreEntry(hotkey, metrics, asserted, tuple(reasons), tuple(evidence))
 
 
+def _validate_compute_candidate_snapshot(value: Any, *, entries: list[str]) -> None:
+    """Validate Compute's signed v2 candidate-set binding.
+
+    The producer has already normalized the original
+    ``cathedral_candidate_snapshot_v1`` into this compact binding. The
+    validator cannot recreate a historical metagraph from a report alone, but
+    it can fail closed unless the signed candidate set is exact, bounded, and
+    covers every report entry. Historical-chain lookup remains a separate
+    validator policy check at the live authority boundary.
+    """
+    if not isinstance(value, dict):
+        raise ThinSubnetError("compute candidate snapshot must be an object")
+    _require_exact_keys(value, _CANDIDATE_SNAPSHOT_KEYS, "compute candidate snapshot")
+    if _SHA256_RE.fullmatch(value["digest"] or "") is None:
+        raise ThinSubnetError("compute candidate snapshot digest is invalid")
+    block = value["block"]
+    if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+        raise ThinSubnetError("compute candidate snapshot block is invalid")
+    block_hash = value["block_hash"]
+    if not isinstance(block_hash, str) or _BLOCK_HASH_RE.fullmatch(block_hash) is None:
+        raise ThinSubnetError("compute candidate snapshot block hash is invalid")
+    hotkeys = value["hotkeys"]
+    if (
+        not isinstance(hotkeys, list)
+        or len(hotkeys) > MAX_REPORT_ENTRIES
+        or any(
+            not isinstance(hotkey, str)
+            or not 1 <= len(hotkey.encode("utf-8")) <= 512
+            for hotkey in hotkeys
+        )
+        or hotkeys != sorted(set(hotkeys))
+    ):
+        raise ThinSubnetError(
+            "compute candidate snapshot hotkeys must be a bounded sorted unique list"
+        )
+    if hotkeys != entries:
+        raise ThinSubnetError(
+            "compute candidate snapshot must exactly match score report entries"
+        )
+
+
 def verify_report(
     raw: bytes,
     policy: ExternalClassPolicy,
@@ -1093,8 +1157,18 @@ def verify_report(
     document = parse_strict_json(raw)
     if raw != canonical_json(document):
         raise ThinSubnetError("score report JSON must be canonical")
-    _require_exact_keys(document, _REPORT_KEYS, "score report")
-    if document["schema"] != REPORT_SCHEMA or document["complete"] is not True:
+    schema = document.get("schema")
+    if policy.report_schema not in {REPORT_SCHEMA, COMPUTE_REPORT_SCHEMA_V2}:
+        raise ThinSubnetError("validator policy report_schema is unsupported")
+    if schema != policy.report_schema:
+        raise ThinSubnetError("score report schema does not match validator policy")
+    if schema == REPORT_SCHEMA:
+        _require_exact_keys(document, _REPORT_V1_KEYS, "score report")
+    elif schema == COMPUTE_REPORT_SCHEMA_V2:
+        _require_exact_keys(document, _REPORT_V2_KEYS, "score report")
+    else:
+        raise ThinSubnetError("unsupported or incomplete score report")
+    if document["complete"] is not True:
         raise ThinSubnetError("unsupported or incomplete score report")
     if (
         not isinstance(document["network"], str)
@@ -1180,6 +1254,10 @@ def verify_report(
     hotkeys = [entry.miner_hotkey for entry in entries]
     if hotkeys != sorted(set(hotkeys)):
         raise ThinSubnetError("score report entries must have sorted unique hotkeys")
+    if schema == COMPUTE_REPORT_SCHEMA_V2:
+        _validate_compute_candidate_snapshot(
+            document["candidate_snapshot"], entries=hotkeys
+        )
     return VerifiedReport(
         class_id=policy.class_id,
         source_id=policy.source_id,

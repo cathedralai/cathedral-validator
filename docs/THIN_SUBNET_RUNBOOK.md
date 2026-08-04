@@ -18,7 +18,8 @@ python -m pytest -q tests/thin
 ## Cathedral Compute score classes
 
 Cathedral Compute exports a frozen epoch as a
-`cathedral_score_class_report_v1`. Positive `verified_work_units` are accepted
+`cathedral_score_class_report_v2`, and its validator policy must pin
+`"report_schema":"cathedral_score_class_report_v2"`. Positive `verified_work_units` are accepted
 only when the ledger contains the exact atomically stored
 `cathedral_assurance_receipt_v2`; zero rows remain in the complete snapshot to
 revoke prior work. The report gives the validator the receipt ID, digest and

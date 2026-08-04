@@ -84,6 +84,7 @@ def _self_verify(raw: bytes, public_key: bytes) -> str:
         max_block_span=max(1, last - first),
         require_evidence=False,
         assignment=AssignmentPolicy("asserted_score", None, "linear", None),
+        report_schema=document.get("schema"),
     )
     report = verify_report(
         raw,

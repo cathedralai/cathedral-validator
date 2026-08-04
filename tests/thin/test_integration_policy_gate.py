@@ -57,14 +57,18 @@ def _receipt_with_advisory(fx, advisory: str):
     """A real signed CPU receipt whose TCB reports one advisory."""
     from cathedral_distill import compute_receipt as cr
 
+    source = fx.cpu_receipt()
     body = fx._compute_body(
         "5CpuMiner",
-        "30",
+        "20",
         {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_TDX},
         cr.CPU_TEE_TDX,
     )
+    body["work"] = dict(source["work"])
     body["tcb"]["advisory_ids"] = [advisory]
-    return cr.build_receipt(body, fx.key, signing_key_id="compute-1")
+    return fx.attach_compute_work_evidence(
+        cr.build_receipt(body, fx.key, signing_key_id="compute-1"), source
+    )
 
 
 def _policy(fx, **over):

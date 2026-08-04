@@ -150,6 +150,19 @@ def test_document_to_allocation(store):
     assert math.isclose(out["weights"][20], FRACTION * 0.25, abs_tol=1e-12)
     assert out["forfeited_fraction"] == 0.0
     assert BURN_UID not in out["weights"]
+    assert out["uid_hotkeys"] == {10: "5Alice", 20: "5Bob"}
+
+
+def test_v3_composition_carries_the_bridge_recipient_bindings(store, monkeypatch):
+    monkeypatch.setenv(bridge.WEIGHT_FRACTION_ENV, "0.30")
+    _registered(store, {"5Alice": 10})
+    assert _post(_client(store), _doc(scores={"5Alice": 3.0})).status_code == 200
+
+    lane = weights._compose_cybergym_lane_v3(store, now=NOW)
+
+    assert lane["weights"] == {"10": pytest.approx(0.30)}
+    assert lane["uid_hotkeys"] == {"10": "5Alice"}
+    assert lane["forfeited_fraction"] == 0.0
 
 
 def test_retry_is_idempotent_and_allocation_is_unchanged(store):
@@ -192,6 +205,27 @@ def test_empty_state_burns_the_share(store):
     out = bridge.cybergym_allocation(store, now=NOW)
     assert out["weights"] == {BURN_UID: pytest.approx(FRACTION)}
     assert math.isclose(out["forfeited_fraction"], FRACTION, abs_tol=1e-12)
+    assert out["uid_hotkeys"] == {BURN_UID: BURN_HOTKEY}
+
+
+def test_ambiguous_recipient_uid_refuses_the_entire_allocation(store):
+    _registered(store, {"5Alice": 10})
+    assert _post(_client(store), _doc(scores={"5Alice": 3.0})).status_code == 200
+    fresh = _iso(NOW - timedelta(seconds=60))
+    store.write(lambda c: c.execute(
+        "INSERT OR REPLACE INTO metagraph_hotkeys("
+        "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (NETWORK, NETUID, "5UidReused", 10, "", 123, fresh),
+    ))
+
+    out = bridge.cybergym_allocation(store, now=NOW)
+
+    assert out["status"] == "recipient_identity_unresolved"
+    assert out["weights"] == {}
+    assert out["uid_hotkeys"] == {}
+    assert out["identity"]["reason"] == "recipient_uid_hotkey_mismatch"
+    assert out["identity"]["ambiguous_uids"] == {10: ["5Alice", "5UidReused"]}
 
 
 def test_malformed_document_is_rejected_and_the_share_burns(store):

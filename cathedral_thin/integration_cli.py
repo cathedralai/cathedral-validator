@@ -51,7 +51,8 @@ Bundle shape:
       "cybergym_epoch_state_path": "/var/lib/cathedral/cybergym-epochs.sqlite",
 
       "receipts": [ {"kind": "compute_cpu", "lane": "cathedral_confidential_tdx",
-                     "receipt": { ... }},
+                     "receipt": { ... },
+                     "work_evidence": {"schema": "cathedral_compute_work_evidence_v1", ...}},
                     # "lane" may be omitted: each kind has a canonical lane id
                     # (compute_cpu, compute_gpu, distill, cybergym).
                     {"kind": "cybergym", "receipt": { ... }} ]
@@ -281,7 +282,7 @@ def run_bundle(
     for item in bundle["receipts"]:
         if not isinstance(item, dict) or {"kind", "receipt"} - set(item):
             raise PreviewError("each receipt entry needs kind and receipt")
-        unknown = set(item) - {"kind", "lane", "receipt"}
+        unknown = set(item) - {"kind", "lane", "receipt", "work_evidence"}
         if unknown:
             raise PreviewError(
                 "receipt entry has unknown keys: " + ", ".join(sorted(unknown))
@@ -296,7 +297,10 @@ def run_bundle(
         # explicitly or rely on the documented default (this is what makes the
         # cybergym lane addressable from a bundle at all).
         lane = str(item["lane"]) if item.get("lane") else DEFAULT_LANE_FOR_KIND[kind]
-        receipts.append(LaneReceipt(kind, lane, item["receipt"]))
+        evidence = item.get("work_evidence")
+        if evidence is not None and not isinstance(evidence, dict):
+            raise PreviewError("receipt work_evidence must be an object")
+        receipts.append(LaneReceipt(kind, lane, item["receipt"], evidence))
 
     # Admission policy from the bundle. A key that is absent means the operator
     # expressed no policy; an empty list is a policy (deny-all for measurements
