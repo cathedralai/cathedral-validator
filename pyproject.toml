@@ -18,15 +18,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Self-composing publisher role (compose + publish). Pinned to the exact
+# versions in deploy/publisher/requirements.txt so `pip install .[publisher]`
+# reproduces the serving lock the compose/publish gates pass under. Keep the two
+# lists in lockstep; bump only with a green re-run of the compose-role suite.
 publisher = [
-    "fastapi>=0.115",
+    "fastapi==0.136.3",
+    "uvicorn[standard]==0.48.0",
+    "starlette==1.2.1",
+    "pydantic==2.13.4",
+    "python-multipart==0.0.29",
+    "cryptography==48.0.0",
+    "bittensor-wallet==4.1.0",
+    "blake3==1.0.8",
+    "psycopg2-binary==2.9.10",
+    "boto3==1.35.99",
+    # Test-only client (scaffold/publisher/tests/test_mechanism_weightset.py);
+    # not part of the runtime serving lock in deploy/publisher/requirements.txt.
     "httpx2>=2",
-    "uvicorn[standard]>=0.30",
-    "python-multipart>=0.0.9",
-    "bittensor-wallet>=4.1.0",
-    "blake3>=1.0",
-    "psycopg2-binary>=2.9",
-    "boto3>=1.35",
 ]
 test = [
     "pytest>=8",
@@ -87,6 +96,10 @@ integration = [
 # its worker-side score publisher and must not claim `cathedral-validator`.
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
+# Self-composing publisher role: serves scaffold.publisher.server:app (needs the
+# '.[publisher]' extra). A thin uvicorn.run wrapper; the deploy image and the
+# deploy/publisher/*.service units may also invoke uvicorn directly.
+cathedral-publisher-serve = "scaffold.publisher.server:_serve_cli"
 # Non-writing Compute+Distill integration preview (needs the '.[integration]' extra).
 cathedral-validator-integration-preview = "cathedral_thin.integration_cli:main"
 cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"

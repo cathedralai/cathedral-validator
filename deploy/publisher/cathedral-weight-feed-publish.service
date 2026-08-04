@@ -1,0 +1,47 @@
+[Unit]
+# Self-composing publisher role 3/3: the weight-feed publish surface. Serves
+# scaffold.publisher.server:app from VALIDATOR-sourced code, same module path
+# the hub image served.
+Description=Cathedral SN39 weight-feed publisher (self-composing publisher role)
+After=network-online.target
+Wants=network-online.target
+Conflicts=cathedral-scorer-sn39.service cathedral-publisher.service
+
+[Service]
+Type=simple
+User=cathedral-publisher
+Group=cathedral-publisher
+# Per-role environment; commit NO secrets.
+EnvironmentFile=/etc/cathedral-publisher/cathedral-weight-feed-publish.env
+Environment=NETUID=39
+Environment=CATHEDRAL_WEIGHT_POLICY_NETWORK=finney
+Environment=PORT=8011
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-scorer-sn39.service cathedral-publisher.service'
+ExecStart=/opt/cathedral-publisher/venv/bin/uvicorn scaffold.publisher.server:app \
+    --host 127.0.0.1 --port ${PORT} \
+    --workers ${WEB_CONCURRENCY:-2} --no-access-log
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+StateDirectory=cathedral-publisher
+StateDirectoryMode=0700
+LogsDirectory=cathedral-publisher
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/cathedral-publisher /var/log/cathedral-publisher
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,11 @@
 # Cathedral SN39 mainnet configuration for a THIRD-PARTY thin validator.
 #
+# This is the third-party ATTESTATION-VERIFIED profile: it relays Cathedral's
+# signed weight vector from the REMOTE origin (api.cathedral.computer). For the
+# consolidated single-host validator that composes/publishes the vector LOCALLY,
+# use config/validator-selfcompose-sn39.toml instead (identical except its
+# [publisher] url points at the local publisher).
+#
 # This profile relays Cathedral's signed weight vector: fetch it, verify it
 # against the pinned weight-policy key, and submit exactly those numbers. It
 # never originates weights, so it has no launch of its own to complete.

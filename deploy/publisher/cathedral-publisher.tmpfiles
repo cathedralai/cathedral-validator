@@ -1,0 +1,16 @@
+# Installed as /etc/tmpfiles.d/cathedral-publisher.conf.
+#
+# Creation-only (':'-prefixed) mode/ownership so a re-run never chowns an inode
+# that already exists — the same discipline as
+# deploy/sn39/cathedral-sn39-validator.tmpfiles. These trees back the
+# StateDirectory=/LogsDirectory= the publisher units declare; declaring them
+# here converges a fresh host and is a no-op on an established one.
+#
+# The DB directory (/data or a DATABASE_URL Postgres backend) is provisioned out
+# of band and is deliberately NOT declared here.
+d /var/lib/cathedral-publisher :0700 :cathedral-publisher :cathedral-publisher -
+d /var/log/cathedral-publisher :0750 :cathedral-publisher :cathedral-publisher -
+# The per-role EnvironmentFile directory. Files inside carry the signing key and
+# credentials, so the directory is owner-only and the files must be installed
+# 0600 by the operator (see the .env.example headers).
+d /etc/cathedral-publisher :0700 :cathedral-publisher :cathedral-publisher -

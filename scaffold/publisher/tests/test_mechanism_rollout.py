@@ -36,8 +36,16 @@ def test_every_accepted_mechanism_has_a_burn_contract() -> None:
     turning a rollout into an outage.
     """
     for pinned, accepted in MECHANISM_ACCEPTED.items():
-        assert pinned in MECHANISM_BURN_FRACTION
-        for mechanism in accepted:
+        for mechanism in (pinned, *accepted):
+            if mechanism == "validated_supply_v3":
+                # v3 is a multi-lane (70% TDX / 30% CyberGym / 0% fixed burn)
+                # contract with NO single-lane fixed-burn contract. Authority /
+                # FULL re-derivation fails closed for it (see
+                # validator_thin._provenance_uid_weights); it is applied only via
+                # the shadow / thin signed-vector path. It must therefore be
+                # absent from the single-lane burn table by design.
+                assert mechanism not in MECHANISM_BURN_FRACTION
+                continue
             assert mechanism in MECHANISM_BURN_FRACTION
 
 

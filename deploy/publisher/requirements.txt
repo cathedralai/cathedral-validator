@@ -1,0 +1,41 @@
+# Self-composing publisher runtime deps — the reproducible serving lock the
+# validator's range-only [publisher] extra (pyproject.toml) lacks. Ported from
+# the hub's deploy/requirements.txt (cathedral repo): the exact versions proven
+# by the compose/publish gates (rc_verify / wire_compat / publisher_verify).
+# Keep in lockstep with pyproject.toml's [publisher] pins; bump only with a
+# green re-run of the compose-role suite.
+#
+# All wheels below resolve on the 3.12 slim/glibc base (deploy/publisher/
+# Dockerfile) — manylinux cp312 wheels exist for every compiled dep, so no rust
+# or libpq build toolchain is needed.
+
+# --- web server ---
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+# fastapi pulls these, pinned for reproducibility:
+starlette==1.2.1
+pydantic==2.13.4
+# REQUIRED: the miner surface uses Form(...) (multipart) — FastAPI raises at
+# request time without it, crashing /v1/agents/submit + the arena endpoints.
+python-multipart==0.0.29
+
+# --- signing (Ed25519 row signing + JWKS derivation) ---
+cryptography==48.0.0
+
+# --- sr25519 hotkey verification backend (auth.py imports `bittensor_wallet`) ---
+# THE package publisher_verify's //Alice golden vectors require; without it the
+# verifier is StubVerifier (fail-closed) and every miner submit is rejected.
+bittensor-wallet==4.1.0
+
+# --- canonical claim bundle_hash (blake3 of empty bytes) ---
+blake3==1.0.8
+
+# --- Postgres backend (MVCC kills the single-lock wedge) ---
+# The store flips to the Postgres pool when DATABASE_URL=postgres[ql]://… is
+# set; absent it, the SQLite backend runs.
+psycopg2-binary==2.9.10
+
+# --- broadcast tier: optional S3-compatible CNF bucket backend ---
+# Imported lazily by cnf_store ONLY when CATHEDRAL_CNF_BACKEND=bucket; inert
+# under the default `db` backend. Pure-python, no system deps.
+boto3==1.35.99
