@@ -37,12 +37,20 @@ root = "/var/lib/cathedral-validator"
 interval_secs = 1500
 
 [provenance]
-# Two-mode operation. "shadow" (default): thin mode submits the signed vector
-# while the full-provenance verifier independently re-verifies the published
-# evidence chain every tick and reports any divergence. "authority": the
-# validator submits its OWN recomputed vector (the signed vector is only used
-# for comparison and the burn destination). "off": no audit.
+# Two-mode operation. "shadow" (default, attestation-verified): thin mode
+# submits the signed vector while the full-provenance verifier independently
+# re-verifies the published evidence chain every tick and reports any
+# divergence. This is the principal mode — it wins the chain-finality race.
+# "authority" (opt-in, --mode full): the validator submits its OWN recomputed
+# vector (the signed vector is only used for comparison and the burn
+# destination); it needs the controlled raw-evidence package and the root-signed
+# launch + recurring-write authorization. "off": no audit.
 mode = "shadow"
+# min_assurance (default rewarded_set_proven) gates the concurrent shadow
+# verifier's PROVEN labeling and the opt-in authority submission path — NOT the
+# thin write path, which submits the signed vector after signature verification
+# regardless. Opt down to receipts_only or up to full_over_epoch deliberately.
+# min_assurance = "rewarded_set_proven"
 # evidence_url = "https://api.cathedral.computer/v1/evidence"   # default: publisher + /v1/evidence
 # Trusted public-key pins (JSON files mapping key_id -> base64 32-byte key).
 # The exact SN39 launch public-key bundle now ships in
