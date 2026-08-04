@@ -64,10 +64,17 @@ is in [VALIDATOR.md](VALIDATOR.md).
 
 ## Run safely
 
-Copy the sample before editing it:
+Start from the SN39 launch config and set your wallet. The default is the
+**relay** profile — it consumes Cathedral's signed weight vector and submits it,
+which is the posture the launch coordinates across every validator. (Operators
+who publish their own scores instead start from `validator-selfcompose-sn39.toml`;
+the relay profile is the one these steps assume.)
 
 ```bash
-cp config/validator.toml my-validator.toml
+git clone https://github.com/cathedralai/cathedral-validator.git
+cd cathedral-validator
+cp config/validator-thin-sn39-relay.toml my-validator.toml
+# then edit my-validator.toml: set wallet_name / wallet_hotkey to your keys.
 ```
 
 Run an offline verification first. It opens no chain connection:
