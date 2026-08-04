@@ -26,7 +26,11 @@ RELEASES = Path("/opt/cathedral-sn39/releases")
 VENVS = Path("/opt/cathedral-sn39/venvs")
 RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
 CONFIGS = {
-    "continuous": INSTALL_ROOT / "validator-selfcompose-sn39.toml",
+    # The RELAY profile is the launch posture: fetch_vector is hardened to
+    # public-HTTPS-only, so the selfcompose profile's loopback publisher URL can
+    # never be fetched (cathedral-validator#37). The live self-compose shape is
+    # "local publisher publishes to the public feed; validator fetches it back".
+    "continuous": INSTALL_ROOT / "validator-thin-sn39-relay.toml",
 }
 MODES = frozenset({*CONFIGS, "status"})
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")

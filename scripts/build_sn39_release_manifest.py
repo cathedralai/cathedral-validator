@@ -46,6 +46,7 @@ RELEASE_FILES = (
     "requirements/sn39-build.lock",
     "scaffold/sn39_continuous_authorization.py",
     "scripts/publish_sn39_validator_status.py",
+    "scripts/finalize_sn39_public_release.py",
     "deploy/sn39/cathedral-sn39-public-status.service",
     "deploy/sn39/cathedral-sn39-public-status.timer",
     "deploy/sn39/cathedral-sn39-validator.sysusers",
