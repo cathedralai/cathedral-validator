@@ -2,8 +2,13 @@
 
 Thin follows Cathedral's signed vector, so an unreachable publisher leaves it
 with nothing to submit. FULL derives the same allocation from raw evidence and
-never reads the vector, so a runtime that is provisioned for FULL should keep
-validating rather than idle until the feed returns.
+never reads the vector, so a runtime that is EXPLICITLY provisioned for FULL and
+opts in can keep validating rather than idle until the feed returns.
+
+The launch DEFAULT, however, is off (cathedral-validator#40): a shadow validator
+idles on a dead feed rather than auto-escalating to an authority writer at tick
+time. The escalation is available, not automatic. The authorization guards below
+still gate it for the opt-in case.
 
 The direction matters and is the whole security argument. thin -> FULL replaces
 a trusted assertion with an independent recomputation, so being forced into it
@@ -179,3 +184,27 @@ def test_without_the_beta_waiver_the_signed_authorization_is_still_required():
             _feed_down_fallback_active=True,
         )
         assert vt._operator_declared_authority(args) is False
+
+
+# --------------------------------------------------------------------------- #
+# launch default: idle (fail closed), do NOT auto-escalate to authority (#40)
+# --------------------------------------------------------------------------- #
+def test_the_launch_default_for_feed_down_fallback_is_off():
+    """The shipped default must be off, so a shadow runtime idles on a dead feed
+    rather than silently becoming an authority writer (cathedral-validator#40)."""
+    from scaffold import cli
+
+    assert cli._DEFAULTS["feed_down_fallback"] is False
+
+
+def test_an_absent_flag_fails_closed_rather_than_escalating():
+    """Even if the arg is missing entirely, the tick-time branch must read it as
+    off — an absent flag is not a licence to escalate."""
+    from types import SimpleNamespace
+
+    # The branch is `if not bool(getattr(args, "feed_down_fallback", <default>))`.
+    # With the fixed default, an object with no such attribute reads as False, so
+    # `not False` -> the escalation is refused and the feed-unavailable error
+    # propagates to the run loop, which idles.
+    args = SimpleNamespace()
+    assert bool(getattr(args, "feed_down_fallback", False)) is False

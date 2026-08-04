@@ -442,3 +442,124 @@ def test_cross_repo_v3_publisher_to_validator(monkeypatch) -> None:
     assert out[50] == pytest.approx(0.18)
     assert out[51] == pytest.approx(0.12)
     assert math.isclose(math.fsum(out.values()), 1.0, abs_tol=1e-12)
+
+
+def _v3_publisher_env_and_stubs(monkeypatch, *, cybergym_allocation):
+    """Shared publisher-compose setup for a v3 round-trip, parameterized by the
+    CyberGym lane the bridge returns. Mirrors test_cross_repo_v3_publisher_to_validator."""
+    from scaffold.publisher import cybergym_bridge
+    from scaffold.publisher import weights as pub
+
+    for k, v in {
+        "CATHEDRAL_VALIDATED_SUPPLY_ENABLED": "1",
+        "CATHEDRAL_EXTERNAL_SCORES_MODE": "confidential_primary",
+        "CATHEDRAL_EXTERNAL_SCORES_SOURCE": "cathedral_confidential_tdx",
+        "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY": "burn-hotkey",
+        "CATHEDRAL_WEIGHT_POLICY_BURN_UID": "",
+        "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2": "0",
+        "CATHEDRAL_ALLOCATION_CONTRACT": "v3",
+        "CATHEDRAL_CYBERGYM_MECHANISM_ENABLED": "1",
+        "CATHEDRAL_CYBERGYM_WEIGHT_FRACTION": "0.30",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+    def fake_compose(store, *, now=None, coldkey_of=None, blend_meta_out=None):
+        if blend_meta_out is not None:
+            blend_meta_out.update({"base_mass": 0.0, "external_mass": 1.0,
+                                   "blended": False, "confidential_primary": _cp_block(mass=1.0)})
+        return {"tdx-a": 0.6, "tdx-b": 0.4}
+
+    monkeypatch.setattr(pub, "compose_scores", fake_compose)
+    monkeypatch.setattr(pub, "_load_scoring_coldkey_map", lambda store: {})
+    monkeypatch.setattr(pub, "_apply_payable_hotkey_policy",
+                        lambda store, scores, *, now: (scores, {"mode": "off"}))
+    monkeypatch.setattr(pub, "next_policy_version", lambda store: 1_700_000_000_000)
+    monkeypatch.setattr(pub, "_effective_mode", lambda store, since: "flat_recent")
+    monkeypatch.setattr(pub, "_perminer_policy_status", lambda store, *, now, coldkey_of: {
+        "score_source": None, "scoring_mode": "disabled", "perminer_enabled": False,
+        "perminer_shadow": False, "perminer_live_requested": False, "perminer_bonus_live": False,
+        "perminer_primary_live": False, "perminer_epoch": None, "perminer_has_scores": False,
+        "bonus_multiplier": 1.0, "history_floor": 0, "public_baseline": 0.0,
+        "coldkey_required": False, "identity_ready": False, "degraded_reason": None})
+    monkeypatch.setattr(pub, "_external_scores_policy_status", lambda store, *, now: {
+        "enabled": True, "has_scores": True, "source": "cathedral_confidential_tdx"})
+    monkeypatch.setattr(cybergym_bridge, "cybergym_allocation",
+                        lambda store, *, now=None: cybergym_allocation)
+    return pub
+
+
+def test_cross_repo_v3_forfeit_round_trip_burn_uid_stable(monkeypatch) -> None:
+    """forfeited_fraction > 0, burn UID stable between compose and validate:
+    the forfeited mass sinks to the burn UID and the vector normalizes to 1.0.
+
+    Closes the #35 gap: the publisher-composed forfeiture path was only ever
+    exercised with forfeited_fraction == 0. Here build_signed_vector emits a lane
+    whose 0.06 forfeited share is bound to the burn UID (0), and the validator's
+    own mapper accepts it end to end."""
+    # 0.24 contributed by miners + 0.06 forfeited to the burn UID = 0.30 lane.
+    lane = {"status": "ok", "weights": {50: 0.14, 51: 0.10, 0: 0.06},
+            "forfeited_fraction": 0.06, "contributing_fraction": 0.24, "burn_uid": 0,
+            "uid_hotkeys": {50: "cyber-a", 51: "cyber-b", 0: "burn-hotkey"},
+            "cybergym": {"reason": "ok", "report_sha256": "sha256:" + "a" * 64}}
+    pub = _v3_publisher_env_and_stubs(monkeypatch, cybergym_allocation=lane)
+
+    payload = pub.build_signed_vector(object(), signing_key_hex="11" * 32, now=NOW)
+    cyber_lane = payload["policy_metadata"]["cybergym_lane"]
+    assert cyber_lane["forfeited_fraction"] == pytest.approx(0.06)
+    assert cyber_lane["burn_uid"] == 0
+    assert math.isclose(math.fsum(cyber_lane["weights"].values()), 0.30, abs_tol=1e-9)
+
+    out = validator_thin.vector_to_uid_weights(payload, H2U, require_policy=V3_PIN)
+    # burn UID (0) receives exactly the forfeited 0.06; the whole vector sums to 1.0.
+    assert out[0] == pytest.approx(0.06)
+    assert out[50] == pytest.approx(0.14) and out[51] == pytest.approx(0.10)
+    assert out[10] == pytest.approx(0.42) and out[11] == pytest.approx(0.28)
+    assert math.isclose(math.fsum(out.values()), 1.0, abs_tol=1e-9)
+
+
+def test_cross_repo_v3_forfeit_round_trip_burn_uid_moved_is_rejected(monkeypatch) -> None:
+    """forfeited_fraction > 0, burn hotkey's UID MOVED between compose and validate:
+    the whole v3 vector is rejected (fail-closed), no partial or misdirected write.
+
+    This is the burn-UID-churn liveness cliff #35 names: fund-safe (nothing is
+    misdirected) but it drops that tick's write, so it is a Phase-5 liveness watch
+    item, documented in THIN_SUBNET_RUNBOOK.md."""
+    lane = {"status": "ok", "weights": {50: 0.14, 51: 0.10, 0: 0.06},
+            "forfeited_fraction": 0.06, "contributing_fraction": 0.24, "burn_uid": 0,
+            "uid_hotkeys": {50: "cyber-a", 51: "cyber-b", 0: "burn-hotkey"},
+            "cybergym": {"reason": "ok", "report_sha256": "sha256:" + "a" * 64}}
+    pub = _v3_publisher_env_and_stubs(monkeypatch, cybergym_allocation=lane)
+    payload = pub.build_signed_vector(object(), signing_key_hex="11" * 32, now=NOW)
+
+    # The burn hotkey now resolves to a DIFFERENT uid than the lane's baked burn_uid.
+    moved = dict(H2U)
+    moved["burn-hotkey"] = 7
+    with pytest.raises(validator_thin.wire.VectorError, match="recipient UID does not match"):
+        validator_thin.vector_to_uid_weights(payload, moved, require_policy=V3_PIN)
+
+
+def test_v3_pin_with_authority_provenance_is_refused_at_startup() -> None:
+    """require_policy=validated_supply_v3 + provenance=authority fails closed every
+    tick and the validator goes dark silently; refuse it loudly at startup (#35)."""
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
+        provenance="authority")
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="incompatible with provenance=authority"):
+        validator_thin._validate_runtime_contract(args)
+
+
+def test_v3_pin_with_shadow_provenance_does_not_trip_the_guard() -> None:
+    """shadow (relay + concurrent audit) is the correct posture for a v3 pin, so the
+    v3/authority guard must NOT fire."""
+    from types import SimpleNamespace
+
+    args = SimpleNamespace(
+        require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
+        provenance="shadow", max_submissions=0, broadcast=False, offline=True, netuid=39)
+    try:
+        validator_thin._validate_runtime_contract(args)
+    except validator_thin.wire.VectorError as exc:
+        assert "incompatible with provenance=authority" not in str(exc)
