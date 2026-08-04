@@ -21,7 +21,7 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Signed vector, JWKS, and public evidence index | Deployed |
 | Validator thin-path checks | Implemented |
 | Concurrent shadow provenance audit | Implemented; default mode |
-| Full-provenance authority mode | Implemented; requires `FULL` evidence and every independent pin |
+| Full-provenance authority mode | Deprecated; no shipped config profile selects it (removal tracked in #40) |
 | Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
 | General validator launch | Pending tagged release and final acceptance |
 
@@ -66,9 +66,8 @@ weight by themselves.
 
 | Mode | Submission authority | Behavior |
 |---|---|---|
-| `shadow` | Thin path | Default. Independently audits evidence in the background without delaying the thin tick. |
-| `authority` | Full-provenance recomputation | Refuses unless the epoch reaches `FULL` assurance and the recomputed vector passes every gate. |
-| `off` | Thin path | Disables the independent audit. This is an explicit reduction in assurance. |
+| `shadow` | Thin path | The mode. Independently audits evidence in the background without delaying the thin tick. |
+| `authority` | Full-provenance recomputation | **Deprecated.** Loses the chain-finality race; no shipped config profile selects it. The code path remains until the excision tracked in #40. |
 
 `receipts_only` is reported as `NOT_PROVEN`; it is not accepted as `FULL`.
 Authority mode requires controlled raw evidence, a pinned static verifier,
@@ -86,9 +85,9 @@ For the default thin + shadow mode:
 - for any future write, a registered SN39 validator hotkey with the required
   chain permissions.
 
-Thin mode does not need TDX or GPU hardware. Full-provenance authority
-additionally needs a Linux x86-64 host for the pinned static TDX verifier and
-access to the controlled-disclosure package for the epoch being replayed.
+The validator does not need TDX or GPU hardware; the background provenance
+audit uses the pinned static TDX verifier binary only when the controlled
+raw-evidence path is provisioned.
 
 Never place wallet seeds or private keys in TOML, environment files committed
 to Git, logs, issues, or provenance bundles.
@@ -156,7 +155,7 @@ payload you are verifying. Compare the supported release's pin with the live
 [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json) through
 an independent channel.
 
-For authority mode, add every pin documented in
+Every provenance pin is documented in
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md). A missing pin is not inferred from
 the manifest or public evidence server.
 
