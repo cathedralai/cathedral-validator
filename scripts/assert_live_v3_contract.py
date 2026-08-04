@@ -49,13 +49,22 @@ TIMEOUT_SECS = 30
 V3_PIN = validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is a different host answering; the validator refuses any
+    non-200, so the gate must not silently follow one either."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        raise SystemExit(f"FAIL  {req.full_url} redirected ({code}); refusing to follow")
+
+
 def fetch_vector(publisher: str) -> dict:
     url = publisher.rstrip("/") + WEIGHTS_PATH
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "cathedral-v3-precutover/1", "Accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECS) as response:
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(request, timeout=TIMEOUT_SECS) as response:
         if response.status != 200:
             raise SystemExit(f"FAIL  {url} returned HTTP {response.status}")
         body = response.read(MAX_BYTES + 1)
@@ -90,10 +99,44 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL  could not reach {args.publisher}{WEIGHTS_PATH}: {exc}", file=sys.stderr)
             return 2
 
+    # A v3-pinned validator's first tick runs accept_vector BEFORE mapping:
+    # pinned-key signature, then freshness/network/netuid invariants. Without
+    # these, a well-formed v3 payload with a bad or stale signature would PASS
+    # the gate and still be refused by every validator — the exact sink-to-burn
+    # outcome this gate exists to prevent. (The per-host rollback fence is the
+    # one accept_vector check that cannot run here.) Runs before any chain
+    # access: a vector no validator accepts needs no metagraph.
+    signature_checked = "_hotkey_to_uid" not in payload
+    if signature_checked:
+        try:
+            wire.verify_signature(
+                payload,
+                public_key_hex=validator_thin.DEFAULT_PUBLIC_KEY_HEX,
+                expected_key_id=validator_thin.SN39_WEIGHT_POLICY_KEY_ID,
+            )
+            wire.invariant_check(
+                payload,
+                network=args.network,
+                netuid=args.netuid,
+                now_iso=validator_thin._ms_iso_now(),
+            )
+        except wire.VectorError as exc:
+            detail = {"ok": False, "stage": "accept", "error": str(exc)}
+            print(json.dumps(detail) if args.as_json else f"FAIL  {exc}", file=sys.stderr)
+            print(
+                "\nDO NOT RE-PIN TO v3. The feed failed signature/freshness "
+                "acceptance — every validator refuses this vector regardless of "
+                "its contract version.",
+                file=sys.stderr,
+            )
+            return 1
+
     # The metagraph the mapping resolves burn/TDX/CyberGym UIDs against. A v3
     # vector's burn UID and lane UIDs are meaningless without THIS tick's map, so
     # the gate resolves it the same way a running validator does. Offline runs may
-    # embed a `_hotkey_to_uid` for a hermetic check.
+    # embed a `_hotkey_to_uid` for a hermetic check — that run validates the file
+    # against itself (mapping AND signature unchecked) and must never be the
+    # basis of a re-pin decision.
     hotkey_to_uid = payload.get("_hotkey_to_uid")
     if hotkey_to_uid is None:
         try:
@@ -128,11 +171,20 @@ def main(argv: list[str] | None = None) -> int:
     total = sum(weights.values())
     snap = payload.get("burn_snapshot") or {}
     burn_uid = snap.get("burn_uid")
-    burn_share = weights.get(int(burn_uid), 0.0) if burn_uid is not None else None
+    try:
+        burn_share = weights.get(int(burn_uid), 0.0) if burn_uid is not None else None
+    except (TypeError, ValueError):
+        print(f"FAIL  burn_snapshot.burn_uid is not an integer: {burn_uid!r}",
+              file=sys.stderr)
+        return 1
     result = {
         "ok": True,
         "publisher": args.publisher if not args.offline else args.offline,
         "accepted_by": V3_PIN,
+        # False only for hermetic fixtures carrying an embedded _hotkey_to_uid;
+        # such a run validates the file against itself and MUST NOT be used as
+        # a re-pin decision.
+        "signature_checked": signature_checked,
         "uids_weighted": len(weights),
         "weight_sum": round(total, 12),
         "burn_uid": burn_uid,
@@ -142,8 +194,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True))
     else:
         print("PASS  a validator pinned to validated_supply_v3 accepts the live feed")
-        for key in ("accepted_by", "uids_weighted", "weight_sum", "burn_uid", "burn_share"):
+        for key in (
+            "accepted_by",
+            "signature_checked",
+            "uids_weighted",
+            "weight_sum",
+            "burn_uid",
+            "burn_share",
+        ):
             print(f"  {key:16} {result[key]}")
+        if not signature_checked:
+            print(
+                "\n  WARNING: hermetic fixture (embedded _hotkey_to_uid) — the "
+                "signature and metagraph were NOT independently verified. Never "
+                "re-pin on this output."
+            )
         print("\nComputed with the validator's own vector_to_uid_weights, so a pass "
               "here is the mapping the v3-pinned validator will perform. A high "
               "burn_share is not a gate failure -- it is forfeited TDX/CyberGym lane "
