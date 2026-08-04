@@ -73,6 +73,10 @@ require_full_provenance_for_broadcast = false
 # this profile unrunnable. Setting this false is refused for any runtime that
 # runs provenance = "authority" or holds the controlled launch material.
 require_completed_launch_for_broadcast = false
+# Weight-originating hosts (holding launch material) additionally need the
+# documented waiver below or the runtime contract refuses the relay opt-out;
+# pure third-party relays have no launch material and are unaffected by it.
+beta_skip_launch_ceremony = true
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
