@@ -13,7 +13,7 @@ Two concurrent modes ship in `cathedral-validator serve`:
 | Mode | Submits | Trust basis |
 |---|---|---|
 | `shadow` (default) | Cathedral's signed vector (thin gates) | audits the published evidence every tick in a single-flight background worker; never delays or changes the thin submission |
-| `authority` | the validator's OWN recomputation | requires **FULL assurance**: raw-evidence replay through the pinned verifier |
+| `authority` | the validator's OWN recomputation | **Deprecated** (no shipped profile; removal tracked in #40). Required **FULL assurance**: raw-evidence replay through the pinned verifier |
 
 **Mainnet launch mode is `shadow`.** Thin validation remains the submission
 authority while the independent provenance audit runs concurrently. Authority

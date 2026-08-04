@@ -37,14 +37,13 @@ root = "/var/lib/cathedral-validator"
 interval_secs = 1500
 
 [provenance]
-# Two-mode operation. "shadow" (default, attestation-verified): thin mode
-# submits the signed vector while the full-provenance verifier independently
-# re-verifies the published evidence chain every tick and reports any
-# divergence. This is the principal mode — it wins the chain-finality race.
-# "authority" (opt-in, --mode full): the validator submits its OWN recomputed
-# vector (the signed vector is only used for comparison and the burn
-# destination); it needs the controlled raw-evidence package and the root-signed
-# launch + recurring-write authorization. "off": no audit.
+# "shadow" is the mode: the thin path submits the signed vector after enforcing
+# the weight-policy signature + freshness + rollback fence, while the
+# full-provenance verifier independently re-verifies the published evidence
+# chain every tick in the background and reports any divergence without ever
+# delaying the write. This wins the chain-finality race. ("authority" — the
+# validator submitting its own recomputation — is deprecated, ships no config
+# profile, and is scheduled for removal; see issue #40.)
 mode = "shadow"
 # min_assurance (default rewarded_set_proven) gates the concurrent shadow
 # verifier's PROVEN labeling and the opt-in authority submission path — NOT the
