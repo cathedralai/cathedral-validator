@@ -602,7 +602,7 @@ def _archive_uid_safety(
         owner_immortal_rows = owner_immortal_rows[:immune_owner_uids_limit]
     owner_immortal_hotkeys = {row[2] for row in owner_immortal_rows}
 
-    mortal_period_blocks = 4
+    mortal_period_blocks = _mortal_period_blocks()
     free_uid_slots = max_uids - len(uids)
     maximum_era_registrations = max_regs_per_block * mortal_period_blocks
     capacity_protects_all = free_uid_slots >= maximum_era_registrations
@@ -1269,7 +1269,7 @@ def build_release(
         or HASH.fullmatch(extrinsic_hash) is None
         or HASH.fullmatch(block_hash) is None
         or block_number < mapping_block
-        or block_number >= mapping_block + 4
+        or block_number >= mapping_block + _mortal_period_blocks()
         or block_number >= next_epoch_start_block
         or version_key != EXPECTED_VERSION_KEY
     ):
