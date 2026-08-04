@@ -13,8 +13,11 @@ path, and broadcast gates.
 
 On every cycle the validator:
 
-1. independently recomputes the weight vector from Cathedral's controlled
-   Compute and Distill evidence — it submits only what it can prove itself;
+1. in its default **attestation-verified** mode (thin / provenance = shadow),
+   verifies the TDX attestation and signed score reports and submits exactly the
+   signed weight vector, while a full-provenance verifier re-checks the published
+   evidence chain concurrently and never delays the write; this is the mode that
+   lands its write before chain finality advances;
 2. enforces the signature, freshness, rollback fence, and policy;
 3. resolves eligible hotkeys against the current SN39 metagraph;
 4. applies the fixed burn contract and owner-controlled allocations;
@@ -23,8 +26,18 @@ On every cycle the validator:
    listener, waiting for the next epoch's evidence; and
 7. stops at dry-run unless the operator explicitly enables broadcast.
 
-A registered miner, an online worker, or a self-reported score does not earn
-weight. Evidence must be independently reproducible or it is not scored.
+Attestation-verified (thin/shadow) is the principal default. **Authority** mode
+— which independently recomputes the whole vector from Cathedral's controlled
+Compute and Distill evidence and submits its own numbers — is opt-in (`--mode
+full`, or `config/validator-mainnet-sn39.toml`) and requires the controlled
+raw-evidence package plus the root-signed launch and recurring-write
+authorization. A registered miner, an online worker, or a self-reported score
+does not earn weight. Evidence must be independently reproducible or it is not
+scored.
+
+Attestation-verified must start from a **clean journal**. Never hand-edit live
+submission state; provision a fresh runtime root with
+`deploy/publisher/init-clean-journal.sh` (see `deploy/publisher/README.md`).
 
 ## Install for review and dry-run
 
