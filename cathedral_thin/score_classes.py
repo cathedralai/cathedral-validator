@@ -114,6 +114,7 @@ _EXTERNAL_CLASS_KEYS = frozenset(
         "assignment",
     }
 )
+_EXTERNAL_CLASS_OPTIONAL_KEYS = frozenset({"report_schema"})
 _REGISTERED_EXTERNAL_CLASS_KEYS = frozenset(
     {
         "class_id",
@@ -129,6 +130,7 @@ _REGISTERED_EXTERNAL_CLASS_KEYS = frozenset(
         "owner_registration",
     }
 )
+_REGISTERED_EXTERNAL_CLASS_OPTIONAL_KEYS = frozenset({"report_schema"})
 _OWNER_REGISTRATION_POLICY_KEYS = frozenset(
     {
         "source_netuid",
@@ -365,6 +367,10 @@ class ExternalClassPolicy:
     max_block_span: int
     require_evidence: bool
     assignment: AssignmentPolicy
+    # A source class accepts exactly one signed report grammar. Keeping the
+    # choice in the validator policy prevents a v1/v2 downgrade at the
+    # producer boundary while retaining an explicit legacy compatibility path.
+    report_schema: str = REPORT_SCHEMA
     owner_registration: OwnerRegistrationPolicy | None = None
     kind: str = "external"
 
@@ -536,6 +542,12 @@ def _positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _report_schema(value: Any) -> str:
+    if value not in {REPORT_SCHEMA, COMPUTE_REPORT_SCHEMA_V2}:
+        raise ThinSubnetError("external class report_schema is unsupported")
+    return str(value)
+
+
 def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePolicy:
     policy_path = Path(path).expanduser()
     try:
@@ -583,8 +595,12 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
             expected = _LOCAL_CLASS_KEYS
         elif "owner_registration" in raw_class:
             expected = _REGISTERED_EXTERNAL_CLASS_KEYS
+            if "report_schema" in raw_class:
+                expected |= _REGISTERED_EXTERNAL_CLASS_OPTIONAL_KEYS
         else:
             expected = _EXTERNAL_CLASS_KEYS
+            if "report_schema" in raw_class:
+                expected |= _EXTERNAL_CLASS_OPTIONAL_KEYS
         _require_exact_keys(raw_class, expected, "score class")
         class_id = _identifier(raw_class["class_id"], "class id")
         if class_id in seen:
@@ -605,6 +621,7 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
         if kind != "external":
             raise ThinSubnetError("class kind must be local_sat or external")
         source_id = _identifier(raw_class["source_id"], "source id")
+        report_schema = _report_schema(raw_class.get("report_schema", REPORT_SCHEMA))
         for name in ("max_age_seconds", "max_future_seconds", "max_block_span"):
             _positive_int(raw_class[name], name)
         if not isinstance(raw_class["require_evidence"], bool):
@@ -674,6 +691,7 @@ def load_score_policy(path: str | Path, *, network: str, netuid: int) -> ScorePo
                 max_block_span=raw_class["max_block_span"],
                 require_evidence=raw_class["require_evidence"],
                 assignment=_parse_assignment(raw_class["assignment"]),
+                report_schema=report_schema,
                 owner_registration=owner_registration,
             )
         )
@@ -1140,6 +1158,10 @@ def verify_report(
     if raw != canonical_json(document):
         raise ThinSubnetError("score report JSON must be canonical")
     schema = document.get("schema")
+    if policy.report_schema not in {REPORT_SCHEMA, COMPUTE_REPORT_SCHEMA_V2}:
+        raise ThinSubnetError("validator policy report_schema is unsupported")
+    if schema != policy.report_schema:
+        raise ThinSubnetError("score report schema does not match validator policy")
     if schema == REPORT_SCHEMA:
         _require_exact_keys(document, _REPORT_V1_KEYS, "score report")
     elif schema == COMPUTE_REPORT_SCHEMA_V2:

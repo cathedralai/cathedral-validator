@@ -37,7 +37,13 @@ def key_material():
 
 
 def write_policy(
-    tmp_path, public_b64, *, asserted=False, locations=None, burn_hotkey=None
+    tmp_path,
+    public_b64,
+    *,
+    asserted=False,
+    locations=None,
+    burn_hotkey=None,
+    report_schema=None,
 ):
     assignment = {
         "mode": "asserted_score" if asserted else "metric",
@@ -68,6 +74,8 @@ def write_policy(
             },
         ],
     }
+    if report_schema is not None:
+        document["classes"][1]["report_schema"] = report_schema
     if burn_hotkey is not None:
         document["burn_hotkey"] = burn_hotkey
     path = tmp_path / "policy.json"
@@ -264,7 +272,10 @@ def test_duplicate_json_key_and_noncanonical_bytes_rejected(tmp_path):
 
 def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
     private, public = key_material()
-    policy = write_policy(tmp_path, public).external_classes[0]
+    legacy_policy = write_policy(tmp_path, public).external_classes[0]
+    policy = write_policy(
+        tmp_path, public, report_schema=COMPUTE_REPORT_SCHEMA_V2
+    ).external_classes[0]
     missing = report_body()
     missing["schema"] = COMPUTE_REPORT_SCHEMA_V2
     with pytest.raises(ThinSubnetError, match="missing=.*candidate_snapshot"):
@@ -278,6 +289,15 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
         )
 
     body = v2_compute_report_body()
+    with pytest.raises(ThinSubnetError, match="schema does not match"):
+        verify_report(
+            sign_report(body, private),
+            legacy_policy,
+            network="finney",
+            netuid=39,
+            current_block=1010,
+            now=NOW,
+        )
     report = verify_report(
         sign_report(body, private),
         policy,
@@ -319,6 +339,43 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
                 current_block=1010,
                 now=NOW,
             )
+
+
+def test_score_policy_rejects_an_unknown_report_schema(tmp_path):
+    _private, public = key_material()
+    path = tmp_path / "policy.json"
+    body = {
+        "schema": "cathedral_score_policy_v1",
+        "network": "finney",
+        "netuid": 39,
+        "classes": [
+            {"allocation": "0.4", "class_id": "local_sat", "kind": "local_sat"},
+            {
+                "allocation": "0.6",
+                "assignment": {
+                    "cap": "100",
+                    "metric": "verified_work_units",
+                    "mode": "metric",
+                    "required_evidence_kinds": ["cathedral_assurance_receipt_v2"],
+                    "required_reason_codes": ["receipt_verified"],
+                    "transform": "linear",
+                },
+                "class_id": "confidential_compute",
+                "kind": "external",
+                "locations": [str(tmp_path / "report.json")],
+                "max_age_seconds": 600,
+                "max_block_span": 100,
+                "max_future_seconds": 30,
+                "report_schema": "cathedral_score_class_report_v99",
+                "require_evidence": True,
+                "source_id": "cathedralconfidential",
+                "trusted_keys": {"score-key-1": public},
+            },
+        ],
+    }
+    path.write_bytes(canonical_json(body))
+    with pytest.raises(ThinSubnetError, match="report_schema"):
+        load_score_policy(path, network="finney", netuid=39)
 
 
 def test_checkpoint_blocks_rollback_equivocation_and_broken_chain(tmp_path):
