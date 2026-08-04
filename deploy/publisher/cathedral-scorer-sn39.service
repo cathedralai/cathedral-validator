@@ -1,0 +1,53 @@
+[Unit]
+# Self-composing publisher role 1/3: the SN39 scorer surface. Serves
+# scaffold.publisher.server:app from VALIDATOR-sourced code (the same module
+# path the hub image served) so the cathedral hub can leave the live loop.
+Description=Cathedral SN39 scorer (self-composing publisher role)
+After=network-online.target
+Wants=network-online.target
+# Belt-and-braces single-writer guard: refuse to start while any peer publisher
+# role that would bind the same port/DB is active. Conflicts= only acts on
+# units systemd is asked to start; this ExecStartPre refuses a hand-launched one.
+Conflicts=cathedral-publisher.service cathedral-weight-feed-publish.service
+
+[Service]
+Type=simple
+User=cathedral-publisher
+Group=cathedral-publisher
+# Per-role environment. Commit NO secrets: the signing key and any
+# DATABASE_URL / bucket credentials are provisioned out of band (see
+# cathedral-scorer-sn39.env.example). CATHEDRAL_EVAL_SIGNING_KEY,
+# CATHEDRAL_DB_PATH, NETUID, PORT, and the weight-policy env live here.
+EnvironmentFile=/etc/cathedral-publisher/cathedral-scorer-sn39.env
+Environment=NETUID=39
+Environment=CATHEDRAL_WEIGHT_POLICY_NETWORK=finney
+Environment=PORT=8012
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-publisher.service cathedral-weight-feed-publish.service'
+ExecStart=/opt/cathedral-publisher/venv/bin/uvicorn scaffold.publisher.server:app \
+    --host 127.0.0.1 --port ${PORT} \
+    --workers ${WEB_CONCURRENCY:-2} --no-access-log
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+StateDirectory=cathedral-publisher
+StateDirectoryMode=0700
+LogsDirectory=cathedral-publisher
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/cathedral-publisher /var/log/cathedral-publisher
+
+[Install]
+WantedBy=multi-user.target
