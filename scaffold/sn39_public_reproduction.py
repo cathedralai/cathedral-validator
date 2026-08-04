@@ -1585,6 +1585,12 @@ def verify_historical_submission(
         )
     observed_nonce = observed.get("nonce")
     raw_era = getattr(observed.get("era"), "value", observed.get("era"))
+    # substrate-interface renders a mortal era either as {"period","phase"} or
+    # as a two-element (period, phase) tuple depending on version. Accept both
+    # shapes and nothing else — an immortal era ("00") has no period/phase and
+    # must still fail closed here.
+    if isinstance(raw_era, (tuple, list)) and len(raw_era) == 2:
+        raw_era = {"period": raw_era[0], "phase": raw_era[1]}
     if not isinstance(raw_era, dict) or not {"period", "phase"} <= set(raw_era):
         raise ReproductionNotProven(
             "decoded launch extrinsic mortal-era fields are unavailable"
