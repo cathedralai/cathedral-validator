@@ -109,10 +109,14 @@ _DEFAULTS = {
     # Beta escape: waive the one-shot launch ceremony. Correctness checks are
     # unaffected. See _continuous_transition_required for the exact scope.
     "beta_skip_launch_ceremony": False,
-    # Thin has nothing to submit when the signed vector is unreachable. When
-    # the raw-evidence path is provisioned, degrade UP into FULL instead of
-    # idling. Never the reverse.
-    "feed_down_fallback": True,
+    # Thin has nothing to submit when the signed vector is unreachable. The
+    # launch default is to IDLE (fail closed, write nothing) rather than
+    # auto-escalate to the FULL/authority tick, so the live shadow validator is
+    # single-mode in practice: nothing can flip it into an authority writer at
+    # tick time (cathedral-validator#40, step 1). The degrade-UP-into-FULL path
+    # still exists for a runtime that explicitly opts in and is provisioned for
+    # raw-evidence recomputation; FULL -> thin stays forbidden either way.
+    "feed_down_fallback": False,
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
