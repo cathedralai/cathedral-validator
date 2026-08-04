@@ -57,9 +57,10 @@ def test_authority_is_still_reachable_as_an_opt_in_alias() -> None:
 def test_module_path_assurance_fallback_is_unchanged() -> None:
     # No min_assurance attribute set -> the fallback stays rewarded_set_proven
     # (rank 1). This is the shadow verifier / authority bar, not the thin gate.
-    assert vt._minimum_assurance_rank(SimpleNamespace()) == pa.ASSURANCE_RANKS[
-        "rewarded_set_proven"
-    ]
+    assert (
+        vt._minimum_assurance_rank(SimpleNamespace())
+        == pa.ASSURANCE_RANKS["rewarded_set_proven"]
+    )
     assert vt._minimum_assurance_rank(SimpleNamespace()) == 1
 
 
@@ -106,9 +107,7 @@ def test_selfcompose_config_points_publisher_at_the_local_role() -> None:
 
 
 def test_relay_profile_stays_shadow() -> None:
-    cfg = cli._load_config_file(
-        str(ROOT / "config" / "validator-thin-sn39-relay.toml")
-    )
+    cfg = cli._load_config_file(str(ROOT / "config" / "validator-thin-sn39-relay.toml"))
     assert cfg["provenance"] == "shadow"
 
 

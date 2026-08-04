@@ -310,9 +310,7 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
 
     for mutate, message in (
         (
-            lambda value: value["candidate_snapshot"].update(
-                {"hotkeys": ["hotkey-a"]}
-            ),
+            lambda value: value["candidate_snapshot"].update({"hotkeys": ["hotkey-a"]}),
             "exactly match",
         ),
         (
