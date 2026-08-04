@@ -891,6 +891,13 @@ def _archive_uid_safety(
             "coldkey_swap_announcement_delay": coldkey_swap_delay,
             "targets": target_rows,
         },
+        # Targets the submission had to drop, normalizing their mass to burn.
+        # Derived exactly as the validator does (sorted target hotkeys minus the
+        # replacement-safe set); a release attesting a submission that dropped
+        # nothing carries the empty list, not a missing key.
+        "excluded_hotkeys": sorted(
+            set(target_uid_hotkeys.values()) - replacement_safe_hotkeys
+        ),
     }
 
 
