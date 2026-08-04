@@ -9259,6 +9259,25 @@ def _validate_runtime_contract(args: Any) -> None:
     max_submissions = int(getattr(args, "max_submissions", 0) or 0)
     if max_submissions < 0:
         raise wire.VectorError("max_submissions must be nonnegative")
+    # Refuse the silent-death combo at startup rather than every tick. A validator
+    # pinned to validated_supply_v3 while running the authority (independent
+    # recompute) provenance mode never applies the signed v3 vector the pin
+    # requires, so it fails closed on every tick and the validator goes dark with
+    # no single loud reason (cathedral-validator#35). A v3 pin is a RELAY posture —
+    # it accepts and submits Cathedral's signed v3 vector — so authority mode
+    # contradicts it. Say so once, at startup, with the fix.
+    if (
+        getattr(args, "require_policy", None) == REQUIRE_POLICY_VALIDATED_SUPPLY_V3
+        and (getattr(args, "provenance", "shadow") or "shadow") == "authority"
+    ):
+        raise wire.VectorError(
+            "require_policy=validated_supply_v3 is incompatible with "
+            "provenance=authority: a v3 pin relays Cathedral's signed v3 vector, "
+            "while authority mode recomputes independently and never applies it, so "
+            "every tick would fail closed and the validator would go dark silently. "
+            "Use provenance=shadow (relay + concurrent audit) with a v3 pin, or drop "
+            "the v3 pin if you intend to run authority."
+        )
     launch_gate = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     launch_preflight = bool(getattr(args, "launch_preflight", False))
     sn39_broadcast = (

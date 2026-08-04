@@ -404,3 +404,29 @@ Alert on:
 
 No central application health endpoint exists by design. Each operator monitors
 its own miner or validator process and the public Subtensor state.
+
+### Phase-5 liveness watch: the v3 burn-UID-churn cliff
+
+Once the coordinated re-pin to `validated_supply_v3` is live (70% Intel TDX /
+30% CyberGym / 0% fixed burn), one specific event drops a tick's write without
+misdirecting any emission, so it is **fund-safe but a liveness risk** and must be
+watched during cutover (cathedral-validator#35):
+
+- The CyberGym lane's forfeited mass is bound to the **burn UID resolved at
+  publisher compose time**. If the burn hotkey's UID moves between compose and a
+  validator's tick — a deregistration/re-registration, an owner transfer — the
+  validator rejects the **entire** v3 vector (`cybergym_lane recipient UID does
+  not match the current hotkey`) and writes nothing that tick. It recovers on the
+  next tick once the publisher recomposes against the new UID.
+- **Alert on:** repeated `cybergym_lane recipient UID does not match` refusals, or
+  a validator that accepted v3 last tick and now writes nothing while the feed is
+  up. The fix is a fresh publisher compose against the current metagraph, not an
+  operator change.
+- This is the intended fail-closed direction: a stale burn UID never pays the
+  wrong account; it only costs the tick. Do not "fix" it by relaxing the UID
+  match — that would trade fund-safety for liveness.
+
+Also refused at **startup**, loudly, rather than per-tick: `require_policy =
+validated_supply_v3` together with `provenance = authority`. A v3 pin relays the
+signed vector; authority mode recomputes independently and never applies it, so
+the combination would go dark every tick. Run a v3 pin with `provenance = shadow`.
