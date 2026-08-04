@@ -1,113 +1,108 @@
 # Cathedral Validator
 
 Cathedral Validator is the canonical operator repository for Cathedral SN39.
-It verifies signed work evidence, resolves eligible miner hotkeys to current
-UIDs, applies the owner-controlled allocation and burn policy, and produces the
-only candidate weight vector an operator should consider for broadcast.
+It fetches the signed weight vector, enforces the weight-policy signature,
+freshness, the rollback fence, UID-replacement safety, and the burn pin, and
+broadcasts exactly what it verified — while a full-provenance verifier
+re-checks the published evidence chain concurrently and never delays the
+write. One mode, one command.
 
 Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
 path, and broadcast gates.
 
-## What it does
+## Quickstart
 
-On every cycle the validator:
-
-1. in its default **attestation-verified** mode (thin / provenance = shadow),
-   verifies the TDX attestation and signed score reports and submits exactly the
-   signed weight vector, while a full-provenance verifier re-checks the published
-   evidence chain concurrently and never delays the write; this is the mode that
-   lands its write before chain finality advances;
-2. enforces the signature, freshness, rollback fence, and policy;
-3. resolves eligible hotkeys against the current SN39 metagraph;
-4. applies the fixed burn contract and owner-controlled allocations;
-5. prints and records the exact UID vector;
-6. when nothing is independently proven, writes nothing and idles as a passive
-   listener, waiting for the next epoch's evidence; and
-7. stops at dry-run unless the operator explicitly enables broadcast.
-
-Attestation-verified (thin/shadow) is the principal default. **Authority** mode
-— which independently recomputes the whole vector from Cathedral's controlled
-Compute and Distill evidence and submits its own numbers — is opt-in (`--mode
-full`, or `config/validator-mainnet-sn39.toml`) and requires the controlled
-raw-evidence package plus the root-signed launch and recurring-write
-authorization. A registered miner, an online worker, or a self-reported score
-does not earn weight. Evidence must be independently reproducible or it is not
-scored.
-
-Attestation-verified must start from a **clean journal**. Never hand-edit live
-submission state; provision a fresh runtime root with
-`deploy/publisher/init-clean-journal.sh` (see `deploy/publisher/README.md`).
-
-## Install for review and dry-run
-
-Use Python 3.11 or 3.12.
+Use Python 3.11 or 3.12 on Linux x86-64.
 
 ```bash
 git clone https://github.com/cathedralai/cathedral-validator.git
 cd cathedral-validator
-python3.11 -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e '.[test,provenance,integration]'
+python -m pip install -e '.[provenance]'
+cp config/validator-thin-sn39-relay.toml my-validator.toml
 ```
 
-The installed command belongs to this repository:
+Edit `my-validator.toml` and set your wallet under `[network]`:
+`wallet_name` and `validator_hotkey` are your local bittensor wallet labels.
+
+Verify offline first — no chain connection is opened:
 
 ```bash
-cathedral-validator --help
+cathedral-validator serve --config my-validator.toml --offline --once
 ```
 
-For chain use, install an immutable reviewed release. Do not operate from a
-moving branch or editable checkout. The full installation and release process
-is in [VALIDATOR.md](VALIDATOR.md).
-
-## Run safely
-
-Copy the sample before editing it:
+Then run one metagraph-backed dry cycle — reads chain state, writes nothing:
 
 ```bash
-cp config/validator.toml my-validator.toml
+cathedral-validator serve --config my-validator.toml --dry-run --once
 ```
 
-Run an offline verification first. It opens no chain connection:
+When the dry-run candidate is fresh, nonempty, policy-correct, and mapped to
+the UIDs you expect, run the validator:
 
 ```bash
-cathedral-validator serve \
-  --config my-validator.toml \
-  --runtime-root "$HOME/.cathedral-validator" \
-  --offline \
-  --once
+cathedral-validator serve --config my-validator.toml --broadcast
 ```
 
-Then run a metagraph-backed dry cycle. It reads chain state but does not write:
+That is the whole loop. The validator must start from a **clean journal**:
+never hand-edit live submission state. To migrate a host that ran an older
+release, archive the previous state file and start fresh
+(`deploy/publisher/init-clean-journal.sh` provisions a clean runtime root —
+see `deploy/publisher/README.md`).
 
-```bash
-cathedral-validator serve \
-  --config my-validator.toml \
-  --runtime-root "$HOME/.cathedral-validator" \
-  --dry-run \
-  --once
-```
+## What it does
 
-Do not add `--broadcast` unless the dry-run candidate is fresh, nonempty,
-policy-correct, mapped to the intended UIDs, and identical to the reviewed
-candidate. Broadcast also requires the immutable Linux release, the registered
-validator hotkey, one-writer protection, and explicit operator authorization.
+On every cycle the validator:
+
+1. fetches the signed weight vector from the publisher feed;
+2. enforces the weight-policy signature, freshness, the monotonic
+   policy-version fence, and the pinned policy contract;
+3. resolves eligible hotkeys against the current SN39 metagraph and refuses
+   any UID whose mapping cannot be proven stable;
+4. enforces the pinned burn destination and floor;
+5. prints and records the exact UID vector it will submit;
+6. submits before chain finality advances — the concurrent full-provenance
+   audit (TDX attestation and signed score reports re-checked against the
+   published evidence chain) runs in the background and never blocks the
+   write; its verdicts land in the event journal as `PROVENANCE_AUDIT_*`;
+7. stops at dry-run unless the operator explicitly enables broadcast.
+
+If the signed feed is unreachable there is nothing to verify, so there is
+nothing to submit: the validator idles and retries rather than inventing a
+vector. Alert on `PROVENANCE_VECTOR_MISMATCH` in the event stream — it means
+the audit disagreed with a vector that was already accepted for submission;
+the write is not blocked, so the alert is the response path.
+
+## Self-composing (advanced)
+
+The profile above follows the remote Cathedral publisher feed. A self-composing
+validator runs the publisher role on the same host and follows its own local
+feed instead: use `config/validator-selfcompose-sn39.toml` (its `[publisher]`
+url points at the local `cathedral-publisher.service`) and the units in
+`deploy/publisher/`. Everything else — verification, fences, broadcast gates —
+is identical.
+
+For a pinned production install (immutable reviewed release, systemd, single
+writer), see [VALIDATOR.md](VALIDATOR.md) and `deploy/sn39/`.
 
 ## How it verifies
 
-The validator runs one way. It independently recomputes the weight vector from
-Cathedral's controlled evidence and submits only what it can prove for itself —
-it never trusts a score it cannot reproduce. Every cycle enforces the signature,
-freshness, the policy-version fence, the burn contract and destination, and
-uid-replacement safety. Anything not independently proven is simply not scored;
-when nothing is proven, the validator writes nothing and idles until the next
-epoch's evidence arrives.
+The write path enforces, on every cycle: the ed25519 weight-policy signature
+over the canonical vector bytes; vector freshness and network/netuid identity;
+the monotonic policy-version fence (no rollback); UID-replacement safety for
+every rewarded hotkey; and the pinned burn destination. A vector failing any
+check is refused — the validator fails closed and writes nothing.
 
-Running the validator needs Linux x86-64, the pinned verifier, and the
-controlled evidence package. Compute workers need Intel TDX when their policy
-requires TDX evidence; the validator host itself does not.
+The full-provenance verifier runs concurrently in the background and re-checks
+the published evidence chain (TDX attestation, signed score reports, signed
+evidence index) against what was submitted. It labels each epoch `PASS`,
+`FAIL`, or `NOT_PROVEN` in the event journal without delaying the write.
+
+Compute workers need Intel TDX when their policy requires TDX evidence; the
+validator host itself does not.
 
 ## Operator documents
 
