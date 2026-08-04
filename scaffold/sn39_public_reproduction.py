@@ -2449,19 +2449,50 @@ def assert_public_reproduction(
     required = {
         "release_attestation": "signed release attestation",
         "historical_launch": "exact historical launch",
+    }
+    evidence_fields = {
         "evidence_checkpoint": "frozen evidence checkpoint",
         "evidence_candidate_set": "historical evidence candidate set",
     }
+    relay = release_result.get("frozen_evidence") == "NOT_CLAIMED"
+    if relay:
+        # Relay posture: the signed release claims no frozen checkpoint, so
+        # there is nothing to replay. The summary says so explicitly rather
+        # than implying a replay happened.
+        if release_result.get("evidence_scope") != "signed_feed_relay":
+            raise ReproductionError(
+                "unclaimed frozen evidence lacks the relay scope"
+            )
+        for field, label in evidence_fields.items():
+            if field in release_result:
+                raise ReproductionError(
+                    f"{label} conflicts with the unclaimed relay scope"
+                )
+    else:
+        required.update(evidence_fields)
     for field, label in required.items():
         if release_result.get(field) != "PASS":
             raise ReproductionError(f"{label} did not reproduce")
+    evidence_summary = (
+        {
+            "frozen_evidence": "NOT_CLAIMED",
+            "evidence_scope": "signed_feed_relay",
+            **{field: "NOT_CLAIMED" for field in evidence_fields},
+            "root_finalizer_tdx_replay": "NOT_CLAIMED",
+        }
+        if relay
+        else {
+            **{field: "PASS" for field in evidence_fields},
+            "root_finalizer_tdx_replay": "PASS",
+        }
+    )
     return {
         "chain_write": False,
         "public_recomputation": "PASS",
-        "root_finalizer_tdx_replay": "PASS",
         "independent_raw_tdx_replay": "NOT_PROVEN",
         "whole_epoch_full": "NOT_PROVEN",
         **{field: "PASS" for field in required},
+        **evidence_summary,
         "reproducer_revision": release_result.get("reproducer_revision"),
     }
 
