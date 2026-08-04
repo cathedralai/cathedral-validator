@@ -702,8 +702,8 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
         else "NOT_PROVEN"
     )
     launch_checkpoint = (
-        ((release.get("launch_submission") or {}).get("evidence_checkpoint") or {})
-        if isinstance(release.get("launch_submission"), dict)
+        ((release.get("attested_submission") or {}).get("evidence_checkpoint") or {})
+        if isinstance(release.get("attested_submission"), dict)
         else {}
     )
     launch_public_assurance = (

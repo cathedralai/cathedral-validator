@@ -8250,7 +8250,7 @@ def _match_signed_public_release_to_launch(
     """
     try:
         release = public_result["release"]
-        launch = release["launch_submission"]
+        launch = release["attested_submission"]
         mapping = launch["mapping"]
         broadcast_intent = launch["broadcast_intent"]
         snapshot = mapping["metagraph_snapshot"]
