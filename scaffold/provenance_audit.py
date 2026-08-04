@@ -58,8 +58,18 @@ MECHANISM_ACCEPTED = {
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Hard bound on the recent-chain walk (mirrors the signed index's own
 # MAX_INDEX_RECENT cap in cathedral.evidence); defense in depth against a
-# verifier regression ever admitting a longer list.
+# verifier regression ever admitting a longer list. This is a ceiling, not a
+# promise: each walked link spends RECENT_WALK_BLOBS_PER_LINK fetches against
+# the audit's 256-artifact cap, and the audit has already spent 4 + 3·receipts
+# artifacts before the bridge runs, so the walk a given audit can AFFORD is
+# derived from the live remaining budget at bridge time (issue #64). Without
+# that derivation a >~84-link gap died on "audit exceeded its artifact cap"
+# mid-walk instead of naming the operator-catch-up condition.
 MAX_RECENT_WALK = 96
+# Blobs fetched per walked recent-chain link: the epoch manifest, its policy
+# registry, and its score report — the three load_blob calls in
+# _verify_recent_chain_bridge's loop. Keep in lockstep with that loop.
+RECENT_WALK_BLOBS_PER_LINK = 3
 
 
 class ProvenanceUnavailable(Exception):
@@ -523,6 +533,10 @@ def _fetcher(
                 raise ProvenanceAuditError(f"blob {digest} content is corrupt")
             return data
 
+        # The local store spends no transport budget: None means "no artifact
+        # cap here", and consumers must treat it as unlimited, not as zero.
+        load_blob.artifacts_remaining = lambda: None
+
         if include_raw_fetch:
 
             def fetch_named(path: str) -> bytes:
@@ -681,6 +695,11 @@ def _fetcher(
             raise ProvenanceAuditError(f"fetched blob does not match digest {digest}")
         return data
 
+    # Live view of the artifact budget, read at bridge time so the
+    # recent-chain walk can size itself to what the audit can still afford
+    # (the pre-bridge spend varies with the receipt count).
+    load_blob.artifacts_remaining = lambda: remaining["artifacts"]
+
     if include_raw_fetch:
 
         def fetch_named(path: str) -> bytes:
@@ -773,6 +792,7 @@ def _verify_recent_chain_bridge(
     latest_epoch: int,
     latest_previous_report_id: str | None,
     load_blob,
+    artifacts_remaining: int | None,
 ) -> None:
     """Bridge the recorded chain tip to the latest report through the SIGNED
     bounded ``recent`` list.
@@ -786,10 +806,26 @@ def _verify_recent_chain_bridge(
     rollback/equivocation fences — and each link must cite its predecessor
     exactly. A missing, forked, or out-of-bound link raises; nothing here
     weakens the durable anti-rollback or equivocation fences.
+
+    Only a link that fails INSIDE the walk is reported as a chain break. A
+    tip that has aged out of the bounded window, or a gap wider than the
+    remaining artifact budget affords (``artifacts_remaining`` fetches,
+    RECENT_WALK_BLOBS_PER_LINK per link; None means the local store's
+    uncapped budget), is unreachable rather than broken: both fail closed
+    BEFORE spending any fetches, naming the operator-catch-up condition
+    instead of dying mid-walk on the artifact cap (issue #64).
     """
     from cathedral import provenance
     from cathedral.evidence import parse_manifest
 
+    if artifacts_remaining is not None and (
+        isinstance(artifacts_remaining, bool)
+        or not isinstance(artifacts_remaining, int)
+    ):
+        raise ProvenanceAuditError(
+            "recent-chain walk requires an integer artifact budget (or None "
+            "for a local evidence store)"
+        )
     rows = sorted(
         (
             row
@@ -798,6 +834,22 @@ def _verify_recent_chain_bridge(
         ),
         key=lambda row: int(row["source_epoch"]),
     )
+    catchup = (
+        "operator catch-up required (see the archived "
+        "cathedral_provenance_catchup_v1 procedure)"
+    )
+    if recent_rows:
+        window_floor = min(int(row["source_epoch"]) for row in recent_rows)
+        if last_epoch < window_floor:
+            # The tip's successor may no longer be in the window, so the
+            # walk could never prove continuity back to the tip. This is
+            # NOT evidence of a chain break; do not report one.
+            raise ProvenanceAuditError(
+                f"recorded chain tip (epoch {last_epoch}) has aged out of "
+                f"the signed index's recent window (oldest retained epoch "
+                f"{window_floor}); the export chain back to the tip can no "
+                f"longer be walked — {catchup}"
+            )
     if not rows:
         raise ProvenanceAuditError(
             "score report does not chain from the last audited report and "
@@ -809,6 +861,16 @@ def _verify_recent_chain_bridge(
             f"recent-chain walk exceeds the bounded window ({len(rows)} > "
             f"{MAX_RECENT_WALK} intermediate epochs)"
         )
+    if artifacts_remaining is not None:
+        affordable = max(0, artifacts_remaining) // RECENT_WALK_BLOBS_PER_LINK
+        if len(rows) > affordable:
+            raise ProvenanceAuditError(
+                f"recorded chain tip (epoch {last_epoch}) is {len(rows)} "
+                f"links behind the signed index window, but the audit's "
+                f"remaining artifact budget ({artifacts_remaining} artifacts "
+                f"at {RECENT_WALK_BLOBS_PER_LINK} per link) affords only "
+                f"{affordable} links — {catchup}"
+            )
     running_report_id = last_report_id
     fence_release = state.get("provenance_policy_release")
     fence_digest = state.get("provenance_policy_digest")
@@ -1044,6 +1106,10 @@ def run_audit(
                 latest_epoch=int(result.source_epoch),
                 latest_previous_report_id=result.previous_report_id,
                 load_blob=load_blob,
+                # Read at bridge time: everything fetched so far (index,
+                # manifest, registry, report, receipts) has already been
+                # charged, and nothing after the bridge fetches remotely.
+                artifacts_remaining=load_blob.artifacts_remaining(),
             )
         if result.policy_release != manifest["policy_registry"]["release"]:
             raise ProvenanceAuditError(
