@@ -405,12 +405,7 @@ def main() -> int:
     parser.add_argument(
         "--continuous-config",
         type=Path,
-        default=INSTALL_ROOT / "validator-mainnet-sn39.toml",
-    )
-    parser.add_argument(
-        "--launch-config",
-        type=Path,
-        default=INSTALL_ROOT / "validator-mainnet-sn39-launch.toml",
+        default=INSTALL_ROOT / "validator-thin-sn39-relay.toml",
     )
     parser.add_argument(
         "--registry-keys",
@@ -441,16 +436,6 @@ def main() -> int:
         "--continuous-unit",
         type=Path,
         default=Path("/etc/systemd/system/cathedral-validator-sn39.service"),
-    )
-    parser.add_argument(
-        "--launch-unit",
-        type=Path,
-        default=Path("/etc/systemd/system/cathedral-validator-sn39-launch.service"),
-    )
-    parser.add_argument(
-        "--reconcile-unit",
-        type=Path,
-        default=Path("/etc/systemd/system/cathedral-validator-sn39-reconcile.service"),
     )
     parser.add_argument(
         "--status-unit",
@@ -498,8 +483,7 @@ def main() -> int:
     ):
         raise SystemExit("release checkout is not the exact pristine requested SHA")
     config_pairs = (
-        (args.continuous_config, root / "config/validator-mainnet-sn39.toml"),
-        (args.launch_config, root / "config/validator-mainnet-sn39-launch.toml"),
+        (args.continuous_config, root / "config/validator-thin-sn39-relay.toml"),
         (args.registry_keys, root / "config/provenance/registry-keys.json"),
         (args.report_keys, root / "config/provenance/report-keys.json"),
         (args.index_keys, root / "config/provenance/index-keys.json"),
@@ -510,14 +494,6 @@ def main() -> int:
         (
             args.continuous_unit,
             root / "deploy/sn39/cathedral-validator-sn39.service",
-        ),
-        (
-            args.launch_unit,
-            root / "deploy/sn39/cathedral-validator-sn39-launch.service",
-        ),
-        (
-            args.reconcile_unit,
-            root / "deploy/sn39/cathedral-validator-sn39-reconcile.service",
         ),
         (
             args.status_unit,
@@ -554,15 +530,12 @@ def main() -> int:
     release_files = {name: digest(root / name) for name in RELEASE_FILES}
     external_files = {
         str(args.continuous_config): digest(args.continuous_config),
-        str(args.launch_config): digest(args.launch_config),
         str(args.registry_keys): digest(args.registry_keys),
         str(args.report_keys): digest(args.report_keys),
         str(args.index_keys): digest(args.index_keys),
         str(args.verifier): digest(args.verifier),
         str(args.launcher): digest(args.launcher),
         str(args.continuous_unit): digest(args.continuous_unit),
-        str(args.launch_unit): digest(args.launch_unit),
-        str(args.reconcile_unit): digest(args.reconcile_unit),
         str(args.status_unit): digest(args.status_unit),
         str(args.status_timer): digest(args.status_timer),
         str(args.sysusers): digest(args.sysusers),
