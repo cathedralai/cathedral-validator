@@ -56,13 +56,17 @@ _DEFAULTS = {
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
-    # Full is the default: the independent recomputation from raw evidence is
-    # what gets submitted, and nobody's feed is a bottleneck. Operators without
-    # evidence access opt DOWN to thin explicitly (--mode thin), which follows
-    # the signed feed after verifying it. Startup fails closed with that hint
-    # when full's inputs are missing; there is deliberately no silent
-    # downgrade, because full -> thin is the forbidden direction.
-    "provenance": "authority",
+    # Attestation-verified (thin/shadow) is the PRINCIPAL default: verify the
+    # TDX attestation + signed score reports and submit exactly the signed
+    # vector, while the full-provenance verifier re-checks the published
+    # evidence chain concurrently and never blocks the write. This is the mode
+    # that wins the chain-finality race — a heavy per-tick recompute (authority)
+    # loses it. Authority is OPT-IN, for operators who hold the controlled
+    # raw-evidence package and deliberately originate weights: select it with
+    # `--mode full` (or `mode = "authority"` in the TOML / the
+    # validator-mainnet-sn39.toml profile). full -> thin remains the forbidden
+    # direction, so authority is never reached by a silent downgrade.
+    "provenance": "shadow",
     "evidence_url": None,  # default: <publisher_url>/v1/evidence
     "evidence_dir": None,
     "provenance_registry_keys": None,
@@ -82,8 +86,17 @@ _DEFAULTS = {
     # independent chain check runs at the producer-chosen candidate block,
     # so an unbounded anchor lets the producer pick which moment is audited.
     "provenance_max_anchor_lag_blocks": None,
-    # Lowest assurance full mode will submit on. "full_over_epoch" restores
-    # the pre-rank behaviour, which never submits on a populated subnet.
+    # Lowest assurance the full-provenance verifier will treat as PROVEN, and
+    # the bar the opt-in AUTHORITY submission path must clear. Left at
+    # "rewarded_set_proven": every rewarded hotkey independently replayed from
+    # raw evidence, everything unreplayed at exactly zero. This is NOT the thin
+    # write path's gate — attestation-verified/thin submits the signed vector
+    # after verifying its attestation + report signatures and never consults
+    # this rank (the shadow verifier's proof labeling and the authority gate do).
+    # Lowering it to "receipts_only" is a deliberate operator choice (it makes a
+    # receipts-only shadow audit persist observational chain state and read as a
+    # PASS); "full_over_epoch" restores the pre-rank behaviour that never submits
+    # on a populated subnet.
     "min_assurance": "rewarded_set_proven",
     "jsonl": None,  # JSONL event stream file
     "status_jsonl": None,  # sanitized status projection a publisher may read

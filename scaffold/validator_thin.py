@@ -1325,14 +1325,19 @@ def _operator_declared_authority(args: Any) -> bool:
 
 
 def _minimum_assurance_rank(args: Any) -> int:
-    """The lowest assurance this runtime will submit on.
+    """The lowest assurance the shadow verifier treats as PROVEN and the bar the
+    opt-in AUTHORITY submission path must clear.
 
     Defaults to rewarded_set_proven: every hotkey receiving weight was
     independently replayed from raw evidence, and everything not replayed
-    carries exactly zero. Setting this to full_over_epoch reproduces the old
-    behaviour exactly, which on any subnet with more registered hotkeys than
-    the manifest's receipt cap means never submitting at all. That is the
-    rollback lever, and it needs no producer redeploy.
+    carries exactly zero. This is NOT the thin/attestation-verified write path's
+    gate — recurring thin ticks submit the signed vector after verifying its
+    attestation + report signatures and never call this. Setting this to
+    receipts_only is a deliberate operator choice (a receipts-only shadow audit
+    then reads as PASS and persists observational chain state); full_over_epoch
+    reproduces the old behaviour exactly, which on any subnet with more
+    registered hotkeys than the manifest's receipt cap means never submitting at
+    all. That is the rollback lever, and it needs no producer redeploy.
     """
     configured = getattr(args, "min_assurance", None) or "rewarded_set_proven"
     rank = ASSURANCE_RANKS.get(str(configured))
@@ -9770,6 +9775,19 @@ def build_parser() -> argparse.ArgumentParser:
         "signed vector)",
     )
     p.add_argument("--provenance-index-max-age-secs", type=float, default=3600.0)
+    p.add_argument(
+        "--min-assurance",
+        dest="min_assurance",
+        choices=("receipts_only", "rewarded_set_proven", "full_over_epoch"),
+        default=os.environ.get(
+            "CATHEDRAL_PROVENANCE_MIN_ASSURANCE", "rewarded_set_proven"
+        ),
+        help="lowest assurance the shadow verifier treats as PROVEN and the bar "
+        "the opt-in authority submission path must clear (default "
+        "rewarded_set_proven). NOT the thin write path's gate — attestation-"
+        "verified/thin submits the signed vector after signature verification "
+        "regardless. Opt down to receipts_only or up to full_over_epoch.",
+    )
     p.add_argument(
         "--provenance-allow-private-hosts",
         action="store_true",
