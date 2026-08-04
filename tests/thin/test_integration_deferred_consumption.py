@@ -189,9 +189,13 @@ def test_a_cross_lane_replay_does_not_suppress_the_miners_other_receipt():
     fx = IntegrationFixtures()
     miner = "5CpuMiner"
     # `a` sorts below `b`, which is the ordering the defect needed.
-    a = fx.cpu_receipt(subject=miner, work_units="20")
-    b = fx.cpu_receipt(subject=miner, work_units="22")
-    assert a["receipt_id"] < b["receipt_id"]
+    a, b = sorted(
+        (
+            fx.cpu_receipt(subject=miner, work_units="20"),
+            fx.cpu_receipt(subject=miner, work_units="22"),
+        ),
+        key=lambda receipt: receipt["receipt_id"],
+    )
 
     out = _preview(
         fx,

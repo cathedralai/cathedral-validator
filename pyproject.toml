@@ -65,22 +65,16 @@ provenance = [
 # (cathedral-validator#16). A commit SHA IS the immutable pin: this extra came
 # through both that rename and cathedral-distill's move to public unchanged.
 #
-# Pinned to an immutable commit on cathedral-distill main (mirrors the provenance
-# extra's discipline: never a mutable branch ref). Re-pinned past distill#22-#28
-# (9 commits since the prior 79e9370 pin). Of the modules this repo imports
-# (integrated_feed, signed_config, consumption_ledger, receipt_keys, testing),
-# only integrated_feed.py changed: verify_lane_receipt's `consumption_ledger`
-# lost its `None` default and is now a required keyword (distill#28 D-4 -- the
-# old default silently returned PASS/REPLAY_NONE with no ledger, so a caller
-# that never learned the keyword existed had no replay gate at all). Compatible
-# as-is: every call site here already passes consumption_ledger explicitly,
-# either a real ledger with defer_consumption=True or the NO_REPLAY_LEDGER
-# sentinel via _no_replay_sentinel_or_none(). Verified byte-identical: signed_config,
-# consumption_ledger, receipt_keys, testing. Update ONLY together with a review
-# of what changed, and keep DISTILL_CONTRACT_COMMIT in integration.py in
-# lockstep (a test asserts they match).
+# Pinned to an immutable reviewed Distill commit, never a mutable branch ref.
+# This revision adds `compute_work_evidence` and the `work_evidence` keyword to
+# `verify_lane_receipt`: a Compute receipt is creditable only after the exact
+# SAT item/result bytes committed by its signed digests replay under
+# `sat_work_units_v1`. The validator forwards this sidecar from `LaneReceipt`
+# and rejects plain receipt-only Compute submissions. Keep this pin and
+# DISTILL_CONTRACT_COMMIT in integration.py in lockstep; a regression test
+# asserts their exact equality.
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b7929b69668ca34dd150029bb9d2c5198a339ada",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@a80119cb21c2e1ba4da4d05a500387f2d8ca0e4b",
 ]
 
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for

@@ -68,6 +68,16 @@ def _write(tmp_path, bundle):
     return str(p)
 
 
+def _compute_entry(fx, *, kind="compute_cpu", lane=LANE_CPU):
+    receipt = fx.cpu_receipt() if kind == "compute_cpu" else fx.gpu_receipt()
+    return {
+        "kind": kind,
+        "lane": lane,
+        "receipt": receipt,
+        "work_evidence": dict(receipt.work_evidence),
+    }
+
+
 def test_preview_cli_composes_cpu_and_distill(tmp_path):
     fx = IntegrationFixtures()
     allocations = [
@@ -75,7 +85,7 @@ def test_preview_cli_composes_cpu_and_distill(tmp_path):
         {"lane": LANE_DISTILL, "allocation": "0.45", "enabled": True},
     ]
     receipts = [
-        {"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()},
+        _compute_entry(fx),
         {"kind": "distill", "lane": LANE_DISTILL, "receipt": fx.distill_receipt()},
     ]
     bundle_path = _write(
@@ -112,8 +122,8 @@ def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):
         {"lane": LANE_GPU, "allocation": "0.45", "enabled": True},
     ]
     receipts = [
-        {"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()},
-        {"kind": "compute_gpu", "lane": LANE_GPU, "receipt": fx.gpu_receipt()},
+        _compute_entry(fx),
+        _compute_entry(fx, kind="compute_gpu", lane=LANE_GPU),
     ]
     bundle_path = _write(
         tmp_path, _bundle(fx, allocations, receipts, **_policy(fx, tmp_path))
@@ -133,7 +143,7 @@ def test_preview_cli_rejects_a_rolled_back_config(tmp_path):
         {"lane": LANE_CPU, "allocation": "0.45", "enabled": True},
         {"lane": LANE_DISTILL, "allocation": "0.45", "enabled": True},
     ]
-    receipts = [{"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()}]
+    receipts = [_compute_entry(fx)]
     bundle = _bundle(
         fx, allocations, receipts, min_burn_version=5
     )  # config is v1 < fence 5
@@ -149,7 +159,7 @@ def test_preview_cli_missing_field_fails_closed(tmp_path):
 
 def _funded_cpu_bundle(fx, tmp_path, **over):
     allocations = [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
-    receipts = [{"kind": "compute_cpu", "lane": LANE_CPU, "receipt": fx.cpu_receipt()}]
+    receipts = [_compute_entry(fx)]
     return _bundle(fx, allocations, receipts, **over)
 
 
