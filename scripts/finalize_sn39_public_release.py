@@ -511,6 +511,23 @@ def _archive_uid_safety(
         uids = [int(value) for value in raw_uids]
         hotkeys = [str(value) for value in getattr(metagraph, "hotkeys", ())]
         registration_blocks = [int(value) for value in raw_registration_blocks]
+
+        # Pruning-score inputs, exactly as the validator derives them
+        # (validator_thin: no PruningScores map on this chain, so eviction order
+        # comes from the metrics a scalar score is monotone in; a missing series
+        # is all-zero, collapsing candidates into one conservative tie group).
+        def _metric_series(name: str) -> list[float]:
+            raw = getattr(metagraph, name, None)
+            if raw is None:
+                return [0.0] * len(uids)
+            values = [float(value) for value in raw]
+            if len(values) != len(uids):
+                raise ValueError(f"{name} does not cover the registered set")
+            return values
+
+        prune_incentive = dict(zip(hotkeys, _metric_series("I")))
+        prune_stake = dict(zip(hotkeys, _metric_series("S")))
+        prune_emission = dict(zip(hotkeys, _metric_series("E")))
         max_uids = int(getattr(metagraph, "max_uids"))
         hparams = getattr(metagraph, "hparams")
         max_regs_per_block = int(getattr(hparams, "max_regs_per_block"))
@@ -620,11 +637,52 @@ def _archive_uid_safety(
         prunable_nonimmune_count
         > min_nonimmune_uids + max(0, maximum_era_registrations - free_uid_slots)
     )
+    # Eviction-DEPTH proof: the third independent sufficient condition the
+    # validator publishes. Weights bind UIDs, so what must be proven is that no
+    # sequence of registrations inside the mortal era can reach this UID —
+    # registration immunity alone would make every mature miner unrewardable.
+    # Imported from the validator so both sides share one implementation.
+    from scaffold.validator_thin import _eviction_depths
+
+    prunable_rows = [
+        (uid, hotkey, registered_at)
+        for uid, hotkey, registered_at in zip(uids, hotkeys, registration_blocks)
+        if registered_at + immunity_period <= block
+        and hotkey not in owner_immortal_hotkeys
+    ]
+    # Cap B counts everyone prunable by the era's LAST block (the
+    # MinNonImmuneUids floor is evaluated at prune time, so a mid-era maturer
+    # permits one further prune); the depth competition below deliberately does
+    # not count them, which is the conservative direction.
+    era_prunable_count = sum(
+        registered_at + immunity_period <= block + mortal_period_blocks
+        and hotkey not in owner_immortal_hotkeys
+        for hotkey, registered_at in zip(hotkeys, registration_blocks)
+    )
+    worst_case_evictions = min(
+        max(0, maximum_era_registrations - free_uid_slots),
+        max(0, era_prunable_count - min_nonimmune_uids),
+    )
+    metric_by_hotkey = {
+        hotkey: (
+            float(prune_incentive.get(hotkey, 0.0)),
+            float(prune_stake.get(hotkey, 0.0)),
+            float(prune_emission.get(hotkey, 0.0)),
+        )
+        for _, hotkey, _ in prunable_rows
+    }
+    eviction_depth = _eviction_depths(prunable_rows, metric_by_hotkey)
+    eviction_safe_hotkeys = {
+        hotkey
+        for hotkey, depth in eviction_depth.items()
+        if depth >= worst_case_evictions
+    }
     replacement_safe_hotkeys = (
         set(hotkeys)
         if capacity_protects_all
         else owner_immortal_hotkeys
         | (temporally_immune_hotkeys if nonimmune_buffer_protects_immunity else set())
+        | eviction_safe_hotkeys
     )
     unsafe_targets = sorted(set(target_uid_hotkeys.values()) - replacement_safe_hotkeys)
     if unsafe_targets:
@@ -655,6 +713,23 @@ def _archive_uid_safety(
         "maximum_era_registrations": maximum_era_registrations,
         "owner_immortal_hotkeys": sorted(owner_immortal_hotkeys),
         "replacement_safe_hotkeys": sorted(replacement_safe_hotkeys),
+        # Raw inputs for the eviction-depth proof, so a re-verifier can
+        # recompute safety rather than trust it (mirrors validator_thin).
+        "worst_case_evictions": worst_case_evictions,
+        "prune_metrics": [
+            {
+                "uid": uid,
+                "hotkey": hotkey,
+                "incentive": prune_incentive.get(hotkey, 0.0),
+                "stake": prune_stake.get(hotkey, 0.0),
+                "emission": prune_emission.get(hotkey, 0.0),
+            }
+            for uid, hotkey in zip(uids, hotkeys)
+        ],
+        "eviction_depth": [
+            {"hotkey": hotkey, "depth": depth}
+            for hotkey, depth in sorted(eviction_depth.items())
+        ],
     }
 
     substrate = getattr(subtensor, "substrate", None)
