@@ -1,0 +1,5 @@
+[Unit]
+Description=ALERT if the shadow audit flagged a vector mismatch in the last 30 minutes
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cathedral-mismatch-check

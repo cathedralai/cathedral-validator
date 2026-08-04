@@ -1,0 +1,7 @@
+[Unit]
+Description=Check for shadow-audit vector mismatches every 10 minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
