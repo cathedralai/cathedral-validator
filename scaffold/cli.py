@@ -300,7 +300,6 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
 # Operator-facing names for the submission authority, mapped onto the internal
 # vocabulary. "full" and "thin" are what these modes are called in practice.
 _MODE_ALIASES = {
-    "off": "off",
     "thin": "shadow",
     "shadow": "shadow",
     "full": "authority",
@@ -374,7 +373,6 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
     from . import render
 
     authority = {
-        "off": [render.bold("thin"), "follows the signed vector, no audit"],
         "shadow": [
             render.bold("thin"),
             "follows the signed vector",

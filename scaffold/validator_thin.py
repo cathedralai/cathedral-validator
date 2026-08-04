@@ -1277,7 +1277,7 @@ def _provenance_settings(args) -> ProvenanceSettings:
     mode = getattr(args, "provenance", "shadow") or "shadow"
     evidence_url = getattr(args, "evidence_url", None)
     evidence_dir = getattr(args, "evidence_dir", None)
-    if mode != "off" and not evidence_url and not evidence_dir:
+    if not evidence_url and not evidence_dir:
         evidence_url = args.publisher_url.rstrip("/") + "/v1/evidence"
     return ProvenanceSettings(
         mode=mode,
@@ -1352,7 +1352,7 @@ def _minimum_assurance_rank(args: Any) -> int:
 def _runtime_modes(args: Any) -> tuple[str, str]:
     """Return the truthful submission authority and provenance runtime mode."""
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
-    if provenance_mode not in {"off", "shadow", "authority"}:
+    if provenance_mode not in {"shadow", "authority"}:
         raise wire.VectorError(f"unsupported provenance mode {provenance_mode!r}")
     submission_authority = (
         "full_provenance" if provenance_mode == "authority" else "thin"
@@ -9698,12 +9698,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--provenance",
-        choices=("off", "shadow", "authority"),
+        choices=("shadow", "authority"),
         default=os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "shadow"),
         help="full-provenance mode: 'shadow' (default) audits the "
         "published evidence concurrently while thin mode submits; "
-        "'authority' submits the independent recomputation; "
-        "'off' disables the audit.",
+        "'authority' submits the independent recomputation.",
     )
     p.add_argument(
         "--evidence-url",
