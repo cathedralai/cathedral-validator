@@ -234,6 +234,42 @@ after an uncertain submission. Keep both on durable owner-only storage; never
 delete, roll back, or replace them to clear a refused attempt. Follow the
 release runbook for recovery.
 
+### Shadow-audit mismatch alert (systemd)
+
+`deploy/sn39/cathedral-mismatch-check` turns two shadow-audit conditions in
+the event journal into a failing oneshot service — the unit failing IS the
+alert; there is no separate notification channel:
+
+1. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
+   disagreed with a vector that was already accepted for submission; and
+2. persistent audit failure (#64) — at least one `PROVENANCE_AUDIT_FAIL` and
+   zero `PROVENANCE_AUDIT_PASS` in the last 90 minutes (about three audit
+   cycles). A transient `FAIL` followed by a `PASS` does not alert; an empty
+   window does not alert.
+
+The script reads `/var/log/cathedral-validator/validator-events.jsonl` by
+default; pass a different journal path as its only argument. Install from the
+reviewed release and enable the timer, which runs the check every 10 minutes:
+
+```bash
+install -D -o root -g root -m 0755 \
+  "$release/deploy/sn39/cathedral-mismatch-check" \
+  /usr/local/bin/cathedral-mismatch-check
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-mismatch-alert.service" \
+  /etc/systemd/system/cathedral-mismatch-alert.service
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-mismatch-alert.timer" \
+  /etc/systemd/system/cathedral-mismatch-alert.timer
+systemctl daemon-reload
+systemctl enable --now cathedral-mismatch-alert.timer
+```
+
+Watch `systemctl status cathedral-mismatch-alert.service` (a failed unit is
+the alert) and `journalctl -u cathedral-mismatch-alert` for the reason line.
+A healthy run prints `no recent mismatch; shadow audit not persistently
+failing` and exits 0.
+
 ## Chain-writing launch gate
 
 Do not add `--broadcast` until all of the following are true:

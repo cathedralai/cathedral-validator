@@ -1,0 +1,25 @@
+#!/bin/bash
+# Fail loudly if the shadow audit flagged a vector mismatch in the last 30 minutes,
+# or if the shadow audit has been persistently failing for 90 minutes with no PASS (#64).
+set -u
+EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
+
+CUTOFF=$(date -u -d "-30 minutes" "+%Y-%m-%dT%H:%M")
+RECENT=$(grep "PROVENANCE_VECTOR_MISMATCH" "$EVENTS" 2>/dev/null | tail -5 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF" "substr(\$0,1,16) >= c" | wc -l)
+if [ "$RECENT" -gt 0 ]; then
+  echo "ALERT: $RECENT PROVENANCE_VECTOR_MISMATCH event(s) within 30m — the audit disagreed with an accepted vector"
+  exit 1
+fi
+
+# Rule 2 (#64): persistent audit failure — at least one PROVENANCE_AUDIT_FAIL and
+# zero PROVENANCE_AUDIT_PASS in the last 90 minutes (~3 audit cycles).
+# A transient FAIL followed by a PASS does not alert; an empty window does not alert.
+CUTOFF90=$(date -u -d "-90 minutes" "+%Y-%m-%dT%H:%M")
+FAILS=$(grep "\"event\":\"PROVENANCE_AUDIT_FAIL\"" "$EVENTS" 2>/dev/null | tail -20 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF90" "substr(\$0,1,16) >= c" | wc -l)
+PASSES=$(grep "\"event\":\"PROVENANCE_AUDIT_PASS\"" "$EVENTS" 2>/dev/null | tail -20 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF90" "substr(\$0,1,16) >= c" | wc -l)
+if [ "$FAILS" -gt 0 ] && [ "$PASSES" -eq 0 ]; then
+  echo "ALERT: shadow audit failing for 90m with no PASS — $FAILS PROVENANCE_AUDIT_FAIL event(s) and zero PROVENANCE_AUDIT_PASS in the last 90 minutes"
+  exit 1
+fi
+
+echo "no recent mismatch; shadow audit not persistently failing"
