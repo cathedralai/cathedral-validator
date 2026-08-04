@@ -333,9 +333,7 @@ def allocation_contract() -> str:
     """
     raw = (os.environ.get(ALLOCATION_CONTRACT_ENV, "v2") or "v2").strip().lower()
     if raw not in ("v2", "v3"):
-        raise VectorError(
-            f"unknown allocation contract {raw!r}; expected 'v2' or 'v3'"
-        )
+        raise VectorError(f"unknown allocation contract {raw!r}; expected 'v2' or 'v3'")
     return raw
 
 
@@ -2117,9 +2115,7 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
             f"{cybergym_bridge.MECHANISM_ENABLED_ENV}"
         )
     fraction = cybergym_bridge.weight_fraction()
-    if not math.isclose(
-        fraction, V3_CYBERGYM_ALLOCATION, rel_tol=0.0, abs_tol=1e-12
-    ):
+    if not math.isclose(fraction, V3_CYBERGYM_ALLOCATION, rel_tol=0.0, abs_tol=1e-12):
         raise VectorError(
             "allocation contract v3 requires CyberGym weight fraction "
             f"{V3_CYBERGYM_ALLOCATION} via {cybergym_bridge.WEIGHT_FRACTION_ENV}; "
@@ -2142,6 +2138,20 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
         raise VectorError(
             f"allocation contract v3 CyberGym lane mass {lane_mass!r} != {fraction!r}"
         )
+    raw_uid_hotkeys = lane.get("uid_hotkeys")
+    if not isinstance(raw_uid_hotkeys, dict):
+        raise VectorError(
+            "allocation contract v3 CyberGym lane has no UID-to-hotkey bindings"
+        )
+    uid_hotkeys = {
+        str(int(uid)): str(hotkey) for uid, hotkey in raw_uid_hotkeys.items()
+    }
+    if set(uid_hotkeys) != {str(int(uid)) for uid in weights} or any(
+        not hotkey for hotkey in uid_hotkeys.values()
+    ):
+        raise VectorError(
+            "allocation contract v3 CyberGym UID-to-hotkey bindings mismatch"
+        )
     burn_uid_val = lane.get("burn_uid")
     forfeited = float(lane.get("forfeited_fraction") or 0.0)
     if forfeited > 0.0 and burn_uid_val is None:
@@ -2154,6 +2164,7 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
         "contributing_fraction": float(lane.get("contributing_fraction") or 0.0),
         "forfeited_fraction": forfeited,
         "burn_uid": None if burn_uid_val is None else int(burn_uid_val),
+        "uid_hotkeys": uid_hotkeys,
         "cybergym": lane.get("cybergym") or {},
     }
 
