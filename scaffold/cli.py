@@ -56,12 +56,15 @@ _DEFAULTS = {
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
-    # Attestation-verified (thin/shadow) is the PRINCIPAL default: verify the
-    # TDX attestation + signed score reports and submit exactly the signed
-    # vector, while the full-provenance verifier re-checks the published
-    # evidence chain concurrently and never blocks the write. This is the mode
-    # that wins the chain-finality race — a heavy per-tick recompute (authority)
-    # loses it. Authority is OPT-IN, for operators who hold the controlled
+    # Attestation-verified (thin/shadow) is the PRINCIPAL default: submit exactly
+    # the signed weight vector after the on-chain write path enforces the
+    # weight-policy signature + freshness + monotonic rollback fence, while the
+    # full-provenance verifier re-checks the published evidence chain (TDX
+    # attestation + per-report signatures) concurrently in shadow and never blocks
+    # the write. The TDX attestation itself is verified compose-side by the
+    # publisher and by that non-blocking shadow verifier — NOT on the write path.
+    # This is the mode that wins the chain-finality race — a heavy per-tick
+    # recompute (authority) loses it. Authority is OPT-IN, for operators who hold the controlled
     # raw-evidence package and deliberately originate weights: select it with
     # `--mode full` (or `mode = "authority"` in the TOML / the
     # validator-mainnet-sn39.toml profile). full -> thin remains the forbidden
@@ -91,8 +94,11 @@ _DEFAULTS = {
     # "rewarded_set_proven": every rewarded hotkey independently replayed from
     # raw evidence, everything unreplayed at exactly zero. This is NOT the thin
     # write path's gate — attestation-verified/thin submits the signed vector
-    # after verifying its attestation + report signatures and never consults
-    # this rank (the shadow verifier's proof labeling and the authority gate do).
+    # after enforcing the weight-policy signature + freshness + rollback fence
+    # (TDX attestation + report-signature verification is compose-side and the
+    # non-blocking shadow verifier's job, never on the write path) and never
+    # consults this rank (the shadow verifier's proof labeling and the authority
+    # gate do).
     # Lowering it to "receipts_only" is a deliberate operator choice (it makes a
     # receipts-only shadow audit persist observational chain state and read as a
     # PASS); "full_over_epoch" restores the pre-rank behaviour that never submits

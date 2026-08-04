@@ -3,12 +3,21 @@
 # vector (locally, via the deploy/publisher/ units) AND validates + broadcasts
 # it in attestation-verified mode.
 #
-# Attestation-verified (thin / provenance = "shadow") is the PRINCIPAL mode: it
-# verifies the TDX attestation + signed score reports and submits exactly the
-# signed vector, winning the chain-finality race that a heavy per-tick authority
-# recompute loses. The full-provenance verifier runs concurrently in shadow and
-# never delays the submission. Authority is the OPT-IN fallback — see
+# Attestation-verified (thin / provenance = "shadow") is the PRINCIPAL mode: the
+# on-chain write path enforces the weight-policy signature + freshness + monotonic
+# rollback fence and submits exactly the signed vector, winning the chain-finality
+# race that a heavy per-tick authority recompute loses. TDX attestation + per-report
+# signature verification is compose-side (the publisher) and is re-checked by the
+# full-provenance verifier, which runs concurrently in shadow and never delays or
+# blocks the submission. Authority is the OPT-IN fallback — see
 # config/validator-mainnet-sn39.toml (kept byte-identical).
+#
+# OPERATIONAL DEPENDENCY: because the shadow verifier is non-blocking, a
+# compromised or buggy LOCAL publisher that signs a vector disagreeing with its
+# own receipts is DETECTED (PROVENANCE_VECTOR_MISMATCH in the event log) but NOT
+# stopped — the bad vector still lands on-chain. Out-of-band alerting on that
+# event is REQUIRED; see the rollback runbook (R1/R4 revert to the hub-backed
+# producer). This is the deliberate cost of winning the finality race.
 #
 # The single delta from validator-thin-sn39-relay.toml is the [publisher] url:
 # it points at the LOCAL self-composed publisher (cathedral-publisher.service,
@@ -55,11 +64,12 @@ root = "/var/lib/cathedral-validator"
 
 [provenance]
 # Attestation-verified: submit the signed vector; the full verifier re-checks
-# the published evidence chain concurrently and never blocks the write. The thin
-# submission verifies the signed vector's attestation + report signatures and
-# lands the write before chain finality advances — no from-scratch re-derivation
-# in the write path, which is what a heavy authority recompute loses the race
-# doing.
+# the published evidence chain (TDX attestation + per-report signatures)
+# concurrently in shadow and never blocks the write. The thin submission enforces
+# the weight-policy signature + freshness + rollback fence and lands the write
+# before chain finality advances — no from-scratch re-derivation and no on-path
+# TDX attestation check in the write path, which is what a heavy authority
+# recompute loses the race doing.
 mode = "shadow"
 evidence_url = "https://api.cathedral.computer/v1/evidence"
 registry_keys = "config/provenance/registry-keys.json"
