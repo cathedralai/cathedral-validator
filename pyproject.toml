@@ -83,7 +83,7 @@ provenance = [
 # DISTILL_CONTRACT_COMMIT in integration.py in lockstep; a regression test
 # asserts their exact equality.
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@df29c22647dcdc3aa3eab6583f583e06535fd0d7",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@266f7d8a78f34e1f60cafccbc02c471bcdfa445c",
 ]
 
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for
