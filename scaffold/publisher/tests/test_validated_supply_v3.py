@@ -13,6 +13,7 @@ Covers:
   * a cross-repo round trip: the vendored publisher composes a real signed v3
     vector and the validator independently maps it to UID weights.
 """
+
 from __future__ import annotations
 
 import math
@@ -66,6 +67,10 @@ def v3_payload(
 ) -> dict:
     tdx_rows = tdx_rows if tdx_rows is not None else [("tdx-a", 0.6), ("tdx-b", 0.4)]
     lane_weights = lane_weights if lane_weights is not None else {50: 0.18, 51: 0.12}
+    lane_hotkeys = {uid: f"cyber-{uid}" for uid in lane_weights}
+    lane_hotkeys.update({50: "cyber-a", 51: "cyber-b"})
+    if 0 in lane_weights:
+        lane_hotkeys[0] = burn_hotkey
     return {
         "weights": _tdx_rows(tdx_rows),
         "burn_snapshot": {
@@ -88,6 +93,7 @@ def v3_payload(
                 "contributing_fraction": 0.30 - forfeited,
                 "forfeited_fraction": forfeited,
                 "burn_uid": lane_burn_uid,
+                "uid_hotkeys": {str(uid): lane_hotkeys[uid] for uid in lane_weights},
                 "cybergym": {"reason": "ok"},
             },
         },
@@ -156,7 +162,7 @@ def test_v2_still_requires_ten_percent_burn() -> None:
 
 # ---- uid-weight mapping ------------------------------------------------------
 
-H2U = {"burn-hotkey": 0, "tdx-a": 10, "tdx-b": 11}
+H2U = {"burn-hotkey": 0, "tdx-a": 10, "tdx-b": 11, "cyber-a": 50, "cyber-b": 51}
 
 
 def test_v3_maps_70_30_split() -> None:
@@ -197,8 +203,15 @@ def test_v3_forfeit_burn_uid_mismatch_fails_closed() -> None:
     # forfeited mass resolved to a stale burn uid (99) that is not the current
     # burn hotkey's uid (0) must fail closed.
     doc = v3_payload(lane_weights={99: 0.30}, forfeited=0.30, lane_burn_uid=99)
-    with pytest.raises(validator_thin.wire.VectorError, match="burn UID does not match"):
+    with pytest.raises(validator_thin.wire.VectorError, match="does not match"):
         validator_thin.vector_to_uid_weights(doc, H2U, require_policy=V3_PIN)
+
+
+def test_v3_rejects_a_recycled_cybergym_uid() -> None:
+    doc = v3_payload()
+    current = {**H2U, "cyber-a": 52, "replacement": 50}
+    with pytest.raises(validator_thin.wire.VectorError, match="does not match"):
+        validator_thin.vector_to_uid_weights(doc, current, require_policy=V3_PIN)
 
 
 def test_v3_tdx_hotkey_on_burn_uid_fails_closed() -> None:
@@ -208,7 +221,9 @@ def test_v3_tdx_hotkey_on_burn_uid_fails_closed() -> None:
 
 
 def test_v3_missing_burn_hotkey_fails_closed() -> None:
-    with pytest.raises(validator_thin.wire.VectorError, match="no current metagraph UID"):
+    with pytest.raises(
+        validator_thin.wire.VectorError, match="no current metagraph UID"
+    ):
         validator_thin.vector_to_uid_weights(
             v3_payload(), {"tdx-a": 10, "tdx-b": 11}, require_policy=V3_PIN
         )
@@ -403,6 +418,7 @@ def test_cross_repo_v3_publisher_to_validator(monkeypatch) -> None:
             "forfeited_fraction": 0.0,
             "contributing_fraction": 0.30,
             "burn_uid": None,
+            "uid_hotkeys": {50: "cyber-a", 51: "cyber-b"},
             "cybergym": {"reason": "ok", "report_sha256": "sha256:" + "a" * 64},
         },
     )

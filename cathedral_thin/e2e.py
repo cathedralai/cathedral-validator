@@ -34,6 +34,7 @@ from .core import (
 )
 from .validator import Peer, ValidatorConfig, evaluate_peers, uid_vector
 from .score_classes import (
+    REPORT_SCHEMA,
     DecisionStore,
     canonical_json,
     compose_class_decisions,
@@ -96,6 +97,7 @@ async def run_e2e(
     *,
     external_report_raw: bytes | None = None,
     external_public_key: bytes | None = None,
+    external_report_schema: str = REPORT_SCHEMA,
 ) -> dict[str, Any]:
     """Run the local validator, optionally with a real external score report.
 
@@ -280,6 +282,7 @@ async def run_e2e(
                                 "source_netuid": 7,
                             },
                             "require_evidence": True,
+                            "report_schema": external_report_schema,
                             "source_id": "cathedralconfidential",
                         },
                     ],

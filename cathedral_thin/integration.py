@@ -36,7 +36,7 @@ from typing import Any, Callable, Mapping, Sequence
 _STAGE = "INTEGRATION"
 _AUTHORITATIVE_EPOCH_TOKEN_KIND = "integration_authoritative_epoch"
 _AUTHORITATIVE_EPOCH_TOKEN_PREFIX = "cathedral-integration-authoritative-epoch-v1"
-DISTILL_CONTRACT_COMMIT = "b7929b69668ca34dd150029bb9d2c5198a339ada"
+DISTILL_CONTRACT_COMMIT = "a80119cb21c2e1ba4da4d05a500387f2d8ca0e4b"
 
 # This seam passes these named gates into the shared Distill contract. An older
 # pin that merely imports but does not accept one of them must fail before any
@@ -57,6 +57,7 @@ _REQUIRED_DISTILL_VERIFIER_PARAMETERS = frozenset(
         "allowed_measurements",
         "allowed_tcb_statuses",
         "allowed_advisories",
+        "work_evidence",
     }
 )
 
@@ -164,8 +165,8 @@ _GATE_NAMES = (
 LANE_CONTRACT_VERSION = "cathedral_validator_lane_contract_v1"
 
 _LANE_EVIDENCE_NOTE = {
-    "compute_cpu": "Intel TDX CPU assurance receipt; PASS needs a measurement/TCB/"
-    "advisory policy and a durable replay ledger.",
+    "compute_cpu": "Intel TDX CPU assurance receipt plus replayable SAT work evidence; "
+    "PASS needs measurement/TCB/advisory policy and a durable replay ledger.",
     "compute_gpu": "GPU confidential-compute receipt; with no GPU attestation "
     "verifier supplied it is reported NOT_PROVEN and its share burns.",
     "distill": "Distill result receipt; PASS needs the admission policy and a "
@@ -254,6 +255,23 @@ class LaneReceipt:
     kind: str  # integrated_feed.KIND_COMPUTE_CPU / _GPU / _DISTILL / _CYBERGYM
     lane: str  # the lane id in the signed allocation config
     receipt: Mapping[str, Any]
+    # Required for a positive Compute lane contribution.  It carries the exact
+    # canonical SAT item/result bytes committed by the signed receipt.
+    work_evidence: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        """Accept an explicit sidecar from an in-memory transport wrapper.
+
+        JSON bundles always pass ``work_evidence`` as their own field.  This
+        small adapter keeps programmatic callers free to use a mapping subtype
+        that transports a verified sidecar alongside the receipt; the sidecar is
+        still independently parsed, receipt-id-bound, and replayed by Distill.
+        A plain mapping without explicit evidence remains a hard refusal.
+        """
+        if self.work_evidence is None:
+            attached = getattr(self.receipt, "work_evidence", None)
+            if isinstance(attached, Mapping):
+                object.__setattr__(self, "work_evidence", attached)
 
 
 def _emit(events, code: str, *, status: str, **fields: Any) -> None:
@@ -454,7 +472,11 @@ def _decide(
         )
     try:
         decision = integrated_feed.verify_lane_receipt(
-            item.kind, item.receipt, lane=item.lane, **gates
+            item.kind,
+            item.receipt,
+            lane=item.lane,
+            work_evidence=item.work_evidence,
+            **gates,
         )
     except Exception as exc:
         return _refused(

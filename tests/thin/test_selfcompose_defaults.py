@@ -112,11 +112,9 @@ def test_relay_profile_stays_shadow() -> None:
     assert cfg["provenance"] == "shadow"
 
 
-def test_authority_fallback_config_is_left_byte_identical() -> None:
-    # The mainnet authority profile is the reachable fallback and must NOT have
-    # been flipped to shadow by this consolidation.
-    cfg = cli._load_config_file(
-        str(ROOT / "config" / "validator-mainnet-sn39.toml")
-    )
-    assert cfg["provenance"] == "authority"
-    assert cfg["min_assurance"] == "rewarded_set_proven"
+def test_no_authority_config_profile_ships() -> None:
+    # The authority/full mode profiles were removed in the shadow-only cleanup;
+    # no shipped config may select the deleted mode.
+    for cfg_path in sorted((ROOT / "config").glob("*.toml")):
+        cfg = cli._load_config_file(str(cfg_path))
+        assert cfg.get("provenance") != "authority", cfg_path.name

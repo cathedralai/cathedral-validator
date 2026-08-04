@@ -36,7 +36,6 @@ def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
         "docs/PROVENANCE.md",
         "docs/THIN_SUBNET_RUNBOOK.md",
         "docs/SN39_MAINNET_RELEASE_20260724.md",
-        "deploy/sn39/beta/OPERATIONS.md",
     ):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert "github.com/cathedralai/cathedral.git" not in text
@@ -102,19 +101,11 @@ def test_compute_release_pin_is_coherent_across_every_authority_site() -> None:
     )
 
     for relative in (
-        "config/validator-mainnet-sn39-launch.toml",
-        "config/validator-mainnet-sn39.toml",
         "config/validator-thin-sn39-relay.toml",
+        "config/validator-selfcompose-sn39.toml",
     ):
         config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
         assert config["provenance"]["source_revision"] == COMPUTE_REVISION
-
-    for relative in (
-        "config/validator-mainnet-sn39-launch.toml",
-        "config/validator-mainnet-sn39.toml",
-    ):
-        config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
-        assert config["provenance"]["max_anchor_lag_blocks"] == 600
 
 
 def test_release_builder_binds_required_public_key_files(
@@ -139,18 +130,6 @@ def test_release_builder_binds_required_public_key_files(
     validate(((installed, reviewed),))
 
     guide = (ROOT / "docs/SN39_MAINNET_RELEASE_20260724.md").read_text(encoding="utf-8")
-    main_config = tomllib.loads(
-        (ROOT / "config/validator-mainnet-sn39.toml").read_text(encoding="utf-8")
-    )
     for name in ("registry-keys.json", "report-keys.json", "index-keys.json"):
         assert f'"$release/config/provenance/{name}"' in guide
         assert f"/etc/cathedral-validator/provenance/{name}" in guide
-    assert main_config["provenance"]["registry_keys"] == str(
-        install_root / "registry-keys.json"
-    )
-    assert main_config["provenance"]["report_keys"] == str(
-        install_root / "report-keys.json"
-    )
-    assert main_config["provenance"]["index_keys"] == str(
-        install_root / "index-keys.json"
-    )
