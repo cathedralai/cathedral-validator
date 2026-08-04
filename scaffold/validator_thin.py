@@ -6091,7 +6091,7 @@ def tick(args) -> bool:
             # The reverse (FULL degrading into thin) stays forbidden: that
             # direction would let anyone who can break the evidence path force
             # the validator back onto trusting the publisher.
-            if not bool(getattr(args, "feed_down_fallback", True)):
+            if not bool(getattr(args, "feed_down_fallback", False)):
                 raise
             if not _full_path_provisioned(args):
                 raise
