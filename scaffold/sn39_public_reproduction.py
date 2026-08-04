@@ -1264,6 +1264,23 @@ def _recompute_uid_safety(
             "maximum_era_registrations": maximum_era_registrations,
             "owner_immortal_hotkeys": sorted(owner_immortal_hotkeys),
             "replacement_safe_hotkeys": sorted(replacement_safe_hotkeys),
+            # Raw eviction-depth inputs, recomputed above from archive state so
+            # the rebuilt document matches the validator's published proof.
+            "worst_case_evictions": worst_case_evictions,
+            "prune_metrics": [
+                {
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "incentive": prune_incentive.get(hotkey, 0.0),
+                    "stake": prune_stake.get(hotkey, 0.0),
+                    "emission": prune_emission.get(hotkey, 0.0),
+                }
+                for uid, hotkey in zip(uids, hotkeys)
+            ],
+            "eviction_depth": [
+                {"hotkey": hotkey, "depth": depth}
+                for hotkey, depth in sorted(eviction_depth.items())
+            ],
         },
         "rotation": {
             "status": "PASS",
@@ -1275,6 +1292,9 @@ def _recompute_uid_safety(
             "coldkey_swap_announcement_delay": coldkey_swap_delay,
             "targets": targets,
         },
+        "excluded_hotkeys": sorted(
+            {hotkey for _uid, hotkey in target_rows} - replacement_safe_hotkeys
+        ),
     }
 
 
