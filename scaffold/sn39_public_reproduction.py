@@ -72,7 +72,10 @@ UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v2"
 UID_SAFETY_STABILITY_BASIS = "operator_controlled_coldkeys"
 POST_ROTATION_EVIDENCE_SCHEMA = "cathedral_sn39_post_rotation_evidence_v2"
 SWAP_LOCK_STATES = frozenset({"never_rotated", "expired", "active"})
-MORTAL_PERIOD_BLOCKS = 4
+# The continuous thin write path signs mortal extrinsics over a 16-block era
+# (validator_thin.SN39_MORTAL_PERIOD_BLOCKS). The one-shot launch used 4; the
+# v3 attestation covers the continuous posture, so the era matches it.
+MORTAL_PERIOD_BLOCKS = 16
 
 
 class ReproductionError(ValueError):

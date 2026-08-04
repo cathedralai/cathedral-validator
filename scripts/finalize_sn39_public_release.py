@@ -819,6 +819,14 @@ def _archive_uid_safety(
     }
 
 
+def _mortal_period_blocks() -> int:
+    # Single source of truth: the continuous thin era length the reproduction
+    # contract pins (imported lazily — sys.path gains the release root in main).
+    from scaffold.sn39_public_reproduction import MORTAL_PERIOD_BLOCKS
+
+    return MORTAL_PERIOD_BLOCKS
+
+
 def _validated_broadcast_intent(
     raw: dict[str, Any],
     *,
@@ -861,7 +869,7 @@ def _validated_broadcast_intent(
         or era_reference_block != mapping_block
         or isinstance(mortal_period_blocks, bool)
         or not isinstance(mortal_period_blocks, int)
-        or mortal_period_blocks != 4
+        or mortal_period_blocks != _mortal_period_blocks()
         or isinstance(intent_version_key, bool)
         or not isinstance(intent_version_key, int)
         or intent_version_key != version_key
