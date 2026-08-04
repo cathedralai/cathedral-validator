@@ -67,7 +67,7 @@ WIRE_TOTAL = WIRE_VALIDATED_SUPPLY_U16 + WIRE_BURN_U16
 WIRE_VALIDATED_SUPPLY_SHARE = WIRE_VALIDATED_SUPPLY_U16 / WIRE_TOTAL
 WIRE_BURN_SHARE = WIRE_BURN_U16 / WIRE_TOTAL
 EXPECTED_VERSION_KEY = 10005000
-RELEASE_SCHEMA = "cathedral_sn39_provenance_release_v2"
+RELEASE_SCHEMA = "cathedral_sn39_provenance_release_v3"
 UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v2"
 UID_SAFETY_STABILITY_BASIS = "operator_controlled_coldkeys"
 POST_ROTATION_EVIDENCE_SCHEMA = "cathedral_sn39_post_rotation_evidence_v2"
@@ -204,7 +204,7 @@ def _validate_post_rotation_boundary(
     launch: dict[str, Any],
     *,
     uid_safety: dict[str, Any],
-    checkpoint: dict[str, Any],
+    checkpoint: dict[str, Any] | None,
 ) -> dict[str, Any]:
     targets = uid_safety["rotation"]["targets"]
     receipts: list[dict[str, Any]] = []
@@ -252,6 +252,12 @@ def _validate_post_rotation_boundary(
         ):
             raise ReproductionError("signed target rotation receipt is malformed")
         receipts.append(receipt)
+    if checkpoint is None:
+        # Relay posture: rotation rows above are still fully validated, but with
+        # no frozen evidence checkpoint there is no evidence-freshness claim to
+        # bound against rotations — the concurrent shadow audit carries that
+        # duty at runtime instead.
+        return {}
     freshness = checkpoint.get("freshness_boundary")
     if not isinstance(freshness, dict):
         raise ReproductionError("signed evidence has no post-rotation boundary")
@@ -327,9 +333,9 @@ def _validate_post_rotation_boundary(
     return freshness
 
 
-def _validate_launch_submission(raw: Any) -> dict[str, Any]:
+def _validate_attested_submission(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise ReproductionError("signed release has no exact launch submission")
+        raise ReproductionError("signed release has no exact attested submission")
     vector = raw.get("signed_vector")
     if not isinstance(vector, dict):
         raise ReproductionError("signed release has no exact signed vector")
@@ -339,7 +345,7 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
         or raw.get("policy_version") != vector.get("policy_version")
         or raw.get("signed_vector_sha256") != vector_digest
     ):
-        raise ReproductionError("signed launch vector identity or digest differs")
+        raise ReproductionError("signed attested vector identity or digest differs")
 
     mapping = raw.get("mapping")
     snapshot = (mapping or {}).get("metagraph_snapshot")
@@ -414,7 +420,7 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
         or isinstance(mapping.get("next_epoch_start_block"), bool)
         or not isinstance(mapping.get("next_epoch_start_block"), int)
     ):
-        raise ReproductionError("signed launch UID mapping differs from 90/10")
+        raise ReproductionError("signed attested UID mapping differs from 90/10")
 
     extrinsic = raw.get("extrinsic")
     intent = raw.get("broadcast_intent")
@@ -435,7 +441,7 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
         or extrinsic.get("weights_u16") != expected_wire_weights
         or extrinsic.get("version_key") != EXPECTED_VERSION_KEY
     ):
-        raise ReproductionError("signed launch extrinsic is malformed")
+        raise ReproductionError("signed attested extrinsic is malformed")
     if (
         not isinstance(intent, dict)
         or set(intent)
@@ -463,7 +469,7 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
             < intent["era_reference_block"] + intent["mortal_period_blocks"]
         )
     ):
-        raise ReproductionError("signed launch broadcast intent is malformed")
+        raise ReproductionError("signed attested broadcast intent is malformed")
     uid_safety = mapping.get("uid_safety")
     if (
         not isinstance(uid_safety, dict)
@@ -484,9 +490,21 @@ def _validate_launch_submission(raw: Any) -> dict[str, Any]:
         }
         != {rewarded_uid, burn_uid}
     ):
-        raise ReproductionError("signed launch UID/hotkey safety proof is malformed")
+        raise ReproductionError("signed attested UID/hotkey safety proof is malformed")
 
     checkpoint = raw.get("evidence_checkpoint")
+    if checkpoint is None:
+        # Relay posture: the attested submission relayed the signed feed and no
+        # frozen full-provenance checkpoint was captured at submission time. The
+        # concurrent shadow audit is the evidence path for a relay; the release
+        # then attests scope "signed_feed_relay" and the frozen-checkpoint
+        # replay is skipped as truthfully not claimed.
+        _validate_post_rotation_boundary(
+            raw,
+            uid_safety=uid_safety,
+            checkpoint=None,
+        )
+        return raw
     frozen_index = (checkpoint or {}).get("signed_index")
     if (
         not isinstance(checkpoint, dict)
@@ -600,12 +618,12 @@ def verify_release_bytes(
         raise ReproductionError("signed source revisions differ from the launch")
     if release.get("pins") != EXPECTED_RELEASE_PINS:
         raise ReproductionError("signed release pins differ from the launch")
-    launch = _validate_launch_submission(release.get("launch_submission"))
+    launch = _validate_attested_submission(release.get("attested_submission"))
     return {
         "release_attestation": "PASS",
         "reproducer_revision": reproducer_revision,
         "release": release,
-        "launch_vector_id": launch["vector_id"],
+        "attested_vector_id": launch["vector_id"],
     }
 
 
@@ -1207,7 +1225,7 @@ def _recompute_uid_safety(
     }
 
 
-def verify_historical_launch(
+def verify_historical_submission(
     release: dict[str, Any],
     *,
     subtensor: Any | None = None,
@@ -1217,7 +1235,7 @@ def verify_historical_launch(
     from scaffold import wire_vector
     from scaffold.validator_thin import vector_to_uid_weights
 
-    launch = _validate_launch_submission(release.get("launch_submission"))
+    launch = _validate_attested_submission(release.get("attested_submission"))
     vector = launch["signed_vector"]
     try:
         wire_vector.verify_signature(
@@ -1226,7 +1244,7 @@ def verify_historical_launch(
             expected_key_id=EXPECTED_POLICY_KEY_ID,
         )
     except Exception as exc:
-        raise ReproductionError("launch vector signature is invalid") from exc
+        raise ReproductionError("attested vector signature is invalid") from exc
     if (
         vector.get("network") != "finney"
         or vector.get("netuid") != 39
@@ -1235,7 +1253,7 @@ def verify_historical_launch(
         .get("contract_version")
         != "v2"
     ):
-        raise ReproductionError("launch vector policy contract differs")
+        raise ReproductionError("attested vector policy contract differs")
 
     if subtensor is None:
         subtensor = _bounded_archive_call(
@@ -1850,8 +1868,16 @@ def verify_frozen_evidence(
     from cathedral.score_class import parse_score_report_json
 
     root = Path(__file__).resolve().parents[1]
-    launch = _validate_launch_submission(release.get("launch_submission"))
-    checkpoint = launch["evidence_checkpoint"]
+    launch = _validate_attested_submission(release.get("attested_submission"))
+    checkpoint = launch.get("evidence_checkpoint")
+    if checkpoint is None:
+        # Relay posture: no frozen checkpoint was captured at submission time,
+        # so there is nothing to replay. The result says so explicitly rather
+        # than implying a replay happened.
+        return {
+            "frozen_evidence": "NOT_CLAIMED",
+            "evidence_scope": "signed_feed_relay",
+        }
     index = checkpoint["signed_index"]
     try:
         issued_at = datetime.fromisoformat(str(index["generated_at"]))
@@ -2050,7 +2076,7 @@ def verify_public_release() -> dict[str, Any]:
         _finney_subtensor,
     )
     result.update(
-        verify_historical_launch(
+        verify_historical_submission(
             release,
             subtensor=subtensor,
             deadline=deadline,
@@ -2241,13 +2267,9 @@ def _assert_current_dry_run_v3(submission: dict[str, Any]) -> str:
             abs_tol=1e-9,
         )
         or not _is_finite_number(intel_tdx_share)
-        or not math.isclose(
-            float(intel_tdx_share), 0.70, rel_tol=0.0, abs_tol=1e-12
-        )
+        or not math.isclose(float(intel_tdx_share), 0.70, rel_tol=0.0, abs_tol=1e-12)
         or not _is_finite_number(cybergym_share)
-        or not math.isclose(
-            float(cybergym_share), 0.30, rel_tol=0.0, abs_tol=1e-12
-        )
+        or not math.isclose(float(cybergym_share), 0.30, rel_tol=0.0, abs_tol=1e-12)
         or isinstance(mapping_block, bool)
         or not isinstance(mapping_block, int)
         or mapping_block <= 0

@@ -252,43 +252,50 @@ def _require_finney_archive(subtensor: Any) -> str:
     return observed
 
 
-def _require_launch_state(
+def _require_attested_state(
     state: dict[str, Any],
 ) -> tuple[
     dict[str, Any],
+    dict[str, Any] | None,
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
 ]:
-    identity = state.get("submission_launch_identity")
-    broadcast_intent = state.get("submission_launch_broadcast_intent")
-    uid_safety = state.get("submission_launch_uid_safety")
+    """The finalized THIN submission the release attests (schema v3).
+
+    The one-shot launch requirement is gone: the attested record is the most
+    recent finalized continuous thin submission — the posture the validator
+    actually runs (relay + concurrent shadow audit). A frozen full-provenance
+    checkpoint is attached only when the submission carried one; a relay
+    submission truthfully attests scope signed_feed_relay instead.
+    """
+    identity = state.get("submission_finalized_identity")
+    broadcast_intent = state.get("submission_finalized_broadcast_intent")
+    receipt = state.get("submission_finalized_receipt")
+    attempt = state.get("submission_finalized_id")
     if (
         state.get("submission_pending_id") is not None
-        or state.get("submission_launch_status") != "finalized"
-        or state.get("submission_launch_budget_limit") != 1
-        or state.get("submission_continuous_enabled") is not False
+        or state.get("submission_finalized_lane") != "thin"
         or not isinstance(identity, dict)
         or not isinstance(broadcast_intent, dict)
-        or not isinstance(uid_safety, dict)
-        or identity.get("uid_safety") != uid_safety
+        or not isinstance(receipt, dict)
+        or not isinstance(attempt, str)
+        or SHA256.fullmatch(attempt.removeprefix("sha256:")) is None
     ):
         raise ReleaseError(
-            "journal has no final, unreconciled one-shot launch with durable "
-            "broadcast intent and UID-safety proof"
+            "journal has no finalized thin submission with durable broadcast "
+            "intent and receipt"
         )
-    attempt = state.get("submission_launch_attempt_id")
-    if (
-        not isinstance(attempt, str)
-        or SHA256.fullmatch(attempt) is None
-        or state.get("submission_launch_attempt_ids") != [attempt]
-    ):
-        raise ReleaseError("journal launch-attempt budget is malformed")
-    full = identity.get("full_provenance")
+    uid_safety = identity.get("uid_safety")
     vector = identity.get("signed_vector")
-    if not isinstance(full, dict) or not isinstance(vector, dict):
-        raise ReleaseError("journal lacks the launch vector or provenance checkpoint")
-    return identity, full, broadcast_intent, uid_safety
+    if not isinstance(uid_safety, dict) or not isinstance(vector, dict):
+        raise ReleaseError(
+            "journal finalized identity lacks the signed vector or UID-safety proof"
+        )
+    full = identity.get("full_provenance")
+    if full is not None and not isinstance(full, dict):
+        raise ReleaseError("journal provenance checkpoint is malformed")
+    return identity, full, broadcast_intent, uid_safety, receipt
 
 
 def _archive_snapshot(
@@ -1183,14 +1190,14 @@ def build_release(
         WIRE_BURN_U16,
         WIRE_VALIDATED_SUPPLY_SHARE,
         WIRE_VALIDATED_SUPPLY_U16,
-        _validate_launch_submission,
-        verify_historical_launch,
+        _validate_attested_submission,
+        verify_historical_submission,
     )
     from scaffold.validator_thin import _wire_weights
 
     _require_finney_archive(subtensor)
-    identity, full, raw_broadcast_intent, journal_uid_safety = _require_launch_state(
-        state
+    identity, full, raw_broadcast_intent, journal_uid_safety, receipt = (
+        _require_attested_state(state)
     )
     vector = identity["signed_vector"]
     vector_digest = "sha256:" + hashlib.sha256(canonical_json(vector)).hexdigest()
@@ -1203,13 +1210,13 @@ def build_release(
             int(uid): float(weight) for uid, weight in identity["uid_weights"]
         }
         uid_hotkeys = {int(uid): str(hotkey) for uid, hotkey in identity["uid_hotkeys"]}
-        extrinsic_hash = str(state["submission_launch_extrinsic_hash"]).lower()
-        block_hash = str(state["submission_launch_block_hash"]).lower()
-        block_number = int(state["submission_launch_block_number"])
-        version_key = int(state["submission_launch_version_key"])
+        extrinsic_hash = str(receipt["extrinsic_hash"]).lower()
+        block_hash = str(receipt["block_hash"]).lower()
+        block_number = int(receipt["block_number"])
+        version_key = int(receipt["version_key"])
         next_epoch_start_block = int(identity["next_epoch_start_block"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ReleaseError("journal launch identity is malformed") from exc
+        raise ReleaseError("journal finalized identity is malformed") from exc
     signed_rows = vector.get("weights")
     burn_snapshot = vector.get("burn_snapshot")
     if (
@@ -1287,7 +1294,7 @@ def build_release(
     ):
         raise ReleaseError(
             "archive mapping, owner, or epoch schedule does not match the "
-            "journaled launch identity"
+            "journaled submission identity"
         )
 
     archive_uid_safety = _archive_uid_safety(
@@ -1302,56 +1309,62 @@ def build_release(
     )
     if archive_uid_safety != journal_uid_safety:
         raise ReleaseError(
-            "archive UID-safety proof differs from the durable launch proof"
+            "archive UID-safety proof differs from the durable journal proof"
         )
 
-    signed_index = full.get("signed_index")
-    if (
-        not isinstance(signed_index, dict)
-        or (signed_index.get("latest") or {}).get("source_epoch")
-        != full.get("source_epoch")
-        or (signed_index.get("latest") or {}).get("manifest") != full.get("manifest")
-    ):
-        raise ReleaseError("journal has no exact signed evidence index checkpoint")
-    if (
-        full.get("scope") != "rewarded_set_full"
-        or full.get("vector_agrees") is not True
-        or not full.get("rewarded_hotkeys")
-        or full.get("rewarded_hotkeys") != full.get("raw_replayed_hotkeys")
-        or full.get("source_revision") != EXPECTED_PRODUCER_REVISION
-        or not isinstance(full.get("report_signing_key_id"), str)
-        or not isinstance(full.get("verifier_binary_digest"), str)
-    ):
-        raise ReleaseError("journal rewarded-set provenance gate is incomplete")
+    checkpoint: dict[str, Any] | None = None
+    replay_bytes = b""
+    if full is not None:
+        signed_index = full.get("signed_index")
+        if (
+            not isinstance(signed_index, dict)
+            or (signed_index.get("latest") or {}).get("source_epoch")
+            != full.get("source_epoch")
+            or (signed_index.get("latest") or {}).get("manifest")
+            != full.get("manifest")
+        ):
+            raise ReleaseError("journal has no exact signed evidence index checkpoint")
+        if (
+            full.get("scope") != "rewarded_set_full"
+            or full.get("vector_agrees") is not True
+            or not full.get("rewarded_hotkeys")
+            or full.get("rewarded_hotkeys") != full.get("raw_replayed_hotkeys")
+            or full.get("source_revision") != EXPECTED_PRODUCER_REVISION
+            or not isinstance(full.get("report_signing_key_id"), str)
+            or not isinstance(full.get("verifier_binary_digest"), str)
+        ):
+            raise ReleaseError("journal rewarded-set provenance gate is incomplete")
 
-    checkpoint = {
-        "source_epoch": full["source_epoch"],
-        "manifest": full["manifest"],
-        "report_id": full["report_id"],
-        "policy_release": full["policy_release"],
-        "policy_digest": full["policy_digest"],
-        "report_signing_key_id": full["report_signing_key_id"],
-        "reward_mechanism": {"id": full["mechanism"], "revision": 1},
-        "verifier_digest": full["verifier_digest"],
-        "verifier_binary_digest": full["verifier_binary_digest"],
-        "public_assurance": "receipts_only",
-        "signed_index": signed_index,
-        "freshness_boundary": full.get("freshness_boundary"),
-    }
-    replay_result = _replay_frozen_controlled_positive(
-        checkpoint=checkpoint,
-        signed_vector=vector,
-        inclusion_block=block_number,
-        inclusion_block_hash=block_hash,
-        public_root=public_root,
-        controlled_root=controlled_root,
-        verifier_binary_path=verifier_binary_path,
-        subtensor=subtensor,
-    )
-    replay_bytes = canonical_json(replay_result)
-    checkpoint["replay_result"] = "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
+        checkpoint = {
+            "source_epoch": full["source_epoch"],
+            "manifest": full["manifest"],
+            "report_id": full["report_id"],
+            "policy_release": full["policy_release"],
+            "policy_digest": full["policy_digest"],
+            "report_signing_key_id": full["report_signing_key_id"],
+            "reward_mechanism": {"id": full["mechanism"], "revision": 1},
+            "verifier_digest": full["verifier_digest"],
+            "verifier_binary_digest": full["verifier_binary_digest"],
+            "public_assurance": "receipts_only",
+            "signed_index": signed_index,
+            "freshness_boundary": full.get("freshness_boundary"),
+        }
+        replay_result = _replay_frozen_controlled_positive(
+            checkpoint=checkpoint,
+            signed_vector=vector,
+            inclusion_block=block_number,
+            inclusion_block_hash=block_hash,
+            public_root=public_root,
+            controlled_root=controlled_root,
+            verifier_binary_path=verifier_binary_path,
+            subtensor=subtensor,
+        )
+        replay_bytes = canonical_json(replay_result)
+        checkpoint["replay_result"] = (
+            "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
+        )
     release = {
-        "schema": "cathedral_sn39_provenance_release_v2",
+        "schema": "cathedral_sn39_provenance_release_v3",
         "network": "finney",
         "netuid": 39,
         "validated_capability": "intel_tdx_cpu",
@@ -1372,7 +1385,7 @@ def build_release(
                 "effective_burn_share": WIRE_BURN_SHARE,
             },
         },
-        "launch_submission": {
+        "attested_submission": {
             "vector_id": identity["vector_id"],
             "policy_version": identity["policy_version"],
             "signed_vector_sha256": vector_digest,
@@ -1422,8 +1435,8 @@ def build_release(
         "pins": EXPECTED_RELEASE_PINS,
         "release_attestation": {"key_id": RELEASE_KEY_ID},
     }
-    _validate_launch_submission(release["launch_submission"])
-    verify_historical_launch(release, subtensor=subtensor)
+    _validate_attested_submission(release["attested_submission"])
+    verify_historical_submission(release, subtensor=subtensor)
     return release, replay_bytes
 
 
@@ -1832,6 +1845,13 @@ def verify_frozen_release_evidence(
     from scaffold.sn39_public_reproduction import verify_frozen_evidence
 
     _require_finney_archive(subtensor)
+    if not (release.get("attested_submission") or {}).get("evidence_checkpoint"):
+        # Relay posture: no frozen checkpoint was captured, so the reproduction
+        # must agree there is nothing to replay — and say so explicitly.
+        result = verify_frozen_evidence(release, subtensor=subtensor)
+        if result.get("frozen_evidence") != "NOT_CLAIMED":
+            raise ReleaseError("relay release unexpectedly claims frozen evidence")
+        return
     if not replay_bytes or len(replay_bytes) > MAX_PUBLIC_BLOB_BYTES:
         raise ReleaseError("generated replay result exceeds its size cap")
     replay_digest = "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
@@ -1933,18 +1953,21 @@ def main() -> int:
         release_sha=args.release_sha,
         release_root=release_root,
     )
-    expected_replay = release["launch_submission"]["evidence_checkpoint"][
-        "replay_result"
-    ]
-    actual_replay = put_blob(PUBLIC_ROOT, replay_bytes)
-    if actual_replay != expected_replay:
-        raise ReleaseError("published replay-result digest differs from the release")
+    checkpoint = release["attested_submission"].get("evidence_checkpoint")
+    actual_replay = None
+    if checkpoint is not None:
+        expected_replay = checkpoint["replay_result"]
+        actual_replay = put_blob(PUBLIC_ROOT, replay_bytes)
+        if actual_replay != expected_replay:
+            raise ReleaseError(
+                "published replay-result digest differs from the release"
+            )
     atomic_write(PUBLIC_ROOT / "release.json", release_bytes)
     atomic_write(PUBLIC_ROOT / "release.json.sig", signature_bytes)
     print(
         json.dumps(
             {
-                "extrinsic_hash": release["launch_submission"]["extrinsic"]["hash"],
+                "extrinsic_hash": release["attested_submission"]["extrinsic"]["hash"],
                 "release_sha256": (
                     "sha256:" + hashlib.sha256(release_bytes).hexdigest()
                 ),

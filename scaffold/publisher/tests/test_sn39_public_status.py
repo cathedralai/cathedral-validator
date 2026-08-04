@@ -291,7 +291,7 @@ def test_current_full_audit_does_not_upgrade_receipts_only_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     release = {
-        "launch_submission": {
+        "attested_submission": {
             "evidence_checkpoint": {"public_assurance": "receipts_only"}
         }
     }
@@ -317,7 +317,7 @@ def test_unsigned_release_cannot_upgrade_launch_assurance(
         json.dumps(
             {
                 "release_attestation": {"key_id": status.RELEASE_KEY_ID},
-                "launch_submission": {
+                "attested_submission": {
                     "evidence_checkpoint": {"public_assurance": "full"}
                 },
             }
@@ -347,7 +347,7 @@ def test_valid_detached_release_signature_can_publish_launch_assurance(
     keys_path = tmp_path / "release-attestation-keys.json"
     release = {
         "release_attestation": {"key_id": status.RELEASE_KEY_ID},
-        "launch_submission": {"evidence_checkpoint": {"public_assurance": "full"}},
+        "attested_submission": {"evidence_checkpoint": {"public_assurance": "full"}},
     }
     release_bytes = json.dumps(
         release,
