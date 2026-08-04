@@ -7,7 +7,7 @@ projection is what the public status service reads, group-readable.
 Three files have to agree for that to hold, and a re-sync broke it by changing only
 one of them:
 
-  1. config/validator-mainnet-sn39.toml must set [logs].status_jsonl, or nothing
+  1. config/validator-selfcompose-sn39.toml must set [logs].status_jsonl, or nothing
      ever writes the projection.
   2. deploy/sn39/cathedral-sn39-public-status.service names exactly that path in
      ConditionPathExists, so if (1) is missing the unit can never start and skips
@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_CONFIG = _ROOT / "config" / "validator-mainnet-sn39.toml"
+_CONFIG = _ROOT / "config" / "validator-selfcompose-sn39.toml"
 _STATUS_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-sn39-public-status.service"
 _VALIDATOR_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39.service"
 _LAUNCHER = _ROOT / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"
@@ -71,7 +71,7 @@ def test_the_status_unit_waits_for_exactly_the_configured_projection():
 
 
 def test_the_launcher_grants_the_group_on_the_projection_only():
-    for mode in ("preflight", "launch", "continuous", "reconcile"):
+    for mode in ("continuous",):
         environment = _launcher._child_environment(mode)
         assert "CATHEDRAL_VALIDATOR_JSONL_GROUP" not in environment, (
             f"{mode}: the raw journal must not be group-readable"

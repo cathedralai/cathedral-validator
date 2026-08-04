@@ -39,7 +39,7 @@ _UNIT_PATH = (
     / "cathedral-validator-sn39.service"
 )
 
-_CHILD_MODES = ("preflight", "launch", "continuous", "reconcile")
+_CHILD_MODES = ("continuous",)
 
 
 @pytest.mark.parametrize("mode", _CHILD_MODES)

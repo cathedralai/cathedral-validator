@@ -94,3 +94,6 @@ require_completed_launch_for_broadcast = false
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+# Sanitized allowlisted projection the public status service reads (the raw
+# journal above stays 0600; only this projection is group-readable).
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"
