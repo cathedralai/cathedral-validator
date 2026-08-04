@@ -32,7 +32,9 @@ CONFIGS = {
     # "local publisher publishes to the public feed; validator fetches it back".
     "continuous": INSTALL_ROOT / "validator-thin-sn39-relay.toml",
 }
-MODES = frozenset({*CONFIGS, "status"})
+MODES = frozenset({*CONFIGS, "status", "finalize"})
+JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
+FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
 SYSTEMCTL = Path("/usr/bin/systemctl")
 LEGACY_SERVICE_UNIT = "cathedral-thin-validator.service"
@@ -420,20 +422,69 @@ def _verify(mode: str) -> tuple[Path, Path, str]:
     return release, python, manifest_digest
 
 
+def _finalizer_context_digest(
+    *,
+    release_sha: str,
+    journal: Path,
+    manifest_digest: str,
+) -> str:
+    payload = (
+        "cathedral-sn39-finalizer-context-v1\n"
+        f"{release_sha}\n"
+        f"{manifest_digest}\n"
+        f"{journal}\n"
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _finalizer_journal(value: str) -> Path:
+    journal = Path(value)
+    if (
+        not journal.is_absolute()
+        or journal.parent != RUNTIME_ROOT
+        or JOURNAL_RE.fullmatch(journal.name) is None
+    ):
+        raise InstallError("finalizer journal is outside the canonical runtime root")
+    return journal
+
+
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else ""
-    if mode not in MODES or len(argv) != 1:
+    finalize = mode == "finalize"
+    if (
+        mode not in MODES
+        or (finalize and len(argv) != 2)
+        or (not finalize and len(argv) != 1)
+    ):
         print(
-            "usage: cathedral-sn39-release {continuous|status}",
+            "usage: cathedral-sn39-release {continuous|status|finalize JOURNAL}",
             file=sys.stderr,
         )
         return 2
+    if finalize and os.geteuid() != ROOT_UID:
+        print("SN39 finalize launcher must run as root", file=sys.stderr)
+        return 1
     try:
+        journal = _finalizer_journal(argv[1]) if finalize else None
         release, python, manifest_digest = _verify(mode)
     except InstallError as exc:
         print(f"SN39 immutable-install check failed: {exc}", file=sys.stderr)
         return 1
-    if mode == "status":
+    if finalize:
+        assert journal is not None
+        command = [
+            str(python),
+            "-I",
+            "-B",
+            str(release / "scripts/finalize_sn39_public_release.py"),
+            "--release",
+            str(release),
+            "--release-sha",
+            release.name,
+            "--journal",
+            str(journal),
+        ]
+    elif mode == "status":
         command = [str(python), "scripts/publish_sn39_validator_status.py"]
     else:
         command = [
@@ -451,6 +502,13 @@ def main(argv: list[str]) -> int:
         release_sha=release.name,
         launch_config_sha256=_digest(config) if config is not None else None,
     )
+    if finalize:
+        assert journal is not None
+        environment[FINALIZER_CONTEXT_ENV] = _finalizer_context_digest(
+            release_sha=release.name,
+            journal=journal,
+            manifest_digest=manifest_digest,
+        )
     os.chdir(release)
     os.execve(python, command, environment)
     return 127
