@@ -19,6 +19,7 @@ from cathedral_thin.score_classes import (
     load_best_report,
     load_score_policy,
     local_class_decision,
+    COMPUTE_REPORT_SCHEMA_V2,
     sign_report,
     verify_report,
 )
@@ -123,6 +124,18 @@ def report_body(*, epoch=7, previous=None, entries=None):
         ],
         "signing_key_id": "score-key-1",
     }
+
+
+def v2_compute_report_body(*, entries=None):
+    body = report_body(entries=entries)
+    body["schema"] = COMPUTE_REPORT_SCHEMA_V2
+    body["candidate_snapshot"] = {
+        "digest": "sha256:" + "77" * 32,
+        "block": 1000,
+        "block_hash": "88" * 32,
+        "hotkeys": [entry["miner_hotkey"] for entry in body["entries"]],
+    }
+    return body
 
 
 def verified(tmp_path, *, epoch=7, previous=None, entries=None, asserted=False):
@@ -247,6 +260,65 @@ def test_duplicate_json_key_and_noncanonical_bytes_rejected(tmp_path):
             current_block=1010,
             now=NOW,
         )
+
+
+def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
+    private, public = key_material()
+    policy = write_policy(tmp_path, public).external_classes[0]
+    missing = report_body()
+    missing["schema"] = COMPUTE_REPORT_SCHEMA_V2
+    with pytest.raises(ThinSubnetError, match="missing=.*candidate_snapshot"):
+        verify_report(
+            sign_report(missing, private),
+            policy,
+            network="finney",
+            netuid=39,
+            current_block=1010,
+            now=NOW,
+        )
+
+    body = v2_compute_report_body()
+    report = verify_report(
+        sign_report(body, private),
+        policy,
+        network="finney",
+        netuid=39,
+        current_block=1010,
+        now=NOW,
+    )
+    assert report.document["candidate_snapshot"]["hotkeys"] == ["hotkey-a", "hotkey-b"]
+
+    for mutate, message in (
+        (
+            lambda value: value["candidate_snapshot"].update(
+                {"hotkeys": ["hotkey-a"]}
+            ),
+            "exactly match",
+        ),
+        (
+            lambda value: value["candidate_snapshot"].update(
+                {"block_hash": "0x" + "88" * 32}
+            ),
+            "block hash",
+        ),
+        (
+            lambda value: value["candidate_snapshot"].update(
+                {"digest": "receipt-sha256:" + "77" * 32}
+            ),
+            "digest",
+        ),
+    ):
+        invalid = v2_compute_report_body()
+        mutate(invalid)
+        with pytest.raises(ThinSubnetError, match=message):
+            verify_report(
+                sign_report(invalid, private),
+                policy,
+                network="finney",
+                netuid=39,
+                current_block=1010,
+                now=NOW,
+            )
 
 
 def test_checkpoint_blocks_rollback_equivocation_and_broken_chain(tmp_path):
