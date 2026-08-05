@@ -2,8 +2,15 @@
 
 A preflight that cannot fail is worse than no preflight: it converts "we think
 it is ready" into "it says it is ready" while proving nothing. So these tests
-drive each of the six checks to its failure verdict with injected facts, and
-they pay particular attention to the two that were mis-stated in the field:
+drive each of the seven checks to its failure verdict with injected facts, and
+they pay particular attention to the three that were mis-stated in the field:
+
+  * the composer-IDENTITY check, because the preflight once resolved the
+    publisher from a unit-name default, landed on a legacy process that writes
+    its own unscoped `latest` row, and reported that decoy's state as fact --
+    declaring the v3 composer absent and the producer hotkey unset when the
+    real composer had both. Silently probing the wrong process and presenting
+    its state confidently is the worst failure mode this script has;
 
   * the dev-key check, because //Alice was found configured on the live
     publisher, and the intake's audience-scoped epoch fence makes a single
@@ -46,6 +53,17 @@ NOW = 1_785_916_800.0  # 2026-08-05T08:00:00Z
 REAL_PRODUCER = "5CtobNq2yNmUKaaR9HL5eSY2jN4j43iz1GLXNeNp2tbkwawK"
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 
+# The three shapes the live SN39 box actually runs, because the decoys are not
+# hypothetical: cathedral-publisher.service (a pre-scope tree writing an
+# unscoped `latest` nothing consumes) and cathedral-scorer-canary.service
+# (scoped to test/292) both answer /v1/validator/weights/next with a real
+# signed vector, and one of them is the process this preflight used to probe.
+COMPOSER_PID = 673997
+LEGACY_PID = 135145
+CANARY_PID = 134825
+EXPECTED_VECTOR_ID = "latest:finney:39"
+EXPECTED_LOCK_NAME = "cathedral:weights:refresh:finney:39"
+
 
 def _iso(offset_secs: float) -> str:
     return gate._iso(NOW - offset_secs)
@@ -63,7 +81,7 @@ def publisher_process(**over) -> gate.ProcessFacts:
     }
     environ.update(over.pop("environ", {}))
     base = {
-        "pid": 135145,
+        "pid": COMPOSER_PID,
         "unit": gate.DEFAULT_PUBLISHER_UNIT,
         "user": "polaris",
         "argv": ["/srv/app/.venv/bin/python3", "-m", "uvicorn"],
@@ -75,6 +93,125 @@ def publisher_process(**over) -> gate.ProcessFacts:
     }
     base.update(over)
     return gate.ProcessFacts(**base)
+
+
+def legacy_process(**over) -> gate.ProcessFacts:
+    """The pre-scope tree: no producer key, no cybergym env, unscoped row."""
+    base = {
+        "pid": LEGACY_PID,
+        "unit": "cathedral-publisher.service",
+        "user": "polaris",
+        "argv": ["/home/polaris/cathedral/.venv/bin/python3", "-m", "uvicorn"],
+        "cwd": "/home/polaris/cathedral",
+        "exe": "/usr/bin/python3.12",
+        "environ": {
+            "PATH": "/usr/bin",
+            "DATABASE_URL": "postgresql://user:secret@127.0.0.1:5432/cathedral",
+        },
+        "start_epoch": NOW - 900_000,
+        "host_now": NOW,
+    }
+    base.update(over)
+    return gate.ProcessFacts(**base)
+
+
+def canary_process(**over) -> gate.ProcessFacts:
+    """Scoped, current code -- but to test/292, not finney/39."""
+    base = {
+        "pid": CANARY_PID,
+        "unit": "cathedral-scorer-canary.service",
+        "user": "polaris",
+        "argv": ["/home/polaris/cathedral-scorer/.venv/bin/python3", "-m", "uvicorn"],
+        "cwd": "/home/polaris/cathedral-scorer",
+        "exe": "/usr/bin/python3.12",
+        "environ": {
+            "PATH": "/usr/bin",
+            "DATABASE_URL": "postgresql://user:secret@127.0.0.1:5432/cathedral",
+            gate.NETWORK_ENV: "test",
+            gate.NETUID_ENV: "292",
+        },
+        "start_epoch": NOW - 900_000,
+        "host_now": NOW,
+    }
+    base.update(over)
+    return gate.ProcessFacts(**base)
+
+
+def scope_probe(**over) -> dict:
+    """What a correctly scoped publisher says about itself."""
+    base = {
+        "cwd": "/srv/app",
+        "executable": "/srv/app/.venv/bin/python3",
+        "module_file": "/srv/app/scaffold/publisher/weights.py",
+        "persisted_vector_id": EXPECTED_VECTOR_ID,
+        "refresh_lock_name": EXPECTED_LOCK_NAME,
+        "legacy_vector_id": "latest",
+    }
+    base.update(over)
+    return base
+
+
+def legacy_scope_probe() -> dict:
+    """A pre-scope tree cannot answer the question at all: no such function."""
+    return {
+        "cwd": "/home/polaris/cathedral",
+        "executable": "/home/polaris/cathedral/.venv/bin/python3",
+        "module_file": "/home/polaris/cathedral/scaffold/publisher/weights.py",
+        "persisted_vector_id": None,
+        "persisted_vector_id_error": "_persisted_vector_id is absent from this module",
+        "refresh_lock_name": None,
+        "refresh_lock_name_error": "_refresh_lock_name is absent from this module",
+        "legacy_vector_id": None,
+    }
+
+
+def canary_scope_probe() -> dict:
+    return scope_probe(
+        cwd="/home/polaris/cathedral-scorer",
+        module_file="/home/polaris/cathedral-scorer/scaffold/publisher/weights.py",
+        persisted_vector_id="latest:test:292",
+        refresh_lock_name="cathedral:weights:refresh:test:292",
+    )
+
+
+def candidate_entry(proc: gate.ProcessFacts, scope: dict, *, is_composer: bool) -> dict:
+    entry = {
+        "unit": proc.unit or "(no unit)",
+        "pid": proc.pid,
+        "cwd": proc.cwd,
+        "interpreter": proc.interpreter,
+        "module_file": scope.get("module_file"),
+        "persisted_vector_id": scope.get("persisted_vector_id"),
+        "refresh_lock_name": scope.get("refresh_lock_name"),
+        "is_composer": is_composer,
+    }
+    for key in ("import_error", "persisted_vector_id_error", "refresh_lock_name_error"):
+        if scope.get(key):
+            entry[key] = scope[key]
+    return entry
+
+
+def composer_identity(**over) -> gate.ComposerResolution:
+    """A resolution that positively identified the composer."""
+    proc = over.pop("process", publisher_process())
+    scope = over.pop("scope", scope_probe())
+    base = {
+        "expected_vector_id": EXPECTED_VECTOR_ID,
+        "expected_lock_name": EXPECTED_LOCK_NAME,
+        "method": f"/proc scan for {gate.PUBLISHER_PROCESS_MARKER}",
+        "process": proc,
+        "scope": scope,
+        "candidates": [candidate_entry(proc, scope, is_composer=True)],
+        "lock": {
+            "observed": True,
+            "holder_pid": proc.pid if proc is not None else None,
+            "polls": 91,
+            "budget_secs": gate.DEFAULT_OBSERVE_LOCK_SECS,
+            "lock_name": EXPECTED_LOCK_NAME,
+        },
+    }
+    base.update(over)
+    return gate.ComposerResolution(**base)
 
 
 def validator_process(**over) -> gate.ProcessFacts:
@@ -152,6 +289,7 @@ def status_events(age_secs: float = 120.0) -> list[dict]:
 
 def healthy_facts(**over) -> gate.Facts:
     base = {
+        "composer_id": composer_identity(),
         "publisher": publisher_process(),
         "composer": composer_probe(),
         "database": database_probe(),
@@ -182,9 +320,10 @@ def result(facts: gate.Facts, check_id: str) -> gate.CheckResult:
 # --------------------------------------------------------------------------
 
 
-def test_a_ready_host_passes_all_six_checks():
+def test_a_ready_host_passes_all_seven_checks():
     results = gate.run_checks(healthy_facts())
     assert [r.check_id for r in results] == [
+        "composer_identity",
         "composer_reachable",
         "db_migration",
         "producer_identity",
@@ -192,7 +331,7 @@ def test_a_ready_host_passes_all_six_checks():
         "fundable_lane",
         "validator_writing",
     ]
-    assert [r.state for r in results] == [gate.PASS] * 6
+    assert [r.state for r in results] == [gate.PASS] * 7
 
 
 def test_every_non_pass_verdict_names_an_action():
@@ -201,6 +340,225 @@ def test_every_non_pass_verdict_names_an_action():
     for candidate in gate.run_checks(facts):
         assert candidate.state != gate.PASS
         assert candidate.action.strip(), candidate.check_id
+
+
+# --------------------------------------------------------------------------
+# 0. composer identity -- the decoy trap
+#
+# The live SN39 box runs four publisher-shaped processes writing three
+# different durable rows. The one this preflight originally probed by default
+# was a legacy tree writing an unscoped `latest` row nothing consumes, so the
+# report confidently described the wrong process. These tests hold the line at
+# three properties: a decoy is never accepted, an unidentifiable process fails
+# rather than passing, and the real composer is found without anyone passing a
+# flag.
+# --------------------------------------------------------------------------
+
+
+def test_the_composer_is_found_among_the_decoys_without_a_unit_flag():
+    host = live_box_host()
+    ident = gate.resolve_composer(host, _args())
+    assert ident.confirmed
+    assert ident.process.pid == COMPOSER_PID
+    assert ident.process.unit == gate.DEFAULT_PUBLISHER_UNIT
+    assert ident.scope["persisted_vector_id"] == EXPECTED_VECTOR_ID
+    # all three were considered, and exactly one was selected
+    assert {c["pid"] for c in ident.candidates} == {
+        LEGACY_PID,
+        CANARY_PID,
+        COMPOSER_PID,
+    }
+    assert [c["pid"] for c in ident.candidates if c["is_composer"]] == [COMPOSER_PID]
+
+
+def test_the_legacy_unscoped_tree_is_never_accepted_as_the_composer():
+    """Its weights.py has no _persisted_vector_id at all: it writes one
+    unscoped `latest` row for every subnet, so it cannot be finney/39's."""
+    host = FakeHost(
+        processes=[legacy_process()], scopes={LEGACY_PID: legacy_scope_probe()}
+    )
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert ident.process is None
+    assert EXPECTED_VECTOR_ID in ident.error
+    assert "cathedral-publisher.service" in ident.error
+
+
+def test_a_canary_scoped_to_another_subnet_is_never_accepted_as_the_composer():
+    """Current code, correct shape, wrong audience: it writes latest:test:292."""
+    host = FakeHost(
+        processes=[canary_process()], scopes={CANARY_PID: canary_scope_probe()}
+    )
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert "latest:test:292" in ident.error
+
+
+def test_a_decoy_is_rejected_even_when_it_is_the_only_process_named_by_the_flag():
+    """Naming a unit narrows the search; it never substitutes for the proof.
+
+    This is the exact shape of the original bug -- the flag (its default) chose
+    the process, and nothing checked that the choice was right.
+    """
+    host = FakeHost(
+        processes=[legacy_process()],
+        scopes={LEGACY_PID: legacy_scope_probe()},
+        units={
+            "cathedral-publisher.service": {
+                "MainPID": str(LEGACY_PID),
+                "User": "polaris",
+                "ActiveState": "active",
+            }
+        },
+    )
+    ident = gate.resolve_composer(
+        host, _args(publisher_unit="cathedral-publisher.service")
+    )
+    assert not ident.confirmed
+    assert EXPECTED_VECTOR_ID in ident.error
+
+
+def test_a_process_that_cannot_be_identified_fails_rather_than_passing():
+    """The probe did not run at all. Unknown is not clean."""
+    host = FakeHost(
+        processes=[publisher_process()],
+        scopes={},  # no answer for this pid
+    )
+    host._scopes = {}
+
+    def _raise(proc, program, **kwargs):
+        if program is gate.SCOPE_PROBE:
+            raise gate.ProbeError("probe exited 1: ImportError")
+        return {"rc": 0, "stdout": json.dumps({}), "stderr": ""}
+
+    host.pyprobe = _raise
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert "ImportError" in ident.candidates[0]["probe_error"]
+    verdict = result(
+        healthy_facts(composer_id=ident, publisher=None), "composer_identity"
+    )
+    assert verdict.state == gate.FAIL
+
+
+def test_two_processes_claiming_the_same_scope_is_a_failure_not_a_coin_flip():
+    twin = publisher_process(pid=999001, unit="cathedral-scorer-twin.service")
+    host = FakeHost(
+        processes=[publisher_process(), twin],
+        scopes={COMPOSER_PID: scope_probe(), 999001: scope_probe()},
+    )
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert "2 running processes" in ident.error
+
+
+def test_the_advisory_lock_holder_overrides_a_scope_claim_it_contradicts():
+    """Only the real composer holds the refresh lock. If it is held by some
+    other candidate, the code-derived selection is wrong and saying nothing
+    would be worse than saying so."""
+    host = live_box_host(
+        lock={
+            "observed": True,
+            "holder_pid": LEGACY_PID,
+            "polls": 4,
+            "budget_secs": 75.0,
+            "lock_name": EXPECTED_LOCK_NAME,
+        }
+    )
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert EXPECTED_LOCK_NAME in ident.error
+    assert str(LEGACY_PID) in ident.error
+    # still named, so the report can say what it looked at
+    assert ident.process.pid == COMPOSER_PID
+
+
+def test_an_unobserved_lock_is_neutral_because_it_is_held_only_while_building():
+    host = live_box_host(
+        lock={
+            "observed": False,
+            "polls": 1400,
+            "budget_secs": 75.0,
+            "lock_name": EXPECTED_LOCK_NAME,
+        }
+    )
+    ident = gate.resolve_composer(host, _args())
+    assert ident.confirmed
+    verdict = result(healthy_facts(composer_id=ident), "composer_identity")
+    assert verdict.state == gate.PASS
+    assert "not seen held" in verdict.reason
+
+
+def test_a_confirmed_identity_names_the_process_it_probed():
+    verdict = result(healthy_facts(), "composer_identity")
+    assert verdict.state == gate.PASS
+    selected = verdict.evidence["selected"]
+    assert selected["unit"] == gate.DEFAULT_PUBLISHER_UNIT
+    assert selected["pid"] == COMPOSER_PID
+    assert selected["cwd"] == "/srv/app"
+    assert selected["module_file"] == "/srv/app/scaffold/publisher/weights.py"
+    assert selected["persisted_vector_id"] == EXPECTED_VECTOR_ID
+
+
+def test_the_default_publisher_unit_is_the_sn39_composer_not_the_legacy_one():
+    """The fallback should still land on the right process if it is ever used."""
+    assert gate.DEFAULT_PUBLISHER_UNIT == "cathedral-scorer-sn39.service"
+
+
+def test_enumeration_falls_back_to_the_named_unit_but_keeps_the_proof():
+    host = FakeHost(enumeration_error="remote probe produced no JSON")
+    ident = gate.resolve_composer(host, _args())
+    assert ident.confirmed
+    assert ident.process.pid == COMPOSER_PID
+    assert gate.DEFAULT_PUBLISHER_UNIT in ident.method
+    assert ident.enumeration_error
+
+
+def test_no_publisher_anywhere_is_a_failure_with_a_reason():
+    host = FakeHost(processes=[], units={})
+    ident = gate.resolve_composer(host, _args())
+    assert not ident.confirmed
+    assert gate.PUBLISHER_PROCESS_MARKER in ident.error
+
+
+def test_the_scope_names_match_the_publishers_own_derivation():
+    """These two strings are the whole identification. If weights.py ever
+    changes how it scopes the durable row, this preflight must change with it."""
+    weights = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "scaffold"
+        / "publisher"
+        / "weights.py"
+    ).read_text()
+    assert 'f"latest:{network}:{netuid}"' in weights
+    assert 'f"cathedral:weights:refresh:{network}:{netuid}"' in weights
+    assert gate.persisted_vector_id("finney", 39) == "latest:finney:39"
+    assert gate.refresh_lock_name("finney", 39) == "cathedral:weights:refresh:finney:39"
+
+
+def test_the_scope_probe_never_imports_the_server_module():
+    """Same constraint as COMPOSER_PROBE: importing scaffold.publisher.server
+    constructs a Store, and Store.__init__ migrates the LIVE database."""
+    assert "publisher.weights" in gate.SCOPE_PROBE
+    assert "publisher.server" not in gate.SCOPE_PROBE
+    assert "Store(" not in gate.SCOPE_PROBE
+
+
+def test_the_lock_probe_only_reads_pg_locks_and_never_takes_the_lock():
+    """pg_try_advisory_lock here would make the real composer's next refresh
+    find the lock held and skip a build -- a write-shaped side effect."""
+    assert "pg_locks" in gate.LOCK_OBSERVE_PROBE
+    assert "pg_try_advisory_lock" not in gate.LOCK_OBSERVE_PROBE
+    assert "pg_advisory_lock" not in gate.LOCK_OBSERVE_PROBE
+    assert "default_transaction_read_only=on" in gate.LOCK_OBSERVE_PROBE
+
+
+def test_publisher_enumeration_reads_proc_and_drops_uvicorn_workers():
+    """A `--workers N` child re-execs the same argv; only the parent composes."""
+    assert "op_publishers" in gate.REMOTE_HELPER
+    assert 'info["ppid"] not in found' in gate.REMOTE_HELPER
+    for forbidden in ("systemctl start", "systemctl restart", "daemon-reload"):
+        assert forbidden not in gate.REMOTE_HELPER
 
 
 # --------------------------------------------------------------------------
@@ -257,15 +615,26 @@ def test_wrong_v3_allocation_constant_fails():
     assert "V3_CYBERGYM_ALLOCATION" in verdict.reason
 
 
-def test_unresolvable_publisher_fails_the_composer_check_and_blocks_the_rest():
+def test_unresolvable_publisher_blocks_every_publisher_side_check():
     facts = gate.Facts(
-        publisher_error="cathedral-publisher.service is inactive", now=NOW
+        composer_id=gate.ComposerResolution(
+            expected_vector_id=EXPECTED_VECTOR_ID,
+            expected_lock_name=EXPECTED_LOCK_NAME,
+            error="cathedral-scorer-sn39.service is inactive",
+        ),
+        publisher_error="cathedral-scorer-sn39.service is inactive",
+        now=NOW,
     )
     verdicts = {r.check_id: r for r in gate.run_checks(facts)}
-    assert verdicts["composer_reachable"].state == gate.FAIL
-    for dependent in ("db_migration", "producer_identity", "fundable_lane"):
+    assert verdicts["composer_identity"].state == gate.FAIL
+    for dependent in (
+        "composer_reachable",
+        "db_migration",
+        "producer_identity",
+        "fundable_lane",
+    ):
         assert verdicts[dependent].state == gate.BLOCKED
-        assert "composer_reachable" in verdicts[dependent].reason
+        assert "composer_identity" in verdicts[dependent].reason
 
 
 def test_the_probe_interpreter_is_the_venv_the_service_runs_not_proc_exe():
@@ -674,30 +1043,91 @@ def test_an_unresolvable_validator_blocks_the_health_check_on_the_trust_check():
 # --------------------------------------------------------------------------
 
 
-class FakeHost(gate.Host):
-    """A host whose every read is canned. Nothing here touches a real machine."""
+def _proc_entry(proc: gate.ProcessFacts) -> dict:
+    return {
+        "pid": proc.pid,
+        "unit": proc.unit,
+        "user": proc.user,
+        "argv": proc.argv,
+        "cwd": proc.cwd,
+        "exe": proc.exe,
+        "environ": proc.environ,
+        "start_epoch": proc.start_epoch,
+        "now": NOW,
+        "ppid": 1,
+    }
 
-    def __init__(self, *, composer=None, units=None):
+
+class FakeHost(gate.Host):
+    """A host whose every read is canned. Nothing here touches a real machine.
+
+    ``processes`` is the whole publisher population: by default just the real
+    composer, but tests hand it the live box's actual mix of decoys.
+    """
+
+    def __init__(
+        self,
+        *,
+        composer=None,
+        units=None,
+        processes=None,
+        scopes=None,
+        lock=None,
+        enumeration_error=None,
+    ):
         self.calls = []
         self._composer = composer if composer is not None else composer_probe()
-        self._units = units or {
-            gate.DEFAULT_PUBLISHER_UNIT: {
-                "MainPID": "135145",
-                "User": "polaris",
-                "ActiveState": "active",
-            },
-            gate.DEFAULT_VALIDATOR_UNIT: {
-                "MainPID": "505121",
-                "User": "cathedral-validator",
-                "ActiveState": "active",
-            },
-        }
+        self._processes = list(
+            processes if processes is not None else [publisher_process()]
+        )
+        self._scopes = dict(scopes or {COMPOSER_PID: scope_probe()})
+        self._lock = (
+            lock
+            if lock is not None
+            else {
+                "observed": True,
+                "holder_pid": COMPOSER_PID,
+                "polls": 91,
+                "budget_secs": gate.DEFAULT_OBSERVE_LOCK_SECS,
+                "lock_name": EXPECTED_LOCK_NAME,
+            }
+        )
+        self._enumeration_error = enumeration_error
+        # `units={}` means "this host has no units", not "use the defaults".
+        self._units = (
+            units
+            if units is not None
+            else {
+                gate.DEFAULT_PUBLISHER_UNIT: {
+                    "MainPID": str(COMPOSER_PID),
+                    "User": "polaris",
+                    "ActiveState": "active",
+                },
+                gate.DEFAULT_VALIDATOR_UNIT: {
+                    "MainPID": "505121",
+                    "User": "cathedral-validator",
+                    "ActiveState": "active",
+                },
+            }
+        )
 
     def unit(self, unit):
-        return dict(self._units[unit])
+        try:
+            return dict(self._units[unit])
+        except KeyError:
+            raise gate.ProbeError(f"Unit {unit} could not be found.") from None
+
+    def publishers(self, marker):
+        if self._enumeration_error is not None:
+            raise gate.ProbeError(self._enumeration_error)
+        return [_proc_entry(proc) for proc in self._processes]
 
     def process(self, pid):
-        proc = publisher_process() if pid == 135145 else validator_process()
+        for proc in self._processes:
+            if proc.pid == pid:
+                break
+        else:
+            proc = validator_process()
         return {
             "argv": proc.argv,
             "cwd": proc.cwd,
@@ -709,7 +1139,11 @@ class FakeHost(gate.Host):
 
     def pyprobe(self, proc, program, *, env_keys=(), env=None, timeout=120.0):
         self.calls.append((proc.unit, proc.interpreter, program, dict(env or {})))
-        if program is gate.COMPOSER_PROBE:
+        if program is gate.SCOPE_PROBE:
+            payload = self._scopes.get(proc.pid, legacy_scope_probe())
+        elif program is gate.LOCK_OBSERVE_PROBE:
+            payload = self._lock
+        elif program is gate.COMPOSER_PROBE:
             payload = self._composer
         elif program is gate.DATABASE_PROBE:
             payload = database_probe()
@@ -733,9 +1167,24 @@ class FakeHost(gate.Host):
         return NOW
 
 
+def live_box_host(**over) -> FakeHost:
+    """The population the live SN39 box actually runs: one composer, two decoys."""
+    base = {
+        "processes": [legacy_process(), canary_process(), publisher_process()],
+        "scopes": {
+            LEGACY_PID: legacy_scope_probe(),
+            CANARY_PID: canary_scope_probe(),
+            COMPOSER_PID: scope_probe(),
+        },
+    }
+    base.update(over)
+    return FakeHost(**base)
+
+
 def _args(**over):
     base = {
-        "publisher_unit": gate.DEFAULT_PUBLISHER_UNIT,
+        "publisher_unit": None,
+        "observe_lock_secs": gate.DEFAULT_OBSERVE_LOCK_SECS,
         "validator_unit": gate.DEFAULT_VALIDATOR_UNIT,
         "validator_config": gate.DEFAULT_VALIDATOR_CONFIG,
         "status_log": gate.DEFAULT_STATUS_LOG,
@@ -757,7 +1206,7 @@ def test_gather_runs_each_probe_in_its_own_services_interpreter():
     assert by_unit[gate.DEFAULT_PUBLISHER_UNIT] == "/srv/app/.venv/bin/python3"
     assert by_unit[gate.DEFAULT_VALIDATOR_UNIT] == "/opt/sn39/current-venv/bin/python"
     assert facts.composer["present"] is True
-    assert [r.state for r in gate.run_checks(facts)] == [gate.PASS] * 6
+    assert [r.state for r in gate.run_checks(facts)] == [gate.PASS] * 7
 
 
 def test_the_exit_code_is_non_zero_when_any_check_fails(capsys):
@@ -785,6 +1234,78 @@ def test_the_human_report_never_prints_the_database_dsn(capsys):
 def test_the_json_report_never_prints_the_database_dsn(capsys):
     gate.main(["--json"], host=FakeHost())
     assert "secret@127.0.0.1" not in capsys.readouterr().out
+
+
+def test_the_live_box_shape_probes_the_composer_and_not_a_decoy(capsys):
+    """End to end, through main(), against the population the live box runs.
+
+    The publisher-side verdicts must be about cathedral-scorer-sn39.service --
+    the process that composes latest:finney:39 -- and the report must say so
+    where a reader will see it.
+    """
+    host = live_box_host()
+    assert gate.main([], host=host) == 0
+    out = capsys.readouterr().out
+    assert f"probed publisher  {gate.DEFAULT_PUBLISHER_UNIT} pid {COMPOSER_PID}" in out
+    assert f"composes {EXPECTED_VECTOR_ID}" in out
+    assert "cathedral-publisher.service" not in out
+    # every publisher-side probe went to the composer, none to a decoy
+    probed = {
+        unit
+        for unit, _, program, _ in host.calls
+        if program in (gate.COMPOSER_PROBE, gate.DATABASE_PROBE)
+    }
+    assert probed == {gate.DEFAULT_PUBLISHER_UNIT}
+
+
+def test_a_box_whose_composer_cannot_be_identified_never_reports_a_decoys_state(capsys):
+    """The regression itself: only decoys running, so there is no composer.
+
+    The old script probed one of them and reported "the v3 composer is absent"
+    and "the producer hotkey is unset" as facts about the composer. Neither was
+    true of the composer; both were true of the decoy. Now every publisher-side
+    verdict is BLOCKED and the reason names why.
+    """
+    host = FakeHost(
+        processes=[legacy_process(), canary_process()],
+        scopes={LEGACY_PID: legacy_scope_probe(), CANARY_PID: canary_scope_probe()},
+        units={},
+    )
+    assert gate.main(["--json"], host=host) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    assert report["probed_publisher"] is None
+    states = {check["check"]: check["state"] for check in report["checks"]}
+    assert states["composer_identity"] == gate.FAIL
+    for dependent in (
+        "composer_reachable",
+        "db_migration",
+        "producer_identity",
+        "fundable_lane",
+    ):
+        assert states[dependent] == gate.BLOCKED
+    identity = next(c for c in report["checks"] if c["check"] == "composer_identity")
+    # the reason must name what it looked at and what each one writes instead
+    assert "cathedral-publisher.service" in identity["reason"]
+    assert "latest:test:292" in identity["reason"]
+    # and nothing anywhere claims a fact about "the composer" from a decoy
+    reachable = next(c for c in report["checks"] if c["check"] == "composer_reachable")
+    assert "absent" not in reachable["reason"]
+    producer = next(c for c in report["checks"] if c["check"] == "producer_identity")
+    assert "is unset" not in producer["reason"]
+
+
+def test_the_json_report_names_the_process_every_publisher_verdict_is_about(capsys):
+    gate.main(["--json"], host=live_box_host())
+    probed = json.loads(capsys.readouterr().out)["probed_publisher"]
+    assert probed == {
+        "unit": gate.DEFAULT_PUBLISHER_UNIT,
+        "pid": COMPOSER_PID,
+        "cwd": "/srv/app",
+        "module_file": "/srv/app/scaffold/publisher/weights.py",
+        "persisted_vector_id": EXPECTED_VECTOR_ID,
+        "confirmed": True,
+    }
 
 
 def test_the_status_log_tail_survives_a_sliced_first_line():
