@@ -45,10 +45,17 @@ def _tracked_python_files() -> list[pathlib.Path]:
         # corrosive: the suite is red only on the machine doing the work.
         ".claude",
     }
+    # Match against the path RELATIVE to the repo, never the absolute one. A
+    # checkout can itself live under a directory named like one of these — an
+    # agent worktree literally lives under `.claude/`, and someone's clone can
+    # sit under `venv/` or `build/`. Testing absolute parts then skips every
+    # file in the tree and this boundary silently proves nothing: it reports an
+    # EMPTY import set, which reads as "the code changed" rather than "the scan
+    # found nothing", and the fix looks like updating the expected set.
     return sorted(
         path
         for path in REPO_ROOT.rglob("*.py")
-        if not skip_parts.intersection(path.parts)
+        if not skip_parts.intersection(path.relative_to(REPO_ROOT).parts)
     )
 
 
@@ -289,3 +296,20 @@ def test_enabling_the_audit_scanner_is_what_would_need_the_sat_lane():
         "the enabled route failed for a reason other than the absent game "
         f"package: missing module was {result.get('missing_module')!r}"
     )
+
+
+def test_the_scan_finds_files_at_all():
+    """A skip list that matches the repo's own location proves nothing.
+
+    The exclusions are matched against repo-relative paths precisely because a
+    checkout can live under a directory named like one of them — an agent
+    worktree sits under `.claude/`. Matched against absolute paths instead,
+    every file is skipped and the import-site assertion above compares an EMPTY
+    set, which reads as a code change rather than a broken scan.
+    """
+    files = _tracked_python_files()
+    assert len(files) > 100, (
+        f"the tracked-file scan found only {len(files)} files; the skip list is "
+        "almost certainly matching a component of the repo's own path"
+    )
+    assert any(p.name == "validator_thin.py" for p in files)

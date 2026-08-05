@@ -110,7 +110,26 @@ class _RetryablePreSignHeadDrift(wire.VectorError):
 
 
 class _PendingReceiptNotProven(wire.VectorError):
-    """A signed attempt may have finalized, but archive proof is unavailable."""
+    """A signed attempt may have finalized, but archive proof is unavailable.
+
+    ``fenced_attempt`` records whether the durable journal actually named a
+    signed attempt before this was raised. Every raise that happens after the
+    journal named one leaves it true, which is the default and the historical
+    behaviour. The failures that happen BEFORE the journal is opened at all —
+    chain preflight, most of which are ordinary configuration faults — set it
+    false.
+
+    The distinction is reporting-only: both cases still exit nonzero, still
+    refuse a replacement write, and still leave restart recovery as the only
+    way forward. It exists because the surfaced remediation "the exact signed
+    attempt remains fenced" is a claim about durable state, and repeating it
+    when no attempt was ever recorded sends an operator hunting for a
+    transaction that does not exist.
+    """
+
+    def __init__(self, message: str, *, fenced_attempt: bool = True) -> None:
+        super().__init__(message)
+        self.fenced_attempt = bool(fenced_attempt)
 
 
 class _PostSignedSubmissionMismatch(wire.VectorError):
@@ -4959,6 +4978,36 @@ def _chain_call_arg(call: dict[str, Any], name: str) -> Any:
     return None
 
 
+def _receipt_verdict(
+    reason_out: list[str] | None,
+    verdict: str,
+    reason: str,
+) -> str:
+    """Record why a receipt proof reached its verdict, then return the verdict.
+
+    ``_classify_finalized_receipt`` has more than twenty distinct exits and
+    only three return values, so the verdict alone never told an operator
+    which check spoke. Threading an optional collector keeps every exit a
+    single expression — the control flow is unchanged, byte for byte — while
+    letting the callers that surface a verdict to a human name the cause.
+
+    The collector is optional so that callers who only need the verdict, and
+    the tests that stub this function out entirely, keep working unchanged.
+    """
+    if reason_out is not None:
+        reason_out.append(reason)
+    return verdict
+
+
+def _receipt_reason_suffix(reason_out: list[str]) -> str:
+    """Render a collected receipt-proof reason for an operator-facing message.
+
+    Empty when nothing was collected, so a stubbed or older classifier still
+    produces exactly the message this validator has always emitted.
+    """
+    return f" (cause: {reason_out[-1]})" if reason_out else ""
+
+
 def _classify_finalized_receipt(
     subtensor: Any,
     *,
@@ -4975,47 +5024,80 @@ def _classify_finalized_receipt(
     expected_subnet_owner_hotkey: str | None = None,
     inclusion_policy: InclusionPolicy | None = None,
     require_receipt: bool = True,
+    reason_out: list[str] | None = None,
 ) -> str:
     """Classify exact finalized-call proof as PASS, FAIL, or NOT_PROVEN.
 
     An RPC/archive exception is not evidence of a mismatch. Keeping that case
     distinct prevents a transient read failure from authorizing any second
     chain write after a valid irreversible call.
+
+    That broad ``except`` is deliberate and stays. What does not stay is
+    discarding the exception it caught: a validator whose write cadence
+    degrades because one archive call intermittently fails on a long-lived
+    connection has no way to learn WHICH call, and the same receipt proving
+    fine after a restart is the only clue. Passing ``reason_out`` collects a
+    short, sanitized description of the exit that fired — including the name
+    of the chain call in flight when a read raised — without altering a single
+    verdict.
     """
     substrate = getattr(subtensor, "substrate", None)
     if substrate is None:
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the subtensor client exposes no substrate interface",
+        )
     if require_receipt:
         receipt_success = (
             getattr(receipt, "is_success", None) if receipt is not None else None
         )
         if not isinstance(receipt_success, bool):
-            return NOT_PROVEN
+            return _receipt_verdict(
+                reason_out,
+                NOT_PROVEN,
+                "the submit receipt exposes no boolean is_success",
+            )
         if (
             receipt_success is not True
             or getattr(receipt, "error_message", None) is not None
         ):
-            return FAIL
+            return _receipt_verdict(
+                reason_out,
+                FAIL,
+                "the submit receipt reports a failed or errored extrinsic",
+            )
+    # Every read below can fail transiently and independently, and only an
+    # operator can tell a rate-limited endpoint from a node that never had the
+    # state. Naming the call in flight is what makes that difference visible.
+    step = "substrate.get_chain_finalised_head"
     try:
         finalized_hash = str(substrate.get_chain_finalised_head())
+        step = "substrate.get_block_number(finalized head)"
         finalized_number = _finalized_block(substrate.get_block_number(finalized_hash))
+        step = "substrate.get_block_hash(finalized number)"
         canonical_finalized_hash = (
             str(substrate.get_block_hash(finalized_number))
             if finalized_number is not None
             else ""
         )
+        step = "substrate.get_block_hash(receipt block number)"
         canonical_hash = str(substrate.get_block_hash(block_number))
+        step = "substrate.get_block(receipt block hash)"
         block = substrate.get_block(block_hash=block_hash)
+        step = "subtensor.metagraph(receipt block)"
         inclusion_metagraph = (
             subtensor.metagraph(netuid, block=block_number)
             if uid_hotkeys is not None
             else None
         )
         if inclusion_policy is not None:
+            step = "subtensor.commit_reveal_enabled(receipt block)"
             commit_reveal_at_inclusion = subtensor.commit_reveal_enabled(
                 netuid=netuid,
                 block=block_number,
             )
+            step = "substrate.query(Timestamp.Now at receipt block)"
             timestamp_value = substrate.query(
                 module="Timestamp",
                 storage_function="Now",
@@ -5027,8 +5109,14 @@ def _classify_finalized_receipt(
                 or not isinstance(timestamp_ms, int)
                 or timestamp_ms <= 0
             ):
-                return NOT_PROVEN
+                return _receipt_verdict(
+                    reason_out,
+                    NOT_PROVEN,
+                    "the inclusion block timestamp is not a positive integer",
+                )
+            step = "decode the inclusion block timestamp"
             inclusion_time = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+            step = "subtensor.get_next_epoch_start_block(receipt block)"
             inclusion_next_epoch = (
                 subtensor.get_next_epoch_start_block(
                     netuid,
@@ -5041,22 +5129,36 @@ def _classify_finalized_receipt(
             commit_reveal_at_inclusion = None
             inclusion_time = None
             inclusion_next_epoch = None
+        step = "subtensor.get_subnet_owner_hotkey(receipt block)"
         inclusion_owner_hotkey = (
             str(subtensor.get_subnet_owner_hotkey(netuid, block=block_number) or "")
             if expected_subnet_owner_hotkey is not None
             else None
         )
+        step = "substrate.retrieve_extrinsic_by_hash(receipt block)"
         historical_execution = substrate.retrieve_extrinsic_by_hash(
             block_hash,
             extrinsic_hash,
         )
-    except Exception:  # noqa: BLE001 - archive/RPC unavailability is inconclusive
-        return NOT_PROVEN
+    except Exception as exc:  # noqa: BLE001 - archive/RPC unavailability is inconclusive
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            f"chain read failed at {step}: {stable_error(exc)}",
+        )
     if not isinstance(block, dict):
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the named block did not decode to a dict",
+        )
     extrinsics = block.get("extrinsics")
     if not isinstance(extrinsics, (list, tuple)):
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the named block carries no extrinsics list",
+        )
     matching = [
         (index, item.value)
         for index, item in enumerate(extrinsics)
@@ -5064,26 +5166,51 @@ def _classify_finalized_receipt(
         and str(item.value.get("extrinsic_hash", "")).lower() == extrinsic_hash.lower()
     ]
     if not matching:
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "no extrinsic in the named block carries the signed hash",
+        )
     if len(matching) > 1:
-        return FAIL
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "the named block carries the signed hash more than once",
+        )
     extrinsic_index, observed = matching[0]
     if historical_execution is None:
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the archive returned no execution record for the signed hash",
+        )
     historical_success = getattr(historical_execution, "is_success", None)
     historical_index = getattr(historical_execution, "extrinsic_idx", None)
     if not isinstance(historical_success, bool) or isinstance(historical_index, bool):
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the execution record exposes no boolean is_success or "
+            "non-boolean extrinsic_idx",
+        )
     try:
         historical_execution_index = int(historical_index)
     except (TypeError, ValueError):
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the execution record extrinsic_idx is not an integer",
+        )
     if (
         historical_success is not True
         or getattr(historical_execution, "error_message", None) is not None
         or historical_execution_index != extrinsic_index
     ):
-        return FAIL
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "the execution record reports failure or a different extrinsic index",
+        )
     historical_execution_ok = True
     call = observed.get("call") or {}
     if (
@@ -5096,23 +5223,51 @@ def _classify_finalized_receipt(
         or not isinstance(call.get("call_module"), str)
         or not isinstance(call.get("call_function"), str)
     ):
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "a finalized-head hash, block hash, or decoded call is malformed",
+        )
     if canonical_finalized_hash.lower() != finalized_hash.lower():
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the finalized head did not re-resolve to its own canonical hash",
+        )
     if canonical_hash.lower() != block_hash.lower():
-        return FAIL
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "the receipt block hash is not canonical at its block number",
+        )
     if finalized_number < block_number:
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the finalized head is still behind the receipt block",
+        )
     if inclusion_policy is not None:
         if not isinstance(commit_reveal_at_inclusion, bool):
-            return NOT_PROVEN
+            return _receipt_verdict(
+                reason_out,
+                NOT_PROVEN,
+                "commit-reveal state at inclusion is not a bool",
+            )
         if inclusion_policy.expected_next_epoch_start_block is not None and (
             isinstance(inclusion_next_epoch, bool)
             or not isinstance(inclusion_next_epoch, int)
         ):
-            return NOT_PROVEN
+            return _receipt_verdict(
+                reason_out,
+                NOT_PROVEN,
+                "the next-epoch start block at inclusion is not an integer",
+            )
     if expected_subnet_owner_hotkey is not None and not inclusion_owner_hotkey:
-        return NOT_PROVEN
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the subnet owner hotkey at inclusion is empty",
+        )
     inclusion_bindings_ok = True
     if uid_hotkeys is not None:
         try:
@@ -5138,10 +5293,18 @@ def _classify_finalized_receipt(
                 == block_number
                 and (netuid != 39 or len(inclusion_permits) == len(inclusion_hotkeys))
             )
-        except (AttributeError, TypeError, ValueError):
-            return NOT_PROVEN
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _receipt_verdict(
+                reason_out,
+                NOT_PROVEN,
+                f"the inclusion metagraph did not decode: {stable_error(exc)}",
+            )
         if not complete_bindings:
-            return NOT_PROVEN
+            return _receipt_verdict(
+                reason_out,
+                NOT_PROVEN,
+                "the inclusion metagraph is incomplete at the receipt block",
+            )
         inclusion_bindings_ok = all(
             inclusion_map.get(uid) == hotkey for uid, hotkey in uid_hotkeys.items()
         )
@@ -5152,7 +5315,12 @@ def _classify_finalized_receipt(
                 if hotkey == validator_hotkey
             ]
             if len(validator_indexes) != 1:
-                return FAIL
+                return _receipt_verdict(
+                    reason_out,
+                    FAIL,
+                    "the validator hotkey is not uniquely registered at the "
+                    "receipt block",
+                )
             inclusion_bindings_ok = (
                 inclusion_bindings_ok
                 and inclusion_permits[validator_indexes[0]] is True
@@ -5191,7 +5359,39 @@ def _classify_finalized_receipt(
         and inclusion_policy_ok
         and inclusion_owner_ok
     )
-    return PASS if proven else FAIL
+    if proven:
+        return _receipt_verdict(
+            reason_out,
+            PASS,
+            "the exact finalized call is proven",
+        )
+    # Recomputed only on the failing branch, so the verdict above keeps its
+    # original short-circuit evaluation exactly. Naming which clause disagreed
+    # is the difference between "mismatch" and something an operator can act
+    # on, and a positive mismatch is the one verdict nobody may automate away.
+    contradicted = [
+        name
+        for name, agreed in (
+            ("signer address", observed.get("address") == validator_hotkey),
+            ("call module", call.get("call_module") == "SubtensorModule"),
+            ("call function", call.get("call_function") == "set_mechanism_weights"),
+            ("netuid", _chain_call_arg(call, "netuid") == netuid),
+            ("mechanism id", _chain_call_arg(call, "mecid") == 0),
+            ("version key", _chain_call_arg(call, "version_key") == version_key),
+            ("dests", _chain_call_arg(call, "dests") == wire_uids),
+            ("weights", _chain_call_arg(call, "weights") == wire_weights),
+            ("UID/hotkey bindings at inclusion", inclusion_bindings_ok),
+            ("inclusion policy window", inclusion_policy_ok),
+            ("subnet owner at inclusion", inclusion_owner_ok),
+        )
+        if not agreed
+    ]
+    return _receipt_verdict(
+        reason_out,
+        FAIL,
+        "the finalized call contradicts "
+        + ", ".join(contradicted or ["nothing named"]),
+    )
 
 
 def _prove_finalized_receipt(
@@ -5747,6 +5947,27 @@ def _submit_exact_sn39_extrinsic(
     return receipt
 
 
+def _mark_tick_reached_chain_call(runtime_contract: Any) -> None:
+    """Record, for failure reporting only, that this tick entered the call.
+
+    ``primary_call_started`` is local to one submission and is gone by the
+    time the loop reports a failed tick, yet it is exactly the fact the report
+    needs: after this point a write may have finalized, and before it nothing
+    was signed. Publishing it on the runtime contract — the same object the
+    loop already holds — keeps the two in agreement without giving the loop a
+    second, weaker notion of "reached the chain".
+
+    Nothing branches on this flag. It is set beside ``primary_call_started``
+    and reset at the top of every tick attempt.
+    """
+    if runtime_contract is None:
+        return
+    try:
+        runtime_contract._tick_chain_call_started = True
+    except (AttributeError, TypeError):  # pragma: no cover - immutable namespace
+        pass
+
+
 def set_weights_on_chain(
     uid_weights: dict[int, float],
     *,
@@ -5829,6 +6050,7 @@ def set_weights_on_chain(
                         "SN39 authorized call has no durable pending attempt"
                     )
                 primary_call_started = True
+                _mark_tick_reached_chain_call(runtime_contract)
                 receipt = _submit_exact_sn39_extrinsic(
                     preflight,
                     runtime_contract=runtime_contract,
@@ -5848,6 +6070,7 @@ def set_weights_on_chain(
                 from bittensor.core.settings import version_as_int
 
                 primary_call_started = True
+                _mark_tick_reached_chain_call(runtime_contract)
                 resp = set_weights_extrinsic(
                     subtensor=preflight.subtensor,
                     wallet=preflight.wallet,
@@ -5930,6 +6153,7 @@ def set_weights_on_chain(
                         wire_uids=wire_uids,
                         wire_weights=wire_values,
                     )
+                proof_reason: list[str] = []
                 proof_status = _classify_finalized_receipt(
                     preflight.subtensor,
                     receipt=receipt,
@@ -5946,6 +6170,7 @@ def set_weights_on_chain(
                         SN39_BURN_HOTKEY if netuid == 39 else None
                     ),
                     inclusion_policy=inclusion_policy,
+                    reason_out=proof_reason,
                 )
                 if netuid == 39 and isinstance(attempt_id, str):
                     _record_pending_proof_status(
@@ -5955,16 +6180,22 @@ def set_weights_on_chain(
                     )
                 finalized = proof_status == PASS
                 if proof_status == NOT_PROVEN:
+                    # This is the line the live unit prints every time its
+                    # cadence slips. Without the cause it says only that
+                    # something was unavailable; with it, the failing call is
+                    # named, which is the whole point of the fence being
+                    # temporary rather than terminal.
                     raise _PendingReceiptNotProven(
                         "submission receipt was recorded, but archive/RPC proof is "
                         "temporarily unavailable; restart may only re-prove this "
                         "exact receipt and must not submit again"
+                        + _receipt_reason_suffix(proof_reason)
                     )
                 if proof_status == FAIL:
                     raise _PostSignedSubmissionMismatch(
                         "submission receipt positively mismatches the reserved "
                         "inclusion contract; the attempt remains fenced for "
-                        "operator investigation"
+                        "operator investigation" + _receipt_reason_suffix(proof_reason)
                     )
     except Exception as exc:
         unsigned_aborted = False
@@ -8043,16 +8274,48 @@ def _recover_pending_launch_receipt(
         getattr(args, "offline", False)
     ):
         return None
+    # The preflight runs BEFORE the journal is opened, so nothing here can be
+    # about a fenced attempt yet — and its ~8 sequential chain calls under one
+    # 180s deadline fail for reasons that are mostly the operator's to fix, not
+    # the chain's to resolve. Collapsing all of them into one "temporarily
+    # unavailable" sentence is what made a third-party unit restart-loop 20
+    # times on a message nobody could act on.
     try:
         _prepare_tick_preflight(args)
     except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
         raise
-    except Exception as exc:
+    except wire.VectorError as exc:
+        # A `VectorError` from the preflight is the preflight's own refusal,
+        # and every one of them is already worded precisely: an unregistered
+        # hotkey, a missing validator permit, a metagraph that would not
+        # resolve at the finalized head, a lite node that cannot serve
+        # `MinNonImmuneUids`/`OwnedHotkeys`, a genesis that is not Finney,
+        # commit-reveal enabled, a burn hotkey that is no longer the subnet
+        # owner, a runtime root that is not the canonical one, or the 180s
+        # deadline naming itself. Carry that wording out instead of replacing
+        # it. The exception TYPE is unchanged so the exit path, return code,
+        # and emitted event stay exactly what they were.
         raise _PendingReceiptNotProven(
-            "pending receipt recovery chain preflight is temporarily unavailable"
+            f"pending receipt recovery chain preflight refused: {stable_error(exc)}",
+            fenced_attempt=False,
+        ) from exc
+    except Exception as exc:
+        # Anything else came out of the RPC/SDK layer with no curated wording
+        # of its own — a closed websocket, a refused or reset connection, a
+        # decode failure. Those really are transient, so the framing stays;
+        # only the cause is added, sanitized, so "unavailable" stops being the
+        # entire diagnosis.
+        raise _PendingReceiptNotProven(
+            "pending receipt recovery chain preflight is temporarily unavailable: "
+            f"{stable_error(exc)}",
+            fenced_attempt=False,
         ) from exc
     recovery_lock = _pending_recovery_tick_lock(args)
     recovery_lock.__enter__()
+    # Reporting-only: whether the journal has actually named a signed attempt
+    # by the time something fails below. Nothing branches on it except the
+    # remediation text.
+    signed_attempt_journaled = False
     try:
         state_path = _submission_state_path(args)
         state = _read_state(state_path)
@@ -8082,6 +8345,9 @@ def _recover_pending_launch_receipt(
             raise wire.VectorError(
                 "pending submission journal has no recognized unsigned or signed phase"
             )
+        # From here the journal positively names a signed attempt, so every
+        # remediation below may say so.
+        signed_attempt_journaled = True
         if state.get("submission_pending_proof_status") == FAIL:
             raise _PostSignedSubmissionMismatch(
                 "pending submission has a positive historical proof mismatch; "
@@ -8234,6 +8500,7 @@ def _recover_pending_launch_receipt(
             raise wire.VectorError(
                 "pending receipt differs from its reserved vector or chain identity"
             )
+        proof_reason: list[str] = []
         try:
             with _chain_operation_deadline(
                 "pending launch receipt recovery",
@@ -8254,12 +8521,14 @@ def _recover_pending_launch_receipt(
                     expected_subnet_owner_hotkey=str(identity.get("burn_hotkey") or ""),
                     inclusion_policy=inclusion_policy,
                     require_receipt=False,
+                    reason_out=proof_reason,
                 )
         except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
             raise
         except Exception as exc:
             raise _PendingReceiptNotProven(
-                "pending receipt archive proof is temporarily unavailable"
+                "pending receipt archive proof is temporarily unavailable: "
+                f"{stable_error(exc)}"
             ) from exc
         _record_pending_proof_status(
             args,
@@ -8270,11 +8539,13 @@ def _recover_pending_launch_receipt(
             raise _PendingReceiptNotProven(
                 "pending receipt is still not provable from the archive; "
                 "no second chain write was attempted"
+                + _receipt_reason_suffix(proof_reason)
             )
         if proof_status == FAIL:
             raise _PostSignedSubmissionMismatch(
                 "pending receipt positively mismatches its historical "
                 "inclusion contract; operator investigation is required"
+                + _receipt_reason_suffix(proof_reason)
             )
         submission = ChainSubmission(
             success=True,
@@ -8414,11 +8685,14 @@ def _recover_pending_launch_receipt(
         raise
     except OSError as exc:
         raise _PendingReceiptNotProven(
-            "pending receipt recovery state is temporarily unavailable"
+            f"pending receipt recovery state is temporarily unavailable: "
+            f"{stable_error(exc)}",
+            fenced_attempt=signed_attempt_journaled,
         ) from exc
     except Exception as exc:
         raise _PostSignedSubmissionMismatch(
-            "pending receipt recovery found contradictory durable state"
+            "pending receipt recovery found contradictory durable state: "
+            f"{stable_error(exc)}"
         ) from exc
     finally:
         recovery_lock.__exit__(*sys.exc_info())
@@ -9607,6 +9881,55 @@ def _validate_runtime_contract(args: Any) -> None:
     _launch_release_config_identity(args)
 
 
+def _pending_receipt_not_proven_remediation(exc: BaseException) -> str:
+    """Tell an operator what is actually true about the durable attempt.
+
+    The fenced-attempt wording is a claim about journal state — that an exact
+    signed transaction exists, is unresolvable for now, and must never be
+    replaced. It is the right thing to say after a receipt could not be
+    re-proven. It is the wrong thing to say when the failure happened before
+    the journal was ever opened, because it sends an operator to look for a
+    transaction nobody signed, and it buries the configuration fault that the
+    message now carries.
+    """
+    if getattr(exc, "fenced_attempt", True):
+        return (
+            "The exact signed attempt remains fenced. Wait for archive/RPC "
+            "proof and restart to re-prove it; never submit a replacement."
+        )
+    return (
+        "No signed attempt was recorded before this failure, so nothing is "
+        "fenced and no replacement is owed. The detail above names the "
+        "failing step: resolve it, then restart."
+    )
+
+
+def _tick_failure_remediation(args: Any) -> str:
+    """Say whether this tick could have left a write behind, and nothing more.
+
+    A failure before the chain call — a dry run, a refused gate, an
+    unreachable feed, a preflight that would not resolve — signed nothing and
+    submitted nothing, so telling its operator to go inspect the durable
+    attempt state and a named extrinsic describes a transaction that does not
+    exist. Only after ``set_weights_on_chain`` has actually entered the call
+    is the ambiguity real, and that is the same marker the CHAIN failed /
+    CHAIN ambiguous lifecycle split already uses.
+    """
+    if bool(getattr(args, "_tick_chain_call_started", False)):
+        return (
+            "The tick failed closed after the chain call had begun, so a write "
+            "may have finalized: inspect the durable attempt state and named "
+            "extrinsic before operator recovery. Automatic same-attempt retry "
+            "remains blocked."
+        )
+    return (
+        "The tick failed closed before any chain call, so nothing was signed, "
+        "submitted, or finalized and there is no ambiguous write to inspect. "
+        "The detail above names the cause; the next tick rebuilds every proof "
+        "from a fresh finalized head."
+    )
+
+
 def run(args) -> int:
     """The validator loop, shared by `python -m scaffold.validator_thin` and the
     `cathedral-validator serve` console command. `args` is any object carrying
@@ -9695,10 +10018,7 @@ def run(args) -> int:
             stage="result",
             status=NOT_PROVEN,
             detail=str(exc)[:512],
-            remediation=(
-                "The exact signed attempt remains fenced. Wait for archive/RPC "
-                "proof and restart to re-prove it; never submit a replacement."
-            ),
+            remediation=_pending_receipt_not_proven_remediation(exc),
         )
         return 1
     if recovered:
@@ -9741,6 +10061,10 @@ def run(args) -> int:
         tick_ok = False
         pre_sign_head_drift_retries = 0
         while True:
+            # Every attempt, including each head-drift retry, starts having
+            # reached no chain call. Reporting-only; see
+            # `_mark_tick_reached_chain_call`.
+            args._tick_chain_call_started = False
             try:
                 tick_ok = tick(args)
                 break
@@ -9806,10 +10130,7 @@ def run(args) -> int:
                     stage="result",
                     status=NOT_PROVEN,
                     detail=str(e)[:512],
-                    remediation=(
-                        "The exact signed attempt remains fenced. Wait for archive/RPC "
-                        "proof and restart to re-prove it; never submit a replacement."
-                    ),
+                    remediation=_pending_receipt_not_proven_remediation(e),
                 )
                 # Restart enters the dedicated receipt-recovery path before any new
                 # tick can reserve or sign another submission.
@@ -9857,12 +10178,7 @@ def run(args) -> int:
                     stage="result",
                     status=FAIL,
                     detail=str(e)[:512],
-                    remediation=(
-                        "The tick failed closed. If failure occurred after the "
-                        "chain call, a write may have finalized; inspect the "
-                        "durable attempt state and named extrinsic before operator "
-                        "recovery. Automatic same-attempt retry remains blocked."
-                    ),
+                    remediation=_tick_failure_remediation(args),
                 )
                 break
         if args.once:
