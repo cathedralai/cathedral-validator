@@ -65,6 +65,7 @@ ALLOWED_EVENTS = frozenset(
         "TICK_FAILED",
         "VECTOR_ACCEPTED",
         "VECTOR_REJECTED",
+        "WEIGHT_COOLDOWN_SKIPPED",
         "WEIGHTS_DRY_RUN",
         "WEIGHTS_SUBMITTED",
     }
@@ -89,6 +90,10 @@ EVENT_STATUS = {
     "TICK_FAILED": "FAIL",
     "VECTOR_ACCEPTED": "PASS",
     "VECTOR_REJECTED": "FAIL",
+    # The chain declining an early write is a schedule fact, not a verdict on
+    # this validator, so it publishes at INFO and never displaces the last
+    # observed authority result.
+    "WEIGHT_COOLDOWN_SKIPPED": "INFO",
     "WEIGHTS_DRY_RUN": "PASS",
     "WEIGHTS_SUBMITTED": "PASS",
 }
@@ -309,6 +314,11 @@ def public_detail(event: str, raw: Any) -> str | None:
         return (
             "the validator tick failed; a write may have finalized, so inspect "
             "the named extrinsic and durable attempt journal before recovery"
+        )
+    if event == "WEIGHT_COOLDOWN_SKIPPED":
+        return (
+            "the subnet's weight-update cooldown had not elapsed; the tick "
+            "skipped the write and attempted no chain call"
         )
     return None
 

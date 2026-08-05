@@ -116,6 +116,19 @@ class _NothingToScoreYet(wire.VectorError):
     fault to fail loudly on."""
 
 
+class _ChainWeightCooldownActive(wire.VectorError):
+    """The chain itself forbids this validator's next weight write for now.
+
+    `weights_rate_limit` is a subnet parameter and the tick interval is a
+    local one, so the two are not synchronized: any tick that lands sooner
+    than the subnet's cooldown — typically the one right after a recovered
+    write — is refused by the runtime before anything is signed. That is the
+    chain working as designed, not a fault, so it is reported as a skip with
+    the exact block at which the next write becomes possible. The strict gate
+    in `_require_inclusion_policy_ready` is unchanged and still owns every
+    case this pre-check cannot positively prove."""
+
+
 EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # A full attempt (preflight, feed, gates, provenance audit) spends most of a
 # 12s Finney block between sampling the finalized head and reaching the
@@ -3593,6 +3606,83 @@ def _require_inclusion_policy_ready(
         )
 
 
+def _chain_weight_cooldown_remaining_blocks(preflight: ChainPreflight) -> int | None:
+    """Blocks the chain still owes this validator before it accepts a write.
+
+    Reads only what chain preflight already sampled at the finalized head, so
+    this costs no extra RPC. The boundary is the same one
+    `_require_inclusion_policy_ready` enforces (`blocks_since_update` must
+    exceed `weights_rate_limit`), expressed as a countdown instead of a
+    verdict. `None` means the cooldown could not be read as two exact
+    non-negative integers: that is NOT a routine wait and is deliberately
+    left to the strict gate, which fails the tick closed.
+    """
+    rate_limit = preflight.weights_rate_limit
+    blocks_since_update = preflight.validator_blocks_since_last_update
+    if (
+        isinstance(rate_limit, bool)
+        or not isinstance(rate_limit, int)
+        or rate_limit < 0
+        or isinstance(blocks_since_update, bool)
+        or not isinstance(blocks_since_update, int)
+        or blocks_since_update < 0
+    ):
+        return None
+    return max(0, rate_limit + 1 - blocks_since_update)
+
+
+def _require_chain_weight_write_permitted(
+    args: Any,
+    preflight: ChainPreflight | None,
+) -> None:
+    """Skip — never fail — a tick the subnet's own cooldown already forbids.
+
+    Called immediately before the submission section reserves anything, so a
+    skip leaves no attempt fence, no signed intent, and no chain call. Two
+    conditions must both hold before a refusal is downgraded from a failure to
+    a skip:
+
+    * the cooldown is positively proven from the finalized head, and
+    * it is still clearing as the chain advances.
+
+    The second guard is what keeps the alarm. A validator whose
+    `blocks_since_last_update` never grows past `weights_rate_limit` is mute,
+    and silently logging that at INFO forever is exactly the failure mode this
+    change must not create. Once the head has advanced further than one whole
+    rate-limit window while the cooldown still refuses, this returns and lets
+    the strict gate raise into `TICK_FAILED` as it always has.
+    """
+    if not bool(getattr(args, "broadcast", False)) or bool(
+        getattr(args, "offline", False)
+    ):
+        args._chain_weight_cooldown_anchor_block = None
+        return
+    if preflight is None:
+        return
+    remaining = _chain_weight_cooldown_remaining_blocks(preflight)
+    if remaining is None:
+        return
+    block = preflight.block
+    if remaining <= 0:
+        args._chain_weight_cooldown_anchor_block = None
+        return
+    if isinstance(block, bool) or not isinstance(block, int):
+        return
+    anchor = getattr(args, "_chain_weight_cooldown_anchor_block", None)
+    if isinstance(anchor, bool) or not isinstance(anchor, int):
+        anchor = block
+        args._chain_weight_cooldown_anchor_block = anchor
+    if block - anchor > int(preflight.weights_rate_limit):
+        return
+    raise _ChainWeightCooldownActive(
+        f"chain weight-update cooldown has {remaining} block(s) left; the next "
+        f"write becomes possible at block {block + remaining} "
+        f"(weights_rate_limit={preflight.weights_rate_limit} "
+        f"blocks_since_last_update={preflight.validator_blocks_since_last_update} "
+        f"finalized_block={block})"
+    )
+
+
 def _prove_target_hotkey_rotation(
     substrate: Any,
     *,
@@ -6423,6 +6513,14 @@ def _thin_tick_locked(args) -> bool:
     thin_attempt_id: str | None = None
     inclusion_policy: InclusionPolicy | None = None
     if broadcast:
+        # Everything above this line has already run: the vector is verified,
+        # mapped, and audited. Only the write is skipped, so a cooldown tick
+        # still contributes its full verification and shadow-audit evidence.
+        # The one-shot launch ceremony keeps failing loudly instead: it is
+        # operator-supervised, and `_launch_inclusion_policy` was already
+        # proven against the cooldown upstream.
+        if getattr(args, "_launch_inclusion_policy", None) is None:
+            _require_chain_weight_write_permitted(args, preflight)
         inclusion_policy = getattr(args, "_launch_inclusion_policy", None)
         if inclusion_policy is None:
             inclusion_policy = _vector_inclusion_policy(payload, preflight)
@@ -9038,6 +9136,12 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
     )
     inclusion_policy: InclusionPolicy | None = None
     if broadcast:
+        # Same reasoning as the thin lane: the audit above already ran, and
+        # `_revalidate_authority_after_audit` would otherwise re-sample the
+        # head only to hit the identical cooldown refusal. Waiting can only
+        # move the countdown down, never up, so the pre-audit snapshot is a
+        # sound basis for the skip.
+        _require_chain_weight_write_permitted(args, preflight)
         authority_audit = getattr(args, "_authority_full_audit", None)
         # Same rank test as the audit gate. Two places comparing assurance by
         # string equality is how one of them ends up demanding a level the
@@ -9674,6 +9778,24 @@ def run(args) -> int:
                 # Restart enters the dedicated receipt-recovery path before any new
                 # tick can reserve or sign another submission.
                 return 1
+            except _ChainWeightCooldownActive as e:
+                # The subnet's `weights_rate_limit` and this unit's tick
+                # interval are set independently, so a tick landing inside the
+                # cooldown is routine chain behaviour, not a fault. Nothing was
+                # reserved and nothing was signed, so there is no ambiguous
+                # write to inspect and no remediation to offer — logging it at
+                # FAIL only taught operators to ignore the log. The next tick
+                # re-derives everything from a fresh finalized head; the daemon
+                # owns the cadence, so this handler never sleeps or retries.
+                tick_ok = True
+                render.outcome(True, f"chain weight cooldown: {stable_error(e)}")
+                _get_events(args).event(
+                    "WEIGHT_COOLDOWN_SKIPPED",
+                    stage="submit",
+                    status=INFO,
+                    detail=str(e)[:512],
+                )
+                break
             except _NothingToScoreYet as e:
                 # Passive-listener state: the validator ran a full, correct check
                 # and there is simply nothing to score this epoch. Report it as a
