@@ -38,6 +38,12 @@ def _tracked_python_files() -> list[pathlib.Path]:
         "site-packages",
         "build",
         "dist",
+        # Agent/tool worktrees are whole second checkouts nested inside this
+        # one, so every source file appears twice and this boundary reports a
+        # phantom import site with a `.claude/worktrees/...` path. CI never
+        # sees it (a fresh clone has none), which is exactly what makes it
+        # corrosive: the suite is red only on the machine doing the work.
+        ".claude",
     }
     return sorted(
         path
@@ -87,7 +93,9 @@ def test_no_module_level_import_of_the_sat_lane():
             if module.split(".")[0] in FOREIGN_ROOTS and module_level:
                 rel = path.relative_to(REPO_ROOT)
                 offenders.append(f"{rel}:{lineno} imports {module}")
-    assert not offenders, "module-level SAT-lane imports found:\n" + "\n".join(offenders)
+    assert not offenders, "module-level SAT-lane imports found:\n" + "\n".join(
+        offenders
+    )
 
 
 def test_the_only_lazy_game_edges_are_the_two_known_publisher_call_sites():
@@ -117,7 +125,9 @@ def test_no_shipped_test_imports_the_sat_lane():
         for module, lineno, _ in _imports(path):
             if module.split(".")[0] in FOREIGN_ROOTS:
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} -> {module}")
-    assert not offenders, "shipped tests reach into the SAT lane:\n" + "\n".join(offenders)
+    assert not offenders, "shipped tests reach into the SAT lane:\n" + "\n".join(
+        offenders
+    )
 
 
 def test_validator_entry_points_import_clean():
