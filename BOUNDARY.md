@@ -95,8 +95,13 @@ bypass those gates or sign a weight transaction.
 
 ## Release boundary
 
-Production runs an immutable content-addressed release on Linux. It does not
-run a mutable checkout or editable package. The release manifest binds:
+Operators run `main` from a git checkout, installed editable. That is the
+supported path and it is what SN39's own uid 30 runs.
+
+The hardened path below — an immutable content-addressed release on Linux —
+remains available for operators who want it, and is documented under "Supported
+systemd install (relay)" in [README](README.md). Where it is used, the release
+manifest binds:
 
 - the exact Validator commit
 - the locked Python environment

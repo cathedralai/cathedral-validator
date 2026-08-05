@@ -100,10 +100,9 @@ Register the hotkey and run it again.
 
 ### 3. Stop here
 
-`--broadcast` is a mainnet write and is **not** the next step. Until Cathedral
-publishes a supported tag, immutable pin bundle, and launch notice, `--offline
---once` and `--dry-run --once` are the supported modes. The full checklist that
-must be true before anyone adds `--broadcast` is in
+`--broadcast` is a mainnet write and is **not** the next step. Run `--offline
+--once` and `--dry-run --once` first and read what they print. The full
+checklist that must be true before anyone adds `--broadcast` is in
 [VALIDATOR.md](VALIDATOR.md#chain-writing-launch-gate).
 
 > [!WARNING]
@@ -208,13 +207,14 @@ change what runs.
 
 ### Build the release and install its reviewed files
 
-`$release_sha` is the reviewed tag's commit. Use `/usr/bin/python3.12` — the
+`$release_sha` is any commit of `main` you have reviewed — there are no tags;
+`git rev-parse origin/main` is the normal answer. Use `/usr/bin/python3.12` — the
 versioned regular file, not the `python3` symlink — because the manifest binds
 its digest.
 
 ```bash
 set -euo pipefail
-release_sha="<reviewed-tag-commit>"
+release_sha="$(git rev-parse origin/main)"
 release="/opt/cathedral-sn39/releases/$release_sha"
 venv="/opt/cathedral-sn39/venvs/$release_sha"
 
