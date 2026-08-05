@@ -4,23 +4,28 @@ This repository is the sole source for Cathedral Validator software and
 operator releases. The default path is read-only. A broadcast needs a reviewed
 immutable release and a candidate that passes every gate in the same cycle.
 
+> [!IMPORTANT]
+> **The one install-and-run path is [README's
+> quickstart](README.md#quickstart).** This document adds only the review
+> gates. Do not follow a second procedure from here.
+
 ## Local review
 
+Run the quickstart through step 1 (`--offline --once`), then add the suite:
+
 ```bash
-git clone https://github.com/cathedralai/cathedral-validator.git
-cd cathedral-validator
-python3 -m venv .venv
-.venv/bin/pip install -e ".[test,provenance,integration]"
 .venv/bin/python -m pytest -q tests/thin tests/boundary
-.venv/bin/cathedral-validator serve \
-  --config config/validator.toml \
-  --mode thin \
-  --offline \
-  --once
 ```
 
-This checks source and prints a synthetic dry-run vector. It does not connect
-to a wallet or write to a chain.
+The suite checks source; the quickstart's offline run prints a synthetic
+dry-run vector. Neither connects to a wallet or writes to a chain.
+
+`tests/thin` needs the shared cathedral-distill contract, so install with the
+extras CI uses rather than the quickstart's `.[provenance]` alone:
+
+```bash
+.venv/bin/pip install -e ".[test,publisher,provenance,integration]"
+```
 
 ## Production path
 
@@ -40,5 +45,7 @@ Do not turn a review command into a broadcast command by adding a flag. Record
 the release, candidate, dry run, operator authorization, transaction, inclusion
 block, events, and resulting weights.
 
-See `README.md` for orientation, `VALIDATOR.md` for operation, `REVIEW.md` for
-review gates, and `BOUNDARY.md` for ownership and trust boundaries.
+See [`README.md`](README.md) for orientation and the canonical install-and-run
+path, [`VALIDATOR.md`](VALIDATOR.md) for operation, [`REVIEW.md`](REVIEW.md)
+for review gates, and [`BOUNDARY.md`](BOUNDARY.md) for ownership and trust
+boundaries.

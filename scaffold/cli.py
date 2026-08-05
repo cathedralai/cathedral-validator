@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import validator_thin
+from .events import EventLogPathError
 
 try:
     import tomllib  # py3.11+
@@ -66,9 +67,11 @@ _DEFAULTS = {
     # This is the mode that wins the chain-finality race — a heavy per-tick
     # recompute (authority) loses it. Authority is OPT-IN, for operators who hold the controlled
     # raw-evidence package and deliberately originate weights: select it with
-    # `--mode full` (or `mode = "authority"` in the TOML / the
-    # validator-mainnet-sn39.toml profile). full -> thin remains the forbidden
-    # direction, so authority is never reached by a silent downgrade.
+    # `--mode full` (or `mode = "authority"` in the TOML). No shipped config
+    # profile selects it — the authority profiles were removed in PR #39 — so
+    # it is reachable only from an operator's own config or flag. full -> thin
+    # remains the forbidden direction, so authority is never reached by a
+    # silent downgrade.
     "provenance": "shadow",
     "evidence_url": None,  # default: <publisher_url>/v1/evidence
     "evidence_dir": None,
@@ -197,6 +200,62 @@ _ENV_MAP = {
 }
 
 
+# Provenance pins that name a FILE the shadow audit must read. The shipped
+# profiles write them relative ("config/provenance/index-keys.json"), which
+# only resolves from the repository/release root — see _anchor_config_paths.
+_CONFIG_RELATIVE_KEY_FILES = (
+    "provenance_registry_keys",
+    "provenance_report_keys",
+    "provenance_index_keys",
+)
+
+
+def _anchor_config_paths(cfg: dict, config_path: str) -> None:
+    """Let a relative key-file pin resolve beside its own config file.
+
+    ``Path(pin).read_bytes()`` resolves against the CWD, so the relay profile's
+    ``config/provenance/*.json`` pins only work from the repository root. The
+    SN39 release launcher chdirs into the release before exec, so the live
+    validator is fine and every other invocation shape — a copied config run
+    from ``$HOME``, a systemd unit with a different WorkingDirectory — loses
+    the shadow audit to a ``FileNotFoundError`` that never reaches the write
+    path and therefore never stops anything.
+
+    The rule is deliberately additive rather than a straight "resolve against
+    the config file". The installed SN39 config lives in
+    ``/etc/cathedral-validator`` while its key bundle lives in the release
+    tree, so anchoring unconditionally would move a live mainnet writer's pins
+    to a directory that does not contain them. Instead the CWD interpretation
+    still wins whenever it resolves — byte-identical behaviour for anything
+    that works today — and the config file is consulted only when it does not.
+
+    Two anchors are tried, in the order the two shipped shapes need them: the
+    config file's own directory, which is where an operator's copy of a
+    profile sits (``cp config/validator-thin-sn39-relay.toml my-validator.toml``
+    at the repository root), and one directory above it, because a profile
+    still inside ``config/`` writes its pins relative to the root that
+    ``config/`` hangs off. Every candidate is digest-pinned at read time, so a
+    wrong guess fails its pin loudly rather than quietly substituting another
+    key set.
+
+    Absolute pins are never rewritten, unresolvable pins are left exactly as
+    the operator wrote them, and neither are values that arrived from the
+    environment or a command-line flag: those are typed against the caller's
+    CWD on purpose.
+    """
+    anchored = Path(config_path).resolve().parent
+    for key in _CONFIG_RELATIVE_KEY_FILES:
+        value = cfg.get(key)
+        if not isinstance(value, str) or not value or os.path.isabs(value):
+            continue
+        if Path(value).exists():
+            continue
+        for candidate in (anchored / value, anchored.parent / value):
+            if candidate.exists():
+                cfg[key] = str(candidate)
+                break
+
+
 def _load_config_file(path: str) -> dict:
     if tomllib is None:
         raise RuntimeError("TOML config requires Python 3.11+")
@@ -206,6 +265,7 @@ def _load_config_file(path: str) -> dict:
     for (section, key), flat in _CONFIG_MAP.items():
         if section in doc and key in doc[section]:
             out[flat] = doc[section][key]
+    _anchor_config_paths(out, path)
     return out
 
 
@@ -725,7 +785,14 @@ def main(argv: list[str] | None = None) -> int:
     vp.set_defaults(func=_cmd_version)
 
     ns = p.parse_args(argv)
-    return ns.func(ns)
+    # A journal path this process cannot open is a configuration mistake, not a
+    # crash: print the fix and exit 2. Non-zero, so a supervising unit still
+    # treats it as a failed start.
+    try:
+        return ns.func(ns)
+    except EventLogPathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -169,6 +169,65 @@ STATUS_FIELDS = (
 )
 
 
+class EventLogPathError(RuntimeError):
+    """The journal path is unusable, and the message says how to fix it.
+
+    Raised instead of letting a bare ``OSError`` escape. The journal is opened
+    from the STARTUP event, before the first tick, so a bad path is the very
+    first thing a new operator hits — and a raw ``FileNotFoundError`` deep in
+    ``os.open`` names neither the setting that chose the path nor the command
+    that repairs it. The CLI entry points turn this into a one-line
+    ``error: …`` and exit 2, which systemd still sees as a failed start.
+    """
+
+
+def _prepare_journal_directory(path: str, label: str) -> None:
+    """Create the journal's parent directory, or explain why we could not.
+
+    Creating it is the right default: the directory holds nothing but the
+    journal, the file's own owner/mode/symlink gates below are unchanged, and
+    0700 keeps the parent at least as private as the 0600 file it will hold.
+    A missing ``$HOME/.cathedral`` is an operator typo away from working and
+    is not worth an error.
+
+    Creating it is not sufficient, which is why the error path exists too: the
+    shipped SN39 profiles log to ``/var/log/cathedral-validator``, which the
+    service install owns and no ordinary user can create. There the honest
+    answer is a message naming the directory and both fixes, not a traceback.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    if not directory:  # pragma: no cover - abspath always yields a parent
+        return
+    try:
+        # Not os.makedirs(mode=...): that applies the mode to the LEAF only and
+        # leaves every intermediate directory it invented at 0777 & ~umask.
+        # Directories we create for a private journal are all created private.
+        missing: list[str] = []
+        walk = directory
+        while not os.path.isdir(walk):
+            missing.append(walk)
+            parent = os.path.dirname(walk)
+            if parent == walk:  # pragma: no cover - reached the filesystem root
+                break
+            walk = parent
+        for component in reversed(missing):
+            try:
+                os.mkdir(component, 0o700)
+            except FileExistsError:
+                # Another process got there first; an existing directory is
+                # exactly what we wanted and its mode is not ours to restat.
+                if not os.path.isdir(component):
+                    raise
+    except OSError as exc:
+        raise EventLogPathError(
+            f"{label} directory {directory} does not exist and could not be "
+            f"created ({exc.strerror}). Either create it for this user "
+            f'(`sudo install -d -o "$USER" -m 0700 {directory}`), or point the '
+            f"journal at a directory you already own, e.g. "
+            f'`--jsonl "$HOME/.cathedral/validator-events.jsonl"`.'
+        ) from exc
+
+
 def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
     """Append-only open that refuses symlinks and non-owner files.
 
@@ -186,7 +245,16 @@ def _open_secure_append(path: str, group: str | None, label: str) -> IO[str]:
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    descriptor = os.open(path, flags, 0o600)
+    _prepare_journal_directory(path, label)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise EventLogPathError(
+            f"{label} {path} could not be opened ({exc.strerror}). Check that "
+            f"this user owns the path and that it is a regular file, not a "
+            f"symlink; or point the journal at a directory you own, e.g. "
+            f'`--jsonl "$HOME/.cathedral/validator-events.jsonl"`.'
+        ) from exc
     try:
         opened = os.fstat(descriptor)
         opened_mode = _stat.S_IMODE(opened.st_mode)

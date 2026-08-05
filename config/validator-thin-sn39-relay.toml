@@ -10,11 +10,17 @@
 # against the pinned weight-policy key, and submit exactly those numbers. It
 # never originates weights, so it has no launch of its own to complete.
 #
-# Every trust-bearing value below is byte-identical to
-# validator-mainnet-sn39.toml and is re-checked against release constants in
-# scaffold/validator_thin.py before any broadcast. Changing any of them is
-# refused, not silently honored. Only wallet identity, log path, and the
-# launch section differ from the Cathedral operator profile.
+# Every trust-bearing value below is re-checked against the release constants
+# in scaffold/validator_thin.py before any broadcast. Changing any of them is
+# refused, not silently honored. Only wallet identity, log path, and the launch
+# section differ from the Cathedral operator profile. (The operator profile,
+# config/validator-mainnet-sn39.toml, was removed in PR #39 with the rest of
+# the authority/launch ceremony; the release constants remain the authority.)
+#
+# The operator-facing path for this profile is README's quickstart. A non-root
+# preview redirects the three service-owned paths below — [runtime].root,
+# [weight_policy].state_file, and [logs].jsonl — with --runtime-root,
+# --state-file and --jsonl rather than editing them here.
 
 [network]
 name = "finney"

@@ -1,8 +1,31 @@
 # SN39 Intel TDX CPU mainnet release
 
 This file records the 2026-07-24 release ceremony and its evidence. It is not
-the current operator guide. Use the repository README and `VALIDATOR.md` for
-current operation. Recheck every live fact before a new release or broadcast.
+the current operator guide. Use [README's quickstart](../README.md#quickstart)
+to install and run, and [`VALIDATOR.md`](../VALIDATOR.md) to operate. Recheck
+every live fact before a new release or broadcast.
+
+> [!CAUTION]
+> **Parts of this record describe artifacts that no longer exist.** The
+> shadow-only cleanup (`chore!: remove the launch/reconcile ceremony, rotation
+> tooling, and authority config profiles`, PR #39) deleted the one-shot launch
+> and reconcile units, the rotation tooling, and the authority/launch config
+> profiles:
+>
+> - `deploy/sn39/cathedral-validator-sn39-launch.service`
+> - `deploy/sn39/cathedral-validator-sn39-reconcile.service`
+> - `deploy/sn39/cathedral-sn39-rotation-launcher.py`
+> - `config/validator-mainnet-sn39.toml`
+> - `config/validator-mainnet-sn39-launch.toml`
+> - `scripts/sn39_hotkey_rotation_operator.py`
+> - `scripts/build_sn39_rotation_manifest.py`
+>
+> Every step below that referenced one is marked in place. The install
+> procedure runs under `set -euo pipefail`, so it would abort on the first
+> missing file; the stanzas for deleted artifacts are commented out rather
+> than silently dropped, so the record of what the ceremony installed is
+> preserved. A future release ceremony must be re-derived from the current
+> tree, not copied from here.
 
 The only authorized public claim, and only after the tagged launch submission
 gate below is **PASS**, is:
@@ -134,6 +157,12 @@ does not supersede on-chain governance or prove that governance is unable to
 intervene.
 
 ### Deterministic rotation handoff
+
+> [!CAUTION]
+> **Removed in PR #39.** `scripts/sn39_hotkey_rotation_operator.py`,
+> `scripts/build_sn39_rotation_manifest.py`, and
+> `deploy/sn39/cathedral-sn39-rotation-launcher.py` are no longer in the tree.
+> This section is a record of the 2026-07-24 handoff, not a procedure to run.
 
 Use `scripts/sn39_hotkey_rotation_operator.py` for one target at a time. Its
 default is inspect-only: it connects to finalized Finney state, verifies the
@@ -445,7 +474,8 @@ For the final launch service, materialize only the two existing inputs:
 1. The producer publishes its new signed index, content-addressed manifest,
    score report, receipts, work/result blobs, and signed weight vector through
    the configured Cathedral endpoints in
-   `config/validator-mainnet-sn39-launch.toml`.
+   `config/validator-mainnet-sn39-launch.toml` (removed in PR #39; the
+   surviving endpoint pins are in `config/validator-thin-sn39-relay.toml`).
 2. The authorized controlled-disclosure package for that same manifest is
    installed byte-for-byte in an immutable epoch directory below
    `/var/lib/cathedral-validator-controlled-sn39`, selected atomically by its
@@ -581,12 +611,13 @@ install -D -o root -g root -m 0755 \
 install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-validator-sn39.service" \
   /etc/systemd/system/cathedral-validator-sn39.service
-install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-validator-sn39-launch.service" \
-  /etc/systemd/system/cathedral-validator-sn39-launch.service
-install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-validator-sn39-reconcile.service" \
-  /etc/systemd/system/cathedral-validator-sn39-reconcile.service
+# REMOVED IN PR #39 — the one-shot launch and reconcile units no longer exist.
+# install -D -o root -g root -m 0644 \
+#   "$release/deploy/sn39/cathedral-validator-sn39-launch.service" \
+#   /etc/systemd/system/cathedral-validator-sn39-launch.service
+# install -D -o root -g root -m 0644 \
+#   "$release/deploy/sn39/cathedral-validator-sn39-reconcile.service" \
+#   /etc/systemd/system/cathedral-validator-sn39-reconcile.service
 install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-sn39-public-status.service" \
   /etc/systemd/system/cathedral-sn39-public-status.service
@@ -600,12 +631,20 @@ install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-sn39-validator.tmpfiles" \
   /etc/tmpfiles.d/cathedral-sn39-validator.conf
 install -d -o root -g root -m 0755 /etc/cathedral-validator
+# REMOVED IN PR #39 — the authority/launch profiles no longer exist. The
+# continuous service config the release launcher selects is now
+# "$release/config/validator-thin-sn39-relay.toml", installed to
+# /etc/cathedral-validator/validator-thin-sn39-relay.toml (see
+# deploy/sn39/cathedral-sn39-release-launcher.py CONFIGS).
+# install -D -o root -g root -m 0644 \
+#   "$release/config/validator-mainnet-sn39.toml" \
+#   /etc/cathedral-validator/validator-mainnet-sn39.toml
+# install -D -o root -g root -m 0644 \
+#   "$release/config/validator-mainnet-sn39-launch.toml" \
+#   /etc/cathedral-validator/validator-mainnet-sn39-launch.toml
 install -D -o root -g root -m 0644 \
-  "$release/config/validator-mainnet-sn39.toml" \
-  /etc/cathedral-validator/validator-mainnet-sn39.toml
-install -D -o root -g root -m 0644 \
-  "$release/config/validator-mainnet-sn39-launch.toml" \
-  /etc/cathedral-validator/validator-mainnet-sn39-launch.toml
+  "$release/config/validator-thin-sn39-relay.toml" \
+  /etc/cathedral-validator/validator-thin-sn39-relay.toml
 install -d -o root -g root -m 0755 \
   /etc/cathedral-validator/provenance
 install -D -o root -g root -m 0644 \
@@ -967,7 +1006,7 @@ current feed would do now; it is not substituted for the immutable launch
 reproduction above:
 
 ```bash
-cp config/validator-mainnet-sn39.toml validator.local.toml
+cp config/validator-thin-sn39-relay.toml validator.local.toml
 # Set wallet_name and validator_hotkey to an existing registered validator.
 install -d -m 700 "$HOME/.cathedral"
 repro_dir="$(mktemp -d "$HOME/.cathedral/sn39-current.XXXXXX")"
