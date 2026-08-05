@@ -497,7 +497,7 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
     assert submissions["count"] == 1
 
 
-def _run_loop_args(*, once: bool) -> SimpleNamespace:
+def _run_loop_args(*, once: bool, interval_secs: int = 60) -> SimpleNamespace:
     return SimpleNamespace(
         publisher_url="https://api.cathedral.computer",
         evidence_url="https://api.cathedral.computer/v2/receipts/latest",
@@ -513,7 +513,7 @@ def _run_loop_args(*, once: bool) -> SimpleNamespace:
         require_policy=None,
         provenance="shadow",
         once=once,
-        interval_secs=60,
+        interval_secs=interval_secs,
         max_submissions=2,
         require_full_provenance_for_broadcast=False,
     )
@@ -608,6 +608,135 @@ def test_safe_pre_sign_head_drift_retries_whole_tick_once(
             ),
         }
     ]
+
+
+class _LoopStopped(Exception):
+    """Break the unbounded serve loop after a bounded number of sleeps."""
+
+
+def _run_recurring_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tick,
+    events: "_RunEventRecorder",
+    max_sleeps: int,
+    interval_secs: int = 1500,
+) -> list[float]:
+    """Drive validator_thin.run()'s recurring loop and record every sleep."""
+    args = _run_loop_args(once=False, interval_secs=interval_secs)
+    sleeps: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= max_sleeps:
+            raise _LoopStopped
+
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin, "_recover_pending_launch_receipt", lambda _args: None
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "tick", tick)
+    monkeypatch.setattr(validator_thin.time, "sleep", _sleep)
+
+    with pytest.raises(_LoopStopped):
+        validator_thin.run(args)
+    return sleeps
+
+
+def _always_drifts(_args: SimpleNamespace) -> bool:
+    raise validator_thin._RetryablePreSignHeadDrift(
+        "finalized head advanced before signing"
+    )
+
+
+def test_head_drift_exhaustion_rearms_without_losing_the_write_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhausting the drift budget reserves and signs nothing, so the tick is
+    re-armed on the short delay rather than costing a whole write cycle."""
+    events = _RunEventRecorder()
+    sleeps = _run_recurring_loop(
+        monkeypatch, tick=_always_drifts, events=events, max_sleeps=1
+    )
+
+    assert sleeps == [validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS]
+    assert sleeps[0] < 1500
+    names = [name for name, _fields in events.rows]
+    assert names.count("PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED") == 1
+    # The retry budget itself is unchanged: exactly one exhaustion per tick,
+    # after exactly SN39_PRE_SIGN_HEAD_DRIFT_RETRIES retries.
+    assert (
+        names.count("PRE_SIGN_HEAD_DRIFT_RETRY")
+        == validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES
+    )
+
+
+def test_head_drift_rearm_is_bounded_and_falls_back_to_the_write_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chain that keeps losing the race must fall back to the daemon's own
+    cadence instead of retrying forever at the short interval."""
+    events = _RunEventRecorder()
+    cap = validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
+    sleeps = _run_recurring_loop(
+        monkeypatch, tick=_always_drifts, events=events, max_sleeps=cap + 1
+    )
+
+    assert sleeps == [validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS] * cap + [1500]
+
+
+def test_head_drift_rearm_never_lengthens_a_short_write_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-arm is a ceiling on lost time, never a floor on cadence."""
+    events = _RunEventRecorder()
+    sleeps = _run_recurring_loop(
+        monkeypatch,
+        tick=_always_drifts,
+        events=events,
+        max_sleeps=1,
+        interval_secs=5,
+    )
+
+    assert sleeps == [5]
+
+
+def test_successful_tick_keeps_the_configured_write_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a drift exhaustion re-arms early; a normal tick keeps the cadence."""
+    events = _RunEventRecorder()
+    sleeps = _run_recurring_loop(
+        monkeypatch, tick=lambda _args: True, events=events, max_sleeps=2
+    )
+
+    assert sleeps == [1500, 1500]
+
+
+def test_head_drift_rearm_resets_after_a_tick_that_does_not_exhaust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovered tick clears the consecutive-re-arm budget, so a later
+    unlucky tick still gets the short re-arm."""
+    events = _RunEventRecorder()
+    calls: list[int] = []
+
+    def tick(_args: SimpleNamespace) -> bool:
+        calls.append(1)
+        # Tick 1 exhausts (9 raises), then one clean tick, then exhaust again.
+        if len(calls) <= validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES + 1:
+            raise validator_thin._RetryablePreSignHeadDrift("head advanced")
+        if len(calls) == validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES + 2:
+            return True
+        raise validator_thin._RetryablePreSignHeadDrift("head advanced")
+
+    sleeps = _run_recurring_loop(monkeypatch, tick=tick, events=events, max_sleeps=3)
+
+    rearm = validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS
+    assert sleeps == [rearm, 1500, rearm]
 
 
 def _cooldown_preflight(

@@ -167,6 +167,20 @@ EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # only: the pre-sign check itself stays exact.
 SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 
+# Exhausting that budget is a TIMING outcome, not a fault: nothing was
+# reserved, nothing was signed, and the very next attempt from a fresh
+# finalized head is as likely to win the race as any other. Sleeping the whole
+# write interval after it therefore threw away a ~25 minute cycle to recover
+# from a ~12 second phenomenon. Re-arm on a short bounded delay instead.
+#
+# The delay is several block times, so the attempt that follows starts at an
+# independently drawn offset into a block rather than immediately re-running
+# the sequence that just lost. It is capped to a few CONSECUTIVE re-arms so a
+# genuinely wedged chain falls back to the daemon's own cadence instead of
+# retrying forever at the short interval.
+SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS = 60
+SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE = 3
+
 
 def _ms_iso_now() -> str:
     dt = datetime.now(UTC)
@@ -10195,8 +10209,10 @@ def run(args) -> int:
         _get_events(args).event("PENDING_RECEIPT_RECOVERED", **event_fields)
         if bool(getattr(args, "once", False)):
             return 0
+    consecutive_head_drift_rearms = 0
     while True:
         tick_ok = False
+        head_drift_exhausted = False
         pre_sign_head_drift_retries = 0
         while True:
             # Every attempt, including each head-drift retry, starts having
@@ -10208,6 +10224,7 @@ def run(args) -> int:
                 break
             except _RetryablePreSignHeadDrift as e:
                 if pre_sign_head_drift_retries >= SN39_PRE_SIGN_HEAD_DRIFT_RETRIES:
+                    head_drift_exhausted = True
                     render.outcome(
                         False, f"head drift, retries exhausted: {stable_error(e)}"
                     )
@@ -10217,9 +10234,11 @@ def run(args) -> int:
                         status=FAIL,
                         detail=str(e)[:512],
                         remediation=(
-                            "No transaction was signed. Wait for the next normal "
-                            "tick, which will rebuild every chain, authorization, "
-                            "mapping, and evidence proof from a new finalized head."
+                            "No transaction was signed. The next tick rebuilds "
+                            "every chain, authorization, mapping, and evidence "
+                            "proof from a new finalized head; it is re-armed on a "
+                            "short delay instead of the full write interval "
+                            "because losing this race reserves and signs nothing."
                         ),
                     )
                     break
@@ -10326,6 +10345,21 @@ def run(args) -> int:
             # captured — is a FAILED single run.
             shadow_ok = _drain_shadow_audit_once(args)
             return 0 if (tick_ok and shadow_ok) else 1
+        # A head-drift exhaustion is the one outcome that neither reserved nor
+        # signed anything AND is expected to clear within a block or two, so it
+        # is the one outcome that must not cost a whole write interval. Every
+        # other path (success, cooldown, contradiction, generic failure) keeps
+        # the daemon's configured cadence exactly as before.
+        if head_drift_exhausted and (
+            consecutive_head_drift_rearms
+            < SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
+        ):
+            consecutive_head_drift_rearms += 1
+            # Never lengthen a short interval: a fast cadence already re-arms
+            # sooner than the drift re-arm would.
+            time.sleep(min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs))
+            continue
+        consecutive_head_drift_rearms = 0
         time.sleep(args.interval_secs)
 
 
