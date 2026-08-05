@@ -176,7 +176,7 @@ genuine TDX execution. The receipt therefore cannot produce production
 validator-signed demand gate and cannot be upgraded into production credit.
 Exact prompt, parameters, output, signed receipt, model hashes, runtime hashes,
 latency/token metadata, rental ID, and proof scope are
-under [`docs/evidence/`](evidence/verifyml-polaris-smollm2-2026-07-19-run.json).
+under [`docs/evidence/`](../evidence/verifyml-polaris-smollm2-2026-07-19-run.json).
 
 The rental deployment was
 `c990822f-0df3-43fe-9d55-dbdb47f800a1`. It was terminated immediately after

@@ -664,9 +664,9 @@ applied.
 
 ## Further reading
 
-- [2026-07-24 SN39 Intel TDX CPU release record](docs/SN39_MAINNET_RELEASE_20260724.md)
+- [2026-07-24 SN39 Intel TDX CPU release record](docs/history/SN39_MAINNET_RELEASE_20260724.md)
 - [Full-provenance verification](docs/PROVENANCE.md)
 - [Score-class contract](docs/THIN_SCORE_CLASSES.md)
 - [Threat model](docs/THIN_SUBNET_DESIGN.md)
-- [Evidence record](docs/THIN_SUBNET_EVIDENCE.md)
+- [Evidence record](docs/history/THIN_SUBNET_EVIDENCE.md)
 - [Operator runbook for the experimental owner-independent path](docs/THIN_SUBNET_RUNBOOK.md)

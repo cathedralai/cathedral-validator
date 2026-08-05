@@ -35,7 +35,7 @@ def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
         "REVIEW.md",
         "docs/PROVENANCE.md",
         "docs/THIN_SUBNET_RUNBOOK.md",
-        "docs/SN39_MAINNET_RELEASE_20260724.md",
+        "docs/history/SN39_MAINNET_RELEASE_20260724.md",
     ):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert "github.com/cathedralai/cathedral.git" not in text
@@ -129,7 +129,9 @@ def test_release_builder_binds_required_public_key_files(
     installed.write_bytes(reviewed.read_bytes())
     validate(((installed, reviewed),))
 
-    guide = (ROOT / "docs/SN39_MAINNET_RELEASE_20260724.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs/history/SN39_MAINNET_RELEASE_20260724.md").read_text(
+        encoding="utf-8"
+    )
     for name in ("registry-keys.json", "report-keys.json", "index-keys.json"):
         assert f'"$release/config/provenance/{name}"' in guide
         assert f"/etc/cathedral-validator/provenance/{name}" in guide

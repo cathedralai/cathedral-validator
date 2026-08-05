@@ -12,7 +12,7 @@ Nothing here authorizes a chain write, infrastructure spend, or a public claim.
 > surviving profiles are `config/validator-thin-sn39-relay.toml`,
 > `config/validator-selfcompose-sn39.toml`, and `config/validator.toml`. To
 > install and run a validator today, follow [README's
-> quickstart](../README.md#quickstart).
+> quickstart](../../README.md#quickstart).
 
 ## 1. Producer revision reconciliation
 
