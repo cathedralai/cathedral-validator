@@ -149,7 +149,13 @@ def _percent(share: Any) -> str:
 # containers and reprs (``wire_uids=[0, 1]``, ``error='not pinned; refusing'``),
 # and a tokenizer that stops at the first interior space splits those in half:
 # the head becomes a truncated value and the tail becomes leftover.
-_KV = re.compile(r"""(\w+)=("[^"]*"|'[^']*'|\[[^\]]*\]|\S+)""")
+# The bracket alternative excludes ``=`` so an UNBALANCED opener cannot swallow
+# the keys that follow it. ``burn_uid=[204 vector=163:0.9,204:0.1]`` must still
+# yield two keys, not one giant value: a malformed detail should lose its own
+# field, never the well-formed fields after it. A list that genuinely contains
+# ``=`` falls through to ``\S+`` and truncates at the first space, which is the
+# pre-existing behaviour and is strictly better than losing a neighbour.
+_KV = re.compile(r"""(\w+)=("[^"]*"|'[^']*'|\[[^\]=]*\]|\S+)""")
 
 
 def _unquote(value: str) -> str:
@@ -469,18 +475,20 @@ def _r_dry_run(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
     words of the quickstart. ``leftover`` is deliberately unused here: any
     detail whose fields this row cannot name is debris, and the wire encoding
     it came from is in the journal for anyone who needs it.
+
+    The only field it names is the uid count. The two "WEIGHTS dry-run" emit
+    sites in ``validator_thin`` write ``uids= wire_uids= wire_weights= vector=``
+    -- no ``burn_uid``, ``burn_share`` or ``vector_id``, so branches keyed on
+    those would be unreachable code that reads as coverage. ``vector`` is not
+    rendered either: the ``weights`` row immediately above already prints the
+    same allocation as percentages, and running the preview through ``_short``
+    truncates it mid-number (``0=0.9000,1....1000``), which is less legible
+    than the line it duplicates.
     """
     parts = []
     count = kv.get("uids")
     if count:
         parts.append(f"{_n(count)} uid{'' if count == '1' else 's'}")
-    burn_uid = kv.get("burn_uid")
-    if burn_uid:
-        share = _percent(kv["burn_share"]) if kv.get("burn_share") else ""
-        parts.append(f"burn uid {_n(burn_uid)}{f' at {share}' if share else ''}")
-    vector_id = kv.get("vector_id") or kv.get("id")
-    if vector_id:
-        parts.append(_short(vector_id))
     s.note(dim("·"), [dim(p) for p in ["dry run, nothing written", *parts]])
 
 

@@ -123,21 +123,53 @@ def test_the_dry_run_line_renders_named_fields_only(capsys):
     assert "fragment" not in out
 
 
-def test_the_dry_run_line_names_the_burn_leg_and_vector_when_present(capsys):
+def test_the_dry_run_line_renders_the_uid_count_and_nothing_invented(capsys):
+    """Built from the real emit shape, not an invented one.
+
+    Both "WEIGHTS dry-run" call sites in validator_thin.py write
+    ``uids= wire_uids= wire_weights= vector=`` and nothing else — no
+    ``burn_uid``, ``burn_share`` or ``vector_id``. A renderer branch keyed on
+    fields no emitter writes is dead code that reads as coverage. The vector is
+    deliberately not repeated here either; the ``weights`` row above it already
+    prints the same allocation, legibly.
+    """
     _emit(
         "WEIGHTS dry-run",
-        "uids=2 burn_uid=204 burn_share=0.100000 vector_id=08abd7f7-e6b5",
+        "uids=2 wire_uids=[0, 1] wire_weights=[58982, 7282] vector=163=0.9000,204=0.1000",
     )
     out = _out(capsys)
-    assert "burn uid 204" in out
-    assert "10.0%" in out
-    assert "08abd7f7" in out
+    assert "2 uids" in out
+    assert "dry run, nothing written" in out
+    # wire encoding is not operator information, and a truncated vector is worse
+    # than the percentages already on screen
+    assert "58982" not in out
+    assert "]" not in out
+    assert "0.9000" not in out
 
 
 def test_the_dry_run_line_neutralizes_what_it_does_render(capsys):
-    _emit("WEIGHTS dry-run", "uids=\033[31m2 burn_uid=\033[2J204")
+    _emit("WEIGHTS dry-run", "uids=\033[31m2 vector=\033[2J163=0.9")
     out = _out(capsys)
     assert "\033" not in out
+
+
+def test_an_unbalanced_bracket_loses_its_own_field_not_its_neighbours(capsys):
+    """A malformed value must not swallow the well-formed keys after it.
+
+    The bracket alternative in ``_KV`` exists so ``wire_uids=[0, 1]`` survives
+    the space inside it. Left unbounded it also spans an unclosed opener all the
+    way to the next ``]``, taking every intervening ``key=`` with it — so one
+    bad field silently deletes its neighbours and the row renders less than it
+    used to. Excluding ``=`` from the bracket body is what stops that.
+    """
+    parsed = render.parse_detail("burn_uid=[204 vector=163:0.9,204:0.1]")[0]
+    assert parsed.get("vector") == "163:0.9,204:0.1]", parsed
+    # and the balanced case the alternative was added for still tokenizes whole
+    balanced = render.parse_detail(
+        "uids=2 wire_uids=[0, 1] wire_weights=[58982, 7282]"
+    )[0]
+    assert balanced["wire_uids"] == "[0, 1]"
+    assert balanced["wire_weights"] == "[58982, 7282]"
 
 
 def test_block_deltas_render_as_durations(capsys):
