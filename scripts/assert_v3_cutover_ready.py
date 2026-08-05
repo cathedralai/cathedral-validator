@@ -7,13 +7,21 @@ answers the question BEFORE anything is touched: "if we flip, will the publisher
 be able to compose a v3 vector at all, and will there be anything in the lane to
 fund?" The two are complementary and neither substitutes for the other.
 
-Why it exists. Six independent things must ALL be true before a v3 flip, and the
-failure mode when one is not is silent and severe: the publisher keeps composing
-v2 (or refuses to sign at all), a v3-pinned validator rejects every vector, and
-the validator goes dark with no single check failing to explain why. Each one
-below is checked separately, so the report names WHICH of the six is missing
-rather than reporting one undifferentiated "not ready".
+Why it exists. Seven independent things must ALL be true before a v3 flip, and
+the failure mode when one is not is silent and severe: the publisher keeps
+composing v2 (or refuses to sign at all), a v3-pinned validator rejects every
+vector, and the validator goes dark with no single check failing to explain why.
+Each one below is checked separately, so the report names WHICH of the seven is
+missing rather than reporting one undifferentiated "not ready".
 
+  0. composer_identity   -- the process every publisher-side check below is
+     about IS the one that composes this subnet's signed vector. A box can run
+     several processes that all import scaffold.publisher.server, answer
+     /v1/validator/weights/next, and look alike; only one of them writes the
+     ``latest:<network>:<netuid>`` row the validator consumes. Probing a decoy
+     and reporting ITS state as fact is how this preflight once declared a
+     healthy composer broken. See resolve_composer() for how the real one is
+     identified -- it is never assumed from a unit-name flag.
   1. composer_reachable  -- the RUNNING publisher process can reach
      ``_compose_cybergym_lane_v3``. Not "the file exists somewhere on disk":
      proven through the interpreter, cwd and environment that process is
@@ -41,14 +49,21 @@ rather than reporting one undifferentiated "not ready".
 
 Every check reports PASS, FAIL, or BLOCKED-ON-OTHER (it could not be evaluated
 because a check it depends on failed -- the reason names which). Exit is 0 only
-when all six PASS. Anything else is non-zero, because "we could not tell" is not
-"ready".
+when all seven PASS. Anything else is non-zero, because "we could not tell" is
+not "ready".
 
 READ-ONLY BY CONSTRUCTION. This script must be safe to run against the live box
 at any time, so:
 
   * the only systemd verb it ever runs is ``systemctl show`` (never start, stop,
-    restart, or daemon-reload);
+    restart, or daemon-reload). Publisher processes are enumerated by reading
+    ``/proc``, not by asking systemd, so a publisher that runs outside the
+    system manager (a user unit, a bare process) is still seen rather than
+    silently missed;
+  * the advisory-lock observation only READS ``pg_locks``. It never calls
+    ``pg_try_advisory_lock`` itself: taking that lock would make the real
+    composer's next refresh find it held and skip a whole build cycle, which is
+    a write-shaped side effect of a read-only preflight;
   * its probe never imports ``scaffold.publisher.server``. Building the app
     constructs a ``Store``, and ``Store.__init__`` calls ``migrate()`` -- which
     would run migrations against the live publisher database as a side effect of
@@ -85,7 +100,17 @@ PASS = "PASS"
 FAIL = "FAIL"
 BLOCKED = "BLOCKED-ON-OTHER"
 
-DEFAULT_PUBLISHER_UNIT = "cathedral-publisher.service"
+# Only ever consulted when /proc enumeration finds no publisher at all, or when
+# an operator names a unit explicitly. It is NOT how the composer is normally
+# identified -- see resolve_composer(). It is the SN39 composer's unit because,
+# if this script is ever reduced to guessing, it should guess the right one:
+# cathedral-publisher.service is a legacy process on the live box that writes
+# its own unscoped `latest` row, which nothing consumes.
+DEFAULT_PUBLISHER_UNIT = "cathedral-scorer-sn39.service"
+# Every publisher-shaped process runs this ASGI app. Matching on it (rather than
+# on a unit name) is what lets the identification below consider a decoy at all,
+# which is what lets it REJECT one.
+PUBLISHER_PROCESS_MARKER = "scaffold.publisher.server"
 DEFAULT_VALIDATOR_UNIT = "cathedral-validator-passive.service"
 DEFAULT_VALIDATOR_CONFIG = "/etc/cathedral-validator/validator-mainnet-sn39.toml"
 DEFAULT_STATUS_LOG = "/var/log/cathedral-validator/validator-status.jsonl"
@@ -105,6 +130,12 @@ DEFAULT_MAX_COOLDOWN_MULTIPLE = 3.0
 # V3_CYBERGYM_ALLOCATION), so a mismatch here is a vector that never signs.
 V3_CYBERGYM_ALLOCATION = 0.30
 CYBERGYM_MIGRATIONS = ("0048_cybergym_scores", "0049_cybergym_authenticated_body")
+# The composer takes this cluster lock for the duration of every rebuild
+# (weights._refresh_lock_name / Store.advisory_lock), so only the process that
+# actually composes this subnet's vector ever holds it. It is held for a few
+# hundred milliseconds out of every refresh cycle, which is why observing it is
+# a bounded poll and a corroboration rather than the primary identification.
+DEFAULT_OBSERVE_LOCK_SECS = 75.0
 
 # The well-known Substrate development keys, by ss58 address. //Alice is the one
 # that was found configured live; the rest are here because a deployment that
@@ -147,6 +178,25 @@ NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 ALLOCATION_CONTRACT_ENV = "CATHEDRAL_ALLOCATION_CONTRACT"
 
 
+def persisted_vector_id(network: str, netuid: int) -> str:
+    """The signed-vector row id a correctly scoped publisher writes.
+
+    Mirrors scaffold/publisher/weights.py ``_persisted_vector_id()``. The
+    pre-scope publisher had no such function and wrote an unscoped ``latest``
+    row instead, which is exactly what makes "which row does this process
+    write?" a decisive identity question rather than a cosmetic one.
+    """
+    return f"latest:{network}:{netuid}"
+
+
+def refresh_lock_name(network: str, netuid: int) -> str:
+    """The cluster advisory lock only this subnet's composer ever takes.
+
+    Mirrors scaffold/publisher/weights.py ``_refresh_lock_name()``.
+    """
+    return f"cathedral:weights:refresh:{network}:{netuid}"
+
+
 class ProbeError(RuntimeError):
     """The preflight itself could not gather a fact. Not a check verdict."""
 
@@ -181,7 +231,7 @@ class CheckResult:
 # audit for writes: it opens files for reading, reads /proc, runs
 # `systemctl show`, and spawns the service's own interpreter. Nothing else.
 REMOTE_HELPER = r'''
-import json, os, subprocess, sys, time
+import json, os, pwd, subprocess, sys, time
 
 
 def _environ(pid):
@@ -232,6 +282,69 @@ def op_process(req):
         "start_epoch": _start_epoch(pid),
         "now": time.time(),
     }
+
+
+def _unit_of(pid):
+    """The systemd unit a pid belongs to, read from its cgroup.
+
+    Deliberately NOT `systemctl status`: a publisher started as a user unit
+    (or by hand) has no system-manager entry, and asking systemd would make it
+    invisible to the identification below. The cgroup path names it either way.
+    """
+    try:
+        with open("/proc/%d/cgroup" % pid) as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        for segment in reversed(line.split("/")):
+            if segment.endswith(".service") or segment.endswith(".scope"):
+                return segment
+    return ""
+
+
+def _status_of(pid):
+    out = {"ppid": 0, "uid": 0}
+    with open("/proc/%d/status" % pid) as fh:
+        for line in fh:
+            if line.startswith("PPid:"):
+                out["ppid"] = int(line.split()[1])
+            elif line.startswith("Uid:"):
+                out["uid"] = int(line.split()[1])
+    return out
+
+
+def op_publishers(req):
+    marker = req["marker"]
+    found = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as fh:
+                argv = [a.decode("utf-8", "replace") for a in fh.read().split(b"\0") if a]
+        except OSError:
+            continue
+        if not argv or not any(marker in arg for arg in argv):
+            continue
+        try:
+            info = op_process({"pid": pid})
+            status = _status_of(pid)
+        except OSError:
+            continue  # exited between listdir and the read; not a publisher we can probe
+        info["unit"] = _unit_of(pid)
+        info["ppid"] = status["ppid"]
+        try:
+            info["user"] = pwd.getpwuid(status["uid"]).pw_name
+        except KeyError:
+            info["user"] = str(status["uid"])
+        found[pid] = info
+    # `uvicorn --workers N` re-execs the same argv in each child. The parent is
+    # the process that owns the listening socket and runs the refresh thread, so
+    # a candidate whose parent is also a candidate is a worker, not a publisher.
+    return {"publishers": [info for pid, info in sorted(found.items())
+                           if info["ppid"] not in found]}
 
 
 def op_pyprobe(req):
@@ -288,7 +401,7 @@ def op_state(req):
 
 
 OPS = {"unit": op_unit, "process": op_process, "pyprobe": op_pyprobe,
-       "tail": op_tail, "state": op_state}
+       "tail": op_tail, "state": op_state, "publishers": op_publishers}
 request = json.loads(sys.argv[1])
 try:
     print(json.dumps({"ok": True, "result": OPS[request["op"]](request)}))
@@ -327,6 +440,21 @@ class ProcessFacts:
         return self.exe
 
 
+def process_facts(entry: dict[str, Any]) -> ProcessFacts:
+    """Build ProcessFacts from one enumerated /proc record."""
+    return ProcessFacts(
+        pid=int(entry.get("pid") or 0),
+        unit=str(entry.get("unit") or ""),
+        user=str(entry.get("user") or "root"),
+        argv=list(entry.get("argv") or []),
+        cwd=str(entry.get("cwd") or ""),
+        exe=str(entry.get("exe") or ""),
+        environ=dict(entry.get("environ") or {}),
+        start_epoch=float(entry.get("start_epoch") or 0.0),
+        host_now=float(entry.get("now") or 0.0),
+    )
+
+
 class Host:
     """A read-only view of the machine the services run on."""
 
@@ -334,6 +462,9 @@ class Host:
         raise NotImplementedError
 
     def process(self, pid: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def publishers(self, marker: str) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def pyprobe(
@@ -436,6 +567,10 @@ class CommandHost(Host):
     def process(self, pid: int) -> dict[str, Any]:
         return self._call({"op": "process", "pid": pid}, 60.0)
 
+    def publishers(self, marker: str) -> list[dict[str, Any]]:
+        result = self._call({"op": "publishers", "marker": marker}, 90.0)
+        return list(result.get("publishers") or [])
+
     def pyprobe(
         self,
         proc: ProcessFacts,
@@ -488,6 +623,166 @@ def gcloud_runner(instance: str, zone: str) -> Callable[[str, float], tuple[int,
 # --------------------------------------------------------------------------
 # Probe programs. Each runs inside a service's own interpreter/cwd/environment.
 # --------------------------------------------------------------------------
+
+# Asks ONE candidate publisher process, through its own interpreter, cwd and
+# environment, the only question that distinguishes the real composer from a
+# look-alike: which durable row do you write, and which cluster lock do you take
+# to write it? Both answers come from the module the process actually imports,
+# evaluated against the environment it actually runs under -- so a legacy tree
+# whose weights.py has no _persisted_vector_id at all answers "attribute absent"
+# (it writes the unscoped `latest` row nothing consumes), and a canary scoped to
+# test/292 answers with test/292. Neither can be mistaken for finney/39.
+#
+# Like COMPOSER_PROBE it imports scaffold.publisher.weights and nothing that
+# constructs a Store.
+SCOPE_PROBE = r'''
+import json, os, sys
+out = {"cwd": os.getcwd(), "executable": sys.executable}
+try:
+    import scaffold.publisher.weights as weights
+except Exception as exc:
+    out["import_error"] = "%s: %s" % (type(exc).__name__, exc)
+    print(json.dumps(out))
+    raise SystemExit(0)
+out["module_file"] = os.path.realpath(weights.__file__)
+for label, attr in (("persisted_vector_id", "_persisted_vector_id"),
+                    ("refresh_lock_name", "_refresh_lock_name")):
+    fn = getattr(weights, attr, None)
+    if fn is None:
+        # A pre-scope tree. It writes one unscoped row for every subnet, so it
+        # cannot be this subnet's composer no matter what its environment says.
+        out[label] = None
+        out[label + "_error"] = "%s is absent from this module" % attr
+        continue
+    try:
+        out[label] = fn()
+    except Exception as exc:
+        out[label] = None
+        out[label + "_error"] = "%s: %s" % (type(exc).__name__, exc)
+out["legacy_vector_id"] = getattr(weights, "_LEGACY_PERSISTED_VECTOR_ID", None)
+print(json.dumps(out))
+'''
+
+# Corroborates the identification above by WATCHING (never taking) the cluster
+# advisory lock the composer holds while it rebuilds, and mapping the holder's
+# Postgres client socket back to a local pid.
+#
+# It is a poll because the lock is held for a fraction of each refresh cycle, so
+# a single sample almost always misses it. "Not observed in the window" is
+# therefore neutral -- it is a sighting or nothing. A sighting that maps to a
+# DIFFERENT candidate is the one outcome that is fatal: it means the durable row
+# is being written by a process other than the one selected, and every
+# publisher-side verdict below would be about the wrong process.
+LOCK_OBSERVE_PROBE = r'''
+import glob, hashlib, json, os, time
+
+out = {"observed": False, "lock_name": os.environ["LOCK_NAME"]}
+key = int.from_bytes(
+    hashlib.sha256(out["lock_name"].encode("utf-8")).digest()[:8], "big"
+) & ((1 << 63) - 1)
+# Postgres splits a bigint advisory key across (classid, objid) with objsubid=1.
+out["classid"] = key >> 32
+out["objid"] = key & 0xFFFFFFFF
+budget = float(os.environ.get("BUDGET_SECS") or "0")
+candidates = [int(p) for p in json.loads(os.environ.get("CANDIDATE_PIDS") or "[]")]
+dsn = os.environ.get("DATABASE_URL") or ""
+if not (dsn.startswith("postgres://") or dsn.startswith("postgresql://")):
+    out["skipped"] = "the composer is not configured against postgres, so there is no cluster advisory lock to observe"
+    print(json.dumps(out))
+    raise SystemExit(0)
+if budget <= 0:
+    out["skipped"] = "lock observation disabled (--observe-lock-secs 0)"
+    print(json.dumps(out))
+    raise SystemExit(0)
+
+
+def _hex_v4(text):
+    parts = text.split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return None
+    return "".join("%02X" % o for o in reversed(octets))
+
+
+def _inode(addr_hex, port):
+    """The socket inode of the holder's client connection, from /proc/net/tcp."""
+    want = "%s:%04X" % (addr_hex, port)
+    try:
+        handle = open("/proc/net/tcp")
+    except OSError:
+        return None
+    with handle:
+        next(handle, None)
+        for line in handle:
+            fields = line.split()
+            if len(fields) > 9 and fields[1] == want:
+                return fields[9]
+    return None
+
+
+def _owner(inode, pids):
+    """Which enumerated candidate holds that socket. Only its own user's
+    processes are readable here, so an unreadable candidate yields None rather
+    than a wrong answer."""
+    target = "socket:[%s]" % inode
+    for pid in pids:
+        for fd in glob.glob("/proc/%d/fd/*" % pid):
+            try:
+                if os.readlink(fd) == target:
+                    return pid
+            except OSError:
+                continue
+    return None
+
+
+try:
+    import psycopg2
+    conn = psycopg2.connect(dsn, options="-c default_transaction_read_only=on")
+    conn.set_session(autocommit=True)
+    cur = conn.cursor()
+    deadline = time.time() + budget
+    polls = 0
+    while time.time() < deadline:
+        cur.execute(
+            "SELECT host(a.client_addr), a.client_port FROM pg_locks l "
+            "JOIN pg_stat_activity a ON a.pid = l.pid "
+            "WHERE l.locktype = 'advisory' AND l.classid = %s AND l.objid = %s "
+            "AND l.objsubid = 1 AND l.granted",
+            (out["classid"], out["objid"]),
+        )
+        rows = cur.fetchall()
+        polls += 1
+        if rows:
+            out["observed"] = True
+            addr, port = rows[0][0], int(rows[0][1] or 0)
+            out["client"] = "%s:%s" % (addr, port)
+            addr_hex = _hex_v4(str(addr or ""))
+            if addr_hex is None or port <= 0:
+                out["unmapped_reason"] = "the holder is not connected over IPv4 TCP"
+            else:
+                inode = _inode(addr_hex, port)
+                if inode is None:
+                    out["unmapped_reason"] = "the holder's client socket is already gone"
+                else:
+                    out["holder_pid"] = _owner(inode, candidates)
+                    if out["holder_pid"] is None:
+                        out["unmapped_reason"] = (
+                            "the holder's socket belongs to no enumerated publisher "
+                            "readable by this user"
+                        )
+            break
+        time.sleep(0.05)
+    out["polls"] = polls
+    out["budget_secs"] = budget
+except Exception as exc:
+    # psycopg2 puts connection details in its messages; the DSN carries a
+    # password and this output is printed verbatim into the report.
+    out["error"] = ("%s: %s" % (type(exc).__name__, exc)).replace(dsn, "<postgres dsn>")
+print(json.dumps(out))
+'''
 
 # Imports scaffold.publisher.weights and NOTHING that constructs a Store. See
 # the module docstring: importing scaffold.publisher.server would migrate the
@@ -652,9 +947,34 @@ print(json.dumps(out))
 
 
 @dataclass
+class ComposerResolution:
+    """Which running process is this subnet's weight composer, and how we know.
+
+    ``process`` is set whenever a candidate was selected -- including when the
+    selection was later contradicted -- so the report can always name what it
+    looked at. ``confirmed`` is the only thing the checks may act on.
+    """
+
+    expected_vector_id: str = ""
+    expected_lock_name: str = ""
+    method: str = ""
+    process: ProcessFacts | None = None
+    scope: dict[str, Any] = field(default_factory=dict)
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    lock: dict[str, Any] = field(default_factory=dict)
+    enumeration_error: str = ""
+    error: str = ""
+
+    @property
+    def confirmed(self) -> bool:
+        return self.process is not None and not self.error
+
+
+@dataclass
 class Facts:
     """Everything the checks are allowed to see."""
 
+    composer_id: ComposerResolution = field(default_factory=ComposerResolution)
     publisher: ProcessFacts | None = None
     publisher_error: str = ""
     composer: dict[str, Any] = field(default_factory=dict)
@@ -676,15 +996,108 @@ class Facts:
     max_cooldown_multiple: float = DEFAULT_MAX_COOLDOWN_MULTIPLE
 
 
+def check_composer_identity(facts: Facts) -> CheckResult:
+    """#0 -- is the process every check below is about actually the composer?
+
+    This check exists because the preflight once resolved the publisher by a
+    unit-name default, landed on a legacy process that writes its own unscoped
+    ``latest`` row, and reported that decoy's state as fact: it declared the v3
+    composer absent and the producer hotkey unset when the real composer had
+    both. A wrong answer delivered confidently is worse than no answer, so the
+    identification is proven here and every publisher-side check is blocked when
+    it cannot be.
+    """
+    title = "the probed publisher IS this subnet's weight composer"
+    ident = facts.composer_id
+    evidence: dict[str, Any] = {
+        "expected_persisted_vector_id": ident.expected_vector_id,
+        "expected_refresh_lock_name": ident.expected_lock_name,
+        "method": ident.method,
+        "candidates": ident.candidates,
+    }
+    if ident.enumeration_error:
+        evidence["enumeration_error"] = ident.enumeration_error
+    if ident.lock:
+        evidence["advisory_lock"] = ident.lock
+    if ident.process is not None:
+        proc = ident.process
+        evidence["selected"] = {
+            "unit": proc.unit or "(no unit)",
+            "pid": proc.pid,
+            "user": proc.user,
+            "cwd": proc.cwd,
+            "interpreter": proc.interpreter,
+            "started_at": _iso(proc.start_epoch),
+            "module_file": ident.scope.get("module_file"),
+            "persisted_vector_id": ident.scope.get("persisted_vector_id"),
+            "refresh_lock_name": ident.scope.get("refresh_lock_name"),
+        }
+    # No selection and no recorded reason means the resolution never ran. That
+    # is still "we cannot tell which process this report is about", which is a
+    # FAIL -- the one verdict this check must never soften.
+    error = ident.error or (
+        "" if ident.process is not None
+        else "the composer was never resolved, so no publisher-side fact below "
+             "can be attributed to a process"
+    )
+    if error:
+        return CheckResult(
+            "composer_identity", title, FAIL, error,
+            "do NOT read the publisher-side verdicts below as facts about the "
+            "composer -- they are blocked precisely because the process they "
+            f"would describe is unproven. Confirm which process writes the "
+            f"{ident.expected_vector_id} row (it is the one holding "
+            f"{ident.expected_lock_name} during a rebuild), then re-run. If this "
+            "box genuinely runs no composer for this subnet, there is nothing to "
+            "flip.",
+            evidence,
+        )
+    return CheckResult(
+        "composer_identity", title, PASS,
+        f"{evidence['selected']['unit']} (pid {ident.process.pid}, cwd "
+        f"{ident.process.cwd}) composes {ident.expected_vector_id}; "
+        f"{_lock_phrase(ident)}",
+        evidence=evidence,
+    )
+
+
+def _lock_phrase(ident: ComposerResolution) -> str:
+    """One clause describing what the advisory-lock observation added."""
+    lock = ident.lock or {}
+    if lock.get("error"):
+        return f"the advisory-lock observation did not run ({lock['error']})"
+    if lock.get("skipped"):
+        return f"the advisory-lock observation was skipped ({lock['skipped']})"
+    if not lock.get("observed"):
+        return (
+            f"{ident.expected_lock_name} was not seen held during the "
+            f"{lock.get('budget_secs', 0)}s window (it is only held while a "
+            "rebuild runs, so this neither confirms nor contradicts)"
+        )
+    if lock.get("holder_pid") is not None:
+        return f"and it was seen holding {ident.expected_lock_name}"
+    return (
+        f"{ident.expected_lock_name} was seen held but not attributable to a pid "
+        f"({lock.get('unmapped_reason') or 'unmapped'})"
+    )
+
+
 def check_composer_reachable(facts: Facts) -> CheckResult:
     """#1 -- can the RUNNING publisher process reach the v3 composer?"""
     title = "the running publisher can reach _compose_cybergym_lane_v3"
     if facts.publisher is None:
+        # Never fall back to "probe whatever publisher-ish process we can find
+        # and report its state". That silent substitution is the bug this check
+        # pair exists to prevent.
         return CheckResult(
-            "composer_reachable", title, FAIL,
-            f"the publisher process could not be resolved: {facts.publisher_error}",
-            "confirm the publisher unit is active and that this preflight can read "
-            "/proc as root (run it on the box with sudo, or pass --gcloud-instance).",
+            "composer_reachable", title, BLOCKED,
+            "composer_identity could not prove which process composes "
+            f"{facts.composer_id.expected_vector_id}, so there is no process "
+            "whose reachability could be reported as the composer's: "
+            f"{facts.publisher_error}",
+            "fix composer_identity first. Confirm the publisher runs as root-"
+            "readable /proc (run this on the box with sudo, or pass "
+            "--gcloud-instance), and that one process claims this subnet's scope.",
         )
     proc = facts.publisher
     evidence = {
@@ -787,9 +1200,9 @@ def check_db_migration(facts: Facts) -> CheckResult:
     if facts.publisher is None:
         return CheckResult(
             "db_migration", title, BLOCKED,
-            "composer_reachable could not resolve the publisher process, so the "
-            "database it is configured against is unknown",
-            "fix composer_reachable first.",
+            "composer_identity could not prove which process is the composer, so "
+            "the database it is configured against is unknown",
+            "fix composer_identity first.",
         )
     if facts.database_error:
         return CheckResult(
@@ -864,9 +1277,11 @@ def check_producer_identity(facts: Facts) -> CheckResult:
     if facts.publisher is None:
         return CheckResult(
             "producer_identity", title, BLOCKED,
-            "composer_reachable could not resolve the publisher process, so its "
-            "configured producer identity is unknown",
-            "fix composer_reachable first.",
+            "composer_identity could not prove which process is the composer, so "
+            "the configured producer identity read here would be some other "
+            "process's",
+            "fix composer_identity first. A producer hotkey read off a decoy is "
+            "the exact wrong answer this preflight used to give.",
         )
     configured = (facts.publisher.environ.get(PRODUCER_HOTKEY_ENV) or "").strip()
     evidence = {"env": PRODUCER_HOTKEY_ENV, "configured": configured or None}
@@ -1029,8 +1444,8 @@ def check_fundable_lane(facts: Facts) -> CheckResult:
     if facts.publisher is None:
         return CheckResult(
             "fundable_lane", title, BLOCKED,
-            "composer_reachable could not resolve the publisher process",
-            "fix composer_reachable first.",
+            "composer_identity could not prove which process is the composer",
+            "fix composer_identity first.",
         )
     env = facts.publisher.environ
     enabled = (env.get(MECHANISM_ENABLED_ENV) or "").strip().lower() in {
@@ -1281,6 +1696,7 @@ def check_validator_writing(facts: Facts) -> CheckResult:
 
 
 CHECKS: tuple[Callable[[Facts], CheckResult], ...] = (
+    check_composer_identity,
     check_composer_reachable,
     check_db_migration,
     check_producer_identity,
@@ -1375,6 +1791,158 @@ def database_queries(network: str, netuid: int) -> dict[str, Any]:
     }
 
 
+SCOPE_ENV_KEYS = (
+    "PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME", "LANG",
+    # The scope is a function of these two, so they must reach the probe
+    # exactly as the process has them -- including "absent".
+    NETWORK_ENV, NETUID_ENV,
+)
+
+
+def resolve_composer(host: Host, args: argparse.Namespace) -> ComposerResolution:
+    """Identify the process that composes ``latest:<network>:<netuid>``.
+
+    Not by unit name. A box can run several processes that import the same ASGI
+    app, answer the same paths, and differ only in which durable row they write;
+    the live SN39 host runs four. What separates them is a fact each one will
+    state about itself:
+
+      * the row id its own imported ``weights`` module would write
+        (``_persisted_vector_id()``), and
+      * the cluster lock that module would take to write it
+        (``_refresh_lock_name()``),
+
+    both evaluated inside that process's interpreter, cwd and environment. A
+    pre-scope tree has neither function and writes one unscoped ``latest`` row;
+    a canary scoped to test/292 names test/292. Exactly one process may name
+    this subnet, and if none or several do, that is a FAIL rather than a guess.
+
+    The Postgres advisory lock is then WATCHED (never taken) to corroborate:
+    only the true composer holds it, so a sighting attributable to a different
+    candidate contradicts the selection and is fatal. It is held for a fraction
+    of each refresh cycle, so not seeing it is neutral.
+
+    ``--publisher-unit`` is a fallback, not the mechanism: it is consulted only
+    when /proc enumeration finds nothing (or when an operator names a unit
+    deliberately), and even then the named process must still prove its scope.
+    """
+    ident = ComposerResolution(
+        expected_vector_id=persisted_vector_id(args.network, args.netuid),
+        expected_lock_name=refresh_lock_name(args.network, args.netuid),
+    )
+    unit = getattr(args, "publisher_unit", None)
+    procs: list[ProcessFacts] = []
+    if unit:
+        ident.method = f"named unit {unit}"
+        try:
+            procs = [host.service_process(unit)]
+        except (ProbeError, OSError, ValueError) as exc:
+            ident.error = f"--publisher-unit {unit} could not be resolved: {exc}"
+            return ident
+    else:
+        ident.method = f"/proc scan for {PUBLISHER_PROCESS_MARKER}"
+        try:
+            procs = [process_facts(entry)
+                     for entry in host.publishers(PUBLISHER_PROCESS_MARKER)]
+        except (ProbeError, OSError, ValueError) as exc:
+            ident.enumeration_error = str(exc)
+        if not procs:
+            ident.method = f"unit fallback to {DEFAULT_PUBLISHER_UNIT}"
+            try:
+                procs = [host.service_process(DEFAULT_PUBLISHER_UNIT)]
+            except (ProbeError, OSError, ValueError) as exc:
+                ident.error = (
+                    "no running process imports "
+                    f"{PUBLISHER_PROCESS_MARKER}"
+                    + (f" ({ident.enumeration_error})" if ident.enumeration_error else "")
+                    + f", and the fallback unit {DEFAULT_PUBLISHER_UNIT} could not "
+                    f"be resolved either: {exc}"
+                )
+                return ident
+
+    matches: list[tuple[ProcessFacts, dict[str, Any]]] = []
+    for proc in procs:
+        entry: dict[str, Any] = {
+            "unit": proc.unit or "(no unit)",
+            "pid": proc.pid,
+            "cwd": proc.cwd,
+            "interpreter": proc.interpreter,
+        }
+        try:
+            scope = host.pyprobe_json(proc, SCOPE_PROBE, env_keys=SCOPE_ENV_KEYS)
+        except (ProbeError, OSError, ValueError) as exc:
+            entry["probe_error"] = str(exc)
+            entry["is_composer"] = False
+            ident.candidates.append(entry)
+            continue
+        entry["module_file"] = scope.get("module_file")
+        entry["persisted_vector_id"] = scope.get("persisted_vector_id")
+        entry["refresh_lock_name"] = scope.get("refresh_lock_name")
+        for key in ("import_error", "persisted_vector_id_error", "refresh_lock_name_error"):
+            if scope.get(key):
+                entry[key] = scope[key]
+        entry["is_composer"] = (
+            scope.get("refresh_lock_name") == ident.expected_lock_name
+            and scope.get("persisted_vector_id") == ident.expected_vector_id
+        )
+        ident.candidates.append(entry)
+        if entry["is_composer"]:
+            matches.append((proc, scope))
+
+    if not matches:
+        seen = ", ".join(
+            f"{c['unit']} (pid {c['pid']}, {c.get('cwd')}) -> "
+            f"{c.get('persisted_vector_id') or c.get('import_error') or c.get('probe_error') or 'unscoped `latest`'}"
+            for c in ident.candidates
+        ) or "nothing"
+        ident.error = (
+            f"no running publisher composes {ident.expected_vector_id}. Considered: "
+            f"{seen}"
+        )
+        return ident
+    if len(matches) > 1:
+        ident.error = (
+            f"{len(matches)} running processes each claim to compose "
+            f"{ident.expected_vector_id} "
+            f"({', '.join(f'{p.unit or p.pid}' for p, _ in matches)}); the durable "
+            "row has one writer, so this box is misconfigured and probing either "
+            "one would be a coin flip"
+        )
+        ident.process, ident.scope = matches[0]
+        return ident
+
+    ident.process, ident.scope = matches[0]
+
+    try:
+        ident.lock = host.pyprobe_json(
+            ident.process,
+            LOCK_OBSERVE_PROBE,
+            env_keys=("PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME", "LANG", "DATABASE_URL"),
+            env={
+                "LOCK_NAME": ident.expected_lock_name,
+                "BUDGET_SECS": str(args.observe_lock_secs),
+                "CANDIDATE_PIDS": json.dumps([c["pid"] for c in ident.candidates]),
+            },
+            timeout=float(args.observe_lock_secs) + 60.0,
+        )
+    except (ProbeError, OSError, ValueError) as exc:
+        ident.lock = {"error": str(exc)}
+
+    holder = ident.lock.get("holder_pid")
+    if ident.lock.get("observed") and holder is not None and int(holder) != ident.process.pid:
+        other = next(
+            (c for c in ident.candidates if c["pid"] == int(holder)), {"unit": "?"}
+        )
+        ident.error = (
+            f"{ident.expected_lock_name} is held by pid {holder} "
+            f"({other.get('unit')}), not by the process whose code claims that "
+            f"scope ({ident.process.unit}, pid {ident.process.pid}). The durable "
+            "row is being written by something other than the process this "
+            "preflight would have described"
+        )
+    return ident
+
+
 def gather(host: Host, args: argparse.Namespace) -> Facts:
     """Collect every fact once. Probe failures are recorded, never raised."""
     facts = Facts(
@@ -1383,10 +1951,11 @@ def gather(host: Host, args: argparse.Namespace) -> Facts:
         max_cooldown_multiple=args.max_cooldown_multiple,
     )
 
-    try:
-        facts.publisher = host.service_process(args.publisher_unit)
-    except (ProbeError, OSError, ValueError) as exc:
-        facts.publisher_error = str(exc)
+    facts.composer_id = resolve_composer(host, args)
+    if facts.composer_id.confirmed:
+        facts.publisher = facts.composer_id.process
+    else:
+        facts.publisher_error = facts.composer_id.error
 
     if facts.publisher is not None:
         try:
@@ -1472,15 +2041,51 @@ def gather(host: Host, args: argparse.Namespace) -> Facts:
 def render(results: list[CheckResult], facts: Facts, as_json: bool) -> str:
     ready = all(result.state == PASS for result in results)
     if as_json:
+        ident = facts.composer_id
+        probed: dict[str, Any] | None = None
+        if ident.process is not None:
+            probed = {
+                "unit": ident.process.unit,
+                "pid": ident.process.pid,
+                "cwd": ident.process.cwd,
+                "module_file": ident.scope.get("module_file"),
+                "persisted_vector_id": ident.scope.get("persisted_vector_id"),
+                "confirmed": ident.confirmed,
+            }
         return json.dumps(
             {
                 "ready": ready,
                 "checked_at": _iso(facts.now),
+                "probed_publisher": probed,
+                "identification_method": ident.method,
                 "checks": [result.as_dict() for result in results],
             },
             sort_keys=True,
         )
     lines = []
+    # The header names the process the publisher-side verdicts are ABOUT,
+    # before any of them. A reader who cannot see which process was probed
+    # cannot tell whether the report is about the right one -- and this report
+    # has been about the wrong one before.
+    ident = facts.composer_id
+    proc = ident.process
+    if proc is None:
+        lines.append(
+            f"probed publisher  NONE -- no process proven to compose "
+            f"{ident.expected_vector_id or 'this subnet'}"
+        )
+    else:
+        mark = "" if ident.confirmed else "  (UNCONFIRMED -- see composer_identity)"
+        lines.append(
+            f"probed publisher  {proc.unit or '(no unit)'} pid {proc.pid}{mark}"
+        )
+        lines.append(f"                  cwd      {proc.cwd}")
+        lines.append(f"                  module   {ident.scope.get('module_file')}")
+        lines.append(
+            f"                  composes {ident.scope.get('persisted_vector_id')}"
+        )
+    lines.append(f"                  found by {ident.method}")
+    lines.append("")
     for result in results:
         lines.append(f"{result.state:<17} {result.check_id:<20} {result.title}")
         lines.append(f"    why    {result.reason}")
@@ -1489,7 +2094,7 @@ def render(results: list[CheckResult], facts: Facts, as_json: bool) -> str:
     lines.append("")
     if ready:
         lines.append(
-            "READY. All six independent conditions hold. Flip the publisher to "
+            "READY. All seven independent conditions hold. Flip the publisher to "
             "CATHEDRAL_ALLOCATION_CONTRACT=v3 and re-pin the validators in ONE "
             "coordinated window, then confirm with scripts/assert_live_v3_contract.py "
             "that a v3-pinned validator accepts the emitted vector."
@@ -1510,7 +2115,23 @@ def main(argv: list[str] | None = None, host: Host | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--gcloud-instance", help="probe this instance over IAP SSH")
     parser.add_argument("--gcloud-zone", default="us-central1-b")
-    parser.add_argument("--publisher-unit", default=DEFAULT_PUBLISHER_UNIT)
+    parser.add_argument(
+        "--publisher-unit",
+        default=None,
+        help="probe THIS unit's process instead of discovering the composer. "
+        "Only ever narrows the search: the named process must still prove it "
+        f"composes latest:<network>:<netuid>, or the run fails. Default: "
+        f"discover by /proc scan, falling back to {DEFAULT_PUBLISHER_UNIT}.",
+    )
+    parser.add_argument(
+        "--observe-lock-secs",
+        type=float,
+        default=DEFAULT_OBSERVE_LOCK_SECS,
+        help="how long to watch pg_locks for the composer's refresh lock, as "
+        "corroboration. The lock is held only while a rebuild runs (roughly "
+        "once a minute), so this window is a little over one cycle. 0 skips it; "
+        "not seeing the lock is never itself a failure.",
+    )
     parser.add_argument("--validator-unit", default=DEFAULT_VALIDATOR_UNIT)
     parser.add_argument("--validator-config", default=DEFAULT_VALIDATOR_CONFIG)
     parser.add_argument("--status-log", default=DEFAULT_STATUS_LOG)
