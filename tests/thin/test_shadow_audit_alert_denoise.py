@@ -323,9 +323,7 @@ def test_the_script_parses_a_really_emitted_line(tmp_path):
             # A completed tick alongside each audit, emitted through the same
             # logger, so the liveness rules are satisfied by real records and
             # this test is about rule 5's parsing rather than rule 3's.
-            logger.event(
-                "WEIGHT_COOLDOWN_SKIPPED", stage="weights", status=events.INFO
-            )
+            logger.event("WEIGHT_COOLDOWN_SKIPPED", stage="weights", status=events.INFO)
             logger.event(
                 "PROVENANCE_AUDIT_FAIL",
                 stage="provenance",
