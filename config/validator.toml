@@ -1,8 +1,13 @@
-# Cathedral SN39 validator config (v4).
-# Dry-run:  cathedral-validator serve --config config/validator.toml --once
-# Broadcast: cathedral-validator serve --config config/validator.toml --broadcast
+# Cathedral SN39 validator config (v4) — an ANNOTATED REFERENCE, not the
+# profile to run. A third-party validator copies
+# config/validator-thin-sn39-relay.toml; see README's quickstart, which is the
+# one install-and-run path in this repository.
+#
 # Security-critical SN39 launch and journal settings cannot be weakened by
-# ambient environment variables.
+# ambient environment variables. Non-security settings CAN be: environment
+# beats this file, so a stray CATHEDRAL_VALIDATOR_STATE export silently
+# replaces the state_file below and later fails the immutable trust profile.
+# Prefer the per-command --state-file / --runtime-root / --jsonl flags.
 
 [network]
 name = "finney"
@@ -26,7 +31,9 @@ public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e
 key_id = "cathedral-weight-policy"
 # Launch contract pin: 90% Intel TDX / >=10% burn. Supported SN39 mode.
 require_policy = "validated_supply_v1"
-# state_file = "~/.cathedral/thin_validator.json"   # rollback-fence persistence
+# Rollback-fence persistence. Must be an ABSOLUTE path: nothing here expands
+# "~" or an environment variable, so a tilde would be taken literally.
+# state_file = "/home/you/.cathedral/thin_validator.json"
 
 [runtime]
 # Shared single-flight lock and ambiguity journal for thin and FULL authority.
@@ -74,6 +81,9 @@ mechanism = "validated_supply_v1"
 # burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 [logs]
-# Stable machine-readable event stream (one JSON object per line).
-# Watch it:  tail -f ~/.cathedral/validator-events.jsonl | jq .
-# jsonl = "~/.cathedral/validator-events.jsonl"
+# Stable machine-readable event stream (one JSON object per line). Absolute
+# path only — "~" is not expanded here. Its parent directory is created
+# owner-only (0700) if missing; if it cannot be created the validator says so
+# and exits rather than raising.
+# Watch it:  tail -f "$HOME/.cathedral/validator-events.jsonl" | jq .
+# jsonl = "/home/you/.cathedral/validator-events.jsonl"

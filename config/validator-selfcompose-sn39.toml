@@ -9,8 +9,10 @@
 # race that a heavy per-tick authority recompute loses. TDX attestation + per-report
 # signature verification is compose-side (the publisher) and is re-checked by the
 # full-provenance verifier, which runs concurrently in shadow and never delays or
-# blocks the submission. Authority is the OPT-IN fallback — see
-# config/validator-mainnet-sn39.toml (kept byte-identical).
+# blocks the submission. Authority is the OPT-IN fallback and ships no config
+# profile of its own — the authority profiles were removed in PR #39, so
+# reaching it takes an explicit `--mode full` or `mode = "authority"` in an
+# operator's own config.
 #
 # OPERATIONAL DEPENDENCY: because the shadow verifier is non-blocking, a
 # compromised or buggy LOCAL publisher that signs a vector disagreeing with its

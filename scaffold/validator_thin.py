@@ -41,7 +41,15 @@ from urllib.parse import urlsplit
 from . import render
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
-from .events import FAIL, INFO, NOT_PROVEN, PASS, EventLogger, stable_error
+from .events import (
+    FAIL,
+    INFO,
+    NOT_PROVEN,
+    PASS,
+    EventLogger,
+    EventLogPathError,
+    stable_error,
+)
 from .provenance_audit import (
     ASSURANCE_RANKS,
     MECHANISM_DEFAULT,
@@ -10053,7 +10061,14 @@ def main() -> int:
     # validator_thin path and the ChainClient path honor it from one source.
     if args.chain_endpoint:
         os.environ[CHAIN_ENDPOINT_ENV] = args.chain_endpoint
-    return run(args)
+    # A journal path this process cannot open is a configuration mistake, not a
+    # crash: print the fix and exit 2. Non-zero, so a supervising unit still
+    # treats it as a failed start.
+    try:
+        return run(args)
+    except EventLogPathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

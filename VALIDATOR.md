@@ -7,6 +7,14 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 - an **independent provenance audit** that re-checks the public artifacts and,
   when configured with controlled evidence, can recompute the vector itself.
 
+> [!IMPORTANT]
+> **Install and first run live in one place: [README's
+> quickstart](README.md#quickstart).** This runbook does not restate those
+> commands — it explains what each step proves, what to watch afterwards, and
+> what must be true before anyone adds `--broadcast`. Run the quickstart
+> first; every command below assumes the `my-validator.toml` and the
+> owner-only `$HOME/.cathedral` it produces.
+
 > [!CAUTION]
 > `cathedral-validator serve` is **non-writing by default** in the launch
 > candidate. Only an explicit `--broadcast` permits a chain-write attempt, and
@@ -92,65 +100,21 @@ raw-evidence path is provisioned.
 Never place wallet seeds or private keys in TOML, environment files committed
 to Git, logs, issues, or provenance bundles.
 
-## Install a reviewed build
+## Install
+
+Follow [README's quickstart](README.md#quickstart). It is the only install
+procedure in this repository: clone, venv, `pip install -e '.[provenance]'`,
+copy `config/validator-thin-sn39-relay.toml` to `my-validator.toml`, then the
+two non-writing runs.
 
 Do not install a moving branch for chain use. When a supported release is
 published, verify the tag, commit, package digest, and release notes before
-installation.
-
-For source review and non-writing testing only:
-
-```bash
-git clone https://github.com/cathedralai/cathedral-validator.git
-cd cathedral-validator
-
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e '.[provenance]'
-
-cp config/validator.toml my-validator.toml
-```
-
-The project distribution is built from this repository. There is no
-published `cathedralsubnet` PyPI package. A copied sample config is suitable
-for review and previews only. Public launch operators must use the immutable
+installation. The project distribution is built from this repository; there is
+no published `cathedralsubnet` PyPI package. A copied profile is suitable for
+review and previews only — public launch operators must use the immutable
 release configuration and installation named by the launch notice.
 
-## Configure
-
-Edit your copy, not the repository sample:
-
-```toml
-[network]
-name = "finney"
-netuid = 39
-wallet_name = "<your-wallet-name>"
-validator_hotkey = "<your-validator-hotkey-name>"
-
-[publisher]
-url = "https://api.cathedral.computer"
-
-[weight_policy]
-key_id = "cathedral-weight-policy"
-public_key_hex = "<independently verified key from the supported release>"
-require_policy = "validated_supply_v1"
-
-[provenance]
-mode = "shadow"
-mechanism = "validated_supply_v1"
-```
-
-Create a private user-owned runtime directory, then set the state and log paths
-through environment variables:
-
-```bash
-install -d -m 700 "$HOME/.cathedral"
-export CATHEDRAL_VALIDATOR_STATE="$HOME/.cathedral/validator-state.json"
-export CATHEDRAL_VALIDATOR_JSONL="$HOME/.cathedral/validator-events.jsonl"
-```
-
-Do not accept the key merely because it appears in the same checkout or
+Do not accept the signing key merely because it appears in the same checkout or
 payload you are verifying. Compare the supported release's pin with the live
 [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json) through
 an independent channel.
@@ -159,55 +123,64 @@ Every provenance pin is documented in
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md). A missing pin is not inferred from
 the manifest or public evidence server.
 
+### Configuration comes from the file, not the environment
+
+> [!WARNING]
+> `CATHEDRAL_*` environment variables override the config file. That is a trap
+> worth stating plainly, because the failure it causes names no cause: a
+> leftover `export CATHEDRAL_VALIDATOR_STATE=$HOME/...` in a shell profile
+> replaces the pinned state file, and every later broadcast attempt fails with
+> `SN39 mainnet broadcast differs from the immutable trust profile:
+> state_file`. The same applies to `CATHEDRAL_VALIDATOR_JSONL`,
+> `CATHEDRAL_WEIGHT_POLICY_*`, `CATHEDRAL_EVIDENCE_URL`, and the
+> `CATHEDRAL_PROVENANCE_*` pins.
+>
+> Configure a preview with the `--runtime-root`, `--state-file` and `--jsonl`
+> flags from the quickstart, which are scoped to the one command that runs.
+> Configure a service with its shipped config. If a broadcast is refused for a
+> value you believe your config sets, check `env | grep CATHEDRAL_` first.
+
 ### Optional RPC endpoint
 
 ```bash
 export CATHEDRAL_CHAIN_ENDPOINT="wss://your-finney-node.example:443"
 ```
 
-The endpoint must serve the same Finney chain and historical state required by
-the evidence anchor. Changing the RPC connection does not change the signed
-`network` label.
+This one is a connection override, not a trust value: it must serve the same
+Finney chain and historical state required by the evidence anchor, and it does
+not change the signed `network` label. `--chain-endpoint` does the same thing
+per command.
 
 ## Non-writing acceptance
 
-Run these in order.
+The two runs are quickstart steps 1 and 2. What to confirm in each:
 
-### 1. Synthetic-map tick
+### 1. Synthetic-map tick (`--offline --once`)
 
-This fetches the signed vector and shadow evidence over HTTPS, uses a synthetic
-UID map, opens no chain connection, and cannot broadcast:
-
-```bash
-cathedral-validator serve \
-  --config my-validator.toml \
-  --runtime-root "$HOME/.cathedral" \
-  --offline \
-  --once
-```
-
-Confirm:
+Fetches the signed vector and shadow evidence over HTTPS, uses a synthetic UID
+map, opens no chain connection, and cannot broadcast. Confirm:
 
 - signature and policy checks pass;
 - the vector is fresh and scoped to Finney SN39;
 - burn and weights are finite and normalized;
-- the provenance result is clearly `PASS`, `FAIL`, or `NOT_PROVEN`; and
+- the provenance result is clearly `PASS`, `FAIL`, or `NOT_PROVEN` — and not a
+  transport or file error. A relay without controlled raw evidence reports
+  `PROVENANCE_AUDIT_NOT_PROVEN` with `assurance receipts_only`, which is the
+  expected outcome; a `FileNotFoundError` naming a key bundle means the audit
+  never ran at all; and
 - no wallet or chain client is initialized, and no broadcast is attempted.
 
-### 2. Metagraph-backed dry run
+A `--once` run exits non-zero unless the shadow audit reached the configured
+minimum assurance in the same run, so a relay's healthy preview exits 1 and
+records `PROVENANCE_HEALTH_GATE_FAILED`. That gate is deliberate — a one-shot
+current-health run is not launch-ready evidence — and it exists only on the
+`--once` path. Judge these two steps from the journal, not the exit status.
 
-This resolves hotkeys and computes the exact UID vector without writing:
+### 2. Metagraph-backed dry run (`--dry-run --once`)
 
-```bash
-cathedral-validator serve \
-  --config my-validator.toml \
-  --runtime-root "$HOME/.cathedral" \
-  --dry-run \
-  --once
-```
-
-Confirm the current metagraph, burn destination, candidate mapping, normalized
-weight sum, rollback state, and explicit “no chain writes” banner.
+Resolves hotkeys and computes the exact UID vector without writing. Confirm
+the current metagraph, burn destination, candidate mapping, normalized weight
+sum, rollback state, and explicit “no chain writes” banner.
 
 If there are no eligible miners, a burn-only outcome is expected fail-closed
 behavior—not a reason to preserve an old positive vector.
@@ -215,10 +188,11 @@ behavior—not a reason to preserve an old positive vector.
 ## Observe the validator
 
 TTY output is designed for a human operator. JSONL is the stable integration
-surface:
+surface — the path is whatever `--jsonl` or `[logs].jsonl` set, so for a
+quickstart preview:
 
 ```bash
-tail -f "$CATHEDRAL_VALIDATOR_JSONL" | jq .
+tail -f "$HOME/.cathedral/validator-events.jsonl" | jq .
 ```
 
 Useful lifecycle stages include `FEED`, `SIGNATURE`, `FRESHNESS`, `ROLLBACK`,
@@ -295,6 +269,13 @@ Do not add `--broadcast` until all of the following are true:
 - [ ] You have explicit operator authorization for a mainnet transaction.
 - [ ] You understand that only `--broadcast` permits a chain attempt, and the
       SN39 release and authorization state can still refuse it.
+- [ ] `env | grep CATHEDRAL_` is empty of trust values, so the pinned config is
+      what actually runs (see the environment warning above).
+- [ ] The `[launch]` settings match what this runtime actually is — see [the
+      two `[launch]` settings a relay depends
+      on](README.md#the-two-launch-settings-a-relay-depends-on). A relay clears
+      the completed-launch gate; a runtime that originates weights does not get
+      to clear it by editing a config file.
 
 Only an authorized operator should then start the continuous service:
 
