@@ -1160,3 +1160,131 @@ def test_recurring_loop_still_fails_a_genuine_tick_failure(
             ),
         }
     ]
+
+
+def _throwing_loop_args(
+    monkeypatch: pytest.MonkeyPatch, events: object, exc: Exception
+):
+    """A one-shot `run` whose tick raises `exc` and nothing else."""
+    args = _run_loop_args(once=True)
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "_drain_shadow_audit_once", lambda _args: True)
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(exc),
+    )
+    return args
+
+
+def test_recurring_loop_reports_epoch_room_as_its_own_routine_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-clearing epoch-boundary wait must not look like a page.
+
+    The refusal names the block at which it clears, so an operator has nothing
+    to do. Sharing `TICK_FAILED`/`FAIL` with the launch lock below is what made
+    an alert on that pair worth muting.
+    """
+    events = _RunEventRecorder()
+    detail = (
+        "only 32 block(s) remain in this epoch; a submission needs 48 "
+        "(16 mortal + 32 finality margin) to prove mortal inclusion and "
+        "finalized verification. This clears itself at block 8680428"
+    )
+    args = _throwing_loop_args(
+        monkeypatch, events, validator_thin._EpochRoomUnavailable(detail)
+    )
+
+    # Still a tick that wrote nothing, so the process exit is unchanged: a
+    # `--once` canary must never report success for a skipped write.
+    assert validator_thin.run(args) == 1
+    names = [name for name, _fields in events.rows]
+    assert "TICK_FAILED" not in names
+    rows = [fields for name, fields in events.rows if name == "EPOCH_ROOM_SKIPPED"]
+    assert len(rows) == 1
+    assert rows[0]["stage"] == "submit"
+    assert rows[0]["status"] == validator_thin.NOT_PROVEN
+    assert rows[0]["detail"] == detail
+    assert "No action" in str(rows[0]["remediation"])
+
+
+def test_recurring_loop_names_the_continuous_launch_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one refusal that never clears itself gets a code of its own.
+
+    A validator that is up, ticking, and writing nothing until a human runs one
+    named command is the single most important thing this loop can report, and
+    it used to be indistinguishable from the epoch-boundary wait above.
+    """
+    events = _RunEventRecorder()
+    detail = (
+        "continuous broadcast is locked until `cathedral-validator "
+        "reconcile-launch` independently verifies the finalized "
+        "rewarded-set-gated launch"
+    )
+    args = _throwing_loop_args(
+        monkeypatch, events, validator_thin._ContinuousLaunchLocked(detail)
+    )
+
+    assert validator_thin.run(args) == 1
+    names = [name for name, _fields in events.rows]
+    assert "TICK_FAILED" not in names
+    assert "EPOCH_ROOM_SKIPPED" not in names
+    rows = [
+        fields for name, fields in events.rows if name == "CONTINUOUS_LAUNCH_LOCKED"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["status"] == validator_thin.FAIL
+    assert "reconcile-launch" in str(rows[0]["remediation"])
+
+
+def test_recurring_loop_names_an_attempt_fence_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _RunEventRecorder()
+    detail = (
+        "thin submission attempt fence refused before chain write: "
+        "OSError: read-only file system"
+    )
+    args = _throwing_loop_args(
+        monkeypatch, events, validator_thin._SubmissionFenceRefused(detail)
+    )
+
+    assert validator_thin.run(args) == 1
+    names = [name for name, _fields in events.rows]
+    assert "TICK_FAILED" not in names
+    rows = [
+        fields for name, fields in events.rows if name == "SUBMISSION_FENCE_REFUSED"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["status"] == validator_thin.FAIL
+    # The reservation is taken immediately before the chain call precisely so
+    # that a refusal here cannot have left an ambiguous write.
+    assert "before any chain call" in str(rows[0]["remediation"])
+
+
+def test_every_new_code_is_still_a_vector_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The split is reporting-only: existing handlers must be unaffected.
+
+    Callers all the way up the stack catch `wire.VectorError`. If any of these
+    stopped being one, a refusal would escape a handler that has caught it for
+    every release so far.
+    """
+    for cls in (
+        validator_thin._EpochRoomUnavailable,
+        validator_thin._ContinuousLaunchLocked,
+        validator_thin._SubmissionFenceRefused,
+    ):
+        assert issubclass(cls, wire_vector.VectorError)

@@ -156,6 +156,51 @@ class _ChainWeightCooldownActive(wire.VectorError):
     case this pre-check cannot positively prove."""
 
 
+class _EpochRoomUnavailable(wire.VectorError):
+    """This tick landed too near the epoch boundary to prove mortal inclusion.
+
+    A submission needs the mortal era plus the finality margin to still be
+    inside the epoch it was composed against. A tick that starts with fewer
+    blocks than that left is refused before anything is reserved or signed,
+    and the very next tick — after the boundary passes — has a whole epoch of
+    room. The refusal names the block at which it clears, so it is a schedule
+    fact with a known expiry, not a verdict on this validator.
+
+    It is deliberately NOT a sibling of the other five epoch refusals
+    `_require_inclusion_policy_ready` raises. "The chain's epoch arithmetic is
+    inconsistent" and "the signed vector was composed against a different
+    epoch" never clear on their own and need a human; only this one does
+    nothing but wait. Reporting them under one code and one status is what
+    made an operator's alert filter choose between paging on routine waits and
+    muting genuine blockers.
+
+    The class is only about REPORTING. Every caller still refuses exactly the
+    same ticks, and the one call site that runs after a durable attempt has
+    been reserved re-raises it as a plain refusal, because there the same
+    sentence describes a tick that must be resolved through the journal."""
+
+
+class _SubmissionFenceRefused(wire.VectorError):
+    """The local durable attempt fence would not reserve, before any chain call.
+
+    Nothing was signed, submitted, or finalized: the reservation is taken
+    immediately before `set_weights_on_chain` precisely so that a refusal here
+    leaves no ambiguous write. But the cause is always local and durable — an
+    unwritable runtime root, a journal left pending by an earlier attempt, a
+    second writer — and none of those clear on their own, so this needs a
+    human. It carries its own code purely so that a human can be paged for it
+    without also being paged for the chain's routine cooldown."""
+
+
+class _ContinuousLaunchLocked(wire.VectorError):
+    """Recurring writes are locked until `reconcile-launch` proves the launch.
+
+    This is the loudest thing the loop can say: the validator is up, ticking,
+    and writing nothing at all, and it will keep doing exactly that until an
+    operator runs one named command. Sharing `TICK_FAILED` with a refusal that
+    clears itself in 32 blocks is what let this hide in a muted filter."""
+
+
 EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # A full attempt (preflight, feed, gates, provenance audit) spends most of a
 # 12s Finney block between sampling the finalized head and reaching the
@@ -3691,7 +3736,7 @@ def _require_inclusion_policy_ready(
             f"{next_epoch}; the vector was composed against a different epoch"
         )
     if remaining < required_epoch_room:
-        raise wire.VectorError(
+        raise _EpochRoomUnavailable(
             f"only {remaining} block(s) remain in this epoch; a submission "
             f"needs {required_epoch_room} "
             f"({policy.mortal_period_blocks} mortal + "
@@ -5741,7 +5786,17 @@ def _authorize_sn39_chain_submission(
         raise wire.VectorError(
             "SN39 chain submission requires an inclusion-time evidence policy"
         )
-    _require_inclusion_policy_ready(inclusion_policy, preflight)
+    try:
+        _require_inclusion_policy_ready(inclusion_policy, preflight)
+    except _EpochRoomUnavailable as exc:
+        # Same sentence, different moment. Everywhere else this gate runs, the
+        # tick has reserved nothing and running out of epoch room is a wait
+        # that the next tick clears by itself. HERE the durable attempt fence
+        # is already held for this exact call, so the refusal leaves journal
+        # state an operator has to resolve and must keep reporting as the
+        # failure it has always been. Re-raise as the plain refusal so this
+        # boundary's event, status, remediation, and exit code are unchanged.
+        raise wire.VectorError(str(exc)) from exc
     observed_uid_safety = _require_uid_mapping_stability(
         preflight,
         {int(uid): str(hotkey) for uid, hotkey in uid_hotkeys.items()},
@@ -7066,7 +7121,7 @@ def _thin_tick_locked(args) -> bool:
                 identity=identity,
             )
         except (ValueError, OSError) as exc:
-            raise wire.VectorError(
+            raise _SubmissionFenceRefused(
                 "thin submission attempt fence refused before chain write: "
                 f"{stable_error(exc)}"
             ) from exc
@@ -9133,7 +9188,7 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
         or state.get("submission_continuous_launch_attempt_id")
         != state.get("submission_launch_attempt_id")
     ):
-        raise wire.VectorError(
+        raise _ContinuousLaunchLocked(
             "continuous broadcast is locked until `cathedral-validator "
             "reconcile-launch` independently verifies the finalized "
             "rewarded-set-gated "
@@ -9742,7 +9797,7 @@ def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
                 identity=identity,
             )
         except (ValueError, OSError) as exc:
-            raise wire.VectorError(
+            raise _SubmissionFenceRefused(
                 "authority submission attempt fence refused before chain write: "
                 f"{stable_error(exc)}"
             ) from exc
@@ -10328,7 +10383,81 @@ def run(args) -> int:
                     ),
                 )
                 break
+            except _EpochRoomUnavailable as e:
+                # The tick started too close to an epoch boundary to prove
+                # mortal inclusion inside the epoch it was composed against.
+                # Nothing was reserved and nothing was signed, and the refusal
+                # itself names the block at which it clears — usually the very
+                # next tick. That is the same shape as the chain's own
+                # cooldown, so it gets the same treatment: its own code, at
+                # NOT_PROVEN, out of the way of an alert on TICK_FAILED/FAIL.
+                #
+                # The tick still did not write, so `tick_ok` is deliberately
+                # left False: a `--once` canary that skipped for epoch room
+                # must not exit 0 and be read as a successful launch write.
+                # Only the reporting changes here.
+                render.outcome(False, f"epoch boundary too close: {stable_error(e)}")
+                _get_events(args).event(
+                    "EPOCH_ROOM_SKIPPED",
+                    stage="submit",
+                    status=NOT_PROVEN,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "No action. The tick refused before reserving or signing "
+                        "anything because too few blocks remained in this epoch "
+                        "to prove mortal inclusion; the detail names the block at "
+                        "which it clears. Escalate only if it repeats across "
+                        "several consecutive epochs."
+                    ),
+                )
+                break
+            except _ContinuousLaunchLocked as e:
+                # The one refusal that will never clear on its own: this unit
+                # is up and ticking and writing nothing, and will keep doing so
+                # until a human runs one named command.
+                render.outcome(False, f"continuous writes locked: {stable_error(e)}")
+                _get_events(args).event(
+                    "CONTINUOUS_LAUNCH_LOCKED",
+                    stage="submit",
+                    status=FAIL,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "This validator is writing no weights and will not start "
+                        "on its own. Nothing was signed or submitted. Run "
+                        "`cathedral-validator reconcile-launch` to independently "
+                        "verify the finalized rewarded-set-gated launch, then "
+                        "restart the loop."
+                    ),
+                )
+                break
+            except _SubmissionFenceRefused as e:
+                # Local durable state, not the chain. The reservation is taken
+                # immediately before the chain call precisely so a refusal here
+                # leaves no ambiguous write — but nothing about the cause is
+                # self-clearing, so this is a page.
+                render.outcome(False, f"attempt fence refused: {stable_error(e)}")
+                _get_events(args).event(
+                    "SUBMISSION_FENCE_REFUSED",
+                    stage="submit",
+                    status=FAIL,
+                    detail=str(e)[:512],
+                    remediation=(
+                        "The refusal happened before any chain call, so nothing "
+                        "was signed, submitted, or finalized and there is no "
+                        "ambiguous write to inspect. The cause is local and will "
+                        "not clear by itself: inspect the runtime root's "
+                        "durable attempt journal and lock for an unresolved "
+                        "pending attempt, a second writer, or a path this unit "
+                        "cannot write."
+                    ),
+                )
+                break
             except Exception as e:  # noqa: BLE001 - loop resilience; sanitized below
+                # Everything above has been lifted out of this handler because
+                # it was answerable without a human. What is left is the
+                # residual: TICK_FAILED at FAIL now means "a person has to look
+                # at this", which is the only reading that makes an alert on it
+                # worth keeping switched on.
                 render.outcome(False, f"tick failed: {stable_error(e)}")
                 _get_events(args).event(
                     "TICK_FAILED",
