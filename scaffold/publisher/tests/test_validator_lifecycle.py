@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from scaffold import validator_thin, wire_vector
+from scaffold import render, validator_thin, wire_vector
 from scaffold.events import _neutralize
 
 
@@ -104,7 +104,10 @@ def test_startup_never_serializes_malformed_or_protocol_relative_endpoints(
         wallet_name="validator",
         wallet_hotkey="default",
         require_policy=None,
-        provenance="off",
+        # 'off' was deleted in 062d2fd as a mode no config could select and the
+        # SN39 trust profile already rejected. 'shadow' is the mode this fixture
+        # always meant: audit alongside, submission authority unchanged.
+        provenance="shadow",
         once=True,
         interval_secs=1,
         jsonl=str(events),
@@ -214,19 +217,44 @@ def test_tick_emits_sanitized_verdict_and_mapping_lifecycle(
         require_policy=None,
     )
 
+    # `_lifecycle` documents the flat "<EVENT>" + "key=value" call site as the
+    # stable contract and hands presentation to `render.py`, which now draws an
+    # operator stream instead of echoing the raw pair. Assert the contract, not
+    # the drawing -- but keep rendering for real so the leak check below reads
+    # what an operator's terminal actually receives.
+    emitted: list[tuple[str, str]] = []
+    real_lifecycle = render.lifecycle
+
+    def _record(event: str, detail: str, timestamp: str) -> None:
+        emitted.append((event, detail))
+        real_lifecycle(event, detail, timestamp)
+
+    monkeypatch.setattr(render, "lifecycle", _record)
+
     assert validator_thin.tick(args)
 
-    output = capsys.readouterr().out
-    assert "FEED fetch source=https://api.cathedral.computer" in output
-    assert "FEED fetched id=12345678 policy_version=42" in output
-    assert "SIGNATURE valid key_id=cathedral-weight-policy" in output
-    assert "FRESHNESS valid network=finney netuid=39" in output
-    assert "ROLLBACK valid policy_version=42 prior_fence=-1" in output
+    stages = dict(emitted)
+    assert stages["FEED fetch"] == "source=https://api.cathedral.computer"
+    assert stages["FEED fetched"] == "id=12345678 policy_version=42"
+    assert stages["SIGNATURE valid"] == "key_id=cathedral-weight-policy"
+    assert stages["FRESHNESS valid"].startswith("network=finney netuid=39")
+    assert stages["ROLLBACK valid"] == "policy_version=42 prior_fence=-1"
     assert (
-        "MAP complete uids=1 burn_uid=0 burn_share=1.000000 vector=0:1.000000" in output
+        stages["MAP complete"]
+        == "uids=1 burn_uid=0 burn_share=1.000000 vector=0:1.000000"
     )
-    assert "WEIGHTS dry-run" in output
-    assert "secret" not in output
+    assert "WEIGHTS dry-run" in stages
+    # Order is part of the contract: nothing is mapped before it is verified,
+    # and nothing is written before it is mapped.
+    names = [event for event, _detail in emitted]
+    assert names.index("SIGNATURE valid") < names.index("MAP complete")
+    assert names.index("ROLLBACK valid") < names.index("MAP complete")
+    assert names.index("MAP complete") < names.index("WEIGHTS dry-run")
+
+    # The point of the whole test: neither the structured detail nor the drawn
+    # terminal output may carry the credential or the query token.
+    assert "secret" not in "".join(f"{e} {d}" for e, d in emitted)
+    assert "secret" not in capsys.readouterr().out
 
 
 def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkeypatch):
@@ -320,7 +348,7 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         wallet_name="validator",
         wallet_hotkey="default",
         require_policy="validated_supply_v1",
-        provenance="off",
+        provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
         # This fixture is a plain relay: it owes SN39 no launch of its own, so
@@ -439,7 +467,7 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         wallet_name="validator",
         wallet_hotkey="default",
         require_policy="validated_supply_v1",
-        provenance="off",
+        provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
         # This fixture is a plain relay: it owes SN39 no launch of its own, so
@@ -621,7 +649,7 @@ def _cooldown_broadcast_args(state_file: Path, public_key: str) -> SimpleNamespa
         wallet_name="validator",
         wallet_hotkey="default",
         require_policy="validated_supply_v1",
-        provenance="off",
+        provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
         # A plain relay, as in the fence fixtures above: it owes SN39 no launch
@@ -779,6 +807,151 @@ def test_cooldown_precheck_defers_when_the_cooldown_cannot_be_proven():
     )
 
 
+class _FakeClock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _frozen_head_preflight() -> SimpleNamespace:
+    """A head that never moves, inside a cooldown that therefore never clears."""
+    return _cooldown_preflight(
+        block=8680424, weights_rate_limit=100, blocks_since_last_update=0
+    )
+
+
+def test_cooldown_precheck_stands_down_when_the_finalized_head_freezes():
+    """A frozen finalized head cannot hold the skip open forever.
+
+    The block-delta stand-down is purely a function of the head ADVANCING, so
+    the one case it cannot see is an endpoint that freezes its finalized head
+    while the cooldown still refuses. Wall-clock time is the only bound left.
+    """
+    clock = _FakeClock()
+    args = SimpleNamespace(broadcast=True, offline=False)
+    frozen = _frozen_head_preflight()
+    bound = validator_thin._chain_weight_cooldown_standdown_seconds(frozen)
+
+    # Routine for as long as the cooldown could honestly still be running.
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args, frozen, monotonic=clock
+        )
+    clock.advance(bound)
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args, frozen, monotonic=clock
+        )
+
+    # Past the bound with the head unmoved: a fault, handed to the strict gate.
+    clock.advance(1.0)
+    validator_thin._require_chain_weight_write_permitted(args, frozen, monotonic=clock)
+
+
+def test_a_frozen_head_cannot_hold_the_skip_open_over_a_long_run():
+    """The reproduction: 200 consecutive ticks against a head that never moves."""
+    clock = _FakeClock()
+    args = SimpleNamespace(broadcast=True, offline=False)
+    frozen = _frozen_head_preflight()
+
+    skips = 0
+    stood_down = False
+    for _tick in range(200):
+        try:
+            validator_thin._require_chain_weight_write_permitted(
+                args, frozen, monotonic=clock
+            )
+        except validator_thin._ChainWeightCooldownActive:
+            skips += 1
+            clock.advance(60.0)
+            continue
+        stood_down = True
+        break
+
+    assert stood_down, "a frozen head skipped all 200 ticks and never stood down"
+    assert skips < 200
+    # 100 blocks of cooldown at 12s a block is ~20 minutes; two windows of that
+    # is ~40, so a minute-cadence loop gives up in the low tens of ticks.
+    assert skips == 41
+
+
+def test_wall_clock_backstop_does_not_pre_empt_a_live_chain():
+    """With the head advancing, #76's block-delta bound is still what fires.
+
+    The backstop must only ever catch a dead chain. On a chain advancing at the
+    nominal block rate the stand-down still lands at +101 blocks, exactly where
+    #76 put it.
+    """
+    clock = _FakeClock()
+    args = SimpleNamespace(broadcast=True, offline=False)
+    first_block = 8680424
+
+    stood_down_at = None
+    for step in range(400):
+        preflight = _cooldown_preflight(
+            block=first_block + step,
+            weights_rate_limit=100,
+            blocks_since_last_update=0,
+        )
+        try:
+            validator_thin._require_chain_weight_write_permitted(
+                args, preflight, monotonic=clock
+            )
+        except validator_thin._ChainWeightCooldownActive:
+            clock.advance(validator_thin.CHAIN_BLOCK_SECONDS)
+            continue
+        stood_down_at = step
+        break
+
+    assert stood_down_at == 101
+
+
+def test_a_cleared_cooldown_starts_the_next_episode_with_a_fresh_clock():
+    """Both anchors reset together, so old waiting is never charged to a new one.
+
+    A validator that has been up for hours has spent plenty of wall-clock time
+    inside earlier, perfectly routine cooldowns. If the clock anchor survived
+    those, the next legitimate cooldown would stand down instantly.
+    """
+    clock = _FakeClock()
+    args = SimpleNamespace(broadcast=True, offline=False)
+    frozen = _frozen_head_preflight()
+
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args, frozen, monotonic=clock
+        )
+    clock.advance(10_000.0)
+
+    # The cooldown clears: the episode is over and both anchors drop.
+    validator_thin._require_chain_weight_write_permitted(
+        args,
+        _cooldown_preflight(
+            block=8680524, weights_rate_limit=100, blocks_since_last_update=101
+        ),
+        monotonic=clock,
+    )
+    assert args._chain_weight_cooldown_anchor_block is None
+    assert args._chain_weight_cooldown_anchor_monotonic is None
+
+    # A brand-new cooldown is routine again, not instantly a fault.
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args,
+            _cooldown_preflight(
+                block=8680525, weights_rate_limit=100, blocks_since_last_update=0
+            ),
+            monotonic=clock,
+        )
+
+
 def test_recurring_loop_reports_a_chain_cooldown_as_a_skip_not_a_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -845,11 +1018,16 @@ def test_recurring_loop_still_fails_a_genuine_tick_failure(
             "stage": "result",
             "status": validator_thin.FAIL,
             "detail": "signed vector burn destination is not the pin",
+            # #80 split this one sentence in two on `_tick_chain_call_started`.
+            # This fixture throws from `tick` before any chain call, so the
+            # honest remediation is the no-write branch: telling an operator to
+            # go inspect a durable attempt and a named extrinsic would describe
+            # a transaction that does not exist.
             "remediation": (
-                "The tick failed closed. If failure occurred after the chain "
-                "call, a write may have finalized; inspect the durable attempt "
-                "state and named extrinsic before operator recovery. Automatic "
-                "same-attempt retry remains blocked."
+                "The tick failed closed before any chain call, so nothing was "
+                "signed, submitted, or finalized and there is no ambiguous "
+                "write to inspect. The detail above names the cause; the next "
+                "tick rebuilds every proof from a fresh finalized head."
             ),
         }
     ]

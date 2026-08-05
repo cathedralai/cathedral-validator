@@ -3712,31 +3712,82 @@ def _chain_weight_cooldown_remaining_blocks(preflight: ChainPreflight) -> int | 
     return max(0, rate_limit + 1 - blocks_since_update)
 
 
+# Nominal Bittensor block time, used only to express the chain's own cooldown
+# window as a duration for the wall-clock stand-down below. Nothing on the
+# write path depends on this being exact: it sizes an alarm, not a deadline.
+CHAIN_BLOCK_SECONDS = 12.0
+
+# How many whole cooldown windows of real time may elapse with the cooldown
+# still refusing before the skip is treated as a fault. Two is deliberately
+# generous — on a chain that is advancing at all, the block-delta stand-down
+# fires after one window of head advance and this never runs out.
+CHAIN_WEIGHT_COOLDOWN_STANDDOWN_WINDOWS = 2.0
+
+# Floor for the same bound, so a subnet with a very small `weights_rate_limit`
+# cannot turn the backstop into a hair trigger on ordinary RPC jitter.
+CHAIN_WEIGHT_COOLDOWN_STANDDOWN_FLOOR_SECONDS = 600.0
+
+
+def _chain_weight_cooldown_standdown_seconds(preflight: ChainPreflight) -> float:
+    """Real seconds the cooldown may keep refusing before it counts as a fault.
+
+    Derived from the chain's own `weights_rate_limit` so the bound scales with
+    whatever the subnet actually configures, rather than pinning a constant
+    that is only right for today's SN39.
+    """
+    rate_limit = preflight.weights_rate_limit
+    if (
+        isinstance(rate_limit, bool)
+        or not isinstance(rate_limit, int)
+        or rate_limit < 0
+    ):
+        return CHAIN_WEIGHT_COOLDOWN_STANDDOWN_FLOOR_SECONDS
+    window_seconds = (rate_limit + 1) * CHAIN_BLOCK_SECONDS
+    return max(
+        CHAIN_WEIGHT_COOLDOWN_STANDDOWN_FLOOR_SECONDS,
+        window_seconds * CHAIN_WEIGHT_COOLDOWN_STANDDOWN_WINDOWS,
+    )
+
+
+def _reset_chain_weight_cooldown_anchor(args: Any) -> None:
+    """Forget the current cooldown episode. Both anchors move together."""
+    args._chain_weight_cooldown_anchor_block = None
+    args._chain_weight_cooldown_anchor_monotonic = None
+
+
 def _require_chain_weight_write_permitted(
     args: Any,
     preflight: ChainPreflight | None,
+    *,
+    monotonic: Any = time.monotonic,
 ) -> None:
     """Skip — never fail — a tick the subnet's own cooldown already forbids.
 
     Called immediately before the submission section reserves anything, so a
-    skip leaves no attempt fence, no signed intent, and no chain call. Two
-    conditions must both hold before a refusal is downgraded from a failure to
-    a skip:
+    skip leaves no attempt fence, no signed intent, and no chain call. The
+    cooldown must be positively proven from the finalized head before a refusal
+    is downgraded from a failure to a skip, and the skip stands down — stops
+    skipping, and lets the strict gate raise into `TICK_FAILED` — as soon as
+    *either* of two bounds is exceeded:
 
-    * the cooldown is positively proven from the finalized head, and
-    * it is still clearing as the chain advances.
+    * the finalized head has advanced further than one whole rate-limit window
+      while the cooldown still refuses, or
+    * more real time has passed than that window could honestly take.
 
-    The second guard is what keeps the alarm. A validator whose
-    `blocks_since_last_update` never grows past `weights_rate_limit` is mute,
-    and silently logging that at INFO forever is exactly the failure mode this
-    change must not create. Once the head has advanced further than one whole
-    rate-limit window while the cooldown still refuses, this returns and lets
-    the strict gate raise into `TICK_FAILED` as it always has.
+    The first bound is the right one for a live chain and is what #76 shipped.
+    It is, however, purely a function of the head ADVANCING, so it cannot see
+    the one failure that matters most: an endpoint that freezes its finalized
+    head while `blocks_since_last_update <= weights_rate_limit`. There
+    `block == anchor` forever, `remaining` never reaches 0, and the tick logs
+    `WEIGHT_COOLDOWN_SKIPPED` at INFO on every tick indefinitely — a mute
+    validator, reported as routine. The second bound is the backstop for that
+    dead chain, and is measured in wall-clock seconds precisely because a
+    frozen head supplies no other clock.
     """
     if not bool(getattr(args, "broadcast", False)) or bool(
         getattr(args, "offline", False)
     ):
-        args._chain_weight_cooldown_anchor_block = None
+        _reset_chain_weight_cooldown_anchor(args)
         return
     if preflight is None:
         return
@@ -3745,15 +3796,29 @@ def _require_chain_weight_write_permitted(
         return
     block = preflight.block
     if remaining <= 0:
-        args._chain_weight_cooldown_anchor_block = None
+        _reset_chain_weight_cooldown_anchor(args)
         return
     if isinstance(block, bool) or not isinstance(block, int):
         return
+    now = float(monotonic())
     anchor = getattr(args, "_chain_weight_cooldown_anchor_block", None)
-    if isinstance(anchor, bool) or not isinstance(anchor, int):
+    started = getattr(args, "_chain_weight_cooldown_anchor_monotonic", None)
+    # Both anchors describe one cooldown episode, so a missing or malformed
+    # half re-seeds the pair. Seeding only one would let a fresh block anchor
+    # inherit a stale clock (or the reverse) and move a bound it never earned.
+    if (
+        isinstance(anchor, bool)
+        or not isinstance(anchor, int)
+        or isinstance(started, bool)
+        or not isinstance(started, (int, float))
+    ):
         anchor = block
+        started = now
         args._chain_weight_cooldown_anchor_block = anchor
+        args._chain_weight_cooldown_anchor_monotonic = started
     if block - anchor > int(preflight.weights_rate_limit):
+        return
+    if now - float(started) > _chain_weight_cooldown_standdown_seconds(preflight):
         return
     raise _ChainWeightCooldownActive(
         f"chain weight-update cooldown has {remaining} block(s) left; the next "
