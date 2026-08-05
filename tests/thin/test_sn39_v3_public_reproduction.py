@@ -368,8 +368,6 @@ def test_the_pin_set_is_derived_from_the_lane_table_so_they_cannot_drift():
     ReproductionError, so the tuple is derived from the table's keys rather
     than maintained beside it.
     """
-    assert pr.EXPECTED_STARTUP_POLICY_PINS == tuple(
-        pr._PIN_TO_DRY_RUN_CONTRACT_VERSION
-    )
+    assert pr.EXPECTED_STARTUP_POLICY_PINS == tuple(pr._PIN_TO_DRY_RUN_CONTRACT_VERSION)
     for pin in pr.EXPECTED_STARTUP_POLICY_PINS:
         assert pin in pr._PIN_TO_DRY_RUN_CONTRACT_VERSION
