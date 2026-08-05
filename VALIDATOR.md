@@ -228,9 +228,6 @@ after an uncertain submission. Keep both on durable owner-only storage; never
 delete, roll back, or replace them to clear a refused attempt. Follow the
 release runbook for recovery.
 
-<<<<<<< HEAD
-### Liveness and shadow-audit alert (systemd)
-=======
 ### When a tick does not write, alert on these
 
 A tick that submits nothing is not one condition. Some of them clear by
@@ -256,8 +253,7 @@ The two skip codes exist because they were the overwhelming majority of what
 `TICK_FAILED` used to carry. Alerting on `TICK_FAILED`/`FAIL` is only worth
 switching on if it does not fire for the chain's own schedule.
 
-### Shadow-audit mismatch alert (systemd)
->>>>>>> 7205c63 (fix(sn39): stop TICK_FAILED from meaning both "wait a block" and "nobody is writing")
+### Liveness and shadow-audit alert (systemd)
 
 `deploy/sn39/cathedral-mismatch-check` turns five conditions in the event
 journal into a failing oneshot service — the unit failing IS the alert; there
