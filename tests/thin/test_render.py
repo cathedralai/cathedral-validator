@@ -80,6 +80,66 @@ def test_weights_render_as_percentages_with_the_burn_leg_labelled(capsys):
     assert "burn" in out
 
 
+def test_a_value_the_writer_meant_to_hold_spaces_tokenizes_whole():
+    # Call sites interpolate Python containers and reprs. A tokenizer that
+    # stops at the first interior space truncates the value AND hands the tail
+    # to whatever renders leftover.
+    kv, leftover = render.parse_detail(
+        "uids=2 wire_uids=[0, 1] wire_weights=[58982, 7282] vector=0=0.9,1=0.1"
+    )
+    assert kv["wire_uids"] == "[0, 1]"
+    assert kv["wire_weights"] == "[58982, 7282]"
+    assert kv["uids"] == "2"
+    assert leftover == ""
+
+    kv, leftover = render.parse_detail("error='package digest not pinned; refusing'")
+    assert kv["error"] == "package digest not pinned; refusing"
+    assert leftover == ""
+
+
+def test_the_dry_run_line_never_prints_list_repr_debris(capsys):
+    # The exact detail the quickstart produces. Its last line used to end
+    # "dry run, nothing written 1]  7282]" -- the tails of the two list
+    # literals -- which is the first thing a new operator ever reads.
+    _emit(
+        "WEIGHTS dry-run",
+        "uids=2 wire_uids=[0, 1] wire_weights=[58982, 7282] vector=0=0.9000,1=0.1000",
+    )
+    out = _out(capsys)
+    assert "dry run, nothing written" in out
+    assert "2 uids" in out
+    assert "]" not in out
+    assert "7282" not in out
+
+
+def test_the_dry_run_line_renders_named_fields_only(capsys):
+    # Widening the tokenizer is not the guarantee; refusing to print anything
+    # unnamed is. A detail shape no future parser handles must still not put
+    # fragments on the operator's screen.
+    _emit("WEIGHTS dry-run", "uids=2 wire_uids=(0, 1) junk fragment]")
+    out = _out(capsys)
+    assert "2 uids" in out
+    assert "junk" not in out
+    assert "fragment" not in out
+
+
+def test_the_dry_run_line_names_the_burn_leg_and_vector_when_present(capsys):
+    _emit(
+        "WEIGHTS dry-run",
+        "uids=2 burn_uid=204 burn_share=0.100000 vector_id=08abd7f7-e6b5",
+    )
+    out = _out(capsys)
+    assert "burn uid 204" in out
+    assert "10.0%" in out
+    assert "08abd7f7" in out
+
+
+def test_the_dry_run_line_neutralizes_what_it_does_render(capsys):
+    _emit("WEIGHTS dry-run", "uids=\033[31m2 burn_uid=\033[2J204")
+    out = _out(capsys)
+    assert "\033" not in out
+
+
 def test_block_deltas_render_as_durations(capsys):
     # 259 blocks is not a quantity anyone reasons about; ~52 minutes is.
     _emit("PREFLIGHT complete", "block=8716129 blocks_until_epoch=259")

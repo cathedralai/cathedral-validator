@@ -136,7 +136,27 @@ def _blocks_as_time(blocks: Any) -> str:
     return _duration(n * _SECS_PER_BLOCK)
 
 
-_KV = re.compile(r'(\w+)=("[^"]*"|\S+)')
+def _percent(share: Any) -> str:
+    """A 0..1 share as a percentage; anything unparseable renders as itself."""
+    try:
+        return f"{float(share) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return _n(share)
+
+
+# A value is everything up to the next space, EXCEPT when it opens a delimiter
+# the writer clearly meant to hold spaces. Call sites interpolate Python
+# containers and reprs (``wire_uids=[0, 1]``, ``error='not pinned; refusing'``),
+# and a tokenizer that stops at the first interior space splits those in half:
+# the head becomes a truncated value and the tail becomes leftover.
+_KV = re.compile(r"""(\w+)=("[^"]*"|'[^']*'|\[[^\]]*\]|\S+)""")
+
+
+def _unquote(value: str) -> str:
+    """Drop one matched pair of surrounding quotes, and only a matched pair."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 def parse_detail(detail: str) -> tuple[dict[str, str], str]:
@@ -144,8 +164,13 @@ def parse_detail(detail: str) -> tuple[dict[str, str], str]:
 
     The lifecycle call sites were written for a flat key=value line, so this
     keeps them working untouched while the renderer gets structured input.
+
+    Leftover is prose the writer meant to be read, never the debris of a value
+    this parser failed to tokenize. Widening ``_KV`` above keeps that promise
+    for the shapes call sites actually emit, but a renderer must not assume it:
+    the only safe thing to print is a field it can name.
     """
-    kv = {m.group(1): m.group(2).strip('"') for m in _KV.finditer(detail or "")}
+    kv = {m.group(1): _unquote(m.group(2)) for m in _KV.finditer(detail or "")}
     leftover = _KV.sub("", detail or "").strip()
     return kv, leftover
 
@@ -425,10 +450,7 @@ def _r_map_complete(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
         if ":" not in pair:
             continue
         uid, _, weight = pair.partition(":")
-        try:
-            pct = f"{float(weight) * 100:.1f}%"
-        except ValueError:
-            pct = _n(weight)
+        pct = _percent(weight)
         tag = dim("burn") if uid == burn_uid else ""
         entries.append(f"{cyan(_n(uid))} {bold(pct)}{(' ' + tag) if tag else ''}")
     s.row("weights", entries or [dim("none")])
@@ -439,7 +461,27 @@ def _r_map_offline(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
 
 
 def _r_dry_run(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    s.note(dim("·"), dim(f"dry run, nothing written {_n(rest)}".strip()))
+    """The last line of the first command a new operator ever runs.
+
+    It is assembled from named fields only. The detail carries Python list
+    reprs (``wire_uids=[0, 1] wire_weights=[58982, 7282]``), and echoing the
+    unparsed remainder printed their tails -- ``1]  7282]`` -- as the closing
+    words of the quickstart. ``leftover`` is deliberately unused here: any
+    detail whose fields this row cannot name is debris, and the wire encoding
+    it came from is in the journal for anyone who needs it.
+    """
+    parts = []
+    count = kv.get("uids")
+    if count:
+        parts.append(f"{_n(count)} uid{'' if count == '1' else 's'}")
+    burn_uid = kv.get("burn_uid")
+    if burn_uid:
+        share = _percent(kv["burn_share"]) if kv.get("burn_share") else ""
+        parts.append(f"burn uid {_n(burn_uid)}{f' at {share}' if share else ''}")
+    vector_id = kv.get("vector_id") or kv.get("id")
+    if vector_id:
+        parts.append(_short(vector_id))
+    s.note(dim("·"), [dim(p) for p in ["dry run, nothing written", *parts]])
 
 
 def _r_chain_submitted(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
