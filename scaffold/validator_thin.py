@@ -3475,6 +3475,20 @@ CHAIN_OPERATION_DEADLINE_SECS = 180.0
 # synchronous SDK deadline plus an explicit clock/RPC margin. The mortal era
 # is intentionally short and is also bounded by the evidence block window.
 SN39_MIN_VALIDITY_MARGIN_SECS = 60.0
+
+# The one NOT_PROVEN reason that is a WAIT rather than a fault: the receipt's
+# block exists and is canonical, but the finalized head has not reached it yet.
+RECEIPT_FINALITY_LAG_REASON = "the finalized head is still behind the receipt block"
+# How long to let finality catch up in-process before reporting NOT_PROVEN.
+# Bittensor finalizes a few blocks behind the head, so a proof attempted
+# immediately after a successful submission routinely loses this race: the
+# process exits, systemd restarts it, and the fresh process proves the very
+# same receipt seconds later. That restart-per-write was costing a tick every
+# cycle. Waiting here changes no verdict — the receipt is still only PASSed on
+# proof, and an unfinalized receipt after the bound is still NOT_PROVEN and
+# still fenced — it just stops treating a known, bounded lag as a fault.
+RECEIPT_FINALITY_WAIT_SECS = 48.0
+RECEIPT_FINALITY_POLL_SECS = 4.0
 # The era is anchored at the PROVEN FINALIZED block, not the best head, so the
 # real inclusion window is this period minus the live finality lag. Measured
 # finney lag is a steady 2-3 blocks, which left a 4-block era with only one or
@@ -5002,6 +5016,48 @@ def _chain_call_arg(call: dict[str, Any], name: str) -> Any:
     return None
 
 
+def _classify_finalized_receipt_awaiting_finality(
+    subtensor: Any,
+    *,
+    wait_secs: float = RECEIPT_FINALITY_WAIT_SECS,
+    poll_secs: float = RECEIPT_FINALITY_POLL_SECS,
+    sleep: Any = time.sleep,
+    monotonic: Any = time.monotonic,
+    **kwargs: Any,
+) -> str:
+    """Classify a receipt, letting finality catch up before calling it unproven.
+
+    Only ONE NOT_PROVEN reason is retried here: the finalized head being behind
+    the receipt's own block. That is a wait, not a fault — the block exists and
+    was already checked canonical at its number, and every other refusal
+    (including the FAIL verdicts) returns immediately and unchanged.
+
+    Waiting is what the process was already doing, badly. A proof attempted
+    right after a successful submission routinely loses the finality race, and
+    the response was to exit non-zero so systemd could restart the process,
+    which then proved the identical receipt seconds later. That cost a restart
+    and a tick on every write. The verdict contract is untouched: an unfinalized
+    receipt at the end of the bound is still NOT_PROVEN and still fenced.
+    """
+    deadline = monotonic() + max(0.0, wait_secs)
+    while True:
+        reason_out = kwargs.get("reason_out")
+        if isinstance(reason_out, list):
+            reason_out.clear()
+        status = _classify_finalized_receipt(subtensor, **kwargs)
+        if status != NOT_PROVEN:
+            return status
+        if not isinstance(reason_out, list) or RECEIPT_FINALITY_LAG_REASON not in (
+            reason_out or ()
+        ):
+            return status
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return status
+        sleep(min(max(0.0, poll_secs), remaining))
+
+
+
 def _receipt_verdict(
     reason_out: list[str] | None,
     verdict: str,
@@ -5268,7 +5324,7 @@ def _classify_finalized_receipt(
         return _receipt_verdict(
             reason_out,
             NOT_PROVEN,
-            "the finalized head is still behind the receipt block",
+            RECEIPT_FINALITY_LAG_REASON,
         )
     if inclusion_policy is not None:
         if not isinstance(commit_reveal_at_inclusion, bool):
@@ -6178,7 +6234,9 @@ def set_weights_on_chain(
                         wire_weights=wire_values,
                     )
                 proof_reason: list[str] = []
-                proof_status = _classify_finalized_receipt(
+                # Await finality rather than exiting so a restart can wait for
+                # it: same verdicts, one fewer restart per write.
+                proof_status = _classify_finalized_receipt_awaiting_finality(
                     preflight.subtensor,
                     receipt=receipt,
                     extrinsic_hash=receipt_extrinsic_hash,
