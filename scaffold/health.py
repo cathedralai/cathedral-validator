@@ -13,17 +13,26 @@ no publisher — and applies five rules, in order:
    intervals;
 3. a tick-completing event (:data:`LIVENESS_EVENTS`) must have been written
    within ``LIVENESS_TICKS`` tick intervals, unless the process restarted
-   inside that window and has not finished its first tick yet;
+   inside that window and has not finished its first tick yet — a grace dated
+   from the FIRST restart since the last completed tick, so a crash loop
+   cannot renew it (see :func:`_first_restart_age`);
 4. no ``PROVENANCE_VECTOR_MISMATCH`` within :data:`MISMATCH_WINDOW_SECS`; and
-5. not (at least one ``PROVENANCE_AUDIT_FAIL`` and zero
-   ``PROVENANCE_AUDIT_PASS``) within :data:`AUDIT_FAILURE_WINDOW_SECS`.
+5. the unbroken run of ``PROVENANCE_AUDIT_FAIL`` at the END of the completed
+   audits inside :data:`AUDIT_FAILURE_WINDOW_SECS` is shorter than
+   :data:`AUDIT_FAILURE_STREAK`. A single ``FAIL`` never alerts, and any
+   completed audit after the failures — ``PASS`` **or** ``NOT_PROVEN`` —
+   clears it.
 
 Rules 1-3 exist because a monitor that reports success when it cannot see the
 thing it monitors is worse than no monitor: it is a green light on a broken
 sensor. Every one of them fails CLOSED — an unreadable path is an alert, not a
-silent zero. Rules 4 and 5 are the pre-existing shadow-audit alarms, kept
-verbatim so ``deploy/sn39/cathedral-mismatch-check`` and
-``cathedral-validator status`` cannot disagree about what "healthy" means.
+silent zero. Rules 4 and 5 are the shadow-audit alarms, kept verbatim so
+``deploy/sn39/cathedral-mismatch-check`` and ``cathedral-validator status``
+cannot disagree about what "healthy" means — a claim that is pinned by
+``tests/thin/test_liveness_alert.py`` running both against the same journals,
+because it was false once: #64 rewrote rule 5 in the shell script only, so one
+transient ``FAIL`` left ``status`` red for 90 minutes on the relay steady state
+the alert called green.
 
 Nothing here reads chain state or holds a lock, so it is safe to run against a
 live validator's journal at any time, as often as you like.
@@ -64,6 +73,14 @@ AUDIT_EVENTS: tuple[str, ...] = (
     "PROVENANCE_VECTOR_MISMATCH",
     "PROVENANCE_VECTOR_STALE_EPOCH",
 )
+# The subset rule 5 walks: an audit that reached a verdict. A relay's audit is
+# receipts_only by design and so never emits PASS, which is why recovery is
+# "any completed audit that is not a FAIL" rather than "a PASS" (#64).
+AUDIT_OUTCOME_EVENTS: tuple[str, ...] = (
+    "PROVENANCE_AUDIT_PASS",
+    "PROVENANCE_AUDIT_FAIL",
+    "PROVENANCE_AUDIT_NOT_PROVEN",
+)
 
 # Tick multiples, not absolute seconds: a validator configured with a short
 # interval should be declared dead sooner, not later.
@@ -73,6 +90,8 @@ LIVENESS_TICKS = 4.0
 # write cadence, so they stay absolute (see VALIDATOR.md).
 MISMATCH_WINDOW_SECS = 30 * 60.0
 AUDIT_FAILURE_WINDOW_SECS = 90 * 60.0
+# How long the trailing run of FAILs has to be before rule 5 alerts.
+AUDIT_FAILURE_STREAK = 2
 
 # Matches the `interval_secs` default in scaffold/cli.py; used only when a
 # caller cannot supply one.
@@ -111,6 +130,10 @@ class Health:
     ok: bool
     problems: tuple[str, ...]
     rows: tuple[tuple[str, str], ...]
+    # True while a restart is still inside its one grace window and no tick has
+    # completed since. Reported so a caller cannot print "ticks are completing"
+    # over a screen whose own tick row says the first one has not.
+    warming_up: bool = False
 
 
 def parse_ts(value: object) -> datetime | None:
@@ -215,6 +238,58 @@ def _age_secs(record: dict | None, now: datetime) -> float | None:
     return max(0.0, (now - when).total_seconds())
 
 
+def _first_restart_age(
+    records: list[dict], *, live: dict | None, now: datetime
+) -> float | None:
+    """Age of the FIRST ``STARTUP`` written since the last completed tick.
+
+    ``None`` when the process has not restarted since a tick last completed.
+
+    Measuring the warm-up grace from the NEWEST ``STARTUP`` is what a
+    crash-restart loop looks like from the inside: every restart writes one, no
+    tick ever completes, so the grace is renewed on each crash and rule 3 —
+    the rule whose whole job is to say "this validator is not writing weights"
+    — never fires. A six-hour restart loop read as healthy, with the journal
+    kept green by the very failures that were costing the emission. Measured
+    from the first restart of the current un-ticked stretch, the grace is
+    granted exactly once and then expires.
+    """
+    live_ts = parse_ts(live.get("ts")) if live is not None else None
+    oldest: datetime | None = None
+    for record in records:
+        if record.get("event") != "STARTUP":
+            continue
+        when = parse_ts(record.get("ts"))
+        if when is None:
+            continue
+        if live_ts is not None and when <= live_ts:
+            continue
+        if oldest is None or when < oldest:
+            oldest = when
+    if oldest is None:
+        return None
+    return max(0.0, (now - oldest).total_seconds())
+
+
+def _trailing_audit_fail_streak(
+    records: list[dict], window: float, now: datetime
+) -> int:
+    """Length of the unbroken run of audit FAILs at the end of ``window``.
+
+    Journal order, matching ``deploy/sn39/cathedral-mismatch-check`` rule 5.
+    """
+    streak = 0
+    for record in records:
+        event = record.get("event")
+        if event not in AUDIT_OUTCOME_EVENTS:
+            continue
+        when = parse_ts(record.get("ts"))
+        if when is None or (now - when).total_seconds() > window:
+            continue
+        streak = streak + 1 if event == "PROVENANCE_AUDIT_FAIL" else 0
+    return streak
+
+
 def _count_within(records: list[dict], event: str, window: float, now: datetime) -> int:
     total = 0
     for record in records:
@@ -313,16 +388,13 @@ def evaluate(
 
     live = _latest(records, LIVENESS_EVENTS)
     live_age = _age_secs(live, now)
-    startup = _latest(records, ("STARTUP",))
-    startup_age = _age_secs(startup, now)
     # A process that restarted inside the liveness window has not been given a
-    # full window to finish a tick yet. Rule 2 above still catches a process
-    # that started and then hung, one tick sooner.
-    warming_up = (
-        startup_age is not None
-        and startup_age <= liveness_after
-        and (live is None or (live_age or 0.0) > startup_age)
-    )
+    # full window to finish a tick yet. The grace runs from the FIRST restart
+    # since the last completed tick, so a restart loop cannot renew it (see
+    # `_first_restart_age`). Rule 2 above still catches a process that started
+    # once and then hung, one tick sooner.
+    first_restart_age = _first_restart_age(records, live=live, now=now)
+    warming_up = first_restart_age is not None and first_restart_age <= liveness_after
     if (live_age is None or live_age > liveness_after) and not warming_up:
         seen = (
             f"the last one was {humanize_secs(live_age)} ago"
@@ -347,23 +419,19 @@ def evaluate(
             "an accepted vector."
         )
 
-    audit_fails = _count_within(
-        records, "PROVENANCE_AUDIT_FAIL", AUDIT_FAILURE_WINDOW_SECS, now
-    )
-    audit_passes = _count_within(
-        records, "PROVENANCE_AUDIT_PASS", AUDIT_FAILURE_WINDOW_SECS, now
-    )
-    if audit_fails and not audit_passes:
+    streak = _trailing_audit_fail_streak(records, AUDIT_FAILURE_WINDOW_SECS, now)
+    if streak >= AUDIT_FAILURE_STREAK:
         problems.append(
-            f"shadow audit failing for {humanize_secs(AUDIT_FAILURE_WINDOW_SECS)} "
-            f"with no PASS — {audit_fails} PROVENANCE_AUDIT_FAIL event(s) and "
-            "zero PROVENANCE_AUDIT_PASS."
+            f"shadow audit FAILed its last {streak} consecutive audits within "
+            f"{humanize_secs(AUDIT_FAILURE_WINDOW_SECS)} with no completed audit "
+            "since — the audit is not recovering on its own."
         )
 
     return Health(
         journal=label,
         ok=not problems,
         problems=tuple(problems),
+        warming_up=warming_up,
         rows=_rows(
             records=records,
             now=now,

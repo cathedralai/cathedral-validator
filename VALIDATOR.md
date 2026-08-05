@@ -110,12 +110,15 @@ procedure in this repository: clone, venv, `pip install -e '.[provenance]'`,
 copy `config/validator-thin-sn39-relay.toml` to `my-validator.toml`, then the
 two non-writing runs.
 
-Do not install a moving branch for chain use. When a supported release is
-published, verify the tag, commit, package digest, and release notes before
-installation. The project distribution is built from this repository; there is
-no published `cathedralsubnet` PyPI package. A copied profile is suitable for
-review and previews only — public launch operators must use the immutable
-release configuration and installation named by the launch notice.
+A preview runs `main`; that is the distribution. A validator that will
+broadcast should not run a moving branch — pin the exact commit you reviewed
+(`git checkout --detach <sha>`, which is what the systemd install's
+`$release_sha` does), so an upstream merge cannot change what a chain-writing
+process runs between one tick and the next. There are no tags: `git rev-parse
+origin/main` is the normal way to name a reviewed commit. The distribution is
+built from this repository; there is no published `cathedralsubnet` PyPI
+package. See [Upgrade and rollback](#upgrade-and-rollback) for moving between
+commits without disturbing durable state.
 
 Do not accept the signing key merely because it appears in the same checkout or
 payload you are verifying. Compare the supported release's pin with the live
@@ -205,31 +208,75 @@ last shadow-audit verdict, and when the next tick is due.
 
 It exits `0` when healthy, `1` when it is not — naming the reason — and `2`
 when there is no journal configured to read at all. It applies the same five
-rules as the systemd alert below, so the two can never disagree about what
-"healthy" means. Pass `--jsonl PATH` to point it at a preview journal, and
-`--interval-secs` if the running validator's tick interval is not the one in
-the config you gave it.
+rules as the systemd alert below, and `tests/thin/test_liveness_alert.py` runs
+both against the same journals so they cannot drift apart. Pass `--jsonl PATH`
+to point it at a preview journal — a preview wrote under `$HOME`, and without
+the flag `status` reads the service path from the config and correctly reports
+that it cannot see anything — and `--interval-secs` if the running validator's
+tick interval is not the one in the config you gave it.
+
+A start with no completed tick yet is reported as healthy and says so — the
+footer reads `starting up`, not `ticks are completing`. That grace is given
+once, dated from the first restart since the last completed tick, so a process
+that keeps crashing and restarting runs out of it and turns `UNHEALTHY` with
+`The validator is not writing weights.`
 
 TTY output is designed for a human operator. JSONL is the stable integration
 surface — the path is whatever `--jsonl` or `[logs].jsonl` set, so for a
 quickstart preview:
 
 ```bash
-tail -f "$HOME/.cathedral/validator-events.jsonl" | jq .
+tail -f "$HOME/.cathedral/validator-events.jsonl"    # pipe through `jq .` if you have it
 ```
 
-Useful lifecycle stages include `FEED`, `SIGNATURE`, `FRESHNESS`, `ROLLBACK`,
-`PROVENANCE`, `VECTOR`, `PREFLIGHT`, `MAP`, `WEIGHTS`, and `CHAIN`. Records
-include the active mode and a `PASS`, `FAIL`, `NOT_PROVEN`, or `INFO` status.
-Credential-shaped values are redacted, but logs should still be protected as
-operational data.
+**Filter on `event`.** It is the stable key: one code per outcome, and the
+table below says which ones need a person. Every record also carries `ts`,
+`stage`, `mode`, a `PASS`/`FAIL`/`NOT_PROVEN`/`INFO` `status`, and a `detail`.
+`stage` is a coarse grouping — `startup`, `verify`, `map`, `safety`,
+`provenance`, `launch`, `submit`, `result` (plus `INTEGRATION` for the
+default-off preview lane) — and it is not a filter that will find you a
+specific failure.
+
+The field to read when something went wrong is `remediation`. Every refusal
+recorded as `FAIL` or `NOT_PROVEN` carries one, and it says what is actually
+true about that failure — whether anything was signed, whether a chain call had
+begun, and what a person has to do:
+
+```bash
+python3 -c 'import json,sys,textwrap
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if r.get("status") in ("FAIL", "NOT_PROVEN"):
+        print(r["ts"], r["event"])
+        for lead, key in (("  ", "detail"), ("  -> ", "remediation")):
+            print(textwrap.fill(r.get(key, ""), 78,
+                                initial_indent=lead, subsequent_indent="     "))' \
+  "$HOME/.cathedral/validator-events.jsonl"
+```
+
+On the wallet-less box from quickstart step 2 that prints:
+
+```
+2026-08-05T22:18:18.523Z TICK_FAILED
+  Generic error: Failed to get hotkey: FileNotFound("Keyfile at: <path> does
+     not exist.")
+  -> The tick failed closed before any chain call, so nothing was signed,
+     submitted, or finalized and there is no ambiguous write to inspect. The
+     detail above names the cause; the next tick rebuilds every proof from a
+     fresh finalized head.
+```
+
+Credential-shaped values, absolute paths and usernames are redacted — a path
+in a message appears as the literal `<path>` — but journals should still be
+protected as operational data.
 
 The lane state file stores rollback fences, provenance reservations, and
-durable pending/finalized attempt records. The release-managed runtime root
-also holds the cross-mode lock and ambiguity journal used to prevent a retry
-after an uncertain submission. Keep both on durable owner-only storage; never
-delete, roll back, or replace them to clear a refused attempt. Follow the
-release runbook for recovery.
+durable pending/finalized attempt records. The runtime root also holds the
+cross-mode lock and the ambiguity journal that prevents a retry after an
+uncertain submission. Keep both on durable owner-only storage, and never
+delete, roll back, or replace them to clear a refused attempt — that is the
+one action that can turn a fenced write into a double write. What to do
+instead is [below](#recovering-from-a-refused-or-fenced-write).
 
 ### When a tick does not write, alert on these
 
@@ -250,11 +297,103 @@ on the routine ones and muting the serious ones.
 | `SUBMISSION_FENCE_REFUSED` | `FAIL` | **Yes** | The local durable attempt fence would not reserve, before any chain call. Nothing was signed or submitted, and the cause — an unresolved pending attempt, a second writer, an unwritable runtime root — does not clear by itself. |
 | `PENDING_RECEIPT_NOT_PROVEN` | `NOT_PROVEN` | **Yes** | A signed attempt is fenced awaiting finalized archive proof. Never submit a replacement. |
 | `PENDING_RECEIPT_CONTRADICTION` | `FAIL` | **Yes** | A signed attempt has a positive contradiction. Stop every writer. |
-| `TICK_FAILED` | `FAIL` | **Yes** | The residual: everything answerable without a person has been given its own code above, so this one means a person has to look. |
+| `TICK_FAILED` | `FAIL` | **Yes** | The residual: everything answerable without a person has been given its own code above, so this one means a person has to look. Read its `remediation` first — it says whether a chain call had begun. |
 
 The two skip codes exist because they were the overwhelming majority of what
 `TICK_FAILED` used to carry. Alerting on `TICK_FAILED`/`FAIL` is only worth
 switching on if it does not fire for the chain's own schedule.
+
+Every row there is the **terminal** outcome of a tick that wrote nothing. Four
+more codes are worth recognizing precisely because they are not that:
+
+- `VECTOR_REJECTED` (`FAIL`) and `PROVENANCE_RESERVATION_REFUSED` (`FAIL`)
+  **accompany** a `TICK_FAILED` rather than replacing it. They name the cause —
+  a signed vector that failed UID mapping, an authority reservation that a
+  newer one or an unwritable state file refused — and both say "nothing was
+  submitted". If you page on `TICK_FAILED`, these are what you read next.
+- `UNSAFE_TARGETS_EXCLUDED` (`NOT_PROVEN`) is emitted by a tick that **did**
+  write. One or more rewarded hotkeys had a UID mapping this validator could
+  not prove stable, so their mass was **burned, not redistributed**; the detail
+  names the excluded UIDs and the forfeited share. They rejoin automatically
+  once their mapping is provable for a full mortal era. Nothing is broken, but
+  the vector you submitted is not the vector the publisher signed shares for,
+  and this is the only record of that.
+- `PENDING_RECEIPT_RECOVERED` (`PASS`) is the resolution of the two
+  pending-receipt rows above: the fenced attempt was re-proven against a
+  finalized block, and the fence has cleared.
+
+`PROVENANCE_STATE_STALE_SKIPPED` and `PROVENANCE_STATE_WRITE_FAILED`
+(`NOT_PROVEN`) belong to the shadow audit's own bookkeeping. The second one is
+worth fixing — its `remediation` is "fix the state file path/permissions" — but
+neither touches the thin submission, which does not depend on the audit either
+way.
+
+### Recovering from a refused or fenced write
+
+Four of the five **Yes** rows name a specific unresolved condition —
+`CONTINUOUS_LAUNCH_LOCKED`, `SUBMISSION_FENCE_REFUSED`,
+`PENDING_RECEIPT_NOT_PROVEN`, `PENDING_RECEIPT_CONTRADICTION` — and the
+validator will not leave any of them on its own. Each has one correct
+response, and they are not interchangeable. (`TICK_FAILED`, the fifth, is the
+residual and has no single procedure: its `remediation` field says whether a
+chain call had begun, and its `detail` names the cause.)
+
+One rule governs all of them: **never delete, edit, restore or roll back the
+state file or the runtime root to clear a refusal.** Those files are the only
+record that an attempt was signed. Clearing one turns "one write, unconfirmed"
+into two writes, and no later check can undo that.
+
+**`CONTINUOUS_LAUNCH_LOCKED`.** Nothing was signed. Run:
+
+```bash
+cathedral-validator reconcile-launch --config /etc/cathedral-validator/validator-thin-sn39-relay.toml
+```
+
+It re-verifies the finalized rewarded-set-gated launch against the chain and
+your durable state and submits nothing; on success it unlocks recurring writes
+and names the block and extrinsic it proved. Restart the service afterwards.
+Otherwise it exits 1 with `launch reconciliation failed closed:` and a cause,
+and the lock is correct until that cause is not true. Note that the shipped
+relay profile sets `require_completed_launch_for_broadcast = false`, so this
+gate never runs for a pure relay — seeing this code means the runtime is not
+one.
+
+**`SUBMISSION_FENCE_REFUSED`.** Nothing was signed, submitted or finalized: the
+reservation is taken immediately before the chain call precisely so a refusal
+here leaves no ambiguous write. The cause is local and does not clear itself.
+Check, in this order:
+
+1. **a second writer.** `systemctl list-units 'cathedral-validator*'` and
+   `pgrep -af cathedral-validator`. The relay unit declares `Conflicts=` and an
+   `ExecStartPre=` guard, but neither can stop a process someone started by
+   hand in a shell;
+2. **the runtime root.** Is it writable by the account the service runs as, is
+   the filesystem full or read-only, and is it the path the config names? A
+   `CATHEDRAL_VALIDATOR_RUNTIME_ROOT` left in an environment file lands here;
+3. **an unresolved pending attempt** in the state file — which is the next
+   entry, not this one.
+
+**`PENDING_RECEIPT_NOT_PROVEN`.** Read the record's `remediation` first,
+because this code covers two situations that want opposite responses:
+
+- *"The exact signed attempt remains fenced"* — a transaction was signed and
+  its outcome is not yet provable from a finalized block. There is nothing to
+  do but let it re-prove: a broadcasting validator re-runs the recovery before
+  every tick, so leaving the service running, or restarting it, retries.
+  Success is a `PENDING_RECEIPT_RECOVERED` record. **Never submit a
+  replacement** — not with a second config, not by hand.
+- *"No signed attempt was recorded before this failure"* — nothing is fenced
+  and nothing is owed. The detail names the failing preflight step: an
+  unregistered hotkey, a missing validator permit, an RPC that would not serve
+  the metagraph at the finalized head, or the 180s deadline. Fix that and
+  restart.
+
+**`PENDING_RECEIPT_CONTRADICTION`.** A signed attempt has a positive
+contradiction: the chain and this validator's journal disagree about what
+happened. Stop every writer for this hotkey on every host, and leave the state
+file and runtime root byte-for-byte as they are. Establish what the named
+extrinsic actually did from an independent chain view before anything writes
+again. This is the one state where a guess costs more than the downtime.
 
 ### Liveness and shadow-audit alert (systemd)
 
@@ -273,8 +412,12 @@ is no separate notification channel:
    `WAITING_FOR_JOB`. That is what a validator which has silently stopped
    writing weights looks like. A tick declined by the subnet's
    `weights_rate_limit`, and a tick that found nothing to score, both count as
-   alive; a process that restarted inside the window is given until the end of
-   it to finish its first tick;
+   alive. A process that restarted inside the window is given until the end of
+   it to finish its first tick — dated from the **first** restart since the
+   last completed tick, not the newest, so a crash-restart loop cannot renew
+   its own grace. It used to: every crash wrote a `STARTUP` and kept the
+   journal growing, so six hours of writing nothing read as "starting up" and
+   exited 0 in both halves of this alert;
 4. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
    disagreed with a vector that was already accepted for submission, and
    could not re-verify that vector against the epoch it names either; and
@@ -444,17 +587,75 @@ Stop the service on any unexpected key, policy, candidate, provenance, burn,
 rollback, or chain result. Do not “fix” a failed gate by disabling it during a
 live launch.
 
-## Updating or rotating keys
+## Upgrade and rollback
 
-Treat a release or signing-key change as a new trust decision:
+The quickstart installs an **editable** checkout (`pip install -e
+'.[provenance]'`), so the running validator executes the files in that clone.
+The first consequence is the one to internalize:
+
+> [!WARNING]
+> `git pull` in the checkout changes the code a running service will execute
+> from its next import — there is no version pin and no restart barrier between
+> the two. A tick that is mid-flight when the tree changes underneath it is not
+> a state anything here reasons about. **Stop the service before you pull.**
+
+Upgrading, from a stopped service:
+
+```bash
+cd /path/to/cathedral-validator
+git fetch origin
+git rev-parse HEAD > ~/cathedral-rollback-sha    # where you are now
+git log --oneline HEAD..origin/main              # what you are about to run
+git checkout --detach origin/main                # or a specific reviewed sha
+.venv/bin/python -m pip install -e '.[provenance]'
+```
+
+`--detach` on purpose: it names the exact commit this host runs, works whether
+you were on a branch or already pinned, and cannot be moved later by a stray
+`git pull`.
+
+Reinstall even when only `.py` files changed: an editable install picks those
+up on its own, but entry points, dependency pins and package metadata do not
+move until pip runs. Then repeat quickstart steps 1 and 2 before restarting the
+service with `--broadcast`, and check
+[`status`](#is-it-working-right-now-status) after the first tick.
+
+Rolling the **software** back is the same shape:
+
+```bash
+git checkout --detach "$(cat ~/cathedral-rollback-sha)"
+.venv/bin/python -m pip install -e '.[provenance]'
+```
+
+Rolling the **durable state** back is different, and it is forbidden: the state
+file and runtime root carry the monotonic fences that make a replayed
+submission impossible. Restoring either from a snapshot rewinds a fence that
+the chain has not rewound — the validator prints this as the `caveat` line on
+every start. Keep them across an upgrade or a rollback, untouched. If a
+rollback is being attempted *because* of a refused or fenced write, that is
+[the previous
+section](#recovering-from-a-refused-or-fenced-write), not this one.
+
+`my-validator.toml` is your file, not the repository's, so a fast-forward pull
+leaves it alone. Re-diff it against
+`config/validator-thin-sn39-relay.toml` after an upgrade: the shipped profile
+carries the trust pins, and the validator refuses a broadcast whose config
+differs from the release constants rather than silently honoring it.
+
+### Rotating a signing key
+
+Treat a signing-key change as a new trust decision, not an upgrade:
 
 1. stop the chain-writing service;
-2. fetch the new immutable release and pin bundle;
-3. verify the change through an independent channel;
-4. install into a new environment;
-5. preserve and migrate the rollback state deliberately;
-6. repeat synthetic-map and metagraph-backed dry runs; and
-7. resume only after explicit operator authorization.
+2. take the new pin bundle from the reviewed commit you are moving to, and
+   verify the change through an independent channel — compare the pin against
+   the live
+   [JWKS](https://api.cathedral.computer/.well-known/cathedral-jwks.json), not
+   against the checkout that carries it;
+3. install as above;
+4. preserve the rollback state deliberately (see the paragraph above);
+5. repeat the synthetic-map and metagraph-backed dry runs; and
+6. resume only after explicit operator authorization.
 
 Never accept a replacement key from a weight payload signed only by the old or
 new key itself.
@@ -701,3 +902,5 @@ applied.
 - [Threat model](docs/THIN_SUBNET_DESIGN.md)
 - [Evidence record](docs/history/THIN_SUBNET_EVIDENCE.md)
 - [Operator runbook for the experimental owner-independent path](docs/THIN_SUBNET_RUNBOOK.md)
+  — a **different binary** (`cathedral-thin-validator`) with its own flags and
+  its own state file. Nothing in it applies to `cathedral-validator serve`.

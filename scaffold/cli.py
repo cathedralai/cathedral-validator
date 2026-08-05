@@ -613,10 +613,15 @@ def _cmd_status(ns: argparse.Namespace) -> int:
     for problem in report.problems:
         print(f"   {render.red('UNHEALTHY')}  {problem}")
     if report.ok:
-        print(
-            f"   {render.green('healthy')}    ticks are completing and the shadow "
-            "audit is not alarming"
+        # The footer must not out-claim the tick row above it: during warm-up
+        # no tick has completed, so "ticks are completing" would be the one
+        # sentence on the screen contradicting the rest of it.
+        summary = (
+            "starting up — no completed tick yet, and nothing else is alarming"
+            if report.warming_up
+            else "ticks are completing and the shadow audit is not alarming"
         )
+        print(f"   {render.green('healthy')}    {summary}")
         return 0
     return 1
 

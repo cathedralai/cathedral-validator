@@ -63,6 +63,11 @@ flags redirect all three into one owner-only directory the validator creates
 for you at mode 0700. A production install keeps the shipped paths and does
 not pass these flags.
 
+`$HOME/.cathedral` is a name other Cathedral tooling also uses. If it already
+exists the validator reuses it and **tightens it to 0700**, and refuses to
+start at all if it is not yours or is group- or world-writable. Give
+`--runtime-root` a directory of its own if that tree is shared.
+
 You should see the signed vector fetched, its signature, freshness and
 rollback fence pass, a synthetic UID map, and `dry run, nothing written`.
 
@@ -92,11 +97,40 @@ cathedral-validator serve \
   --dry-run --once
 ```
 
-This step needs a local bittensor wallet matching the labels you set, and that
-hotkey must be registered on SN39. If it is not, the tick fails closed with
-`validator hotkey is not registered on this subnet` — which still tells you
-the feed, the pins, the metagraph connection, and the UID mapping all worked.
-Register the hotkey and run it again.
+This is the first step that needs a wallet. `wallet_name` and
+`validator_hotkey` are labels for a bittensor wallet **on this host**, and the
+shipped profile names `validator` and `default`, so the file the validator
+opens is `~/.bittensor/wallets/validator/hotkeys/default`. On a box with no
+wallet there, the tick fails before it fetches anything:
+
+```
+   ✗ tick failed: KeyFileError: Generic error: Failed to get hotkey: FileNotFound("Keyfile at:
+     <path> does not exist.") · in 6s
+```
+
+`<path>` is literal: the operator stream and the journal strip absolute paths
+and usernames, so the message will not tell you where it looked. The path
+above is where. Create or import that hotkey with the Bittensor CLI (`btcli
+wallet new_hotkey` or `btcli wallet regen_hotkey`, from the separate
+`bittensor-cli` package — this repository does not install it), passing
+`--wallet.name validator --wallet.hotkey default` to match the labels, or edit
+the two labels to name a wallet you already have. Never put a coldkey or
+mnemonic on a validator host.
+
+With the wallet present but that hotkey not registered on SN39, the tick fails
+closed with:
+
+```
+   ✗ tick failed: VectorError: validator hotkey is not registered on this subnet · in 5s
+```
+
+Both failures come from the same preflight, which runs **before** the signed
+feed is fetched — so neither one says anything about the feed, the trust pins,
+or the miner UID mapping. What the second proves is narrower and still worth
+having: this host reached Finney, read the SN39 metagraph, and loaded your
+hotkey. Step 1 is what exercises the feed and the pins; a step-2 journal that
+fails here holds a `STARTUP` and a `TICK_FAILED` and nothing else. Register the
+hotkey and run it again.
 
 ### 3. Stop here
 
@@ -121,33 +155,48 @@ see `deploy/publisher/README.md`).
 
 ### Is it working right now?
 
-One command answers that:
+One command answers that. It reads the event journal and only the journal — no
+chain call, no wallet, no publisher fetch, no lock — so it is safe to run
+beside a live validator as often as you like, and it still answers when the
+thing that broke is the network. **A preview wrote its journal under `$HOME`,
+so name it**; a service uses the path in its own config and needs no flag:
 
 ```bash
-cathedral-validator status --config my-validator.toml
+cathedral-validator status --config my-validator.toml \
+  --jsonl "$HOME/.cathedral/validator-events.jsonl"
 ```
+
+Run straight after step 1, that prints:
 
 ```
    SN39 validator status  finney · netuid 39
-   ──────────────────────────────────────────────────────────────
-   journal    fresh · newest record 6m ago
-   tick       WEIGHTS_SUBMITTED 6m ago
-   write      WEIGHTS_SUBMITTED 6m ago · 42 uids
-   vector     VECTOR_ACCEPTED 7m ago · id 9f3c1a2b-3 · policy_version 7
-   audit      PROVENANCE_AUDIT_PASS 6m ago
-   next tick  ~19m from now
+   ─────────────────────────────────────────────────────────────────────────────────────
+   journal    fresh · newest record 0s ago
+   tick       WEIGHTS_DRY_RUN 2s ago
+   write      WEIGHTS_DRY_RUN 2s ago · 2 uids
+   vector     VECTOR_ACCEPTED 2s ago · id 6b798de3-e04 · policy_version 1785969111518
+   audit      PROVENANCE_AUDIT_NOT_PROVEN 0s ago
+   next tick  ~25m from now
 
-   path       /var/log/cathedral-validator/validator-events.jsonl
+   path       /home/you/.cathedral/validator-events.jsonl
 
    healthy    ticks are completing and the shadow audit is not alarming
 ```
 
-It reads the event journal and only the journal — no chain call, no wallet, no
-publisher fetch, no lock — so it is safe to run beside a live validator as
-often as you like, and it still answers when the thing that broke is the
-network. Exit `0` means healthy, `1` names what is wrong, `2` means no journal
-was configured for it to read. Add `--jsonl PATH` if you previewed with the
-path flags above instead of the shipped config.
+Those are the right rows for this quickstart, not a degraded version of some
+better ones: nothing was submitted, so the write is a dry run, and a relay's
+audit is receipts-only, so `PROVENANCE_AUDIT_NOT_PROVEN` is its permanent
+steady state and `PROVENANCE_AUDIT_PASS` never appears (step 1 explains why).
+On a broadcasting validator the tick and write rows read `WEIGHTS_SUBMITTED`
+instead; the audit row does not change. `policy_version` is the publisher's
+epoch-milliseconds counter, so it is a long number and it only ever goes up.
+
+Exit `0` means healthy, `1` names what is wrong, `2` means no journal was
+configured for it to read. Point it at the wrong file and it says so rather
+than reporting green: without the `--jsonl` above, the shipped config sends it
+to `/var/log/cathedral-validator/validator-events.jsonl`, which a preview never
+writes, and it exits 1 with `journal cannot be read (No such file or
+directory) — nothing is being monitored`.
 
 The unattended half of the same five rules is
 `deploy/sn39/cathedral-mismatch-check`, a 10-minute systemd timer whose unit
@@ -156,6 +205,16 @@ failing is the alert — see
 it before you broadcast: a validator that quietly stops writing weights costs
 you the emission it did not earn, and the journal is the only place that shows
 up first.
+
+### And when it stops?
+
+A tick that writes nothing has its own event code for each reason, and every
+`FAIL` or `NOT_PROVEN` one carries a `remediation` field saying what a person
+has to do — including when the honest answer is "nothing was signed, and the
+next tick rebuilds". [What each one means and which ones page a
+human](VALIDATOR.md#when-a-tick-does-not-write-alert-on-these); [recovering
+from the ones that do](VALIDATOR.md#recovering-from-a-refused-or-fenced-write);
+[upgrading and rolling back](VALIDATOR.md#upgrade-and-rollback).
 
 ### The two `[launch]` settings a relay depends on
 
@@ -453,10 +512,12 @@ The quickstart above is the one path to a running preview. These pick up from
 it; none of them restates it.
 
 - [Validator runbook](VALIDATOR.md) — what each gate proves, how to read the
-  event journal, the shadow-audit mismatch alert the install above enables, the
-  checklist that must be true before `--broadcast`, and key rotation.
-- [Review gates](VALIDATOR-ONBOARDING.md) — what a reviewer must prove from one
-  cycle before a write.
+  event journal, **what to do when a write is refused or fenced**, the
+  shadow-audit mismatch alert the install above enables, the checklist that
+  must be true before `--broadcast`, and upgrade, rollback and key rotation.
+- [Review gates](VALIDATOR-ONBOARDING.md) — the extras a reviewer installs on
+  top of the quickstart; [REVIEW.md](REVIEW.md) has the review order and the
+  gates a broadcast must prove in one cycle.
 - [Provenance contract](docs/PROVENANCE.md) — every pin the shadow audit uses.
 - [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
 - [SN39 v3 publisher cutover](docs/SN39_V3_PUBLISHER_CUTOVER.md) — what the live

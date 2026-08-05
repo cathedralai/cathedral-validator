@@ -200,6 +200,54 @@ def test_a_validator_that_started_and_then_hung_still_alerts(tmp_path):
     assert "has not grown" in result.stdout
 
 
+def _restart_loop(hours: float = 6.0, every_secs: float = 600.0) -> list[dict]:
+    """A process that starts, fails its tick, dies, and is restarted. Forever."""
+    records: list[dict] = []
+    ago = hours * 3600.0
+    while ago > 0:
+        records.append(_record("STARTUP", ago_secs=ago, status="INFO"))
+        records.append(_record("TICK_FAILED", ago_secs=ago - 5, status="FAIL"))
+        ago -= every_secs
+    return records
+
+
+def test_a_restart_loop_cannot_renew_its_own_warm_up_grace(tmp_path):
+    """The expensive failure, and it used to read as healthy in both monitors.
+
+    Every restart writes a STARTUP, so grace dated from the NEWEST one was
+    renewed by the crashes themselves — and the same crashes kept the journal
+    growing, so the staleness rule stayed green too. Six hours of writing no
+    weights, exit 0, "starting up". Grace is dated from the FIRST restart since
+    the last completed tick, so it is granted once and then expires.
+    """
+    path = _journal(tmp_path, _restart_loop())
+    result = _run_alert(path)
+    assert result.returncode == 1
+    assert "no completed tick" in result.stdout
+    assert "not writing weights" in result.stdout
+
+    report = health.evaluate(path, interval_secs=TICK)
+    assert report.ok is False
+    assert any("not writing weights" in problem for problem in report.problems)
+    assert report.warming_up is False
+
+
+def test_a_single_restart_still_gets_its_whole_grace_window(tmp_path):
+    """The fix must not page an operator for one ordinary restart."""
+    records = [
+        _record("WEIGHTS_SUBMITTED", ago_secs=5 * TICK),
+        _record("STARTUP", ago_secs=3.5 * TICK, status="INFO"),
+        _record("VECTOR_ACCEPTED", ago_secs=60),
+    ]
+    path = _journal(tmp_path, records)
+    result = _run_alert(path)
+    assert result.returncode == 0, result.stdout
+    assert "starting up" in result.stdout
+    report = health.evaluate(path, interval_secs=TICK)
+    assert report.ok is True
+    assert report.warming_up is True
+
+
 def test_the_windows_are_tick_multiples_not_fixed_minutes(tmp_path):
     """A validator configured to tick fast is declared dead fast."""
     records = _alive(ago_secs=600)
@@ -277,6 +325,48 @@ def test_a_transient_audit_failure_followed_by_a_pass_does_not_alert(tmp_path):
     assert result.returncode == 0, result.stdout
 
 
+# -- rule 5 is ONE rule, not two implementations of it ----------------------
+
+
+def _audit_run(outcomes: list[str]) -> list[dict]:
+    """A live relay whose audit produced ``outcomes``, oldest first."""
+    records = [_record("STARTUP", ago_secs=10 * TICK, status="INFO")]
+    for index, outcome in enumerate(reversed(outcomes)):
+        ago = 300 + index * 1500
+        records.insert(1, _record(f"PROVENANCE_AUDIT_{outcome}", ago_secs=ago))
+    records.append(_record("WEIGHTS_SUBMITTED", ago_secs=60))
+    return records
+
+
+@pytest.mark.parametrize(
+    "outcomes,healthy",
+    [
+        # The relay steady state: receipts_only, so NOT_PROVEN forever and a
+        # PASS that never comes. One transient publisher-side FAIL between two
+        # of them must not page anyone.
+        (["NOT_PROVEN", "FAIL", "NOT_PROVEN"], True),
+        (["NOT_PROVEN", "NOT_PROVEN", "NOT_PROVEN"], True),
+        (["FAIL"], True),
+        (["FAIL", "FAIL"], False),
+        (["FAIL", "FAIL", "NOT_PROVEN"], True),
+        (["FAIL", "FAIL", "PASS"], True),
+        (["NOT_PROVEN", "FAIL", "FAIL"], False),
+    ],
+)
+def test_rule_five_agrees_between_status_and_the_alert(tmp_path, outcomes, healthy):
+    """#64 rewrote rule 5 in the shell script only, and the two diverged.
+
+    ``health.py`` still read "one FAIL and no PASS in 90 minutes", so on the
+    receipts-only relay this repository ships — where a PASS is impossible by
+    design — a single transient FAIL left `cathedral-validator status` red for
+    a full 90 minutes while the systemd alert stayed green. The interactive
+    tool false-alarmed on the documented steady state.
+    """
+    path = _journal(tmp_path, _audit_run(outcomes))
+    assert health.evaluate(path, interval_secs=TICK).ok is healthy
+    assert (_run_alert(path).returncode == 0) is healthy
+
+
 # -- scaffold.health applies the same five rules ----------------------------
 
 
@@ -345,6 +435,21 @@ def test_status_exits_nonzero_when_the_validator_is_not_writing(tmp_path, capsys
     out = capsys.readouterr().out
     assert "UNHEALTHY" in out
     assert "not writing weights" in out
+
+
+def test_status_does_not_claim_ticks_are_completing_before_the_first_one(
+    tmp_path, capsys
+):
+    """The footer is the line an operator reads; it may not out-claim the body.
+
+    A fresh start printed `tick starting up — the first tick has not completed`
+    and, four lines later, `healthy ticks are completing`.
+    """
+    path = _journal(tmp_path, [_record("STARTUP", ago_secs=60, status="INFO")])
+    assert cli_main(["status", "--jsonl", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "ticks are completing" not in out
+    assert "starting up" in out
 
 
 def test_status_on_a_journal_that_does_not_exist_is_not_healthy(tmp_path, capsys):
