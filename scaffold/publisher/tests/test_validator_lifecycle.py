@@ -580,3 +580,276 @@ def test_safe_pre_sign_head_drift_retries_whole_tick_once(
             ),
         }
     ]
+
+
+def _cooldown_preflight(
+    *,
+    block: int,
+    weights_rate_limit: int,
+    blocks_since_last_update: int | None,
+) -> SimpleNamespace:
+    """A minimal broadcast-grade preflight parameterized on the cooldown."""
+    return SimpleNamespace(
+        hotkey_to_uid={"burn-hotkey": 204},
+        subnet_owner_hotkey="burn-hotkey",
+        blocks_until_next_epoch=100,
+        next_epoch_start_block=block + 100,
+        weights_rate_limit=weights_rate_limit,
+        validator_blocks_since_last_update=blocks_since_last_update,
+        uid_mapping_stable_until_block=block + 4,
+        replacement_safe_hotkeys=frozenset({"burn-hotkey"}),
+        block=block,
+        validator_uid=30,
+        validator_hotkey="validator-hotkey",
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        commit_reveal_enabled=False,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+    )
+
+
+def _cooldown_broadcast_args(state_file: Path, public_key: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        publisher_url="https://api.cathedral.computer",
+        state_file=str(state_file),
+        public_key_hex=public_key,
+        key_id="cathedral-weight-policy",
+        network="finney",
+        netuid=39,
+        offline=False,
+        broadcast=True,
+        wallet_name="validator",
+        wallet_hotkey="default",
+        require_policy="validated_supply_v1",
+        provenance="off",
+        provenance_burn_hotkey="burn-hotkey",
+        runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
+        # A plain relay, as in the fence fixtures above: it owes SN39 no launch
+        # of its own, so the recurring authorization is not what these tests
+        # are about.
+        require_completed_launch_for_broadcast=False,
+    )
+
+
+def _install_cooldown_tick_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    payload: dict,
+    preflight: SimpleNamespace,
+) -> tuple[list[dict[int, float]], _RunEventRecorder]:
+    submitted: list[dict[int, float]] = []
+    events = _RunEventRecorder()
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "fetch_vector", lambda _url: payload)
+    monkeypatch.setattr(validator_thin, "chain_preflight", lambda **_kwargs: preflight)
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_continuous_launch_transition",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: {"schema": "fixture_uid_safety_v1"},
+    )
+
+    def submit(uid_weights, **kwargs):
+        submitted.append(dict(uid_weights))
+        runtime = kwargs["runtime_contract"]
+        ordered = sorted(uid_weights.items())
+        wire_uids, wire_weights = validator_thin._wire_weights(
+            [uid for uid, _weight in ordered],
+            [weight for _uid, weight in ordered],
+        )
+        validator_thin._record_pending_broadcast_intent(
+            runtime,
+            attempt_id=validator_thin._read_state(
+                validator_thin._submission_state_path(runtime)
+            )["submission_pending_id"],
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=17,
+            era_reference_block=runtime._tick_preflight.block,
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+        )
+        return validator_thin.ChainSubmission(
+            success=True,
+            extrinsic_hash="0x" + "a" * 64,
+            block_hash="0x" + "d" * 64,
+            block_number=preflight.block + 1,
+            finalized=True,
+        )
+
+    monkeypatch.setattr(validator_thin, "set_weights_on_chain", submit)
+    return submitted, events
+
+
+def test_tick_skips_the_write_while_the_chain_weight_cooldown_is_unelapsed(
+    tmp_path, monkeypatch
+):
+    payload, public_key = _signed_vector()
+    # blocks_since_last_update == weights_rate_limit is the exact boundary the
+    # submission gate refuses, so the chain still owes one more block.
+    preflight = _cooldown_preflight(
+        block=8680424, weights_rate_limit=100, blocks_since_last_update=100
+    )
+    submitted, events = _install_cooldown_tick_fixture(
+        monkeypatch, payload=payload, preflight=preflight
+    )
+    state_file = tmp_path / "fence.json"
+    args = _cooldown_broadcast_args(state_file, public_key)
+
+    with pytest.raises(validator_thin._ChainWeightCooldownActive) as raised:
+        validator_thin.tick(args)
+
+    detail = str(raised.value)
+    assert "1 block(s) left" in detail
+    assert "next write becomes possible at block 8680425" in detail
+    # No chain call, and no durable attempt fence to recover from either.
+    assert submitted == []
+    common = validator_thin._read_state(validator_thin._submission_state_path(args))
+    assert common.get("submission_pending_id") is None
+    lane_state = validator_thin._read_state(state_file)
+    assert lane_state.get("thin_submission_attempt_id") is None
+    # The rollback fence is untouched, so the identical vector stays eligible
+    # on the first tick the chain is willing to accept.
+    assert validator_thin.load_fence(state_file) == -1
+    # Verification still ran in full; only the write was skipped.
+    names = [name for name, _fields in events.rows]
+    assert names == ["VECTOR_ACCEPTED"]
+
+
+def test_tick_submits_normally_on_the_first_block_past_the_cooldown(
+    tmp_path, monkeypatch
+):
+    payload, public_key = _signed_vector()
+    preflight = _cooldown_preflight(
+        block=8680425, weights_rate_limit=100, blocks_since_last_update=101
+    )
+    submitted, events = _install_cooldown_tick_fixture(
+        monkeypatch, payload=payload, preflight=preflight
+    )
+    state_file = tmp_path / "fence.json"
+    args = _cooldown_broadcast_args(state_file, public_key)
+
+    assert validator_thin.tick(args) is True
+    assert submitted == [{204: 1.0}]
+    assert validator_thin.load_fence(state_file) == 42
+    names = [name for name, _fields in events.rows]
+    assert names == ["VECTOR_ACCEPTED", "WEIGHTS_SUBMITTED"]
+
+
+def test_cooldown_precheck_stands_down_when_the_cooldown_stops_clearing():
+    """A cooldown that never elapses is a fault, not a schedule, and stays loud."""
+    args = SimpleNamespace(broadcast=True, offline=False)
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args,
+            _cooldown_preflight(
+                block=8680424, weights_rate_limit=100, blocks_since_last_update=0
+            ),
+        )
+    # Still within one rate-limit window of head advance: routine.
+    with pytest.raises(validator_thin._ChainWeightCooldownActive):
+        validator_thin._require_chain_weight_write_permitted(
+            args,
+            _cooldown_preflight(
+                block=8680524, weights_rate_limit=100, blocks_since_last_update=0
+            ),
+        )
+    # A whole rate-limit window has now passed with no progress, so the
+    # pre-check defers and the strict submission gate fails the tick closed.
+    validator_thin._require_chain_weight_write_permitted(
+        args,
+        _cooldown_preflight(
+            block=8680525, weights_rate_limit=100, blocks_since_last_update=0
+        ),
+    )
+
+
+def test_cooldown_precheck_defers_when_the_cooldown_cannot_be_proven():
+    """An unreadable cooldown is never a routine skip."""
+    validator_thin._require_chain_weight_write_permitted(
+        SimpleNamespace(broadcast=True, offline=False),
+        _cooldown_preflight(
+            block=8680424, weights_rate_limit=100, blocks_since_last_update=None
+        ),
+    )
+
+
+def test_recurring_loop_reports_a_chain_cooldown_as_a_skip_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _run_loop_args(once=True)
+    events = _RunEventRecorder()
+    detail = (
+        "chain weight-update cooldown has 4 block(s) left; the next write "
+        "becomes possible at block 8680428"
+    )
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "_drain_shadow_audit_once", lambda _args: True)
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            validator_thin._ChainWeightCooldownActive(detail)
+        ),
+    )
+
+    assert validator_thin.run(args) == 0
+    names = [name for name, _fields in events.rows]
+    assert "TICK_FAILED" not in names
+    assert [
+        fields for name, fields in events.rows if name == "WEIGHT_COOLDOWN_SKIPPED"
+    ] == [{"stage": "submit", "status": validator_thin.INFO, "detail": detail}]
+
+
+def test_recurring_loop_still_fails_a_genuine_tick_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _run_loop_args(once=True)
+    events = _RunEventRecorder()
+    monkeypatch.setattr(
+        validator_thin, "_validate_runtime_contract", lambda _args: None
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_recover_pending_launch_receipt",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+    monkeypatch.setattr(validator_thin, "_drain_shadow_audit_once", lambda _args: True)
+    monkeypatch.setattr(
+        validator_thin,
+        "tick",
+        lambda _args: (_ for _ in ()).throw(
+            wire_vector.VectorError("signed vector burn destination is not the pin")
+        ),
+    )
+
+    assert validator_thin.run(args) == 1
+    names = [name for name, _fields in events.rows]
+    assert "WEIGHT_COOLDOWN_SKIPPED" not in names
+    assert [fields for name, fields in events.rows if name == "TICK_FAILED"] == [
+        {
+            "stage": "result",
+            "status": validator_thin.FAIL,
+            "detail": "signed vector burn destination is not the pin",
+            "remediation": (
+                "The tick failed closed. If failure occurred after the chain "
+                "call, a write may have finalized; inspect the durable attempt "
+                "state and named extrinsic before operator recovery. Automatic "
+                "same-attempt retry remains blocked."
+            ),
+        }
+    ]

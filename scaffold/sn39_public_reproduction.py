@@ -2458,6 +2458,12 @@ def assert_current_dry_run(
             "resolved launch pins differ: " + ", ".join(mismatched_startup)
         )
 
+    # Named because they must fail the reproduction whatever status they
+    # carry. WEIGHT_COOLDOWN_SKIPPED is deliberately absent and needs no
+    # exemption clause: the subnet's weight-update cooldown is a schedule
+    # fact rather than a verdict, so it is emitted at INFO and the status
+    # test below already lets it through. A no-write reproduction never
+    # reaches the cooldown boundary at all.
     failures = {
         "TICK_FAILED",
         "PROVENANCE_AUDIT_FAIL",
