@@ -2855,6 +2855,26 @@ REQUIRE_POLICY_CHOICES = (
     REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
 )
 
+# The weight policies the SN39 mainnet trust profile admits — a CLOSED set of
+# exactly two named contracts, not "any validated_supply", not "anything in
+# REQUIRE_POLICY_CHOICES".
+#
+# The trust profile exists so a tampered config cannot redirect mainnet weights,
+# and it does that by comparing every pinned field to one literal. Exactly one
+# field needs two admissible values, because SN39's allocation is meant to roll
+# from the launch contract (90% validated supply / 10% burn) to v3 (70% Intel
+# TDX / 30% CyberGym / 0% fixed burn) as a deliberate, coordinated re-pin. Every
+# other field of the profile stays single-equality strict.
+#
+# Membership, not a predicate: adding a third economy has to be an edit to this
+# tuple in a reviewed commit, exactly as adding one to the profile would be.
+# confidential_primary_v1 is NOT here — it is a valid CLI pin for other subnets,
+# but it is not an SN39 mainnet posture.
+SN39_PINNED_REQUIRE_POLICIES = (
+    REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
+    REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
+)
+
 
 def _validated_supply_common(policy: dict[str, Any], payload: dict[str, Any]) -> None:
     """Burn-destination checks shared by every validated_supply contract.
@@ -6669,9 +6689,15 @@ def _validate_resolved_chain_contract(
             "Finney SN39 broadcast requires the `finney` signed-vector audience "
             "even when a self-hosted RPC endpoint is used"
         )
-    if getattr(args, "require_policy", None) != "validated_supply_v1":
+    # Same closed two-value set as the startup trust profile, re-checked here
+    # against the RESOLVED chain rather than the config's label. If this stayed
+    # single-equality on v1, a re-pin to v3 would clear the startup profile and
+    # then die at chain preflight on every tick — a validator that starts
+    # cleanly and never writes.
+    if getattr(args, "require_policy", None) not in SN39_PINNED_REQUIRE_POLICIES:
         raise wire.VectorError(
-            "Finney SN39 broadcast requires the validated_supply_v1 policy"
+            "Finney SN39 broadcast requires the validated_supply_v1 or "
+            "validated_supply_v3 policy"
         )
     if preflight.min_allowed_weights != 1 or not math.isclose(
         preflight.max_weight_limit,
@@ -8780,7 +8806,12 @@ def _continuous_transition_required(args: Any) -> bool:
     explicit = getattr(args, "require_completed_launch_for_broadcast", None)
     if explicit is not None:
         return bool(explicit)
-    return getattr(args, "require_policy", None) == "validated_supply_v1"
+    # This asks "is this an SN39 mainnet posture?", not "is this the launch
+    # contract?". Both admitted pins are that posture, so both carry the
+    # continuous-authorization obligation. Left as single equality on v1, a
+    # re-pin to v3 would SILENTLY DROP the obligation — a real weakening bought
+    # with a one-word config change, and one nothing else would report.
+    return getattr(args, "require_policy", None) in SN39_PINNED_REQUIRE_POLICIES
 
 
 @contextlib.contextmanager
@@ -9327,7 +9358,6 @@ def _validate_runtime_contract(args: Any) -> None:
             "publisher_url": SN39_PUBLISHER_URL,
             "public_key_hex": DEFAULT_PUBLIC_KEY_HEX,
             "key_id": SN39_WEIGHT_POLICY_KEY_ID,
-            "require_policy": "validated_supply_v1",
             "evidence_url": SN39_EVIDENCE_URL,
             "provenance_registry_keys_digest": SN39_REGISTRY_KEYS_DIGEST,
             "provenance_report_keys_digest": SN39_REPORT_KEYS_DIGEST,
@@ -9347,6 +9377,16 @@ def _validate_runtime_contract(args: Any) -> None:
             )
             != expected
         ]
+        # The one profile field with more than one admissible value, and it is
+        # still a CLOSED membership test over two named contracts — the launch
+        # pin and the v3 re-pin. A third value, including a legitimate
+        # REQUIRE_POLICY_CHOICES entry like confidential_primary_v1, is a
+        # mismatch. `provenance_mechanism` above stays pinned to v1 on purpose:
+        # MECHANISM_ACCEPTED already admits v2/v3 evidence under a v1 pin, and
+        # MECHANISM_BURN_FRACTION is looked up by the operator's own pin, so
+        # widening it here would move the burn contract, not the evidence.
+        if getattr(args, "require_policy", None) not in SN39_PINNED_REQUIRE_POLICIES:
+            mismatches.append("require_policy")
         if Path(str(getattr(args, "state_file", ""))) != SN39_STATE_FILE:
             mismatches.append("state_file")
         provenance_mode = getattr(args, "provenance", "shadow") or "shadow"

@@ -67,6 +67,37 @@ WIRE_TOTAL = WIRE_VALIDATED_SUPPLY_U16 + WIRE_BURN_U16
 WIRE_VALIDATED_SUPPLY_SHARE = WIRE_VALIDATED_SUPPLY_U16 / WIRE_TOTAL
 WIRE_BURN_SHARE = WIRE_BURN_U16 / WIRE_TOTAL
 EXPECTED_VERSION_KEY = 10005000
+# The exact reward-mechanism block a signed release may carry, keyed by its own
+# declared id. Each entry is compared by WHOLE-OBJECT equality, so the v1 launch
+# release is held to precisely the literal it was held to before; the id only
+# selects which literal, it never relaxes one. An id outside this table has no
+# expected shape and does not reproduce.
+#
+# v1 is the immutable launch: 90% validated supply / 10% burn, paid as the
+# 2-UID 65535/7282 u16 wire vector. v3 is the coordinated re-pin: 70% Intel TDX
+# / 30% CyberGym / 0% FIXED burn, paid as a full multi-UID vector, so it carries
+# no `wire_quantization` block — there is no fixed two-slot quantization to
+# state, and inventing one would be a claim the payout does not make.
+EXPECTED_RELEASE_REWARD_MECHANISMS = {
+    "validated_supply_v1": {
+        "id": "validated_supply_v1",
+        "revision": 1,
+        "validated_supply_share": 0.9,
+        "burn_share": 0.1,
+        "wire_quantization": {
+            "weights_u16": [WIRE_VALIDATED_SUPPLY_U16, WIRE_BURN_U16],
+            "effective_validated_supply_share": WIRE_VALIDATED_SUPPLY_SHARE,
+            "effective_burn_share": WIRE_BURN_SHARE,
+        },
+    },
+    "validated_supply_v3": {
+        "id": "validated_supply_v3",
+        "revision": 1,
+        "intel_tdx_share": 0.70,
+        "cybergym_share": 0.30,
+        "burn_share": 0.0,
+    },
+}
 RELEASE_SCHEMA = "cathedral_sn39_provenance_release_v3"
 UID_SAFETY_SCHEMA = "cathedral_sn39_uid_safety_v2"
 UID_SAFETY_STABILITY_BASIS = "operator_controlled_coldkeys"
@@ -602,17 +633,18 @@ def verify_release_bytes(
         or release.get("claim") != "SN39 mainnet: validated Intel TDX CPU compute."
     ):
         raise ReproductionError("signed release contract differs from the launch")
-    if release.get("reward_mechanism") != {
-        "id": "validated_supply_v1",
-        "revision": 1,
-        "validated_supply_share": 0.9,
-        "burn_share": 0.1,
-        "wire_quantization": {
-            "weights_u16": [WIRE_VALIDATED_SUPPLY_U16, WIRE_BURN_U16],
-            "effective_validated_supply_share": WIRE_VALIDATED_SUPPLY_SHARE,
-            "effective_burn_share": WIRE_BURN_SHARE,
-        },
-    }:
+    mechanism = release.get("reward_mechanism")
+    # The id only SELECTS the expected literal; the whole block is then compared
+    # by equality, so a release cannot soften its own contract by naming itself.
+    # A non-string id is looked up in nothing (a dict, say, would raise on an
+    # unhashable key) and falls through to the same refusal.
+    declared_id = mechanism.get("id") if isinstance(mechanism, dict) else None
+    expected_mechanism = (
+        EXPECTED_RELEASE_REWARD_MECHANISMS.get(declared_id)
+        if isinstance(declared_id, str)
+        else None
+    )
+    if expected_mechanism is None or mechanism != expected_mechanism:
         raise ReproductionError("signed reward mechanism differs from the launch")
     if release.get("source_revisions") != {
         "producer": EXPECTED_PRODUCER_REVISION,
@@ -2182,7 +2214,6 @@ EXPECTED_STARTUP = {
         "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"  # pragma: allowlist secret
     ),
     "weight_policy_key_id": "cathedral-weight-policy",
-    "policy_pin": "validated_supply_v1",
     # STARTUP records only the credential-free origin. The exact evidence path
     # is bound by the signed release and fetched by the hardened reproducer.
     "provenance_evidence_url": "https://api.cathedral.computer",
@@ -2202,6 +2233,32 @@ EXPECTED_STARTUP = {
         "26ebdbb885746f1835ea67ff314e384b4838560f"  # pragma: allowlist secret
     ),
     "provenance_mechanism": "validated_supply_v1",
+}
+
+# `policy_pin` is the one resolved startup field with two admissible values, so
+# it is checked here instead of in the flat-equality EXPECTED_STARTUP table: the
+# launch contract and the coordinated v3 re-pin. A CLOSED tuple — a third value
+# is a different economy and does not reproduce.
+#
+# `provenance_mechanism` above deliberately stays pinned to validated_supply_v1
+# in both postures. It selects which evidence a run admits (MECHANISM_ACCEPTED
+# already lets a v1 pin accept v2/v3 manifests) and which burn contract applies;
+# widening it would move the burn, not the allocation.
+EXPECTED_STARTUP_POLICY_PINS = ("validated_supply_v1", "validated_supply_v3")
+
+# The no-write dry-run lane each admissible pin MUST produce, keyed by the
+# `contract_version` the thin run stamps on its WEIGHTS_DRY_RUN result (the v2
+# 90/10 wire contract stamps nothing).
+#
+# This is a CROSS-CHECK, and it is strictly stricter than the code it replaces
+# for a v1 release: previously the lane was chosen by the result's own
+# contract_version and the pin was only compared to a literal, so a v1-pinned
+# run that emitted a v3 (70/30/0) result reproduced happily under the v3
+# assertions. Now the pin picks the lane and a result that disagrees with the
+# pin fails closed. Neither direction of the disagreement can reproduce.
+_PIN_TO_DRY_RUN_CONTRACT_VERSION = {
+    "validated_supply_v1": None,
+    "validated_supply_v3": "validated_supply_v3",
 }
 
 
@@ -2383,6 +2440,9 @@ def assert_current_dry_run(
         for name, expected in EXPECTED_STARTUP.items()
         if startup.get(name) != expected
     ]
+    policy_pin = startup.get("policy_pin")
+    if policy_pin not in EXPECTED_STARTUP_POLICY_PINS:
+        mismatched_startup.append("policy_pin")
     if mismatched_startup:
         raise ReproductionError(
             "resolved launch pins differ: " + ", ".join(mismatched_startup)
@@ -2423,8 +2483,18 @@ def assert_current_dry_run(
     if submission is None or submission.get("status") != "PASS":
         raise ReproductionError("missing successful no-write thin result")
     # v2 (90/10) stays the default no-write contract; a v3 (70/30/0) result is
-    # accepted only when the thin run explicitly stamps contract_version=v3.
-    if submission.get("contract_version") == "validated_supply_v3":
+    # accepted only when the thin run explicitly stamps contract_version=v3 AND
+    # the resolved startup pin is the v3 pin. The lane is selected by the PIN,
+    # then the result's own stamp must agree with it, so neither a v1-pinned run
+    # emitting a v3 vector nor a v3-pinned run emitting the launch 90/10 vector
+    # can reproduce.
+    stamped_version = submission.get("contract_version")
+    if stamped_version != _PIN_TO_DRY_RUN_CONTRACT_VERSION[policy_pin]:
+        raise ReproductionError(
+            "thin result contract does not match the resolved policy pin: "
+            f"policy_pin={policy_pin!r} contract_version={stamped_version!r}"
+        )
+    if policy_pin == "validated_supply_v3":
         burn_share_label = _assert_current_dry_run_v3(submission)
     else:
         burn_share_label = _assert_current_dry_run_v2(submission)
