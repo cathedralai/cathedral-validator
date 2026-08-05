@@ -2240,20 +2240,9 @@ EXPECTED_STARTUP = {
     "provenance_mechanism": "validated_supply_v1",
 }
 
-# `policy_pin` is the one resolved startup field with two admissible values, so
-# it is checked here instead of in the flat-equality EXPECTED_STARTUP table: the
-# launch contract and the coordinated v3 re-pin. A CLOSED tuple — a third value
-# is a different economy and does not reproduce.
-#
-# `provenance_mechanism` above deliberately stays pinned to validated_supply_v1
-# in both postures. It selects which evidence a run admits (MECHANISM_ACCEPTED
-# already lets a v1 pin accept v2/v3 manifests) and which burn contract applies;
-# widening it would move the burn, not the allocation.
-EXPECTED_STARTUP_POLICY_PINS = ("validated_supply_v1", "validated_supply_v3")
-
 # The no-write dry-run lane each admissible pin MUST produce, keyed by the
 # `contract_version` the thin run stamps on its WEIGHTS_DRY_RUN result (the v2
-# 90/10 wire contract stamps nothing).
+# 90/10 wire contract stamps nothing, so its lane is None).
 #
 # This is a CROSS-CHECK, and it is strictly stricter than the code it replaces
 # for a v1 release: previously the lane was chosen by the result's own
@@ -2265,6 +2254,22 @@ _PIN_TO_DRY_RUN_CONTRACT_VERSION = {
     "validated_supply_v1": None,
     "validated_supply_v3": "validated_supply_v3",
 }
+
+# `policy_pin` is the one resolved startup field with two admissible values, so
+# it is checked separately from the flat-equality EXPECTED_STARTUP table: the
+# launch contract and the coordinated v3 re-pin. A third value is a different
+# economy and does not reproduce.
+#
+# DERIVED from the lane table above, deliberately: two hand-maintained closed
+# sets can drift, and the drift is silent — a pin admitted here but missing a
+# lane would raise an uncaught KeyError out of the public reproducer instead of
+# a ReproductionError. One edit, one place, both meanings.
+#
+# `provenance_mechanism` above deliberately stays pinned to validated_supply_v1
+# in both postures. It selects which evidence a run admits (MECHANISM_ACCEPTED
+# already lets a v1 pin accept v2/v3 manifests) and which burn contract applies;
+# widening it would move the burn, not the allocation.
+EXPECTED_STARTUP_POLICY_PINS = tuple(_PIN_TO_DRY_RUN_CONTRACT_VERSION)
 
 
 def _load_events(path: Path) -> list[dict[str, Any]]:

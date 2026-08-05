@@ -358,3 +358,18 @@ def test_the_v3_mechanism_is_the_70_30_0_split():
 def test_a_mechanism_outside_the_table_does_not_reproduce(mechanism):
     with pytest.raises(pr.ReproductionError, match="reward mechanism differs"):
         _verify(mechanism)
+
+
+def test_the_pin_set_is_derived_from_the_lane_table_so_they_cannot_drift():
+    """One closed set, not two.
+
+    A pin admitted by the membership check but missing from the lane table
+    would raise an uncaught KeyError out of the public reproducer instead of a
+    ReproductionError, so the tuple is derived from the table's keys rather
+    than maintained beside it.
+    """
+    assert pr.EXPECTED_STARTUP_POLICY_PINS == tuple(
+        pr._PIN_TO_DRY_RUN_CONTRACT_VERSION
+    )
+    for pin in pr.EXPECTED_STARTUP_POLICY_PINS:
+        assert pin in pr._PIN_TO_DRY_RUN_CONTRACT_VERSION
