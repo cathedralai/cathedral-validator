@@ -11,6 +11,8 @@ from __future__ import annotations
 import pathlib
 from types import SimpleNamespace
 
+import pytest
+
 from scaffold import cli
 from scaffold import provenance_audit as pa
 from scaffold import validator_thin as vt
@@ -88,6 +90,12 @@ def _selfcompose_cfg() -> dict:
     )
 
 
+def _relay_cfg() -> dict:
+    return cli._load_config_file(
+        str(ROOT / "config" / "validator-thin-sn39-relay.toml")
+    )
+
+
 def test_selfcompose_config_is_attestation_verified_thin() -> None:
     cfg = _selfcompose_cfg()
     assert cfg["provenance"] == "shadow"
@@ -99,6 +107,16 @@ def test_selfcompose_config_is_attestation_verified_thin() -> None:
     assert "min_assurance" not in cfg
 
 
+def test_selfcompose_config_carries_the_launch_ceremony_waiver() -> None:
+    cfg = _selfcompose_cfg()
+    # The two opt-outs pinned above are only HONORED for a runtime with no
+    # launch of its own. The consolidated host has the release-installed launch
+    # material, so it reads as launch-capable no matter what it declares, and
+    # the runtime contract refuses the opt-outs without this waiver. Omitting it
+    # makes the profile unable to start on the one host it is written for.
+    assert cfg["beta_skip_launch_ceremony"] is True
+
+
 def test_selfcompose_config_points_publisher_at_the_local_role() -> None:
     cfg = _selfcompose_cfg()
     # The one line that makes the validator self-composing: fetch the signed
@@ -107,8 +125,112 @@ def test_selfcompose_config_points_publisher_at_the_local_role() -> None:
 
 
 def test_relay_profile_stays_shadow() -> None:
-    cfg = cli._load_config_file(str(ROOT / "config" / "validator-thin-sn39-relay.toml"))
-    assert cfg["provenance"] == "shadow"
+    assert _relay_cfg()["provenance"] == "shadow"
+
+
+def test_the_only_deltas_from_the_relay_profile_are_the_documented_two() -> None:
+    """The self-compose header states its deltas; hold it to that claim.
+
+    The profile's whole safety story is "same trust-bearing numbers as the
+    relay, one publisher origin apart". A value that quietly drifts apart —
+    or a key present in one profile and missing from the other, which is how
+    the launch waiver went absent here in the first place — falsifies the
+    header without touching it. Compare the LOADED configs so a delta cannot
+    hide behind formatting or section ordering.
+    """
+    absent = object()
+    selfcompose, relay = _selfcompose_cfg(), _relay_cfg()
+    deltas = {
+        key
+        for key in set(selfcompose) | set(relay)
+        if selfcompose.get(key, absent) != relay.get(key, absent)
+    }
+    assert deltas == {"publisher_url", "status_jsonl"}
+
+
+# -- the self-compose profile on the host it is written for -----------------
+
+
+def _selfcompose_broadcast_args() -> SimpleNamespace:
+    """The self-compose profile as `serve --broadcast` would resolve it.
+
+    `publisher_url` is overridden to the release origin because it is the one
+    delta the immutable trust profile also pins, and it raises first — the
+    local-publisher URL is refused independently of anything launch-related
+    (a separate, known limitation of this profile). Overriding it here is what
+    lets these tests reach the launch-gate branch they are about; it is a
+    no-op for every other pinned value.
+    """
+    cfg = dict(cli._DEFAULTS)
+    cfg.update(_selfcompose_cfg())
+    cfg["publisher_url"] = vt.SN39_PUBLISHER_URL
+    cfg["broadcast"] = True
+    cfg["offline"] = False
+    return SimpleNamespace(**cfg)
+
+
+def _relocate_launch_material(monkeypatch, root: pathlib.Path) -> pathlib.Path:
+    """Point the three release-pinned launch paths inside `root`.
+
+    `_sn39_launch_obligation` answers from code constants and this runtime's
+    own journal, never from config, so the only honest way to test the profile
+    on its own host is to move what those constants address. Relocating all
+    three (rather than one) keeps the test machine's real filesystem from
+    deciding which branch fires.
+    """
+    monkeypatch.setattr(vt, "SN39_LAUNCH_CONTROLLED_DIR", root / "controlled")
+    monkeypatch.setattr(vt, "SN39_LAUNCH_APPROVAL_FILE", root / "approval.json")
+    verifier = root / "cathedral-tdx-verifier"
+    monkeypatch.setattr(vt, "SN39_LAUNCH_VERIFIER_BINARY", verifier)
+    return verifier
+
+
+@pytest.fixture()
+def launch_capable_host(monkeypatch, tmp_path) -> None:
+    # A release install puts the verifier binary on the consolidated host; that
+    # possession alone is what makes the runtime launch-capable.
+    _relocate_launch_material(monkeypatch, tmp_path).write_bytes(b"")
+
+
+@pytest.fixture()
+def bare_relay_host(monkeypatch, tmp_path) -> None:
+    # A third-party relay never receives the launch material, so none of the
+    # pinned paths resolve.
+    _relocate_launch_material(monkeypatch, tmp_path)
+
+
+def test_selfcompose_profile_starts_on_a_launch_capable_host(
+    launch_capable_host,
+) -> None:
+    # The consolidated host holds launch material, so it owes SN39 a launch it
+    # cannot perform — and the profile still has to be able to broadcast there.
+    args = _selfcompose_broadcast_args()
+    assert vt._sn39_launch_obligation(args) is True
+    vt._validate_runtime_contract(args)
+
+
+def test_without_the_waiver_that_host_could_not_broadcast_at_all(
+    launch_capable_host,
+) -> None:
+    # The gate is unchanged and still bites: this is what the shipped profile
+    # did before it carried the waiver, and what it will do again if the waiver
+    # is dropped. Pinning the failure keeps the waiver from reading as noise.
+    args = _selfcompose_broadcast_args()
+    args.beta_skip_launch_ceremony = False
+    with pytest.raises(vt.wire.VectorError, match="completed-launch gate"):
+        vt._validate_runtime_contract(args)
+
+
+def test_a_host_without_launch_material_never_needed_the_waiver(
+    bare_relay_host,
+) -> None:
+    # Why the omission went unnoticed: with no launch material there is no
+    # obligation, so the gate never fires and the missing waiver costs nothing.
+    # It is the launch-capable host, and only that host, that the waiver saves.
+    args = _selfcompose_broadcast_args()
+    args.beta_skip_launch_ceremony = False
+    assert vt._sn39_launch_obligation(args) is False
+    vt._validate_runtime_contract(args)
 
 
 def test_no_authority_config_profile_ships() -> None:

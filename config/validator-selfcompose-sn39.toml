@@ -19,12 +19,25 @@
 # event is REQUIRED; see the rollback runbook (R1/R4 revert to the hub-backed
 # producer). This is the deliberate cost of winning the finality race.
 #
-# The single delta from validator-thin-sn39-relay.toml is the [publisher] url:
-# it points at the LOCAL self-composed publisher (cathedral-publisher.service,
-# 127.0.0.1:8010) instead of the remote api.cathedral.computer. min_assurance is
-# intentionally left at the default (rewarded_set_proven) — it gates only the
-# concurrent shadow verifier's PROVEN labeling, never the thin write path, which
-# submits the signed vector after signature verification regardless.
+# Exactly TWO settings differ from validator-thin-sn39-relay.toml. The
+# [network], [weight_policy], [weights], [runtime], [provenance] and [launch]
+# sections are byte-identical to it. The deltas are:
+#
+#   1. [publisher] url — the LOCAL self-composed publisher
+#      (cathedral-publisher.service, 127.0.0.1:8010) instead of the remote
+#      api.cathedral.computer. This is the one line that makes the validator
+#      self-composing.
+#   2. [logs] status_jsonl — the sanitized projection the public status service
+#      reads. Only a host that also composes publishes one.
+#
+# In particular the [launch] section, waiver included, is the relay's verbatim;
+# see the comment there for why this host needs the waiver even though the
+# relay's own text presents it as the weight-originating case.
+#
+# min_assurance is intentionally left at the default (rewarded_set_proven) — it
+# gates only the concurrent shadow verifier's PROVEN labeling, never the thin
+# write path, which submits the signed vector after signature verification
+# regardless.
 #
 # CLEAN-JOURNAL REQUIREMENT: attestation-verified must start from a clean/fresh
 # journal (state_file below). Never hand-edit a live journal — provision with
@@ -91,6 +104,18 @@ burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allow
 # its own and must not require a per-validator completed launch.
 require_full_provenance_for_broadcast = false
 require_completed_launch_for_broadcast = false
+# REQUIRED on this profile, not optional. The relay's copy of this line calls
+# the waiver the weight-originating case; the consolidated host IS that case.
+# It carries the controlled launch material at the release-pinned absolute
+# paths (/opt/cathedral-sn39/bin/cathedral-tdx-verifier and its siblings — a
+# release install puts them there), so _sn39_launch_obligation reads this
+# runtime as launch-capable from code constants and this runtime's own journal.
+# No config value can clear that, and by design: the two opt-outs above are
+# then refused without this documented waiver, and startup ends at "SN39
+# broadcast from a weight-originating or launch-capable runtime requires the
+# completed-launch gate". A third-party relay holds no launch material and is
+# unaffected either way.
+beta_skip_launch_ceremony = true
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
