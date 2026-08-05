@@ -89,6 +89,9 @@ For the default thin + shadow mode:
 
 - Linux or macOS with Python 3.11 or newer;
 - a stable network connection;
+- a host clock disciplined by NTP (`chronyd`, `systemd-timesyncd`, or `ntpd`):
+  the signed vector's freshness is judged against this host's clock, so a drift
+  of a couple of minutes refuses every tick and writes nothing;
 - for metagraph-backed checks, a Bittensor-compatible Finney RPC endpoint; and
 - for any future write, a registered SN39 validator hotkey with the required
   chain permissions.

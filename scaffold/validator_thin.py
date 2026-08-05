@@ -289,6 +289,46 @@ def _safe_endpoint_label(value: Any) -> str | None:
 
 MAX_VECTOR_FETCH_BYTES = 4 * 1024 * 1024
 
+# How long a `Date:` reading stays usable as an explanation. Clock skew does
+# not change minute to minute, but an operator who fixes NTP must not keep
+# being told about the drift that was measured before the fix, and a cached
+# vector re-verified hours later must not borrow a stale reading. Past this
+# age the observation is dropped and refusals read exactly as they do today.
+PUBLISHER_CLOCK_OBSERVATION_TTL_SECONDS = 900.0
+
+# Last observed publisher `Date:` header, as (observation, monotonic stamp).
+#
+# DIAGNOSTIC ONLY. Nothing here is a time source: see the warning on
+# `wire.PublisherClock`. It is module state rather than a return value because
+# `fetch_vector`'s contract is "returns the vector document" and is stubbed
+# under that contract in tests and in the offline paths — a stubbed or skipped
+# fetch simply leaves this empty, which degrades to today's message.
+_PUBLISHER_CLOCK: tuple[wire.PublisherClock, float] | None = None
+
+
+def _record_publisher_clock(date_header: str | None) -> None:
+    """Remember the publisher's `Date:` header for refusal diagnostics only."""
+    global _PUBLISHER_CLOCK
+    if not date_header:
+        # No header: forget the previous reading rather than let an older,
+        # unrelated observation explain this fetch's vector.
+        _PUBLISHER_CLOCK = None
+        return
+    _PUBLISHER_CLOCK = (
+        wire.PublisherClock(date_header=date_header, observed_at=datetime.now(UTC)),
+        time.monotonic(),
+    )
+
+
+def _observed_publisher_clock() -> wire.PublisherClock | None:
+    """Return the recent `Date:` observation, or None when there is none."""
+    if _PUBLISHER_CLOCK is None:
+        return None
+    observation, stamp = _PUBLISHER_CLOCK
+    if time.monotonic() - stamp > PUBLISHER_CLOCK_OBSERVATION_TTL_SECONDS:
+        return None
+    return observation
+
 
 def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
     """Hardened bounded fetch of the thin feed (public HTTPS only).
@@ -388,6 +428,10 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
             )
             connection.sock.settimeout(_phase_timeout())
             response = connection.getresponse()
+            # Read before the status gate: a 503 still carries a usable clock
+            # reading, and this is only ever used to EXPLAIN a later refusal.
+            # It is never consulted by any check — see `wire.PublisherClock`.
+            _record_publisher_clock(response.getheader("Date"))
             if response.status != 200:
                 raise wire.VectorError(
                     f"vector fetch failed with status {response.status} "
@@ -2674,7 +2718,17 @@ def accept_vector(
     wire.verify_signature(
         payload, public_key_hex=public_key_hex, expected_key_id=key_id
     )
-    wire.invariant_check(payload, network=network, netuid=netuid, now_iso=_ms_iso_now())
+    # `now_iso` is the host clock and remains the sole basis for freshness.
+    # The publisher's observed `Date:` header is passed for one reason: so a
+    # refusal that has already been decided can name the host clock instead of
+    # reading as "Cathedral's feed is broken". It is not a time source.
+    wire.invariant_check(
+        payload,
+        network=network,
+        netuid=netuid,
+        now_iso=_ms_iso_now(),
+        publisher_clock=_observed_publisher_clock(),
+    )
     pv = int(payload["policy_version"])
     if pv <= fence_version:
         raise wire.VectorError(

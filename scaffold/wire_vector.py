@@ -14,7 +14,9 @@ import base64
 import json
 import math
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 MAX_VECTOR_ENTRIES = 8192
@@ -23,6 +25,17 @@ MAX_VECTOR_FUTURE_SKEW_SECONDS = 120.0
 _UTC_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})Z$"
 )
+
+# Smallest host-versus-publisher offset worth naming as a clock fault. The HTTP
+# ``Date`` header has one-second granularity and the reading also absorbs the
+# request round trip, so a smaller number is measurement noise. Printing it
+# would be inventing a figure the operator cannot act on.
+MIN_REPORTABLE_CLOCK_SKEW_SECONDS = 5.0
+
+# Longest ``Date:`` header this will even attempt to parse. It is unvalidated
+# bytes off the wire, so a broken or hostile publisher does not get to grow a
+# refusal message.
+_MAX_DATE_HEADER_CHARS = 128
 
 # The exact key set of the v3 allocation contract's CyberGym lane, carried on
 # the wire as ``policy_metadata["cybergym_lane"]``.
@@ -54,6 +67,89 @@ V3_CYBERGYM_LANE_FIELDS = frozenset(
 
 class VectorError(Exception):
     """Signature, key-id, or structural-invariant check failed."""
+
+
+@dataclass(frozen=True)
+class PublisherClock:
+    """One reading of the publisher's HTTP ``Date:`` response header, paired
+    with what the host clock said at the instant that header arrived.
+
+    DIAGNOSTIC ONLY, AND DELIBERATELY SO. NEVER PROMOTE THIS INTO A CHECK.
+
+    This value is unauthenticated: it is not signed, it is not covered by the
+    vector's Ed25519 signature, and anyone who can answer the HTTP request can
+    put any instant in it. It exists for exactly one purpose — writing the text
+    of a refusal that has ALREADY been decided by the host clock alone — and
+    nothing downstream of it may read it for any other reason.
+
+    Concretely, it must never be used to derive ``now_iso``, to widen or relax
+    ``MAX_VECTOR_FUTURE_SKEW_SECONDS``, to decide whether ``expires_at`` has
+    passed, to correct the host clock, or to let a vector through that the host
+    clock rejected. Doing any of those would hand the freshness gate — the
+    thing that stops a replayed or stale weight vector from reaching the chain
+    — to whoever serves the response. A refusal explained badly is an operator
+    inconvenience; a refusal decided by the publisher is a security hole.
+    """
+
+    #: Raw header text as received. Unvalidated; parsed defensively below.
+    date_header: str
+    #: The host clock at the moment the header was read. This is the thing
+    #: being diagnosed, not a correction applied to it.
+    observed_at: datetime
+
+
+def clock_skew_hint(publisher_clock: PublisherClock | None) -> str:
+    """Return a trailing clause explaining a freshness refusal in terms of the
+    HOST clock, or ``""`` when there is nothing trustworthy to say.
+
+    Empty is always the safe answer, and it is what comes back whenever the
+    fetch never happened (offline runs, a cached vector, a stubbed fetch), the
+    publisher sent no ``Date:`` header, the header did not parse, or the
+    measured offset is inside the noise floor. In every one of those cases the
+    caller's existing message stands exactly as it does today.
+
+    This function never raises and never influences whether a vector is
+    refused. It only decides what the operator gets to read afterwards.
+    """
+    if publisher_clock is None:
+        return ""
+    header = publisher_clock.date_header
+    if not isinstance(header, str) or not 0 < len(header) <= _MAX_DATE_HEADER_CHARS:
+        return ""
+    observed = publisher_clock.observed_at
+    if not isinstance(observed, datetime) or observed.tzinfo is None:
+        return ""
+    # Everything that touches the header stays inside one guard, including the
+    # rendering. A well-formed date at the edge of the representable range
+    # (``31 Dec 9999 ... -1400``) overflows on conversion to UTC, and an
+    # explanation that raised would replace a clean refusal with a crash — a
+    # different exception, a different exit path. Diagnosis never gets to do
+    # that: anything unexpected here means no hint, and today's message stands.
+    try:
+        published = parsedate_to_datetime(header)
+        if published is None:
+            return ""
+        if published.tzinfo is None:
+            # RFC 5322 "-0000" means "no timezone stated"; HTTP dates are GMT.
+            published = published.replace(tzinfo=UTC)
+        offset = (observed - published).total_seconds()
+        if not math.isfinite(offset):
+            return ""
+        # The parsed value is re-rendered rather than echoed, so no unvalidated
+        # header bytes are ever interpolated into an operator-facing message.
+        stamp = published.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:  # noqa: BLE001 - unvalidated wire input; silence is fine
+        return ""
+    if abs(offset) < MIN_REPORTABLE_CLOCK_SKEW_SECONDS:
+        return (
+            f"; your host clock matches the publisher's (its Date: header "
+            f"says {stamp}), so this is not host clock skew"
+        )
+    direction = "BEHIND" if offset < 0 else "AHEAD OF"
+    return (
+        f"; your host clock is {abs(offset):.0f}s {direction} the publisher's "
+        f"(its Date: header says {stamp}); check NTP/chrony"
+    )
 
 
 def _parse_canonical_utc(value: Any, *, field: str) -> datetime:
@@ -111,9 +207,22 @@ def verify_signature(
 
 
 def invariant_check(
-    payload: dict[str, Any], *, network: str, netuid: int, now_iso: str
+    payload: dict[str, Any],
+    *,
+    network: str,
+    netuid: int,
+    now_iso: str,
+    publisher_clock: PublisherClock | None = None,
 ) -> None:
-    """Structural sanity — mirrors the deployed validator's checks."""
+    """Structural sanity — mirrors the deployed validator's checks.
+
+    ``publisher_clock`` is optional and purely explanatory. Every decision
+    below is made against ``now_iso`` — the host clock — exactly as before;
+    the observation is read only after a freshness check has already failed,
+    to name the host clock as the likely cause instead of leaving the operator
+    to conclude the feed is broken. Passing it, omitting it, or passing a
+    garbage header cannot change which vectors are accepted.
+    """
     weights = payload.get("weights") or []
     snap = payload.get("burn_snapshot") or {}
     b_uid = snap.get("burn_uid")
@@ -156,11 +265,18 @@ def invariant_check(
             f"vector lifetime {lifetime:.0f}s exceeds "
             f"{MAX_VECTOR_LIFETIME_SECONDS:.0f}s"
         )
+    # Both freshness bounds below are decided against `now` (the host clock)
+    # and nothing else. `clock_skew_hint` runs only on the raise path, after
+    # the refusal is settled, and can only append explanatory text.
     future_skew = (generated_at - now).total_seconds()
     if future_skew > MAX_VECTOR_FUTURE_SKEW_SECONDS:
         raise VectorError(
             f"generated_at is {future_skew:.0f}s in the future; "
             f"maximum skew is {MAX_VECTOR_FUTURE_SKEW_SECONDS:.0f}s"
+            + clock_skew_hint(publisher_clock)
         )
     if expires_at <= now:
-        raise VectorError(f"vector expired at {payload.get('expires_at')!r}")
+        raise VectorError(
+            f"vector expired at {payload.get('expires_at')!r}"
+            + clock_skew_hint(publisher_clock)
+        )
