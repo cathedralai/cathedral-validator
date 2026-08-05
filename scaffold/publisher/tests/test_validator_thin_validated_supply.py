@@ -241,6 +241,22 @@ def test_locked_sdk_epoch_countdown_has_no_inclusive_plus_one() -> None:
 def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A full subnet, and the routes by which a UID is replacement-safe.
+
+    Registration immunity protects a NEW neuron from pruning, so it is only a
+    route to reward safety when the runtime's non-immune buffer is deep enough
+    that the era's registrations can never be forced to evict an immune UID.
+    That buffer shrinks when the owner's immortal budget removes candidates
+    from the prunable pool, and it is measured against the whole mortal era, so
+    at the live MinNonImmuneUids a recently registered miner is NOT protected
+    by immunity at all. The independent route that does protect a mature miner
+    is eviction DEPTH: the runtime has to prune everything ahead of it first,
+    and the era can only fund worst_case_evictions prunes.
+
+    Each route is exercised separately here, because the earlier expectation
+    (immunity is the only route, so an expired immunity means unrewardable)
+    was the inverted rule the depth proof replaced.
+    """
     finalized_hash = "0x" + "f" * 64
     genesis_hash = "0x" + "0" * 64
     owner = "owner-hotkey"
@@ -251,8 +267,9 @@ def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
     registration_blocks = [0, 0, 999, *([0] * 17)]
     owner_owned_hotkeys = [owner]
     owner_immune_limit = [1]
+    min_nonimmune_uids = [10]
     query_values = {
-        "MinNonImmuneUids": lambda: 10,
+        "MinNonImmuneUids": lambda: min_nonimmune_uids[0],
         "SubnetOwner": lambda: "owner-coldkey",
         "OwnedHotkeys": lambda: list(owner_owned_hotkeys),
         "ImmuneOwnerUidsLimit": lambda: owner_immune_limit[0],
@@ -293,17 +310,46 @@ def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
         validator_thin, "_bt_subtensor", lambda _bt: lambda **_kwargs: subtensor
     )
 
-    preflight = validator_thin.chain_preflight(
-        network="finney",
-        netuid=39,
-        wallet_name="validator",
-        wallet_hotkey="default",
-    )
+    def preflight_now() -> validator_thin.ChainPreflight:
+        return validator_thin.chain_preflight(
+            network="finney",
+            netuid=39,
+            wallet_name="validator",
+            wallet_hotkey="default",
+        )
+
+    # 18 prunable non-immune UIDs is not more than MinNonImmuneUids plus a full
+    # era of registrations (10 + 16), so the buffer does not hold: the newly
+    # registered worker is immune to pruning at this head and still not a safe
+    # reward target, because the era can outlast its immunity. Safety here is
+    # owner-immortality plus eviction depth, and nothing else.
+    preflight = preflight_now()
     assert preflight.subnet_free_uid_slots == 0
     assert preflight.subnet_temporally_immune_uids == 1
-    assert preflight.replacement_safe_hotkeys == frozenset({owner, worker})
     assert preflight.subnet_owner_immortal_hotkeys == frozenset({owner})
+    assert preflight.subnet_worst_case_evictions == 8
+    depth = dict(preflight.subnet_eviction_depth)
+    assert worker not in depth, "an immune UID is not in the prunable pool at all"
+    assert worker not in preflight.replacement_safe_hotkeys
+    assert preflight.replacement_safe_hotkeys == frozenset(
+        {owner, *(f"other-{index}" for index in range(7, 17))}
+    )
+    # The threshold is exactly worst_case_evictions: one prune short is unsafe.
+    assert depth["other-6"] == 7
+    assert depth["other-7"] == 8
 
+    # Deepen the buffer by lowering the runtime's floor. Now 18 prunable UIDs
+    # exceeds 1 + 16, the era can never be forced to evict an immune UID, and
+    # immunity becomes a route to safety on its own -- for the worker, the only
+    # route, since it is not prunable and so has no depth at all.
+    min_nonimmune_uids[0] = 1
+    buffered = preflight_now()
+    assert worker in buffered.replacement_safe_hotkeys
+    assert worker not in dict(buffered.subnet_eviction_depth)
+
+    # Crowding the owner's immortal budget takes those UIDs out of the prunable
+    # pool, shrinking the buffer to 14 against the same 1 + 16, so the worker
+    # loses the immunity route while the buffer floor stays where it was.
     owner_owned_hotkeys[:] = [
         owner,
         validator,
@@ -312,25 +358,23 @@ def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
         "other-2",
     ]
     owner_immune_limit[0] = 5
-    owner_crowded = validator_thin.chain_preflight(
-        network="finney",
-        netuid=39,
-        wallet_name="validator",
-        wallet_hotkey="default",
-    )
+    owner_crowded = preflight_now()
     assert worker not in owner_crowded.replacement_safe_hotkeys
     assert owner_crowded.subnet_owner_immortal_hotkeys == frozenset(owner_owned_hotkeys)
 
+    # Immunity expiring does not make a target unrewardable, which is what the
+    # retired rule asserted here. The mature worker joins the prunable pool as
+    # the newest registration at the deepest position, and depth is what proves
+    # it safe: the era funds 9 evictions and 18 UIDs stand in front of it.
     owner_owned_hotkeys[:] = [owner]
     owner_immune_limit[0] = 1
+    min_nonimmune_uids[0] = 10
     registration_blocks[2] = 0
-    expired = validator_thin.chain_preflight(
-        network="finney",
-        netuid=39,
-        wallet_name="validator",
-        wallet_hotkey="default",
-    )
-    assert expired.replacement_safe_hotkeys == frozenset({owner})
+    expired = preflight_now()
+    assert expired.subnet_temporally_immune_uids == 0
+    assert expired.subnet_worst_case_evictions == 9
+    assert dict(expired.subnet_eviction_depth)[worker] == 18
+    assert worker in expired.replacement_safe_hotkeys
 
 
 def test_chain_preflight_rejects_best_head_mapping_newer_than_finalized(
@@ -1068,7 +1112,22 @@ def test_vector_inclusion_policy_refuses_near_expiry_before_reservation() -> Non
 
 
 def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
+    """One block short of the epoch's room requirement still refuses.
+
+    The room a submission needs is the mortal era plus the finality margin, so
+    the fixture is derived from both constants rather than written out: a
+    literal count stops being "one block short" the moment either constant is
+    resized, and the refusal would then be proven by arithmetic that no longer
+    describes the boundary. The epoch arithmetic the check cross-examines has
+    to stay consistent with it, so the next epoch start moves with it too.
+    """
     now = datetime.now(UTC)
+    required_room = (
+        validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+        + validator_thin.SN39_EPOCH_FINALITY_MARGIN_BLOCKS
+    )
+    remaining = required_room - 1
+    next_epoch_start = 900 + remaining
     preflight = validator_thin.ChainPreflight(
         wallet=object(),
         subtensor=object(),
@@ -1081,8 +1140,8 @@ def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
         commit_reveal_enabled=False,
         genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
         subnet_owner_hotkey=validator_thin.SN39_BURN_HOTKEY,
-        blocks_until_next_epoch=35,
-        next_epoch_start_block=935,
+        blocks_until_next_epoch=remaining,
+        next_epoch_start_block=next_epoch_start,
         weights_rate_limit=100,
         validator_blocks_since_last_update=101,
         uid_mapping_stable_until_block=904,
@@ -1092,17 +1151,22 @@ def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
         valid_until_block=1000,
         valid_from_time=now - timedelta(seconds=1),
         valid_until_time=now + timedelta(hours=1),
-        expected_next_epoch_start_block=935,
+        expected_next_epoch_start_block=next_epoch_start,
     )
     with pytest.raises(
         validator_thin.wire.VectorError,
-        match="enough room",
-    ):
+        match=rf"only {remaining} block\(s\) remain in this epoch",
+    ) as refusal:
         validator_thin._require_inclusion_policy_ready(
             policy,
             preflight,
             now=now,
         )
+    # The refusal names the shortfall and the block that clears it, because
+    # this is the self-resolving wait that issue #68 needed distinguished from
+    # a stuck publisher.
+    assert f"needs {required_room}" in str(refusal.value)
+    assert f"clears itself at block {next_epoch_start}" in str(refusal.value)
 
 
 def test_inclusion_policy_refuses_active_validator_weight_cooldown() -> None:
@@ -1183,8 +1247,10 @@ def test_sdk_exception_cannot_attempt_rate_limit_aware_correction() -> None:
     assert not hasattr(validator_thin, "_emergency_owner_burn_correction")
 
 
-def test_uid_capacity_guard_requires_stability_for_complete_mortal_era() -> None:
-    preflight = validator_thin.ChainPreflight(
+def _uid_capacity_preflight(
+    safe: frozenset[str],
+) -> validator_thin.ChainPreflight:
+    return validator_thin.ChainPreflight(
         wallet=object(),
         subtensor=object(),
         hotkey_to_uid={"worker": 7, "validator": 30, "burn": 241},
@@ -1198,25 +1264,66 @@ def test_uid_capacity_guard_requires_stability_for_complete_mortal_era() -> None
         next_epoch_start_block=1100,
         weights_rate_limit=100,
         validator_blocks_since_last_update=101,
-        replacement_safe_hotkeys=frozenset({"burn"}),
+        replacement_safe_hotkeys=safe,
     )
-    with pytest.raises(
-        validator_thin.wire.VectorError,
-        match="UID mappings stable",
-    ):
-        validator_thin._require_uid_mapping_stability(
-            preflight,
-            {7: "worker", 241: "burn"},
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
-        )
-    validator_thin._require_uid_mapping_stability(
-        validator_thin.replace(
-            preflight,
-            replacement_safe_hotkeys=frozenset({"worker", "burn"}),
-        ),
+
+
+def test_uid_capacity_guard_requires_stability_for_complete_mortal_era(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unprovable target is never paid, and no provable target refuses.
+
+    The guard used to abort the entire vector the moment any single target was
+    unprovable. That paid nobody and let one unprotected UID stall every other
+    target, so the contract now excludes the unprovable target and normalizes
+    its mass to burn, reserving hard failure for the case where nothing can be
+    paid safely at all. The invariant this test exists to hold is unchanged
+    either way: weight never reaches a UID whose hotkey mapping is not proven
+    stable for the complete mortal era. Exclusion is only a weaker refusal if
+    the caller ignores it, so the drop is asserted here, not just the report.
+    """
+    events = SimpleNamespace(records=[])
+    events.event = lambda name, **fields: events.records.append(name)
+    monkeypatch.setattr(validator_thin, "_get_events", lambda _args: events)
+
+    unprovable_worker = validator_thin._require_uid_mapping_stability(
+        _uid_capacity_preflight(frozenset({"burn"})),
         {7: "worker", 241: "burn"},
         mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
     )
+    assert unprovable_worker["excluded_hotkeys"] == ["worker"]
+    kept = validator_thin._drop_unprovable_targets(
+        SimpleNamespace(),
+        {7: 0.9, 241: 0.1},
+        unprovable_worker,
+        {"worker": 7, "burn": 241},
+        241,
+    )
+    assert 7 not in kept, "an unprovable UID must not be written at any weight"
+    assert kept == {241: pytest.approx(1.0)}
+    validator_thin._validate_emission_vector(kept)
+    assert "UNSAFE_TARGETS_EXCLUDED" in events.records
+
+    # Nothing provable is still the hard refusal it always was: there is no
+    # surviving target to carry the vector, so exclusion has nothing to fall
+    # back to.
+    with pytest.raises(
+        validator_thin.wire.VectorError,
+        match="cannot prove any UID mapping stable for the complete mortal era",
+    ):
+        validator_thin._require_uid_mapping_stability(
+            _uid_capacity_preflight(frozenset({"validator"})),
+            {7: "worker", 241: "burn"},
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        )
+
+    # Every target provable: nothing is excluded and the vector is untouched.
+    fully_provable = validator_thin._require_uid_mapping_stability(
+        _uid_capacity_preflight(frozenset({"worker", "burn"})),
+        {7: "worker", 241: "burn"},
+        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+    )
+    assert fully_provable["excluded_hotkeys"] == []
 
 
 def test_exact_sn39_signer_pins_era_and_journals_hash_before_submit(
@@ -2607,6 +2714,17 @@ def test_chain_submission_has_a_validator_controlled_wall_clock_deadline(
     assert time.monotonic() - started < 0.15
 
 
+# Mapping block of the Finney UID-safety fixture, and the last block of the
+# mortal era anchored there. The era is derived from the production constant
+# rather than written out: the rotation proof compares the era's LAST block
+# against each coldkey's swap cooldown, so a literal era silently changes what
+# every lock assertion below means the moment the constant is resized.
+_UID_SAFETY_MAPPING_BLOCK = 100
+_UID_SAFETY_ERA_LAST_BLOCK = (
+    _UID_SAFETY_MAPPING_BLOCK + validator_thin.SN39_MORTAL_PERIOD_BLOCKS - 1
+)
+
+
 def _finney_uid_safety_fixture(
     *,
     hotkey_swap_interval: int = 7200,
@@ -2650,7 +2768,7 @@ def _finney_uid_safety_fixture(
     proved_rotation_blocks: list[int] = []
 
     def get_block_hash(block: int) -> str | None:
-        if block == 100:
+        if block == _UID_SAFETY_MAPPING_BLOCK:
             return mapping_hash
         proved_rotation_blocks.append(block)
         return str(rotations[block]["block_hash"]) if block in rotations else None
@@ -2730,7 +2848,7 @@ def _finney_uid_safety_fixture(
         substrate=substrate,
         query_subtensor=lambda *, name, params, block: (
             values[(name, tuple(params))]
-            if block == 100
+            if block == _UID_SAFETY_MAPPING_BLOCK
             else (_ for _ in ()).throw(AssertionError("wrong mapping block"))
         ),
     )
@@ -2740,7 +2858,7 @@ def _finney_uid_safety_fixture(
         hotkey_to_uid={"worker": 7, "burn": 241},
         validator_hotkey="validator",
         validator_uid=30,
-        block=100,
+        block=_UID_SAFETY_MAPPING_BLOCK,
         min_allowed_weights=1,
         max_weight_limit=1.0,
         genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
@@ -2765,10 +2883,13 @@ def _finney_uid_safety_fixture(
 
 
 def _uid_safety(fixture: SimpleNamespace) -> dict[str, object]:
+    # The era length is the production constant, not a literal: the proof
+    # rejects any other mortal vector outright, so a hardcoded era silently
+    # turns every rotation assertion below into a check of that one refusal.
     return validator_thin._require_uid_mapping_stability(
         fixture.preflight,
         {7: "worker", 241: "burn"},
-        mortal_period_blocks=4,
+        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
     )
 
 
@@ -2778,7 +2899,7 @@ def test_finney_uid_safety_proves_an_active_rotation_lock() -> None:
     assert proof["schema"] == "cathedral_sn39_uid_safety_v2"
     assert proof["stability_basis"] == "operator_controlled_coldkeys"
     assert proof["rotation"]["status"] == validator_thin.PASS
-    assert proof["rotation"]["era_last_block"] == 103
+    assert proof["rotation"]["era_last_block"] == _UID_SAFETY_ERA_LAST_BLOCK
     targets = proof["rotation"]["targets"]
     assert [row["uid"] for row in targets] == [7, 241]
     assert [row["swap_lock"] for row in targets] == ["active", "active"]
@@ -2805,12 +2926,19 @@ def test_finney_uid_safety_accepts_a_target_that_never_rotated() -> None:
 
 def test_finney_uid_safety_accepts_an_expired_rotation_cooldown() -> None:
     # A cooldown of exactly the mortal era still passes the constants check, but
-    # it only covers the era for the more recent of the two rotations.
-    fixture = _finney_uid_safety_fixture(hotkey_swap_interval=4)
+    # it only covers the era for the more recent of the two rotations: the
+    # worker rotated one block earlier, so its cooldown ends one block short of
+    # the era's last block.
+    fixture = _finney_uid_safety_fixture(
+        hotkey_swap_interval=validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+    )
     proof = _uid_safety(fixture)
     targets = proof["rotation"]["targets"]
     assert [row["swap_lock"] for row in targets] == ["expired", "active"]
-    assert [row["hotkey_swap_safe_until_block"] for row in targets] == [102, 103]
+    assert [row["hotkey_swap_safe_until_block"] for row in targets] == [
+        _UID_SAFETY_ERA_LAST_BLOCK - 1,
+        _UID_SAFETY_ERA_LAST_BLOCK,
+    ]
     assert targets[0]["rotation_receipt"] is None
     assert targets[0]["hotkey_root"] is None
     assert targets[1]["rotation_receipt"]["block_number"] == 99
@@ -2819,7 +2947,9 @@ def test_finney_uid_safety_accepts_an_expired_rotation_cooldown() -> None:
 
 
 def test_finney_uid_safety_accepts_every_cooldown_expired() -> None:
-    fixture = _finney_uid_safety_fixture(hotkey_swap_interval=4)
+    fixture = _finney_uid_safety_fixture(
+        hotkey_swap_interval=validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+    )
     fixture.values[("LastHotkeySwapOnNetuid", (39, "burn-coldkey"))] = 98
     proof = _uid_safety(fixture)
     targets = proof["rotation"]["targets"]
@@ -2910,7 +3040,7 @@ def test_unsigned_reservation_does_not_consume_budget_until_signed_intent(
         extrinsic_hash="0x" + "a" * 64,
         nonce=17,
         era_reference_block=100,
-        mortal_period_blocks=4,
+        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=[7, 241],
         wire_weights=[65535, 7282],
