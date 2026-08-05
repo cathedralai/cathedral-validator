@@ -1112,7 +1112,22 @@ def test_vector_inclusion_policy_refuses_near_expiry_before_reservation() -> Non
 
 
 def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
+    """One block short of the epoch's room requirement still refuses.
+
+    The room a submission needs is the mortal era plus the finality margin, so
+    the fixture is derived from both constants rather than written out: a
+    literal count stops being "one block short" the moment either constant is
+    resized, and the refusal would then be proven by arithmetic that no longer
+    describes the boundary. The epoch arithmetic the check cross-examines has
+    to stay consistent with it, so the next epoch start moves with it too.
+    """
     now = datetime.now(UTC)
+    required_room = (
+        validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+        + validator_thin.SN39_EPOCH_FINALITY_MARGIN_BLOCKS
+    )
+    remaining = required_room - 1
+    next_epoch_start = 900 + remaining
     preflight = validator_thin.ChainPreflight(
         wallet=object(),
         subtensor=object(),
@@ -1125,8 +1140,8 @@ def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
         commit_reveal_enabled=False,
         genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
         subnet_owner_hotkey=validator_thin.SN39_BURN_HOTKEY,
-        blocks_until_next_epoch=35,
-        next_epoch_start_block=935,
+        blocks_until_next_epoch=remaining,
+        next_epoch_start_block=next_epoch_start,
         weights_rate_limit=100,
         validator_blocks_since_last_update=101,
         uid_mapping_stable_until_block=904,
@@ -1136,17 +1151,22 @@ def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
         valid_until_block=1000,
         valid_from_time=now - timedelta(seconds=1),
         valid_until_time=now + timedelta(hours=1),
-        expected_next_epoch_start_block=935,
+        expected_next_epoch_start_block=next_epoch_start,
     )
     with pytest.raises(
         validator_thin.wire.VectorError,
-        match="enough room",
-    ):
+        match=rf"only {remaining} block\(s\) remain in this epoch",
+    ) as refusal:
         validator_thin._require_inclusion_policy_ready(
             policy,
             preflight,
             now=now,
         )
+    # The refusal names the shortfall and the block that clears it, because
+    # this is the self-resolving wait that issue #68 needed distinguished from
+    # a stuck publisher.
+    assert f"needs {required_room}" in str(refusal.value)
+    assert f"clears itself at block {next_epoch_start}" in str(refusal.value)
 
 
 def test_inclusion_policy_refuses_active_validator_weight_cooldown() -> None:
