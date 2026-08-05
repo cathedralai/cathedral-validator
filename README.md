@@ -285,6 +285,18 @@ remove, and the only proof is a log line from the validator itself. When the
 launch notice permits a write, `systemctl enable --now
 cathedral-validator-sn39-relay.service` makes it durable.
 
+That proof is only readable because the validator's operator stream is
+line-buffered: every line reaches the journal as it happens, so a quiet
+`journalctl` means nothing has happened yet, not that output is waiting in a
+buffer. Do not restart a validator merely because `journalctl -f` has been
+quiet, or because the newest line is a tick divider with no outcome under it —
+ticks are ~25 minutes apart, so both are normal mid-cycle. The authoritative
+record of what a tick did is the JSONL journal
+(`/var/log/cathedral-validator/validator-events.jsonl`); check it for a
+`WEIGHTS_SUBMITTED` before concluding anything is stuck. A needless restart
+costs a write cycle and can leave a submitted-but-unconfirmed receipt to
+recover.
+
 One host must never run both postures against one hotkey. The relay unit
 declares `Conflicts=` on `cathedral-validator-sn39.service`, which systemd
 applies in both directions, and re-checks with an `ExecStartPre=` guard because

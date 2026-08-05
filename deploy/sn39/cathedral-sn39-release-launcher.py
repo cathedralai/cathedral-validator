@@ -470,12 +470,27 @@ def main(argv: list[str]) -> int:
     except InstallError as exc:
         print(f"SN39 immutable-install check failed: {exc}", file=sys.stderr)
         return 1
+    # -u on every mode. The child's stdout is a journald pipe, and Python's
+    # default for a non-tty stdout is an 8192-byte BLOCK buffer -- so a tick's
+    # worth of operator output can sit unflushed for hours, and a SIGTERM
+    # (systemctl restart/stop) discards it entirely. scaffold.cli.main also
+    # line-buffers itself, which is what covers third-party operators running
+    # the CLI directly; this flag is the belt to that braces and additionally
+    # covers the two script modes, which have no such call. Buffering only:
+    # -u changes no verdict, gate or ordering.
+    #
+    # It has to be here rather than in the unit. This launcher builds the
+    # COMPLETE environment for os.execve, so an operator's PYTHONUNBUFFERED --
+    # from a systemd drop-in, a shell, a compose file -- never reaches the
+    # child; and the unit's digest is bound in the release manifest, so they
+    # cannot edit it either.
     if finalize:
         assert journal is not None
         command = [
             str(python),
             "-I",
             "-B",
+            "-u",
             str(release / "scripts/finalize_sn39_public_release.py"),
             "--release",
             str(release),
@@ -485,10 +500,11 @@ def main(argv: list[str]) -> int:
             str(journal),
         ]
     elif mode == "status":
-        command = [str(python), "scripts/publish_sn39_validator_status.py"]
+        command = [str(python), "-u", "scripts/publish_sn39_validator_status.py"]
     else:
         command = [
             str(python),
+            "-u",
             "-m",
             "scaffold.cli",
             "serve",
