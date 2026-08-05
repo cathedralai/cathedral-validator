@@ -84,6 +84,19 @@ STALE_REVERIFY_BLOBS_PER_RECEIPT = 3
 # to accept a vector on the strength of a message.
 VECTOR_EPOCH_BINDING_DISCREPANCY = "signed vector is bound to ingested source epoch"
 
+# How far a signed vector may lag the verified evidence and still be called a
+# serving race rather than a disagreement. ONE epoch: the publisher signs a
+# vector from its newest ingested report and serves it from a short-lived cache,
+# so at an epoch boundary a consumer can legitimately hold epoch N's vector
+# beside epoch N+1's evidence — and never more than that one boundary.
+#
+# This bound is the whole safety of the stale classification. Anything older is
+# not a race: it is a publisher that stopped advancing, or a replay of an older
+# genuinely-signed vector, and it must keep firing PROVENANCE_VECTOR_MISMATCH so
+# the alert path sees it. The thin tick submits the signed vector whatever the
+# audit says, so silence here is weights pinned to a stale epoch.
+MAX_STALE_VECTOR_LAG_EPOCHS = 1
+
 
 class ProvenanceUnavailable(Exception):
     """Provenance cannot run here (package missing or pins not configured).
@@ -1016,7 +1029,20 @@ def _classify_stale_vector(
     # Only a vector that LAGS the verified evidence can be a serving race. One
     # naming a later epoch claims evidence this audit never verified, and the
     # index's own rollback fences are what would have to speak to it.
-    if not 0 <= named < int(result.source_epoch):
+    #
+    # And it may lag by AT MOST MAX_STALE_VECTOR_LAG_EPOCHS. The race this
+    # classifies is a publisher serving a vector it signed up to one cache TTL
+    # before the evidence index advanced — bounded by construction to a single
+    # epoch boundary. Accepting any older vector would silence the opposite
+    # condition: a publisher that has STOPPED advancing, or an on-path replay of
+    # a genuinely-signed older vector. Because the recurring thin tick submits
+    # the signed vector regardless of what the audit concludes, an unbounded
+    # rule would let SN39 weights sit pinned to an old epoch for as long as that
+    # epoch stayed in the index's bounded recent window — roughly eight hours —
+    # while emitting only the non-alerting stale event. That is a real failure
+    # becoming invisible on the one path whose sole defense is the alarm.
+    lag = int(result.source_epoch) - named
+    if named < 0 or not 1 <= lag <= MAX_STALE_VECTOR_LAG_EPOCHS:
         return None
     row = None
     for candidate in recent_rows or ():
