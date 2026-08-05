@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Build the root-owned immutable-install manifest for one reviewed SN39 SHA."""
+"""Build the root-owned immutable-install manifest for one reviewed SN39 SHA.
+
+Two postures install this release and each gets its own manifest. The default
+is the Cathedral ORIGIN host: it pins the controlled-disclosure TDX verifier
+binary and the producer-side status publisher. `--relay` builds the manifest a
+THIRD PARTY can actually produce — same reviewed source, same environment
+commitment, same bootstrap binding, minus the two external files a relay can
+neither obtain nor install. The relay manifest is refused outright on a host
+holding SN39 launch material, so it cannot be used to weaken the origin host.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +20,7 @@ import re
 import stat
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[-_.]+")
@@ -52,6 +61,117 @@ RELEASE_FILES = (
     "deploy/sn39/cathedral-sn39-validator.sysusers",
     "deploy/sn39/cathedral-sn39-validator.tmpfiles",
 )
+# The relay manifest binds a SUPERSET of the reviewed source above: every file
+# the Cathedral manifest binds, plus the two files only a relay host installs.
+# Binding more source, not less, is the point — what a relay manifest omits is
+# an EXTERNAL file (the controlled verifier binary), never reviewed source.
+RELAY_RELEASE_FILES = RELEASE_FILES + (
+    "deploy/sn39/cathedral-validator-sn39-relay.service",
+    "deploy/sn39/cathedral-sn39-validator-relay.tmpfiles",
+)
+# The release-pinned absolute paths that make a host owe SN39 its own launch.
+# `scaffold.validator_thin._sn39_launch_obligation` reads exactly these three,
+# and a runtime that holds any of them must present the root-signed launch and
+# recurring-write authorization no matter what its config says. Restating them
+# here is what keeps `--relay` from being usable as a downgrade: on the one
+# host where the obligation is real, a relay manifest cannot be built at all.
+LAUNCH_MATERIAL_PATHS = (
+    Path("/var/lib/cathedral-validator-controlled-sn39/current"),
+    Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier"),
+    Path("/etc/cathedral-validator/sn39-launch-approval.json"),
+)
+
+
+class InstallProfile(NamedTuple):
+    """Which reviewed files one manifest binds, and what it therefore claims.
+
+    Two postures install this release. The ORIGIN host holds the
+    controlled-disclosure TDX evidence package and the pinned verifier binary,
+    so its manifest pins the verifier bytes and the producer-side status
+    publisher. A third-party RELAY holds neither: the raw evidence package is
+    Cathedral's, its shadow audit is receipts-only by design
+    (`config/validator-thin-sn39-relay.toml` omits `controlled_dir` and
+    `verifier_binary`, and `scaffold/provenance_audit.py` requires both only in
+    authority mode), and the public status publisher writes the producer's
+    evidence tree as the producer's account. Pinning files a relay cannot
+    obtain made the manifest builder — and therefore the launcher's whole
+    verification — buildable by Cathedral only.
+
+    The difference is carried here rather than as `if relay:` branches at each
+    use so that what each posture claims is one readable object, and so that
+    the Cathedral profile stays byte-identical to what it has always emitted.
+
+    A NamedTuple rather than a dataclass on purpose: this script is loaded by
+    `runpy.run_path` and by a bare `spec.loader.exec_module` in the test suite,
+    neither of which registers the module in `sys.modules`, and
+    `@dataclass` needs that registration to resolve its own annotations.
+    """
+
+    name: str
+    release_files: tuple[str, ...]
+    continuous_unit_source: str
+    continuous_unit_path: Path
+    tmpfiles_source: str
+    tmpfiles_path: Path
+    # FALSE for a relay only. The verifier binary is controlled-disclosure, so
+    # a relay can neither install it nor prove its digest; pinning it is what
+    # an origin-host manifest asserts and a relay manifest must not.
+    pins_verifier_binary: bool
+    # The status publisher runs as the producer's account and writes the
+    # producer's published evidence tree. A relay does not install it, and an
+    # external_files entry for a file that is absent is an unbuildable
+    # manifest, not a stricter one.
+    binds_status_publisher: bool
+
+
+CATHEDRAL_PROFILE = InstallProfile(
+    name="cathedral",
+    release_files=RELEASE_FILES,
+    continuous_unit_source="deploy/sn39/cathedral-validator-sn39.service",
+    continuous_unit_path=Path("/etc/systemd/system/cathedral-validator-sn39.service"),
+    tmpfiles_source="deploy/sn39/cathedral-sn39-validator.tmpfiles",
+    tmpfiles_path=Path("/etc/tmpfiles.d/cathedral-sn39-validator.conf"),
+    pins_verifier_binary=True,
+    binds_status_publisher=True,
+)
+RELAY_PROFILE = InstallProfile(
+    name="relay",
+    release_files=RELAY_RELEASE_FILES,
+    continuous_unit_source="deploy/sn39/cathedral-validator-sn39-relay.service",
+    continuous_unit_path=Path(
+        "/etc/systemd/system/cathedral-validator-sn39-relay.service"
+    ),
+    tmpfiles_source="deploy/sn39/cathedral-sn39-validator-relay.tmpfiles",
+    tmpfiles_path=Path("/etc/tmpfiles.d/cathedral-sn39-validator-relay.conf"),
+    pins_verifier_binary=False,
+    binds_status_publisher=False,
+)
+
+
+def install_profile(*, relay: bool) -> InstallProfile:
+    return RELAY_PROFILE if relay else CATHEDRAL_PROFILE
+
+
+def require_no_launch_material() -> None:
+    """Refuse to build a relay manifest on a host that owes SN39 a launch."""
+    for path in LAUNCH_MATERIAL_PATHS:
+        try:
+            path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            # A host that cannot answer the question is treated as holding the
+            # material. Refusing the relay manifest is the safe direction:
+            # the worst case is that an origin host must build the manifest it
+            # was always supposed to build.
+            raise SystemExit(
+                f"cannot determine whether this host holds launch material: {path}"
+            ) from None
+        raise SystemExit(
+            "this host holds SN39 launch material at "
+            f"{path}, so --relay is refused. A host that can originate weights "
+            "builds the Cathedral manifest, which pins the verifier binary."
+        )
 
 
 def digest(path: Path) -> str:
@@ -403,6 +523,15 @@ def main() -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--venv", type=Path)
     parser.add_argument(
+        "--relay",
+        action="store_true",
+        help=(
+            "build the third-party relay manifest: no controlled verifier "
+            "binary pin, the relay unit and tmpfiles, and no producer-side "
+            "status publisher"
+        ),
+    )
+    parser.add_argument(
         "--continuous-config",
         type=Path,
         default=INSTALL_ROOT / "validator-thin-sn39-relay.toml",
@@ -422,47 +551,56 @@ def main() -> int:
         type=Path,
         default=PROVENANCE_INSTALL_ROOT / "index-keys.json",
     )
-    parser.add_argument(
-        "--verifier",
-        type=Path,
-        default=Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier"),
-    )
+    # The four paths below default to None rather than to a literal because the
+    # posture chooses them. Resolving the default after parsing keeps the
+    # Cathedral invocation identical to what it has always produced while
+    # letting --relay select the unit and tmpfiles a relay host installs.
+    parser.add_argument("--verifier", type=Path)
     parser.add_argument(
         "--launcher",
         type=Path,
         default=Path("/usr/local/libexec/cathedral-sn39-release"),
     )
-    parser.add_argument(
-        "--continuous-unit",
-        type=Path,
-        default=Path("/etc/systemd/system/cathedral-validator-sn39.service"),
-    )
-    parser.add_argument(
-        "--status-unit",
-        type=Path,
-        default=Path("/etc/systemd/system/cathedral-sn39-public-status.service"),
-    )
-    parser.add_argument(
-        "--status-timer",
-        type=Path,
-        default=Path("/etc/systemd/system/cathedral-sn39-public-status.timer"),
-    )
+    parser.add_argument("--continuous-unit", type=Path)
+    parser.add_argument("--status-unit", type=Path)
+    parser.add_argument("--status-timer", type=Path)
     parser.add_argument(
         "--sysusers",
         type=Path,
         default=Path("/etc/sysusers.d/cathedral-sn39-validator.conf"),
     )
-    parser.add_argument(
-        "--tmpfiles",
-        type=Path,
-        default=Path("/etc/tmpfiles.d/cathedral-sn39-validator.conf"),
-    )
+    parser.add_argument("--tmpfiles", type=Path)
     parser.add_argument(
         "--bootstrap-python",
         type=Path,
         default=BOOTSTRAP_PYTHON,
     )
     args = parser.parse_args()
+    profile = install_profile(relay=args.relay)
+    if args.relay:
+        # Refused rather than ignored. Silently dropping a path the operator
+        # named would produce a manifest that does not bind the file they
+        # believe it binds, which is the failure mode this whole file exists
+        # to prevent.
+        for flag, value in (
+            ("--verifier", args.verifier),
+            ("--status-unit", args.status_unit),
+            ("--status-timer", args.status_timer),
+        ):
+            if value is not None:
+                raise SystemExit(
+                    f"{flag} is a Cathedral-only path and is refused with --relay"
+                )
+        require_no_launch_material()
+    verifier = args.verifier or Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier")
+    continuous_unit = args.continuous_unit or profile.continuous_unit_path
+    status_unit = args.status_unit or Path(
+        "/etc/systemd/system/cathedral-sn39-public-status.service"
+    )
+    status_timer = args.status_timer or Path(
+        "/etc/systemd/system/cathedral-sn39-public-status.timer"
+    )
+    tmpfiles = args.tmpfiles or profile.tmpfiles_path
     root = args.release.resolve()
     venv = (
         args.venv.resolve()
@@ -492,22 +630,28 @@ def main() -> int:
             root / "deploy/sn39/cathedral-sn39-release-launcher.py",
         ),
         (
-            args.continuous_unit,
-            root / "deploy/sn39/cathedral-validator-sn39.service",
+            continuous_unit,
+            root / profile.continuous_unit_source,
         ),
-        (
-            args.status_unit,
-            root / "deploy/sn39/cathedral-sn39-public-status.service",
-        ),
-        (
-            args.status_timer,
-            root / "deploy/sn39/cathedral-sn39-public-status.timer",
+        *(
+            (
+                (
+                    status_unit,
+                    root / "deploy/sn39/cathedral-sn39-public-status.service",
+                ),
+                (
+                    status_timer,
+                    root / "deploy/sn39/cathedral-sn39-public-status.timer",
+                ),
+            )
+            if profile.binds_status_publisher
+            else ()
         ),
         (args.sysusers, root / "deploy/sn39/cathedral-sn39-validator.sysusers"),
-        (args.tmpfiles, root / "deploy/sn39/cathedral-sn39-validator.tmpfiles"),
+        (tmpfiles, root / profile.tmpfiles_source),
     )
     validate_installed_release_files(config_pairs)
-    if digest(args.verifier) != EXPECTED_VERIFIER_BINARY:
+    if profile.pins_verifier_binary and digest(verifier) != EXPECTED_VERIFIER_BINARY:
         raise SystemExit("installed verifier binary differs from the launch pin")
     try:
         bootstrap_info = args.bootstrap_python.lstat()
@@ -527,20 +671,22 @@ def main() -> int:
         root / "requirements/sn39-reproduction.lock",
         root / "requirements/sn39-build.lock",
     )
-    release_files = {name: digest(root / name) for name in RELEASE_FILES}
+    release_files = {name: digest(root / name) for name in profile.release_files}
     external_files = {
         str(args.continuous_config): digest(args.continuous_config),
         str(args.registry_keys): digest(args.registry_keys),
         str(args.report_keys): digest(args.report_keys),
         str(args.index_keys): digest(args.index_keys),
-        str(args.verifier): digest(args.verifier),
         str(args.launcher): digest(args.launcher),
-        str(args.continuous_unit): digest(args.continuous_unit),
-        str(args.status_unit): digest(args.status_unit),
-        str(args.status_timer): digest(args.status_timer),
+        str(continuous_unit): digest(continuous_unit),
         str(args.sysusers): digest(args.sysusers),
-        str(args.tmpfiles): digest(args.tmpfiles),
+        str(tmpfiles): digest(tmpfiles),
     }
+    if profile.pins_verifier_binary:
+        external_files[str(verifier)] = digest(verifier)
+    if profile.binds_status_publisher:
+        external_files[str(status_unit)] = digest(status_unit)
+        external_files[str(status_timer)] = digest(status_timer)
     print(
         json.dumps(
             {

@@ -144,6 +144,152 @@ pin, freshness and expiry, the monotonic rollback fence, the
 `validated_supply` contract check, burn destination and floor, UID-replacement
 safety, and the single-writer guard.
 
+## Supported systemd install (relay)
+
+> [!IMPORTANT]
+> **Do this only after the quickstart above.** Steps 1 and 2 prove the feed,
+> the pins and your wallet from an ordinary shell, where nothing can be
+> written to chain. This section installs the pinned release as root and the
+> unit it enables runs with `--broadcast`, so **step 3 still governs**: do not
+> `systemctl enable --now` until Cathedral publishes the supported tag, the
+> immutable pin bundle and the launch notice. Installing and verifying without
+> enabling is safe and is the useful half of this section.
+
+Everything a relay needs to build and verify this install is in the
+repository. It was not before: the manifest builder pinned the
+controlled-disclosure Intel TDX verifier binary, and the shipped unit
+conditioned on root-signed authorization files. A relay needs neither, because
+a relay does not originate weights — it relays a vector Cathedral signed, and
+its shadow audit is receipts-only by design.
+
+The install is one immutable release: a pristine `git` checkout, a hash-locked
+venv, root-owned configs and units, and a root-owned manifest binding every one
+of those bytes. `cathedral-sn39-release` re-checks the whole manifest before
+it `execve`s the validator, so a service account that is compromised cannot
+change what runs.
+
+### Build the release and install its reviewed files
+
+`$release_sha` is the reviewed tag's commit. Use `/usr/bin/python3.12` — the
+versioned regular file, not the `python3` symlink — because the manifest binds
+its digest.
+
+```bash
+set -euo pipefail
+release_sha="<reviewed-tag-commit>"
+release="/opt/cathedral-sn39/releases/$release_sha"
+venv="/opt/cathedral-sn39/venvs/$release_sha"
+
+install -d -o root -g root -m 0755 /opt/cathedral-sn39/releases
+git clone https://github.com/cathedralai/cathedral-validator.git "$release"
+git -C "$release" checkout --detach "$release_sha"
+
+/usr/bin/python3.12 -m venv "$venv"
+"$venv/bin/python" -m pip install \
+  --require-hashes -r "$release/requirements/sn39-build.lock"
+"$venv/bin/python" -m pip install --no-build-isolation \
+  --require-hashes -r "$release/requirements/sn39-reproduction.lock"
+
+install -D -o root -g root -m 0755 \
+  "$release/deploy/sn39/cathedral-sn39-release-launcher.py" \
+  /usr/local/libexec/cathedral-sn39-release
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-validator-sn39-relay.service" \
+  /etc/systemd/system/cathedral-validator-sn39-relay.service
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-sn39-validator.sysusers" \
+  /etc/sysusers.d/cathedral-sn39-validator.conf
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-sn39-validator-relay.tmpfiles" \
+  /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
+install -d -o root -g root -m 0755 /etc/cathedral-validator/provenance
+install -D -o root -g root -m 0644 \
+  "$release/config/validator-thin-sn39-relay.toml" \
+  /etc/cathedral-validator/validator-thin-sn39-relay.toml
+for key in registry report index; do
+  install -D -o root -g root -m 0644 \
+    "$release/config/provenance/$key-keys.json" \
+    "/etc/cathedral-validator/provenance/$key-keys.json"
+done
+
+systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
+systemctl mask --now cathedral-thin-validator.service
+systemctl daemon-reload
+```
+
+The two files that differ from Cathedral's own install are the ones a third
+party could not otherwise use:
+
+| File | Why the relay gets its own |
+|---|---|
+| `deploy/sn39/cathedral-validator-sn39-relay.service` | The origin unit has `ConditionPathExists=` on the root-signed recurring-write authorization and `SupplementaryGroups=cathedral-validator-evidence`. Neither is obtainable, and an unmet `Condition=` makes `systemctl start` **report success while starting nothing**. |
+| `deploy/sn39/cathedral-sn39-validator-relay.tmpfiles` | The origin contract provisions the evidence producer's published tree, including a directory owned by `polaris`. `systemd-tmpfiles` refuses a line whose user does not resolve, so on a relay host it errors every boot for directories that host never uses. |
+
+Install the shipped `.sysusers` unchanged: it declares only the validator
+identities (`cathedral-validator` and `cathedral-validator-log`) and
+deliberately restates no producer identity.
+
+**The installed config must be byte-identical to the reviewed one** — the
+manifest builder compares them and refuses otherwise. So do not edit
+`/etc/cathedral-validator/validator-thin-sn39-relay.toml`. The shipped profile
+names `wallet_name = "validator"` and `validator_hotkey = "default"`, and those
+are local labels: provision your already-registered SN39 hotkey under the
+service account's home as
+`/var/lib/cathedral-validator/.bittensor/wallets/validator/hotkeys/default`,
+owned by `cathedral-validator`, directories 0700 and files 0600. Never copy a
+coldkey, mnemonic or password to this host.
+
+### Build the relay manifest
+
+```bash
+manifest_tmp="$(mktemp /etc/cathedral-validator/sn39-release-manifest.json.XXXXXX)"
+/usr/bin/python3.12 -I -E -s \
+  "$release/scripts/build_sn39_release_manifest.py" \
+  --relay --release "$release" --release-sha "$release_sha" >"$manifest_tmp"
+chown root:root "$manifest_tmp"
+chmod 0644 "$manifest_tmp"
+mv "$manifest_tmp" /etc/cathedral-validator/sn39-release-manifest.json
+```
+
+`--relay` is what makes this runnable off a Cathedral host. It omits the one
+`external_files` entry a relay cannot produce — the controlled-disclosure TDX
+verifier binary — along with the producer-side status publisher unit and timer,
+which write the producer's evidence tree as the producer's account. It binds a
+*superset* of the reviewed source: everything the Cathedral manifest binds plus
+the relay unit and its tmpfiles. The environment commitment, the pristine
+checkout proof and the bootstrap-interpreter binding are unchanged.
+
+`--relay` is refused outright on a host holding SN39 launch material at the
+release-pinned paths, so it cannot be used to give the one host that owes SN39
+a launch a manifest with no verifier pin. `--verifier`, `--status-unit` and
+`--status-timer` are refused with it rather than ignored: silently dropping a
+path you named would produce a manifest that does not bind the file you believe
+it binds.
+
+### Verify before enabling
+
+`cathedral-sn39-release` runs the whole verification and only then `execve`s.
+It exits non-zero, writing `SN39 immutable-install check failed:` and a cause,
+if anything above is wrong:
+
+```bash
+systemctl start cathedral-validator-sn39-relay.service
+systemctl status cathedral-validator-sn39-relay.service
+journalctl -u cathedral-validator-sn39-relay.service -n 50
+```
+
+Read the journal, not the exit status of `systemctl start`. Confirm the unit
+reached `ExecStart` at all — that is the failure the relay unit exists to
+remove, and the only proof is a log line from the validator itself. When the
+launch notice permits a write, `systemctl enable --now
+cathedral-validator-sn39-relay.service` makes it durable.
+
+One host must never run both postures against one hotkey. The relay unit
+declares `Conflicts=` on `cathedral-validator-sn39.service`, which systemd
+applies in both directions, and re-checks with an `ExecStartPre=` guard because
+`Conflicts=` cannot stop a writer somebody launched by hand.
+
 ## What it does
 
 On every cycle the validator:
@@ -186,7 +332,8 @@ url points at the local `cathedral-publisher.service`) and the units in
 is identical.
 
 For a pinned production install (immutable reviewed release, systemd, single
-writer), see [VALIDATOR.md](VALIDATOR.md) and `deploy/sn39/`.
+writer) the relay path is [above](#supported-systemd-install-relay);
+[VALIDATOR.md](VALIDATOR.md) covers what each gate proves once it is running.
 
 ## How it verifies
 
