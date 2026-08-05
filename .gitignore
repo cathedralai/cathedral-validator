@@ -39,3 +39,6 @@ publisher.db
 *.db
 *.sqlite
 *.sqlite3
+
+# agent worktrees — never part of the tree
+.claude/
