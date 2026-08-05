@@ -2394,12 +2394,25 @@ def assert_current_dry_run(
         "PROVENANCE_VECTOR_MISMATCH",
         "PROVENANCE_AUDIT_UNRESOLVED",
     }
+    # The publisher signs and caches a vector for up to a minute while the
+    # evidence index flips to the next 311s epoch, so a dry run that fetches
+    # both inside that window holds last epoch's vector beside this epoch's
+    # evidence. The audit re-verifies such a vector IN FULL against the epoch
+    # it names — signed manifest, report body digest, recomputed shares — and
+    # only then classifies it stale, so this event carries no claim that
+    # anything is wrong and must not fail a reproduction. A vector that cannot
+    # be re-verified that way is never classified: it stays
+    # PROVENANCE_VECTOR_MISMATCH, which fails here as it always has.
+    tolerated = {"PROVENANCE_VECTOR_STALE_EPOCH"}
     startup_index = events.index(startup)
     observed_failures = [
         str(event.get("event"))
         for event in events[startup_index:]
-        if event.get("event") in failures
-        or event.get("status") in {"FAIL", "NOT_PROVEN"}
+        if str(event.get("event")) not in tolerated
+        and (
+            event.get("event") in failures
+            or event.get("status") in {"FAIL", "NOT_PROVEN"}
+        )
     ]
     if observed_failures:
         raise ReproductionError(

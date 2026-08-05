@@ -241,11 +241,22 @@ the event journal into a failing oneshot service — the unit failing IS the
 alert; there is no separate notification channel:
 
 1. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
-   disagreed with a vector that was already accepted for submission; and
+   disagreed with a vector that was already accepted for submission, and
+   could not re-verify that vector against the epoch it names either; and
 2. persistent audit failure (#64) — at least one `PROVENANCE_AUDIT_FAIL` and
    zero `PROVENANCE_AUDIT_PASS` in the last 90 minutes (about three audit
    cycles). A transient `FAIL` followed by a `PASS` does not alert; an empty
    window does not alert.
+
+`PROVENANCE_VECTOR_STALE_EPOCH` deliberately does NOT alert. The publisher
+signs and caches a vector for up to a minute while the evidence index flips to
+the next epoch, so an audit can hold last epoch's vector beside this epoch's
+evidence. The audit then re-verifies that vector IN FULL against the epoch it
+names — that epoch's signed manifest, its report body digest, and its
+recomputed shares — and emits this `NOT_PROVEN` event instead. It is still a
+disagreement (nothing is submitted on its strength), just not the tamper
+alarm. A vector that cannot be re-verified against a signed, digest-matched
+epoch is never reclassified: it stays `PROVENANCE_VECTOR_MISMATCH` and alerts.
 
 The script reads `/var/log/cathedral-validator/validator-events.jsonl` by
 default; pass a different journal path as its only argument. Install from the

@@ -70,6 +70,19 @@ MAX_RECENT_WALK = 96
 # registry, and its score report — the three load_blob calls in
 # _verify_recent_chain_bridge's loop. Keep in lockstep with that loop.
 RECENT_WALK_BLOBS_PER_LINK = 3
+# Blobs the stale-vector re-verification spends: the named epoch's manifest,
+# its policy registry, and its score report, plus this many per receipt (the
+# receipt itself and its two work artifacts) — the same shape run_audit spends
+# on the latest epoch. Keep in lockstep with _classify_stale_vector's fetches.
+STALE_REVERIFY_FIXED_BLOBS = 3
+STALE_REVERIFY_BLOBS_PER_RECEIPT = 3
+# The one discrepancy cathedral.provenance.compare_with_vector returns when the
+# ONLY thing wrong with a signed vector is which epoch it names: that check
+# early-returns, so the body-digest, contract, and share comparisons behind it
+# never ran. Matching this text is therefore only ever a decision to RUN THE
+# WHOLE COMPARISON AGAIN against the epoch the vector names — never a decision
+# to accept a vector on the strength of a message.
+VECTOR_EPOCH_BINDING_DISCREPANCY = "signed vector is bound to ingested source epoch"
 
 
 class ProvenanceUnavailable(Exception):
@@ -307,6 +320,14 @@ class ProvenanceAudit:
     recomputed: dict[str, float] = field(default_factory=dict)
     agrees_with_vector: bool | None = None
     discrepancies: list[str] = field(default_factory=list)
+    # Set ONLY when a disagreeing vector was re-verified IN FULL against the
+    # older epoch it names — that epoch's signed manifest, its report body
+    # digest, and its recomputed shares (see _classify_stale_vector). It says
+    # "this is a correct vector for a signed epoch the evidence index has
+    # since moved past", which is the publisher's serving race, not tampering.
+    # agrees_with_vector stays False either way: a stale vector is still not
+    # this epoch's vector, so nothing downstream may submit or trust it.
+    vector_stale_epoch: int | None = None
     receipt_hotkeys: list[str] = field(default_factory=list)
     raw_replayed_hotkeys: list[str] = field(default_factory=list)
     not_proven_reasons: list[str] = field(default_factory=list)
@@ -938,6 +959,148 @@ def _verify_recent_chain_bridge(
         )
 
 
+def _classify_stale_vector(
+    result,
+    vector_payload: Mapping[str, Any],
+    discrepancies: list[str],
+    *,
+    settings: ProvenanceSettings,
+    network: str,
+    netuid: int,
+    registry_keys: Mapping[str, bytes],
+    report_keys: Mapping[str, bytes],
+    recent_rows,
+    load_blob,
+) -> int | None:
+    """Return the epoch a disagreeing vector is a CORRECT vector for, or None.
+
+    The publisher signs and caches a vector for up to a minute while the
+    evidence index flips to the next 311s epoch, so a consumer that fetches
+    both in that window legitimately holds epoch N's vector beside epoch N+1's
+    evidence. That is a serving race, not a bad vector — but the comparison
+    cannot tell the two apart, because equal proportions never prove an equal
+    epoch, and it is right not to guess.
+
+    So do not loosen the comparison: RUN IT AGAIN, whole, against the epoch the
+    vector actually names. The signed index's bounded ``recent`` window already
+    carries ``source_epoch`` + ``manifest`` per row (the same rows
+    _verify_recent_chain_bridge walks), so that epoch's evidence is reachable
+    through the SAME signed, content-addressed path as the latest epoch's, with
+    nothing unsigned fetched. Its manifest, registry, report, and receipts are
+    verified and recomputed exactly as run_audit verifies the latest epoch —
+    the superseded report is verified at its own issue moment, as the bridge
+    verifies every superseded link — and only then is the vector compared
+    against THAT result, body digest included.
+
+    A vector is called stale only if that whole second comparison agrees. Every
+    other outcome — an epoch outside the signed window, evidence that fails to
+    verify, a body digest that does not match its own epoch's manifest, shares
+    that do not match its own epoch's recomputation, a budget too small to
+    re-verify — returns None and stays a genuine mismatch. This classifies a
+    disagreement; it never forgives one.
+    """
+    from cathedral import provenance
+    from cathedral.evidence import parse_manifest
+
+    if len(discrepancies) != 1 or VECTOR_EPOCH_BINDING_DISCREPANCY not in str(
+        discrepancies[0]
+    ):
+        return None
+    metadata = vector_payload.get("policy_metadata")
+    external = (
+        metadata.get("external_scores") if isinstance(metadata, Mapping) else None
+    )
+    named = external.get("latest_epoch") if isinstance(external, Mapping) else None
+    if isinstance(named, bool) or not isinstance(named, int):
+        return None
+    # Only a vector that LAGS the verified evidence can be a serving race. One
+    # naming a later epoch claims evidence this audit never verified, and the
+    # index's own rollback fences are what would have to speak to it.
+    if not 0 <= named < int(result.source_epoch):
+        return None
+    row = None
+    for candidate in recent_rows or ():
+        if not isinstance(candidate, Mapping):
+            return None
+        if int(candidate["source_epoch"]) == named:
+            row = candidate
+            break
+    if row is None:
+        return None
+    # Budget: this re-verification costs a second epoch's worth of artifacts
+    # against the audit's one cap (None means the local store's uncapped
+    # budget). Too little left is an unclassifiable disagreement, which is a
+    # mismatch — never a downgrade — so refuse BEFORE spending anything.
+    remaining = load_blob.artifacts_remaining()
+    if remaining is not None and (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, int)
+        or remaining < STALE_REVERIFY_FIXED_BLOBS
+    ):
+        return None
+    manifest = parse_manifest(load_blob(row["manifest"]))
+    accepted = MECHANISM_ACCEPTED.get(settings.mechanism, (settings.mechanism,))
+    if (
+        manifest["network"] != network
+        or manifest["netuid"] != netuid
+        or int(manifest["source_epoch"]) != named
+        or manifest["reward_mechanism"]["id"] not in accepted
+        or manifest["verifier"]["digest"] != settings.verifier_digest
+    ):
+        return None
+    receipts = manifest["receipts"]
+    if remaining is not None and remaining < (
+        STALE_REVERIFY_FIXED_BLOBS + STALE_REVERIFY_BLOBS_PER_RECEIPT * len(receipts)
+    ):
+        return None
+    report_bytes = load_blob(manifest["score_report"]["blob"])
+    try:
+        named_result = provenance.verify_and_recompute(
+            report_bytes=report_bytes,
+            receipts_by_id={
+                receipt["receipt_id"]: load_blob(receipt["blob"])
+                for receipt in receipts
+            },
+            registry_bytes=load_blob(manifest["policy_registry"]["blob"]),
+            trusted_registry_keys=registry_keys,
+            report_signing_keys=report_keys,
+            expected_network=network,
+            expected_netuid=netuid,
+            expected_verifier_digest=settings.verifier_digest,
+            mechanism_id=settings.mechanism,
+            registry_max_age_seconds=settings.registry_max_age_secs,
+            candidate_set=manifest["candidate_set"],
+            work_artifacts_by_receipt={
+                receipt["receipt_id"]: (
+                    load_blob(receipt["work_item_blob"]),
+                    load_blob(receipt["result_blob"]),
+                )
+                for receipt in receipts
+            },
+            # An already-superseded epoch is verified at its own issue moment,
+            # exactly as _verify_recent_chain_bridge verifies a superseded
+            # link: its signature, identity, and bindings must all hold, while
+            # the expected staleness of a past epoch is not evidence of a
+            # break. No current-block window is asserted because this
+            # classification never grants a vector any authority.
+            now=_report_issue_moment(report_bytes),
+        )
+    except provenance.ProvenanceError:
+        return None
+    if (
+        int(named_result.source_epoch) != named
+        or named_result.report_id != manifest["score_report"]["report_id"]
+        or named_result.policy_release != manifest["policy_registry"]["release"]
+    ):
+        return None
+    agree, _ = provenance.compare_with_vector(
+        named_result,
+        vector_payload,
+        wire_report_sha256=manifest.get("wire_report_sha256"),
+    )
+    return named if agree else None
+
+
 def run_audit(
     settings: ProvenanceSettings,
     *,
@@ -1371,10 +1534,42 @@ def run_audit(
             audit.agrees_with_vector = agree
             audit.discrepancies = discrepancies
             if not agree:
-                audit.remediation = (
-                    "Escalate to Cathedral operators. Shadow mode keeps submitting "
-                    "the signed vector; authority mode submits the recomputed one."
-                )
+                # Separate "a bad vector landed" from "the publisher served
+                # last epoch's vector beside this epoch's evidence". Both stay
+                # disagreements — agrees_with_vector is False either way, so no
+                # submission path changes — but only the first one is the alarm.
+                try:
+                    audit.vector_stale_epoch = _classify_stale_vector(
+                        result,
+                        vector_payload,
+                        discrepancies,
+                        settings=settings,
+                        network=network,
+                        netuid=netuid,
+                        registry_keys=registry_keys,
+                        report_keys=report_keys,
+                        recent_rows=index_document.get("recent") or (),
+                        load_blob=load_blob,
+                    )
+                except Exception:  # noqa: BLE001 - unclassifiable IS a mismatch
+                    # A failed classification must never promote a vector
+                    # disagreement into an audit-level FAIL, and must never
+                    # quiet one either: the outcome stays the mismatch it
+                    # already was.
+                    audit.vector_stale_epoch = None
+                if audit.vector_stale_epoch is not None:
+                    audit.remediation = (
+                        "No operator action if it clears on the next audit: the "
+                        "signed vector re-verified in full against the older "
+                        "epoch it names. Escalate only if it persists across "
+                        "several epochs — that is a publisher that stopped "
+                        "advancing, not a serving race."
+                    )
+                else:
+                    audit.remediation = (
+                        "Escalate to Cathedral operators. Shadow mode keeps submitting "
+                        "the signed vector; authority mode submits the recomputed one."
+                    )
         audit.duration_ms = (time.monotonic() - started) * 1000
         return audit
     except ProvenanceUnavailable as exc:

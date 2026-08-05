@@ -57,6 +57,7 @@ ALLOWED_EVENTS = frozenset(
         "PROVENANCE_STATE_STALE_SKIPPED",
         "PROVENANCE_STATE_WRITE_FAILED",
         "PROVENANCE_VECTOR_MISMATCH",
+        "PROVENANCE_VECTOR_STALE_EPOCH",
         "LAUNCH_REWARDED_SET_GATE_PASS",
         "PENDING_RECEIPT_CONTRADICTION",
         "PENDING_RECEIPT_NOT_PROVEN",
@@ -80,6 +81,7 @@ EVENT_STATUS = {
     "PROVENANCE_STATE_STALE_SKIPPED": "NOT_PROVEN",
     "PROVENANCE_STATE_WRITE_FAILED": "NOT_PROVEN",
     "PROVENANCE_VECTOR_MISMATCH": "FAIL",
+    "PROVENANCE_VECTOR_STALE_EPOCH": "NOT_PROVEN",
     "LAUNCH_REWARDED_SET_GATE_PASS": "PASS",
     "PENDING_RECEIPT_CONTRADICTION": "FAIL",
     "PENDING_RECEIPT_NOT_PROVEN": "NOT_PROVEN",
@@ -97,6 +99,9 @@ EVENT_REMEDIATION = {
     "PROVENANCE_RESERVATION_REFUSED": "inspect the validator-local state fence; nothing was submitted",
     "PROVENANCE_STATE_WRITE_FAILED": "repair the validator-local state path; thin authority is unaffected",
     "PROVENANCE_VECTOR_MISMATCH": "keep thin authority and inspect the validator-local discrepancy log",
+    "PROVENANCE_VECTOR_STALE_EPOCH": (
+        "no action unless it persists across several epochs; thin authority is unaffected"
+    ),
     "PROVENANCE_HEALTH_GATE_FAILED": "keep thin authority and inspect the validator-local provenance verdict",
     "PENDING_RECEIPT_RECOVERED": (
         "verify the published exact transaction proof; never retry the recovered attempt"
@@ -277,6 +282,11 @@ def public_detail(event: str, raw: Any) -> str | None:
         return "the observational provenance state could not be persisted"
     if event == "PROVENANCE_VECTOR_MISMATCH":
         return "independent recomputation disagreed with the signed vector"
+    if event == "PROVENANCE_VECTOR_STALE_EPOCH":
+        return (
+            "the signed vector re-verified in full against the older epoch it "
+            "names; the verified evidence has since advanced"
+        )
     if event == "PROVENANCE_AUDIT_FAIL":
         return "the provenance audit failed"
     if event == "PROVENANCE_HEALTH_GATE_FAILED":
