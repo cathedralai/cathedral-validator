@@ -3145,16 +3145,7 @@ def _validated_supply_v3_to_uid_weights(
     lane = metadata.get("cybergym_lane")
     if not isinstance(lane, dict):
         raise wire.VectorError("validated_supply v3 missing cybergym_lane metadata")
-    expected_lane_fields = {
-        "fraction",
-        "weights",
-        "contributing_fraction",
-        "forfeited_fraction",
-        "burn_uid",
-        "uid_hotkeys",
-        "cybergym",
-    }
-    if set(lane) != expected_lane_fields:
+    if set(lane) != wire.V3_CYBERGYM_LANE_FIELDS:
         raise wire.VectorError("validated_supply v3 cybergym_lane fields mismatch")
     try:
         lane_fraction = float(lane["fraction"])

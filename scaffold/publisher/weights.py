@@ -53,6 +53,7 @@ from . import external_scores
 # callers and the gates (one import surface).
 from ..wire_vector import (  # noqa: F401
     MAX_VECTOR_ENTRIES,
+    V3_CYBERGYM_LANE_FIELDS,
     VectorError,
     canonical_bytes,
     invariant_check,
@@ -2158,7 +2159,7 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
         raise VectorError(
             "allocation contract v3 CyberGym lane has forfeited mass but no burn uid"
         )
-    return {
+    composed = {
         "fraction": fraction,
         "weights": {str(int(uid)): float(w) for uid, w in weights.items()},
         "contributing_fraction": float(lane.get("contributing_fraction") or 0.0),
@@ -2167,6 +2168,17 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
         "uid_hotkeys": uid_hotkeys,
         "cybergym": lane.get("cybergym") or {},
     }
+    # The validator admits this block by exact-set equality against the same
+    # V3_CYBERGYM_LANE_FIELDS. Checking here too means a field added or dropped
+    # above fails the compose that introduced it, rather than silently shipping a
+    # vector that every validator rejects for the rest of the epoch.
+    if set(composed) != V3_CYBERGYM_LANE_FIELDS:
+        raise VectorError(
+            "allocation contract v3 CyberGym lane shape does not match the wire "
+            f"contract; expected {sorted(V3_CYBERGYM_LANE_FIELDS)}, "
+            f"composed {sorted(composed)}"
+        )
+    return composed
 
 
 def build_signed_vector(
