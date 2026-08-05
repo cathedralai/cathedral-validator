@@ -584,7 +584,41 @@ def _cmd_version(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _line_buffer_stdout() -> None:
+    """Make the operator stream arrive as it happens, not 8 KiB at a time.
+
+    Every supported way of running this validator puts a PIPE on stdout --
+    systemd's journal, `nohup`, `tmux | tee`, `docker logs`. Python's default
+    for a non-tty stdout is an 8192-byte BLOCK buffer, and a tick emits a few
+    hundred bytes, so a live validator writes roughly one buffer's worth every
+    few hours. The operator sees nothing for hours, then a wall of hours-old
+    text ending mid-tick with no outcome line: the exact signature of a hang
+    mid-submission. The rational response is `systemctl restart`, which
+    discards the unflushed buffer (SIGTERM does not flush), costs a write
+    cycle, and lands them in receipt recovery -- all for a validator that was
+    healthy the whole time.
+
+    This belongs in the process, not in the unit file. The SN39 release
+    launcher `execve`s a curated environment, so an operator's own
+    `PYTHONUNBUFFERED` -- from a systemd drop-in, a shell, a compose file --
+    never reaches the child. They cannot fix this from outside.
+
+    stdout only: since 3.9 CPython line-buffers stderr whether or not it is a
+    tty, so the error path was never affected and needs no change here.
+
+    Buffering is the only thing that changes: no verdict, no gate, no ordering.
+    Guarded because a caller may have replaced stdout with a plain object
+    (pytest's capture, a subclass without `reconfigure`); losing line buffering
+    in a test harness is not worth an exception on a real start.
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _line_buffer_stdout()
     p = argparse.ArgumentParser(
         prog="cathedral-validator",
         description="Cathedral SN39 validator (v4) — fetch one signed score per miner, "
