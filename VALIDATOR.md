@@ -249,11 +249,11 @@ is no separate notification channel:
 4. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
    disagreed with a vector that was already accepted for submission, and
    could not re-verify that vector against the epoch it names either; and
-5. persistent audit failure (#64) — at least one `PROVENANCE_AUDIT_FAIL` and
-   zero `PROVENANCE_AUDIT_PASS` in the last 90 minutes (about three audit
-   cycles). A transient `FAIL` followed by a `PASS` does not alert; an empty
-   window does not alert on this rule, because rules 1-3 have already proved
-   the journal is live.
+5. persistent audit failure (#64) — the audit's **two most recent completed
+   outcomes** inside the last 90 minutes (about three audit cycles) are both
+   `PROVENANCE_AUDIT_FAIL`. A single `FAIL` never alerts; an empty window does
+   not alert; and any completed audit after the failures — `PASS` **or**
+   `NOT_PROVEN` — clears it.
 
 Rule 3 also fires when the process is perfectly healthy but the signed feed
 has been unreachable for the whole window, because the fail-closed idle state
@@ -270,6 +270,33 @@ The two liveness windows are tick multiples, so a validator configured to tick
 faster is declared dead sooner rather than later. They are measured against
 the shipped `[weights].interval_secs` of 1500s; if you changed it, set
 `CATHEDRAL_TICK_SECS` in the unit to match (`Environment=CATHEDRAL_TICK_SECS=…`).
+
+#### A relay's steady state is `NOT_PROVEN` on every tick, and that is correct
+
+Recovery in rule 2 is "the next audit completed with some outcome other than
+`FAIL`", not "a `PASS`", because on a third-party relay a `PASS` never comes.
+
+`PROVENANCE_AUDIT_PASS` is emitted only when the audit reaches the configured
+`min_assurance` (default `rewarded_set_proven`, meaning every rewarded hotkey
+was replayed from raw evidence). A relay has no controlled raw-evidence
+package — `config/validator-thin-sn39-relay.toml` sets no `controlled_dir` or
+`verifier_binary`, and `cathedral-validator-sn39-relay.service` deliberately
+omits the `cathedral-validator-evidence` group — so its audit is
+`receipts_only`, below that bar, and it logs `PROVENANCE_AUDIT_NOT_PROVEN`
+every ~25 minutes. **That is the permanent, expected, correct steady state of
+a relay, not a fault to chase.** It means the audit ran and verified what a
+relay can verify; the thin submission never depended on it either way. The
+only relay journal worth acting on is one with no `PROVENANCE_*` records at
+all, or the two alert conditions above.
+
+Keying recovery on `PASS` would therefore have reduced rule 2 on every relay
+to "one `PROVENANCE_AUDIT_FAIL` in 90 minutes alerts". Since any exception
+inside the audit is recorded as `FAIL`, and the ones seen in practice are
+publisher-side and self-clearing (`evidence index is stale`, `score report is
+stale`), a 60-second hiccup upstream would have failed the alert unit for 90
+minutes while claiming a sustained outage. Two consecutive failures are
+required precisely so the timer stays trustworthy enough to leave enabled —
+rule 1 is the alarm that matters, and it is only ever seen through this unit.
 
 `PROVENANCE_VECTOR_STALE_EPOCH` deliberately does NOT alert. The publisher
 signs and caches a vector for up to a minute while the evidence index flips to
