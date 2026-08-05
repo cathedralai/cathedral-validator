@@ -3643,18 +3643,42 @@ def _require_inclusion_policy_ready(
     required_epoch_room = (
         policy.mortal_period_blocks + SN39_EPOCH_FINALITY_MARGIN_BLOCKS
     )
-    if (
-        isinstance(remaining, bool)
-        or not isinstance(remaining, int)
-        or isinstance(next_epoch, bool)
-        or not isinstance(next_epoch, int)
-        or next_epoch != preflight.block + remaining
-        or policy.expected_next_epoch_start_block != next_epoch
-        or remaining < required_epoch_room
-    ):
+    # One refusal, but six distinct reasons — and they call for opposite
+    # operator responses. "The tick landed 15 blocks from the epoch boundary"
+    # resolves itself on the next tick and needs nobody; "the signed vector
+    # expects a different epoch than the chain reports" is a producer
+    # disagreement that never resolves on its own. Collapsing them into one
+    # sentence made a routine, self-clearing wait indistinguishable from a
+    # stuck publisher, which is exactly the confusion issue #68 was about.
+    if isinstance(remaining, bool) or not isinstance(remaining, int):
         raise wire.VectorError(
-            "submission cannot prove the exact next epoch with enough room for "
-            "mortal inclusion and finalized verification"
+            "submission cannot prove the blocks remaining in this epoch "
+            f"(got {remaining!r})"
+        )
+    if isinstance(next_epoch, bool) or not isinstance(next_epoch, int):
+        raise wire.VectorError(
+            f"submission cannot prove the next epoch start block (got {next_epoch!r})"
+        )
+    if next_epoch != preflight.block + remaining:
+        raise wire.VectorError(
+            "chain epoch arithmetic is inconsistent: next epoch start "
+            f"{next_epoch} != finalized block {preflight.block} + {remaining} "
+            "blocks remaining"
+        )
+    if policy.expected_next_epoch_start_block != next_epoch:
+        raise wire.VectorError(
+            "the signed inclusion policy expects next epoch start "
+            f"{policy.expected_next_epoch_start_block}, but the chain reports "
+            f"{next_epoch}; the vector was composed against a different epoch"
+        )
+    if remaining < required_epoch_room:
+        raise wire.VectorError(
+            f"only {remaining} block(s) remain in this epoch; a submission "
+            f"needs {required_epoch_room} "
+            f"({policy.mortal_period_blocks} mortal + "
+            f"{SN39_EPOCH_FINALITY_MARGIN_BLOCKS} finality margin) to prove "
+            "mortal inclusion and finalized verification. This clears itself "
+            f"at block {next_epoch}"
         )
 
 
