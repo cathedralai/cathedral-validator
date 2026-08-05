@@ -475,12 +475,30 @@ class EventLogger:
         defect in this code, and swallowing it would leave the journal quietly
         dropping events with a healthy-looking process on top.
 
-        Degrading the journal changes NOTHING about whether a tick succeeded.
-        No status is rewritten, no caller is told the write landed, and the
-        return value below is advisory: `event()` is telemetry, and no
+        Degrading the journal changes NOTHING about whether a tick's work was
+        SOUND. No status is rewritten, no caller is told the write landed, and
+        the return value below is advisory: `event()` is telemetry, and no
         decision about writing weights reads it. The fences that decide that
         are in the state file, which stays fatal on the same ENOSPC — see
         `_replace_private_state` in `validator_thin`.
+
+        It does change what a full disk DOES, and the shipped configs make that
+        reachable. `state_file` is under `/var/lib/cathedral-validator` and
+        `jsonl` under `/var/log/cathedral-validator` — separate ReadWritePaths,
+        commonly separate filesystems. Same filesystem: the state write hits
+        ENOSPC too, and the tick still refuses. **Only `/var/log` full: the
+        tick that previously died at its first `event()` now runs to
+        completion and can broadcast, with no journal record of having done
+        so.**
+
+        That is the deliberate trade and it is not free. Replay protection is
+        unaffected (the fences are durable, on the other filesystem), so this
+        costs observability, not safety — and losing a whole emission cycle to
+        a full LOG disk is the worse outcome. The exposure is bounded by the
+        liveness alert: a frozen journal trips `cathedral-mismatch-check`'s
+        staleness rule at three tick intervals, so a blind validator is
+        reported rather than silently tolerated. `cathedral-mismatch-alert`
+        becomes load-bearing here in a way it was not before.
         """
         try:
             target.write(line + "\n")

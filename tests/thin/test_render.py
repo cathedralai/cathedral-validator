@@ -197,3 +197,41 @@ def test_an_unknown_error_passes_through_unchanged():
 def test_humanize_neutralizes_before_matching():
     plain, _ = render.humanize("\033[31mVectorError: mystery")
     assert "\033" not in plain
+
+
+def test_a_full_disk_on_the_operator_stream_does_not_kill_the_tick(monkeypatch):
+    """stdout is decoration; it must never be able to end a tick.
+
+    Under systemd stdout is a journald socket and cannot fill, but an operator
+    running with stdout redirected to a file on a full filesystem hits ENOSPC
+    on every line. ``events._append`` already degrades for the DURABLE journal;
+    the operator stream has strictly less claim to be fatal than that.
+    """
+    import builtins
+
+    def full_disk(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(builtins, "print", full_disk)
+    render.lifecycle(
+        "VECTOR accepted", "miners=1 burn=10.0%", "2026-07-27T22:04:17.239Z"
+    )
+
+
+def test_a_programming_error_on_the_operator_stream_still_propagates(monkeypatch):
+    """The swallow is OSError-shaped, not a blanket rescue.
+
+    A broad ``except Exception`` here would hide a real renderer bug behind a
+    silently blank terminal, which is how the head-drift cause stayed invisible
+    for weeks.
+    """
+    import builtins
+
+    import pytest
+
+    def broken(*_a, **_k):
+        raise TypeError("renderer bug")
+
+    monkeypatch.setattr(builtins, "print", broken)
+    with pytest.raises(TypeError):
+        render._Stream().write("x")

@@ -358,3 +358,32 @@ def test_the_readme_relay_install_installs_the_rotation_fragment():
         "/etc/logrotate.d/cathedral-validator",
     ):
         assert line in section, line
+
+
+def test_every_journal_line_is_flushed_as_it_is_written(tmp_path, monkeypatch):
+    """The property #97 exists for, pinned at the durable-journal layer.
+
+    #97 fixed a validator whose systemd journal ran hours stale because stdout
+    block-buffered. The event journal has the same exposure through a different
+    stream: without the per-event flush, a reader tailing the JSONL sees
+    nothing until an 8 KiB buffer fills, and `cathedral-mismatch-check` and
+    `cathedral-validator status` both decide liveness from the newest record.
+    A stale-looking journal reads as a dead validator.
+
+    Deleting the flush() in events._append passed the whole suite before this.
+    """
+    import json
+
+    from scaffold import events as ev
+
+    path = tmp_path / "events.jsonl"
+    logger = ev.EventLogger(mode="shadow", jsonl_path=str(path))
+    try:
+        logger.event("STARTUP", stage="startup", status=ev.INFO)
+        # Read through a SEPARATE descriptor while the writer is still open --
+        # exactly what the alert and the status command do.
+        seen = [json.loads(line) for line in path.read_text().splitlines() if line]
+        assert seen, "the record had not reached the file by the time a reader looked"
+        assert seen[-1]["event"] == "STARTUP"
+    finally:
+        logger.close()

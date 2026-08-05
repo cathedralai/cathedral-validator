@@ -255,7 +255,20 @@ class _Stream:
     # -- primitives ---------------------------------------------------------
 
     def write(self, text: str = "") -> None:
-        print(text)
+        # The operator stream is decoration; it must never be able to kill a
+        # tick. Under systemd stdout is a journald socket and this cannot fail,
+        # but an operator running with stdout redirected to a file on a full
+        # filesystem would otherwise die here -- the same crash `events._append`
+        # already degrades for the durable journal, on the one path that is not
+        # durable and so has even less claim to be fatal.
+        #
+        # OSError only, and nothing is logged about it: the place a complaint
+        # would go is the stream that just failed. The durable journal lives on
+        # its own filesystem and still holds the record.
+        try:
+            print(text)
+        except OSError:
+            pass
 
     def row(self, label: str, text: str, *, once: bool = False) -> None:
         # Anything emitted outside a tick (startup preflight, receipt recovery)
