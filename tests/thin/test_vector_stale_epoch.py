@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -571,10 +572,12 @@ def test_the_deployed_alert_script_does_not_match_the_stale_event():
             "alerting must match the event FIELD, or a future event whose name "
             "contains an alerting name would alert too"
         )
+    # Every line that builds a match set from the journal, by shape rather than
+    # by variable name, so a renamed or added match line cannot slip past this.
     alerting = [
         line
         for line in script.splitlines()
-        if line.startswith(("RECENT=", "FAILS=", "PASSES="))
+        if re.match(r"^[A-Z_0-9]+=\$\(", line) and "PROVENANCE_" in line
     ]
     assert alerting, "the alert script no longer builds its match lines here"
     for line in alerting:

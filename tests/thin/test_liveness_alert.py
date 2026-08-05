@@ -261,7 +261,9 @@ def test_persistent_audit_failure_still_alerts(tmp_path):
     ]
     result = _run_alert(_journal(tmp_path, records))
     assert result.returncode == 1
-    assert "no PASS" in result.stdout
+    # Rule 5 counts a run of consecutive FAILs; it no longer keys recovery on a
+    # PASS, which a receipts-only relay never emits. See the denoise suite.
+    assert "2 consecutive" in result.stdout
 
 
 def test_a_transient_audit_failure_followed_by_a_pass_does_not_alert(tmp_path):
