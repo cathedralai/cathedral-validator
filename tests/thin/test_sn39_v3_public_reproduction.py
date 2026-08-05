@@ -174,8 +174,15 @@ def test_v3_lane_still_refuses_a_nonzero_burn(tmp_path):
 
 
 def test_every_other_startup_pin_is_still_flat_equality(tmp_path):
-    """Only `policy_pin` moved out of the flat table."""
-    assert "policy_pin" not in pr.EXPECTED_STARTUP
+    """Only `policy_pin` is exempt from flat equality — and it is still listed.
+
+    It stays in EXPECTED_STARTUP so the table remains a complete description of
+    a valid STARTUP event (anything building a fixture from it gets the launch
+    pin); what changed is only that its comparison is the closed membership in
+    EXPECTED_STARTUP_POLICY_PINS rather than one literal.
+    """
+    assert pr.EXPECTED_STARTUP["policy_pin"] == "validated_supply_v1"
+    assert pr.EXPECTED_STARTUP["policy_pin"] in pr.EXPECTED_STARTUP_POLICY_PINS
     with pytest.raises(pr.ReproductionError, match="provenance_mechanism"):
         pr.assert_current_dry_run(
             _stream(

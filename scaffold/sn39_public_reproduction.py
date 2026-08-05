@@ -2214,6 +2214,11 @@ EXPECTED_STARTUP = {
         "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"  # pragma: allowlist secret
     ),
     "weight_policy_key_id": "cathedral-weight-policy",
+    # The launch pin, kept here so this table stays a complete description of a
+    # valid STARTUP event. It is the one field NOT compared by flat equality —
+    # see EXPECTED_STARTUP_POLICY_PINS and its closed membership check, which
+    # also admits the coordinated v3 re-pin.
+    "policy_pin": "validated_supply_v1",
     # STARTUP records only the credential-free origin. The exact evidence path
     # is bound by the signed release and fetched by the hardened reproducer.
     "provenance_evidence_url": "https://api.cathedral.computer",
@@ -2435,10 +2440,15 @@ def assert_current_dry_run(
         or "provenance=shadow" not in startup_detail
     ):
         raise ReproductionError("validator did not run in thin/shadow mode")
+    # `policy_pin` stays IN the table so it remains a complete description of a
+    # valid startup event — anything building a fixture from EXPECTED_STARTUP
+    # gets the launch pin — but its comparison is the closed membership below,
+    # not this flat equality, because it is the one field with two admissible
+    # values.
     mismatched_startup = [
         name
         for name, expected in EXPECTED_STARTUP.items()
-        if startup.get(name) != expected
+        if name != "policy_pin" and startup.get(name) != expected
     ]
     policy_pin = startup.get("policy_pin")
     if policy_pin not in EXPECTED_STARTUP_POLICY_PINS:
