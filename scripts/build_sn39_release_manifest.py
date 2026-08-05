@@ -61,6 +61,13 @@ RELEASE_FILES = (
     "deploy/sn39/cathedral-sn39-public-status.timer",
     "deploy/sn39/cathedral-sn39-validator.sysusers",
     "deploy/sn39/cathedral-sn39-validator.tmpfiles",
+    # Both postures log to /var/log/cathedral-validator, so both bind the
+    # fragment that bounds it. Binding the reviewed SOURCE (rather than adding
+    # an external_files entry for the installed /etc/logrotate.d copy) is
+    # deliberate: logrotate is not in the exec path the launcher re-verifies,
+    # and an external entry naming a file an existing host has not installed
+    # yet would make the manifest unbuildable rather than stricter.
+    "deploy/sn39/cathedral-validator.logrotate",
 )
 # The relay manifest binds a SUPERSET of the reviewed source above: every file
 # the Cathedral manifest binds, plus the files only a relay host installs.

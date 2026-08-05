@@ -77,9 +77,26 @@ AUDIT_FAILURE_WINDOW_SECS = 90 * 60.0
 # Matches the `interval_secs` default in scaffold/cli.py; used only when a
 # caller cannot supply one.
 DEFAULT_INTERVAL_SECS = 1500.0
-# Only the tail is read: the journal is append-only and grows without bound,
-# and every rule here is about recent history.
+# Only the tail is read: the journal is append-only, and every rule here is
+# about recent history.
 TAIL_BYTES = 512 * 1024
+# The one rotated generation `deploy/sn39/cathedral-validator.logrotate` keeps
+# uncompressed, via `delaycompress`.
+#
+# That fragment rotates with `copytruncate`, because the validator holds its
+# journal descriptor open for the life of the process (scaffold/events.py
+# `_open_secure_append`). So immediately after a rotation the live journal is
+# genuinely empty, and stays that way until the next event — up to a full tick
+# interval later. Reading only the live file across that window would report a
+# healthy validator as stale, or as "no parseable record", which is the blind
+# verdict this module exists to avoid.
+#
+# Exactly one generation is enough: rotation runs at most once per logrotate
+# run and the longest rule here looks back 90 minutes. It is consulted only to
+# top up an unfilled byte budget, so on a validator that has been running since
+# the last rotation nothing extra is read at all, and a missing or unreadable
+# rotated file is never itself an alert — only the live path can be that.
+ROTATED_SUFFIX = ".1"
 
 
 class JournalUnreadable(Exception):
@@ -112,16 +129,11 @@ def parse_ts(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def read_tail(
-    journal: str | os.PathLike[str], *, tail_bytes: int = TAIL_BYTES
-) -> list[dict]:
-    """Return the parseable JSONL records in the tail of ``journal``.
+def _tail_records(path: Path, tail_bytes: int) -> tuple[list[dict], int]:
+    """Parseable records in the last ``tail_bytes`` of one file, plus its size.
 
     Raises :class:`JournalUnreadable` if the path cannot be opened or read.
-    A path that exists but holds no parseable record returns an empty list;
-    the caller decides what that means.
     """
-    path = Path(journal)
     try:
         with open(path, "rb") as handle:
             size = handle.seek(0, os.SEEK_END)
@@ -146,7 +158,35 @@ def read_tail(
             continue
         if isinstance(record, dict):
             records.append(record)
-    return records
+    return records, size
+
+
+def read_tail(
+    journal: str | os.PathLike[str], *, tail_bytes: int = TAIL_BYTES
+) -> list[dict]:
+    """Return the parseable JSONL records in the tail of ``journal``.
+
+    Whatever budget the live journal leaves unspent is topped up from the one
+    uncompressed rotated generation (see :data:`ROTATED_SUFFIX`), oldest first,
+    so a rotation cannot make the newest record disappear. Only the live path
+    can raise :class:`JournalUnreadable`: a rotated file that is absent or
+    unreadable is the normal case, not an alert.
+
+    A path that exists but holds no parseable record returns an empty list;
+    the caller decides what that means.
+    """
+    path = Path(journal)
+    records, size = _tail_records(path, tail_bytes)
+    remaining = int(tail_bytes) - size
+    if remaining <= 0:
+        return records
+    try:
+        older, _size = _tail_records(
+            path.with_name(path.name + ROTATED_SUFFIX), remaining
+        )
+    except JournalUnreadable:
+        return records
+    return older + records
 
 
 def _latest(records: list[dict], events: tuple[str, ...] | None = None) -> dict | None:

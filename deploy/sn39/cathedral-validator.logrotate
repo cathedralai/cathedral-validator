@@ -1,0 +1,67 @@
+# Bound /var/log/cathedral-validator. Installed as
+# /etc/logrotate.d/cathedral-validator by README's "Supported systemd install
+# (relay)"; picked up by the host's own logrotate timer/cron, so nothing here
+# needs a unit of its own.
+#
+# Both files this covers are append-only and neither had any cap: on the live
+# SN39 box validator-events.jsonl reached 888 KB in nine days and would have
+# kept going until the filesystem stopped it. The failure that costs an
+# operator money is a validator that cannot write, and a full /var is one of
+# the ways to get there.
+#
+# WHAT IS **NOT** ROTATED, and must never be added here: the durable submission
+# state. /var/lib/cathedral-validator/journal-*.json and the lane state file
+# carry the monotonic fences, the anti-rollback watermarks and the signed
+# attempt journal. Truncating or renaming one of those is how a validator
+# double-submits. This file names /var/log only.
+#
+# copytruncate is mandatory, not a preference. scaffold/events.py
+# `_open_secure_append` opens each stream ONCE, with
+# O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW, and `EventLogger` holds that descriptor
+# for the life of the process. A rename-and-create rotation would leave the
+# running validator writing into the renamed inode until its next restart,
+# so the live path would sit at 0 bytes and `cathedral-mismatch-check` would
+# (correctly) alert that it is blind. copytruncate keeps the inode, so the
+# descriptor, its owner and its mode all survive, and because the descriptor is
+# O_APPEND the next write lands at offset 0 of the truncated file rather than
+# leaving a sparse hole.
+#
+# copytruncate's cost is a millisecond-wide window between the copy and the
+# truncate in which one record can be lost. That is the right trade for
+# telemetry: nothing in the submission path reads these files back, and the
+# fences that do decide whether a write may happen are in /var/lib, above.
+#
+# delaycompress is load-bearing, not tidiness. For up to one tick interval
+# (~25 min) after a rotation the live journal can hold no record at all, and
+# both readers decide liveness from the newest record they can see:
+# deploy/sn39/cathedral-mismatch-check, and scaffold/health.py `read_tail`
+# behind `cathedral-validator status`. Both fall back to the single
+# most recent rotated generation, and both read plain text. delaycompress is
+# what keeps that generation uncompressed as `<name>.jsonl.1`; compressing it
+# immediately would blind them for that window instead — a red liveness alert
+# on a perfectly healthy validator.
+#
+# su is required because /var/log/cathedral-validator is 0750
+# cathedral-validator:cathedral-validator-log (LogsDirectory= in
+# cathedral-validator-sn39-relay.service, and the matching tmpfiles contract),
+# not root-owned, and logrotate refuses to rotate inside a directory it does
+# not own unless it is told which identity to drop to.
+#
+# Verify a change here without waiting for the timer:
+#   logrotate --debug /etc/logrotate.d/cathedral-validator
+/var/log/cathedral-validator/*.jsonl {
+    su cathedral-validator cathedral-validator-log
+    daily
+    maxsize 64M
+    rotate 14
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+    # No `create`: it would mint a new inode the running validator's held
+    # descriptor does not point at. copytruncate reuses the original, so the
+    # rotated copies inherit its owner and mode (0600 for the raw journal, 0640
+    # for the sanitized status projection) and rotation never widens who can
+    # read the raw stream.
+}

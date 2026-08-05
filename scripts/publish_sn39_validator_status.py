@@ -20,6 +20,9 @@ from typing import Any
 # and is deliberately unreadable here: it carries hotkeys, receipts and
 # caller-supplied fields that must never reach the public tree.
 SOURCE = Path("/var/log/cathedral-validator/validator-status.jsonl")
+# The one rotated generation deploy/sn39/cathedral-validator.logrotate keeps
+# uncompressed, matching scaffold/health.py ROTATED_SUFFIX.
+ROTATED_SUFFIX = ".1"
 PUBLIC_ROOT = Path("/var/lib/cathedral-public-evidence")
 LOG_ROOT = PUBLIC_ROOT / "logs"
 INDEX = PUBLIC_ROOT / "index.json"
@@ -537,12 +540,21 @@ def clean_event(document: Any) -> dict[str, Any] | None:
     return clean
 
 
-def tail_events() -> list[dict[str, Any]]:
+def read_source_tail(path: Path, budget: int) -> tuple[bytes, int]:
+    """Bounded tail of one sanitized stream, as ``(payload, size)``.
+
+    A size of ``-1`` means the path is unusable — absent, a symlink, not a
+    regular file, world-writable, or unreadable — and carries no data. Every
+    one of those gates is the pre-existing contract for `SOURCE`; the split
+    exists so the rotated generation is read through exactly the same ones.
+    """
+    if budget <= 0:
+        return b"", -1
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(SOURCE, flags)
+        descriptor = os.open(path, flags)
     except OSError:
-        return []
+        return b"", -1
     try:
         info = os.fstat(descriptor)
         if (
@@ -550,16 +562,37 @@ def tail_events() -> list[dict[str, Any]]:
             or stat.S_IMODE(info.st_mode) & 0o002
             or info.st_size < 0
         ):
-            return []
-        offset = max(0, info.st_size - MAX_SOURCE_BYTES)
+            return b"", -1
+        offset = max(0, info.st_size - budget)
         os.lseek(descriptor, offset, os.SEEK_SET)
-        payload = os.read(descriptor, MAX_SOURCE_BYTES)
+        payload = os.read(descriptor, budget)
     except OSError:
-        return []
+        return b"", -1
     finally:
         os.close(descriptor)
     if offset:
         _discarded, _separator, payload = payload.partition(b"\n")
+    return payload, info.st_size
+
+
+def tail_events() -> list[dict[str, Any]]:
+    payload, size = read_source_tail(SOURCE, MAX_SOURCE_BYTES)
+    # `deploy/sn39/cathedral-validator.logrotate` rotates this stream with
+    # `copytruncate`, so for up to a tick after a rotation the live file is
+    # legitimately empty and every freshness field in `build_status` would read
+    # as "not fresh" — a public card claiming the validator stopped writing,
+    # once a day, for a validator that did not. Whatever budget the live stream
+    # leaves unspent is therefore topped up from the one generation
+    # `delaycompress` keeps uncompressed, through the same gates above.
+    #
+    # An unusable LIVE path still publishes nothing: this is a supplement to
+    # the stream the validator is writing now, never a substitute for it.
+    if 0 <= size < MAX_SOURCE_BYTES:
+        older, _older_size = read_source_tail(
+            SOURCE.with_name(SOURCE.name + ROTATED_SUFFIX), MAX_SOURCE_BYTES - size
+        )
+        if older:
+            payload = older + b"\n" + payload
     lines = payload.splitlines()
     events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
     for raw in lines:

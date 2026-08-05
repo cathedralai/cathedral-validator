@@ -3,9 +3,10 @@
 # alert, because the systemd unit failing IS the notification — when ANY of
 # these is true of the event journal:
 #
-#   1. it is missing, is not a regular file, is unreadable, is empty, or holds
-#      no parseable record (fail closed: a check that cannot see the validator
-#      must never report that the validator is fine);
+#   1. it is missing, is not a regular file, is unreadable, is empty with no
+#      rotated generation beside it, or holds no parseable record (fail closed:
+#      a check that cannot see the validator must never report that the
+#      validator is fine);
 #   2. its newest record is older than 3 tick intervals (the validator is
 #      stopped, wedged, or writing somewhere else);
 #   3. no tick has COMPLETED in the last 4 tick intervals — no
@@ -33,6 +34,16 @@ set -u
 export LC_ALL=C
 
 EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
+# The one rotated generation deploy/sn39/cathedral-validator.logrotate keeps
+# uncompressed, via `delaycompress`. That fragment rotates with `copytruncate`,
+# because the validator holds its journal descriptor open for the life of the
+# process, so straight after a rotation the live journal really is empty and
+# stays that way until the next event — up to a full tick interval later.
+# Reading only the live file across that window would report a healthy
+# validator as blind (rule 1) or as stopped (rule 2). Reading the rotated
+# generation too is what keeps the newest record visible; it is never required
+# to exist, and its absence is never itself an alert.
+ROTATED="$EVENTS.1"
 TICK_SECS="${CATHEDRAL_TICK_SECS:-1500}"
 
 alert() {
@@ -55,12 +66,24 @@ LIVENESS_SECS=$((TICK_SECS * 4))
 [ -e "$EVENTS" ] || alert "event journal '$EVENTS' does not exist — this check is blind. Point it at the path the validator's --jsonl / [logs].jsonl actually names."
 [ -f "$EVENTS" ] || alert "event journal '$EVENTS' is not a regular file — this check is blind."
 [ -r "$EVENTS" ] || alert "event journal '$EVENTS' is not readable by $(id -un 2>/dev/null || echo "this user") — this check is blind. The journal is owner-only 0600 by design; run the timer as a user that can read it."
-[ -s "$EVENTS" ] || alert "event journal '$EVENTS' is empty — this check is blind. The validator has never written a record here."
+# Empty is still blind — unless a rotation just emptied it, in which case the
+# rotated generation still holds the records rules 2-5 need. Everything after
+# this decides on timestamps, so an empty live journal beside a STALE rotated
+# one is caught by rule 2 with a far more useful message than "is empty".
+if [ ! -s "$EVENTS" ] && [ ! -s "$ROTATED" ]; then
+  alert "event journal '$EVENTS' is empty — this check is blind. The validator has never written a record here."
+fi
 
-# One bounded read of the tail, reused by every rule below: the journal is
-# append-only and unbounded, and no rule here looks back further than 90
-# minutes. A read error is an alert, not a silent zero.
+# One bounded read of the tail, reused by every rule below: no rule here looks
+# back further than 90 minutes. A read error on the LIVE journal is an alert,
+# not a silent zero; the rotated generation is optional, so an unreadable one
+# is skipped rather than fatal — the live path above already proved this check
+# can see the validator's own file.
 TAIL=$(tail -n 5000 -- "$EVENTS") || alert "event journal '$EVENTS' could not be read — this check is blind."
+if [ -f "$ROTATED" ] && [ -r "$ROTATED" ] && [ -s "$ROTATED" ]; then
+  # Oldest first, so the rule 5 streak still walks the journal in order.
+  ROTATED_TAIL=$(tail -n 5000 -- "$ROTATED") && TAIL=$(printf '%s\n%s' "$ROTATED_TAIL" "$TAIL")
+fi
 
 # Seconds-resolution UTC cutoff, comparable against a record's ts prefix.
 cutoff() { date -u -d "-$1 seconds" "+%Y-%m-%dT%H:%M:%S"; }

@@ -407,6 +407,79 @@ def test_source_reader_rejects_symlink_and_world_writable_file(
     assert [row["event"] for row in status.tail_events()] == ["VECTOR_ACCEPTED"]
 
 
+def test_source_reader_falls_back_to_the_rotated_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `copytruncate` rotation must not publish a card that says "stopped".
+
+    `deploy/sn39/cathedral-validator.logrotate` empties this stream in place,
+    so for up to a tick afterwards the live file holds nothing and every
+    freshness field in `build_status` would read as stale — a public claim that
+    the validator stopped writing, on a validator that did not.
+    """
+    live = tmp_path / "validator-status.jsonl"
+    rotated = tmp_path / "validator-status.jsonl.1"
+    rotated.write_text(
+        json.dumps(_event("VECTOR_ACCEPTED", "PASS")) + "\n", encoding="utf-8"
+    )
+    rotated.chmod(0o600)
+    live.write_text("", encoding="utf-8")
+    live.chmod(0o600)
+    monkeypatch.setattr(status, "SOURCE", live)
+
+    assert [row["event"] for row in status.tail_events()] == ["VECTOR_ACCEPTED"]
+
+    # Oldest first, and the live stream still wins the tail.
+    live.write_text(
+        json.dumps(_event("WEIGHTS_SUBMITTED", "PASS")) + "\n", encoding="utf-8"
+    )
+    assert [row["event"] for row in status.tail_events()] == [
+        "VECTOR_ACCEPTED",
+        "WEIGHTS_SUBMITTED",
+    ]
+
+
+def test_source_reader_ignores_a_rotated_generation_with_no_live_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rotated file supplements the live stream; it never stands in for it."""
+    rotated = tmp_path / "validator-status.jsonl.1"
+    rotated.write_text(
+        json.dumps(_event("VECTOR_ACCEPTED", "PASS")) + "\n", encoding="utf-8"
+    )
+    rotated.chmod(0o600)
+    monkeypatch.setattr(status, "SOURCE", tmp_path / "validator-status.jsonl")
+    assert status.tail_events() == []
+
+
+def test_source_reader_applies_the_same_gates_to_the_rotated_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = tmp_path / "validator-status.jsonl"
+    live.write_text("", encoding="utf-8")
+    live.chmod(0o600)
+    monkeypatch.setattr(status, "SOURCE", live)
+
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text(
+        json.dumps(_event("VECTOR_ACCEPTED", "PASS")) + "\n", encoding="utf-8"
+    )
+    target.chmod(0o600)
+    link = tmp_path / "validator-status.jsonl.1"
+    link.symlink_to(target)
+    assert status.tail_events() == []
+
+    link.unlink()
+    target.rename(link)
+    link.chmod(0o666)
+    assert status.tail_events() == []
+    link.chmod(0o600)
+    assert [row["event"] for row in status.tail_events()] == ["VECTOR_ACCEPTED"]
+
+
 def test_public_json_reader_rejects_symlink_and_world_writable_file(
     tmp_path: Path,
 ) -> None:

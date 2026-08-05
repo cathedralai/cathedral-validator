@@ -259,6 +259,9 @@ install -D -o root -g root -m 0644 \
 install -D -o root -g root -m 0644 \
   "$release/deploy/sn39/cathedral-mismatch-alert.timer" \
   /etc/systemd/system/cathedral-mismatch-alert.timer
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-validator.logrotate" \
+  /etc/logrotate.d/cathedral-validator
 
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
@@ -278,6 +281,17 @@ validator unit separately.
 [VALIDATOR.md](VALIDATOR.md#shadow-audit-mismatch-alert-systemd) has the rules
 in full, including why `PROVENANCE_VECTOR_STALE_EPOCH` deliberately does not
 alert.
+
+`/etc/logrotate.d/cathedral-validator` bounds the two append-only streams in
+`/var/log/cathedral-validator` at 14 daily generations, or sooner at 64 MB. It
+needs no unit of its own — the host's existing logrotate timer picks it up —
+and `logrotate --debug /etc/logrotate.d/cathedral-validator` shows what it
+would do without waiting. It rotates with `copytruncate` because the validator
+holds its journal descriptor open, and keeps the newest rotated generation
+uncompressed because both the alert and `cathedral-validator status` read it to
+stay sighted across the minutes after a rotation when the live journal is
+empty. It touches nothing in `/var/lib/cathedral-validator`: the submission
+fences and the signed-attempt journal live there and are never rotated.
 
 The two files that differ from Cathedral's own install are the ones a third
 party could not otherwise use:

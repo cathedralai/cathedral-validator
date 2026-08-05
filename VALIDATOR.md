@@ -262,9 +262,10 @@ switching on if it does not fire for the chain's own schedule.
 journal into a failing oneshot service — the unit failing IS the alert; there
 is no separate notification channel:
 
-1. the journal is missing, is not a regular file, is unreadable, is empty, or
-   holds no parseable record. **This check fails closed**: a monitor that
-   cannot see the validator must never report that the validator is fine;
+1. the journal is missing, is not a regular file, is unreadable, is empty with
+   no rotated generation beside it, or holds no parseable record. **This check
+   fails closed**: a monitor that cannot see the validator must never report
+   that the validator is fine;
 2. the newest record is older than 3 tick intervals — the validator is
    stopped, wedged, or writing to a different path;
 3. no tick has COMPLETED in the last 4 tick intervals — no
@@ -338,6 +339,33 @@ epoch is never reclassified: it stays `PROVENANCE_VECTOR_MISMATCH` and alerts.
 
 The script reads `/var/log/cathedral-validator/validator-events.jsonl` by
 default; pass a different journal path as its only argument.
+
+#### Log rotation, and why it does not blind the alert
+
+`deploy/sn39/cathedral-validator.logrotate`, installed as
+`/etc/logrotate.d/cathedral-validator`, bounds `/var/log/cathedral-validator`
+at 14 daily generations or 64 MB, whichever comes first. Nothing rotated it
+before, and both streams there are append-only.
+
+It rotates with `copytruncate` because it has to: `scaffold/events.py` opens
+each stream once, `O_APPEND`, and holds the descriptor for the life of the
+process, so a rename-and-create rotation would leave the validator writing into
+the renamed inode until its next restart while the live path sat at zero bytes.
+`copytruncate` keeps the inode, so the descriptor, its owner and its
+`0600`/`0640` mode all survive, and the next append lands at offset 0.
+
+The consequence is that for up to one tick interval after a rotation the live
+journal is legitimately empty. Both readers handle that the same way: the
+alert and `scaffold/health.py` (behind `cathedral-validator status`) also read
+the single most recent rotated generation, which `delaycompress` keeps
+uncompressed as `validator-events.jsonl.1`. Removing `delaycompress`, or
+switching to `create`, would put a healthy validator's newest record out of
+reach of both — a red liveness alert on a working validator, or a blind one.
+
+The durable submission state under `/var/lib/cathedral-validator` — the
+monotonic fences, the anti-rollback watermarks and the signed-attempt journal —
+is deliberately not covered by any rotation rule and must never be added to
+one.
 
 **Installing it is a step of the supported install, not an extra.** The three
 files below are installed and the timer enabled by README's

@@ -7392,6 +7392,73 @@ def _prepare_tick_preflight(args: Any) -> None:
     args._tick_preflight = preflight
 
 
+# How many signed attempt ids `submission_attempt_ids` retains. Read the proof
+# below before changing it: a window that is too small silently reopens a retry
+# window on an irreversible chain write.
+#
+# WHY THE JOURNAL CAN BE BOUNDED AT ALL.
+# Only `_commit_pending_signed_attempt` appends here, so every entry is a
+# SIGNED attempt, and every entry's id is `sha256(dedup_identity)` where the
+# dedup identity carries exactly one monotone field per lane:
+#
+#   thin      -> identity["policy_version"] = P
+#   authority -> identity["source_epoch"]   = E
+#
+# `_reserve_common_submission` derives the lane high-water from that SAME
+# field, and both the reservation (`_write_state_fenced`) and the commit refuse
+# unless it strictly exceeds the stored `submission_highest_policy_version` /
+# `submission_highest_source_epoch`. The commit writes the new high-water in
+# the same atomic fsync that appends the id, and nothing lowers or deletes
+# either high-water: they are written only by that commit, and the two clearing
+# paths (`_abort_unsigned_common_submission`,
+# `_expire_pending_common_submission`) drop only `submission_pending_*` keys.
+#
+# So for any id already in this journal, its lane high-water is >= the monotone
+# value hashed into it, and re-deriving that exact id would need a reservation
+# whose P (or E) is simultaneously equal to and greater than the stored
+# high-water. The membership test is a second lock on a door the monotone fence
+# has already bolted; evicting an old entry cannot reopen it.
+#
+# WHAT ACTUALLY BOUNDS THE WINDOW is therefore not replay but the two readers
+# that look an id UP rather than assert it is absent:
+#
+#   `_expire_pending_common_submission` needs the pending signed id, which is
+#   always the entry just appended; and
+#   `_recover_common_finalized_submission` needs `submission_finalized_id`,
+#   which trails the tail by the signed attempts committed since the last
+#   proven inclusion. Every one of those consumes a slot in
+#   `submission_attempt_budgets`, and one continuous authorization is capped at
+#   96 attempts (`_reserve_common_submission`,
+#   `_authority_lane_transition_authorized`).
+#
+# 512 is more than five times that 96-attempt ceiling, so
+# `submission_finalized_id` survives even if five consecutive fully spent
+# authorizations expired without a single inclusion. At the live SN39 rate (77
+# signed attempts in ~9 days) it is about two months of history and caps the
+# field near 37 KB. Both ids that ARE looked up are pinned explicitly at the
+# call site regardless of the window, so the size is a retention choice rather
+# than a correctness one.
+SUBMISSION_ATTEMPT_ID_WINDOW = 512
+
+
+def _bounded_attempt_journal(history: list[str], pinned: tuple[Any, ...]) -> list[str]:
+    """The newest `SUBMISSION_ATTEMPT_ID_WINDOW` ids, oldest first.
+
+    Any id in `pinned` is kept even when it falls outside the window: those are
+    the ids a reader resolves against this journal, and losing one turns a
+    recoverable restart into a fail-closed contradiction. Order is preserved so
+    the journal stays chronological.
+    """
+    if len(history) <= SUBMISSION_ATTEMPT_ID_WINDOW:
+        return list(history)
+    retained = {value for value in pinned if isinstance(value, str)}
+    cut = len(history) - SUBMISSION_ATTEMPT_ID_WINDOW
+    return [
+        *(item for item in history[:cut] if item in retained),
+        *history[cut:],
+    ]
+
+
 def _submission_identity_digest(args: Any) -> str:
     """Hash the canonical chain/signer identity shared by every mode."""
     try:
@@ -7761,16 +7828,40 @@ def _commit_pending_signed_attempt(
                 raise ValueError("common authority epoch fence changed before signing")
             lane_updates = {"submission_highest_source_epoch": source_epoch}
 
+        # `submission_attempt_count` is the LIFETIME total, not the retained
+        # length, so it stays truthful once the window starts evicting and
+        # `count - len(ids)` names exactly how many were dropped. A stored
+        # count below the retained length means a downgraded or hand-edited
+        # journal; fall back to the length rather than move the total
+        # backwards. Nothing in this repository reads the field — it is
+        # operator telemetry — but a silently shrinking counter would make a
+        # routine eviction look like data loss during an incident.
+        stored_count = current.get("submission_attempt_count")
+        if (
+            isinstance(stored_count, bool)
+            or not isinstance(stored_count, int)
+            or stored_count < len(history)
+        ):
+            stored_count = len(history)
+
         document = dict(current)
         document.update(
             {
                 "submission_pending_phase": "signed_intent",
                 "submission_pending_broadcast_intent": intent,
                 "submission_pending_broadcast_started_at": _ms_iso_now(),
-                "submission_attempt_ids": [*history, attempt_id],
+                "submission_attempt_ids": _bounded_attempt_journal(
+                    [*history, attempt_id],
+                    # The only two ids a reader looks UP in this journal.
+                    # Everything else consults it to prove an id is ABSENT,
+                    # which the lane high-water fence already guarantees for
+                    # anything old enough to be evicted — see
+                    # SUBMISSION_ATTEMPT_ID_WINDOW.
+                    (attempt_id, current.get("submission_finalized_id")),
+                ),
                 "submission_attempt_budgets": updated_budgets,
                 "submission_active_lane": lane,
-                "submission_attempt_count": len(history) + 1,
+                "submission_attempt_count": stored_count + 1,
                 **lane_updates,
                 **launch_updates,
             }
