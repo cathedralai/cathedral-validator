@@ -562,8 +562,23 @@ _PLAIN = (
         "independent recomputation could not reach full assurance",
     ),
     (
-        r"cannot prove the exact next epoch",
+        # Two spellings of one refusal. The second is the wording since the
+        # epoch-room gate was split into its six distinct causes; the first is
+        # the collapsed sentence it replaced, kept so older journals still read
+        # in plain English. Only the "too few blocks left" cause matches: the
+        # sibling refusals ("cannot prove the blocks remaining in this epoch",
+        # "composed against a different epoch") are not boundary timing and
+        # must not borrow a reading that says they clear themselves.
+        r"remain in this epoch|cannot prove the exact next epoch",
         "too close to the epoch boundary to land safely",
+    ),
+    (
+        r"continuous broadcast is locked until",
+        "not writing at all until `cathedral-validator reconcile-launch` is run",
+    ),
+    (
+        r"attempt fence refused before chain write",
+        "the local attempt journal would not reserve; nothing was sent",
     ),
     (
         r"finalized head advanced after preflight",

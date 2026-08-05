@@ -2469,8 +2469,17 @@ def assert_current_dry_run(
     # fact rather than a verdict, so it is emitted at INFO and the status
     # test below already lets it through. A no-write reproduction never
     # reaches the cooldown boundary at all.
+    #
+    # The three codes below were all TICK_FAILED until they were named, so
+    # they are listed to keep this reproduction gate byte-identical to what it
+    # was: EPOCH_ROOM_SKIPPED is routine for an operator's alert filter, but a
+    # dry run that lands inside the epoch-boundary window still did not
+    # reproduce a submission and must not be allowed to pass here on a rename.
     failures = {
         "TICK_FAILED",
+        "CONTINUOUS_LAUNCH_LOCKED",
+        "EPOCH_ROOM_SKIPPED",
+        "SUBMISSION_FENCE_REFUSED",
         "PROVENANCE_AUDIT_FAIL",
         "PROVENANCE_VECTOR_MISMATCH",
         "PROVENANCE_AUDIT_UNRESOLVED",

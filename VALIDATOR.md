@@ -228,6 +228,31 @@ after an uncertain submission. Keep both on durable owner-only storage; never
 delete, roll back, or replace them to clear a refused attempt. Follow the
 release runbook for recovery.
 
+### When a tick does not write, alert on these
+
+A tick that submits nothing is not one condition. Some of them clear by
+themselves within a block or two and need nobody; others mean this validator
+is writing no weights at all and will keep not writing until a person acts.
+Each has its own event code so a filter does not have to choose between paging
+on the routine ones and muting the serious ones.
+
+| Event | Status | Page a human? | What it means |
+| --- | --- | --- | --- |
+| `WEIGHT_COOLDOWN_SKIPPED` | `INFO` | No | The subnet's own `weights_rate_limit` has not elapsed. The detail names the block at which the next write becomes possible. |
+| `EPOCH_ROOM_SKIPPED` | `NOT_PROVEN` | No | Too few blocks were left in the epoch to prove mortal inclusion. Nothing was reserved or signed; the detail names the block at which it clears. |
+| `WAITING_FOR_JOB` | `NOT_PROVEN` | No | Nothing was independently proven this epoch, so there is nothing to score. |
+| `PRE_SIGN_HEAD_DRIFT_RETRY` | `NOT_PROVEN` | No | The chain moved while the tick was preparing; it rebuilds from a fresh head. |
+| `PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED` | `FAIL` | Only if it repeats | The retry budget ran out. Nothing was signed and the loop re-arms on a short delay. |
+| `CONTINUOUS_LAUNCH_LOCKED` | `FAIL` | **Yes** | Recurring writes are locked. This unit is up, ticking, and writing nothing, and will not start on its own: run `cathedral-validator reconcile-launch`, then restart the loop. |
+| `SUBMISSION_FENCE_REFUSED` | `FAIL` | **Yes** | The local durable attempt fence would not reserve, before any chain call. Nothing was signed or submitted, and the cause — an unresolved pending attempt, a second writer, an unwritable runtime root — does not clear by itself. |
+| `PENDING_RECEIPT_NOT_PROVEN` | `NOT_PROVEN` | **Yes** | A signed attempt is fenced awaiting finalized archive proof. Never submit a replacement. |
+| `PENDING_RECEIPT_CONTRADICTION` | `FAIL` | **Yes** | A signed attempt has a positive contradiction. Stop every writer. |
+| `TICK_FAILED` | `FAIL` | **Yes** | The residual: everything answerable without a person has been given its own code above, so this one means a person has to look. |
+
+The two skip codes exist because they were the overwhelming majority of what
+`TICK_FAILED` used to carry. Alerting on `TICK_FAILED`/`FAIL` is only worth
+switching on if it does not fire for the chain's own schedule.
+
 ### Liveness and shadow-audit alert (systemd)
 
 `deploy/sn39/cathedral-mismatch-check` turns five conditions in the event

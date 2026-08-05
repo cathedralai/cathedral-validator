@@ -62,6 +62,9 @@ ALLOWED_EVENTS = frozenset(
         "PENDING_RECEIPT_CONTRADICTION",
         "PENDING_RECEIPT_NOT_PROVEN",
         "PENDING_RECEIPT_RECOVERED",
+        "CONTINUOUS_LAUNCH_LOCKED",
+        "EPOCH_ROOM_SKIPPED",
+        "SUBMISSION_FENCE_REFUSED",
         "TICK_FAILED",
         "VECTOR_ACCEPTED",
         "VECTOR_REJECTED",
@@ -87,6 +90,15 @@ EVENT_STATUS = {
     "PENDING_RECEIPT_CONTRADICTION": "FAIL",
     "PENDING_RECEIPT_NOT_PROVEN": "NOT_PROVEN",
     "PENDING_RECEIPT_RECOVERED": "PASS",
+    # Both were TICK_FAILED before they were named. Neither clears without a
+    # human, so both keep FAIL: the split is about telling an operator WHICH
+    # human problem they have, not about softening either one.
+    "CONTINUOUS_LAUNCH_LOCKED": "FAIL",
+    "SUBMISSION_FENCE_REFUSED": "FAIL",
+    # Too few blocks left in the epoch to prove mortal inclusion. Like the
+    # cooldown above it, this is a schedule fact with a named expiry block, not
+    # a verdict on this validator, and the next tick clears it.
+    "EPOCH_ROOM_SKIPPED": "NOT_PROVEN",
     "TICK_FAILED": "FAIL",
     "VECTOR_ACCEPTED": "PASS",
     "VECTOR_REJECTED": "FAIL",
@@ -122,6 +134,18 @@ EVENT_REMEDIATION = {
     "TICK_FAILED": (
         "inspect the validator-local log and durable attempt journal; a named "
         "extrinsic may have finalized and automatic retry remains blocked"
+    ),
+    "CONTINUOUS_LAUNCH_LOCKED": (
+        "this validator is writing no weights and will not start on its own; "
+        "run `cathedral-validator reconcile-launch` and restart the loop"
+    ),
+    "SUBMISSION_FENCE_REFUSED": (
+        "inspect the validator-local attempt journal and lock; nothing was "
+        "signed or submitted and the cause will not clear by itself"
+    ),
+    "EPOCH_ROOM_SKIPPED": (
+        "no action unless it persists across several consecutive epochs; "
+        "nothing was reserved or signed and the detail names the clearing block"
     ),
     "VECTOR_REJECTED": "inspect the validator-local verification log; nothing was submitted",
 }
@@ -319,6 +343,22 @@ def public_detail(event: str, raw: Any) -> str | None:
         return (
             "the subnet's weight-update cooldown had not elapsed; the tick "
             "skipped the write and attempted no chain call"
+        )
+    if event == "EPOCH_ROOM_SKIPPED":
+        return (
+            "too few blocks remained in the epoch to prove mortal inclusion; "
+            "the tick reserved nothing and attempted no chain call"
+        )
+    if event == "CONTINUOUS_LAUNCH_LOCKED":
+        return (
+            "recurring writes are locked until `cathedral-validator "
+            "reconcile-launch` verifies the finalized launch; no weights are "
+            "being written and no chain call was attempted"
+        )
+    if event == "SUBMISSION_FENCE_REFUSED":
+        return (
+            "the local durable attempt fence would not reserve, before any "
+            "chain call; nothing was signed, submitted, or finalized"
         )
     return None
 
@@ -659,6 +699,14 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
             "PENDING_RECEIPT_CONTRADICTION",
             "PENDING_RECEIPT_NOT_PROVEN",
             "PENDING_RECEIPT_RECOVERED",
+            # Both were TICK_FAILED until they were named, and both still mean
+            # this validator is not writing, so they must keep displacing the
+            # last observed authority result exactly as TICK_FAILED did.
+            # EPOCH_ROOM_SKIPPED is deliberately absent for the same reason
+            # WEIGHT_COOLDOWN_SKIPPED is: a self-clearing schedule fact is not
+            # an observed failure of the last live submission.
+            "CONTINUOUS_LAUNCH_LOCKED",
+            "SUBMISSION_FENCE_REFUSED",
             "TICK_FAILED",
             "VECTOR_REJECTED",
         ),
@@ -695,6 +743,8 @@ def build_status(events: list[dict[str, Any]]) -> dict[str, Any]:
         current_provenance_mode = "NOT_PROVEN"
     if authority_event in (
         "PENDING_RECEIPT_CONTRADICTION",
+        "CONTINUOUS_LAUNCH_LOCKED",
+        "SUBMISSION_FENCE_REFUSED",
         "TICK_FAILED",
         "VECTOR_REJECTED",
     ):
