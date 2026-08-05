@@ -19,7 +19,7 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 > `cathedral-validator serve` is **non-writing by default** in the launch
 > candidate. Only an explicit `--broadcast` permits a chain-write attempt, and
 > Finney SN39 still requires the signed release and transition gates. Until
-> Cathedral publishes the supported tag, immutable pin bundle, and launch
+> Cathedral publishes a reviewed commit and launch
 > notice, use only `--offline --once` and `--dry-run --once`.
 
 ## Status
@@ -31,7 +31,7 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Concurrent shadow provenance audit | Implemented; default mode |
 | Full-provenance authority mode | Deprecated; no shipped config profile selects it (removal tracked in #40) |
 | Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
-| General validator launch | Pending tagged release and final acceptance |
+| General validator launch | Pending a scoreable corpus and final acceptance |
 
 The current public contract mismatch is a launch blocker. Shadow mode reports
 it but does not veto an otherwise valid thin vector, which is why operators
@@ -254,7 +254,8 @@ for line in open(sys.argv[1]):
   "$HOME/.cathedral/validator-events.jsonl"
 ```
 
-On the wallet-less box from quickstart step 2 that prints:
+On the wallet-less box from quickstart step 2 that prints three blocks — the
+two the relay always ends on, then the wallet failure. Abridged to the last:
 
 ```
 2026-08-05T22:18:18.523Z TICK_FAILED
@@ -369,7 +370,6 @@ Check, in this order:
    hand in a shell;
 2. **the runtime root.** Is it writable by the account the service runs as, is
    the filesystem full or read-only, and is it the path the config names? A
-   `CATHEDRAL_VALIDATOR_RUNTIME_ROOT` left in an environment file lands here;
 3. **an unresolved pending attempt** in the state file — which is the next
    entry, not this one.
 
@@ -556,7 +556,8 @@ sudo /usr/local/bin/cathedral-mismatch-check
 
 Do not add `--broadcast` until all of the following are true:
 
-- [ ] Cathedral has published a supported immutable tag and launch notice.
+- [ ] Cathedral has published a reviewed commit and a launch notice. There are
+      no tags in this repository; `git rev-parse origin/main` names the commit.
 - [ ] You verified the source/package digest and all signing-key pins.
 - [ ] Synthetic-map and metagraph-backed dry runs passed on your machine.
 - [ ] The current vector, evidence index, and provenance outcome match your

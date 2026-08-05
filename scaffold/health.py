@@ -465,7 +465,20 @@ def _rows(
     fresh = "fresh" if newest_age <= stale_after else "STALE"
     rows.append(("journal", f"{fresh} · newest record {humanize_secs(newest_age)} ago"))
 
-    if warming_up:
+    if warming_up and live is not None and live_age is not None:
+        # A tick HAS completed, just not since the most recent start. Saying
+        # "the first tick has not completed" while the `write` row on the same
+        # screen names a completed tick is the contradiction this row exists to
+        # avoid — and the documented quickstart reaches it, because step 2
+        # restarts and fails after step 1 completed a dry run.
+        rows.append(
+            (
+                "tick",
+                f"starting up — none completed since the last restart; "
+                f"previous {live.get('event')} {humanize_secs(live_age)} ago",
+            )
+        )
+    elif warming_up:
         rows.append(("tick", "starting up — the first tick has not completed"))
     elif live is None or live_age is None:
         rows.append(("tick", "none completed in this journal"))

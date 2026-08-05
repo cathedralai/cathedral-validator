@@ -494,3 +494,28 @@ def test_status_is_listed_in_the_command_surface(capsys):
         cli_main(["--help"])
     assert excinfo.value.code == 0
     assert "status" in capsys.readouterr().out
+
+
+def test_the_tick_row_never_denies_a_tick_the_write_row_names(tmp_path):
+    """The two rows on one screen must not contradict each other.
+
+    The documented quickstart reaches this exactly: step 1 completes a dry run,
+    step 2 restarts and fails without a wallet. That leaves a STARTUP newer
+    than the last completed tick, so the run is warming up — but a tick HAS
+    completed, and the `write` row says so. Claiming "the first tick has not
+    completed" beside it is the contradiction the row exists to avoid.
+    """
+    records = [
+        _record("STARTUP", ago_secs=300, status="INFO"),
+        _record("WEIGHTS_DRY_RUN", ago_secs=290),
+        _record("STARTUP", ago_secs=30, status="INFO"),
+        _record("TICK_FAILED", ago_secs=20, status="FAIL"),
+    ]
+    report = health.evaluate(_journal(tmp_path, records), interval_secs=TICK)
+    rows = dict(report.rows)
+    tick = rows.get("tick", "")
+    write = rows.get("write", "")
+    assert "the first tick has not completed" not in tick, tick
+    assert "since the last restart" in tick, tick
+    # whatever the write row names, the tick row must not deny it happened
+    assert "WEIGHTS_DRY_RUN" in write and "WEIGHTS_DRY_RUN" in tick, (tick, write)

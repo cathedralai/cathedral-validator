@@ -166,7 +166,8 @@ cathedral-validator status --config my-validator.toml \
   --jsonl "$HOME/.cathedral/validator-events.jsonl"
 ```
 
-Run straight after step 1, that prints:
+What it prints depends on which step you ran last. After step 1 alone — a
+completed dry run and nothing since — it looks like this:
 
 ```
    SN39 validator status  finney · netuid 39

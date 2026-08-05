@@ -21,10 +21,11 @@ and run the suite:
 ```
 
 `tests/thin` needs the shared cathedral-distill contract that the `integration`
-extra brings in. Without it a quarter of the suite skips quietly instead of
-failing, which is the one way this review can look green while proving less
-than it claims — [`REVIEW.md`](REVIEW.md#steps-5-and-6-what-ci-gates-on) has the
-numbers.
+extra brings in. Without it 215 of 830 tests (26%) do not run. Nine modules
+`importorskip` the contract and skip quietly; `test_cybergym_prelaunch_e2e.py`
+imports it at module scope, so the run ends in a collection error and a
+non-zero exit rather than a quiet green — that loud import is the only thing
+that makes the shortfall visible, so leave it as it is.
 
 The suite checks source; the quickstart's offline run prints a synthetic
 dry-run vector. Neither connects to a wallet or writes to a chain.
