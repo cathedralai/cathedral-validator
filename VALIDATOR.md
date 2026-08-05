@@ -334,23 +334,23 @@ alarm. A vector that cannot be re-verified against a signed, digest-matched
 epoch is never reclassified: it stays `PROVENANCE_VECTOR_MISMATCH` and alerts.
 
 The script reads `/var/log/cathedral-validator/validator-events.jsonl` by
-default; pass a different journal path as its only argument. Install from the
-reviewed release and enable the timer, which runs the check every 10 minutes:
+default; pass a different journal path as its only argument.
 
-```bash
-install -D -o root -g root -m 0755 \
-  "$release/deploy/sn39/cathedral-mismatch-check" \
-  /usr/local/bin/cathedral-mismatch-check
-install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-mismatch-alert.service" \
-  /etc/systemd/system/cathedral-mismatch-alert.service
-install -D -o root -g root -m 0644 \
-  "$release/deploy/sn39/cathedral-mismatch-alert.timer" \
-  /etc/systemd/system/cathedral-mismatch-alert.timer
-systemctl daemon-reload
-systemctl enable --now cathedral-mismatch-alert.timer
-```
+**Installing it is a step of the supported install, not an extra.** The three
+files below are installed and the timer enabled by README's
+[Supported systemd install (relay)](README.md#supported-systemd-install-relay)
+block, and `--relay` binds all three in the release manifest — so install them
+*before* building the manifest, or the build fails with `required release file
+is unavailable`. Do not install them by hand out of that order; the table below
+records only which reviewed bytes land where:
 
+| Reviewed file | Installed path |
+|---|---|
+| `deploy/sn39/cathedral-mismatch-check` | `/usr/local/bin/cathedral-mismatch-check` (0755) |
+| `deploy/sn39/cathedral-mismatch-alert.service` | `/etc/systemd/system/cathedral-mismatch-alert.service` (0644) |
+| `deploy/sn39/cathedral-mismatch-alert.timer` | `/etc/systemd/system/cathedral-mismatch-alert.timer` (0644) |
+
+The timer runs the check every 10 minutes.
 Watch `systemctl status cathedral-mismatch-alert.service` (a failed unit is
 the alert) and `journalctl -u cathedral-mismatch-alert` for the reason line.
 A healthy run names the tick it saw and exits 0:
