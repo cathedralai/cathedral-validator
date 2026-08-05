@@ -169,6 +169,57 @@ STATUS_FIELDS = (
 )
 
 
+# One `statvfs` at startup. Large enough that the warning lands while an
+# operator can still act on it, small enough that a normally provisioned host
+# never sees it.
+JOURNAL_LOW_SPACE_BYTES = 8 * 1024 * 1024
+
+
+def _stderr_line(message: str) -> None:
+    """Report on stderr, which under systemd IS journald.
+
+    Once the journal file cannot be written, this is the operator's only
+    remaining signal, so it must never raise: a failure here would reintroduce
+    exactly the crash the caller is degrading away from.
+    """
+    stream = sys.stderr
+    if stream is None:  # pragma: no cover - stderr detached
+        return
+    try:
+        stream.write(message + "\n")
+        stream.flush()
+    except OSError:
+        # The last resort failed too. There is nowhere left to say so, and
+        # raising would kill the loop over a logging failure.
+        pass
+
+
+def _warn_if_low_on_space(path: str, label: str) -> None:
+    """Advisory startup warning; it may never fail the start.
+
+    A validator that degrades to stderr at 03:00 crossed 90% full hours
+    earlier with nobody watching. This costs one syscall on the startup path
+    and prints at most one line.
+
+    It is advisory ONLY. It gates nothing, and every error is swallowed:
+    `statvfs` is missing on some platforms and fails on some mounts, and a
+    warning that can refuse to start a validator is worse than no warning.
+    Deciding whether a write may happen is the durable fences' job, never
+    this function's.
+    """
+    try:
+        free = os.statvfs(os.path.dirname(os.path.abspath(path)) or ".")
+        available = free.f_bavail * free.f_frsize
+    except (OSError, ValueError, AttributeError):
+        return
+    if available < JOURNAL_LOW_SPACE_BYTES:
+        _stderr_line(
+            f"warning: {label} {path} has {available // 1024} KiB free. "
+            f"Journal writes degrade to stderr when the disk fills; clear "
+            f"space before that is the only place events can go."
+        )
+
+
 class EventLogPathError(RuntimeError):
     """The journal path is unusable, and the message says how to fix it.
 
@@ -318,6 +369,21 @@ class EventLogger:
             self._status_file = _open_secure_append(
                 status_path, status_group, "status log"
             )
+        # After the opens, so a genuinely broken path still reports its own
+        # error first. Deduplicated by directory: both streams normally share
+        # one filesystem and one warning is the useful number.
+        warned: set[str] = set()
+        for candidate, candidate_label in (
+            (jsonl_path, "event log"),
+            (status_path, "status log"),
+        ):
+            if not candidate:
+                continue
+            directory = os.path.dirname(os.path.abspath(candidate))
+            if directory in warned:
+                continue
+            warned.add(directory)
+            _warn_if_low_on_space(candidate, candidate_label)
         self._tty = tty if tty is not None else sys.stdout
         if color is None:
             color = (
@@ -375,19 +441,54 @@ class EventLogger:
         for key, value in fields.items():
             if key not in record:
                 record[key] = _scrub(value)
+        # Serialization stays OUTSIDE the guard below: a record that cannot be
+        # encoded is a defect in what we are asking the journal to record, and
+        # it must still raise.
         line = json.dumps(record, separators=(",", ":"), allow_nan=False)
         for target in (self._jsonl, self._jsonl_file):
             if target is not None:
-                target.write(line + "\n")
-                target.flush()
+                self._append(target, line, "journal")
         if self._status_file is not None:
             status_line = json.dumps(
                 sanitized_status_record(record), separators=(",", ":"), allow_nan=False
             )
-            self._status_file.write(status_line + "\n")
-            self._status_file.flush()
+            self._append(self._status_file, status_line, "status log")
         self._write_tty(record)
         return record
+
+    def _append(self, target: IO[str], line: str, label: str) -> bool:
+        """Append one line, degrading to stderr instead of killing the caller.
+
+        A full disk used to take the validator down rather than degrade it.
+        `TICK_FAILED` is emitted from the tick loop's own generic handler, so
+        an `OSError` raised while writing it unwinds past BOTH `while True`
+        loops in `run()` and the process dies on a raw traceback — losing the
+        operator the one event that explains the outage. Degrading here means
+        the NEXT tick's `TICK_FAILED` still reaches journald.
+
+        Only `OSError` is caught, and only around the write. A full disk, a
+        read-only remount, a revoked descriptor: none of them say anything
+        about whether the tick's own work was sound. Everything else still
+        propagates, because a broad `except Exception` around a durable write
+        is how the head-drift bug hid for weeks — a `TypeError` from an
+        unserializable field or a `ValueError` from a malformed record is a
+        defect in this code, and swallowing it would leave the journal quietly
+        dropping events with a healthy-looking process on top.
+
+        Degrading the journal changes NOTHING about whether a tick succeeded.
+        No status is rewritten, no caller is told the write landed, and the
+        return value below is advisory: `event()` is telemetry, and no
+        decision about writing weights reads it. The fences that decide that
+        are in the state file, which stays fatal on the same ENOSPC — see
+        `_replace_private_state` in `validator_thin`.
+        """
+        try:
+            target.write(line + "\n")
+            target.flush()
+        except OSError as exc:
+            _stderr_line(f"{label} write failed: {stable_error(exc)}")
+            return False
+        return True
 
     def _write_tty(self, record: dict[str, Any]) -> None:
         if self._tty is None or not self._is_tty:

@@ -862,7 +862,28 @@ def _read_state_without_mutation(state_file: Path) -> dict[str, Any]:
 
 
 def _replace_private_state(state_file: Path, document: dict[str, Any]) -> None:
-    """Atomically replace state relative to one verified directory descriptor."""
+    """Atomically replace state relative to one verified directory descriptor.
+
+    A failed write here stays FATAL, deliberately, and that is the opposite of
+    what `scaffold.events` does with the same ENOSPC. The asymmetry is the
+    point:
+
+    * The event journal is telemetry. Nothing reads it back to decide whether
+      a write may happen, so a lost line costs visibility and nothing else —
+      and killing the loop over one costs the operator the `TICK_FAILED` that
+      would have explained the outage. It degrades to stderr.
+    * This file carries the monotonic fences and the anti-rollback watermark.
+      Every caller writes it to record that something irreversible happened or
+      is about to. Swallowing a failure here would leave the fence pointing at
+      an older attempt while the process carried on believing it advanced,
+      which is how a validator replays or double-submits. A crash is strictly
+      the better outcome: the fence stays where it was, the next start reads
+      it, and nothing is written on top of an unrecorded attempt.
+
+    So the OSError raised out of the write, `os.fsync` or `os.replace` below
+    is left to propagate. In the tick loop it reaches the generic handler,
+    which fails the tick closed — no reservation, no signature, no submission.
+    """
     parent = _open_private_state_dir(state_file.parent)
     tmp_name = state_file.name + ".tmp"
     try:
