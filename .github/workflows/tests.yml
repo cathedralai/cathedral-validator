@@ -80,13 +80,22 @@ jobs:
         run: python tools/source_manifest.py
 
   publisher:
-    # Advisory legacy-publisher compatibility suite. It is not a release gate.
-    # The required validator, boundary, pin, and integration checks run in the
-    # gating jobs above and below. Publisher failures remain visible here until
-    # their fixtures are reconciled with the canonical validator output. Keep
-    # continue-on-error on the test step: job-level handling still reports a red
-    # PR check even though GitHub lets the workflow continue.
-    name: Publisher suite (advisory)
+    # GATING for the validator-facing tests, advisory for the rest.
+    #
+    # This job used to run the whole publisher suite under `continue-on-error`
+    # as its ONLY step, with a comment claiming that "job-level handling still
+    # reports a red PR check". That is false: step-level continue-on-error
+    # yields a job conclusion of `success`, so the check could never go red.
+    # Run 30983128053 on main reported this job green while
+    # test_validator_thin_validated_supply.py had ten failing tests -- and that
+    # is exactly how they rotted unnoticed for nine days, on the file that
+    # covers core weight-mapping and UID-replacement safety.
+    #
+    # So the validator-facing file is now a REQUIRED step, and the rest of the
+    # publisher suite keeps its advisory posture in a separate step that is
+    # allowed to fail. Advisory is a fine status for legacy fixtures; it is not
+    # a fine status for the tests that cover the write path.
+    name: Publisher suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -96,10 +105,22 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -e ".[test,publisher]"
-      - name: Run advisory publisher compatibility tests
+      # REQUIRED. Covers the validator's own weight-mapping and UID-replacement
+      # safety. A failure here is a failure. It must also not be able to pass
+      # vacuously: a collection error or an empty selection exits non-zero
+      # rather than reporting "no tests ran" as success.
+      - name: Validator-facing publisher tests (required)
+        run: |
+          python -m pytest -q --no-header \
+            scaffold/publisher/tests/test_validator_thin_validated_supply.py
+      # Advisory: legacy publisher fixtures still being reconciled with the
+      # canonical validator output. Allowed to fail, and its failure is visible
+      # in the step, but it does not gate.
+      - name: Legacy publisher compatibility (advisory)
         continue-on-error: true
         run: |
-          python -m pytest -q scaffold/publisher/tests
+          python -m pytest -q scaffold/publisher/tests \
+            --ignore=scaffold/publisher/tests/test_validator_thin_validated_supply.py
 
   integration:
     # GATING. Exercises the default-OFF Compute+Distill integration lane against the
