@@ -19,6 +19,26 @@ This repository owns:
 There is no upstream validator sync. No other Cathedral repository is a deploy
 source for the validator.
 
+### Allocation contracts
+
+This repository is the sole owner of the signed allocation contracts, both the
+v2 (90% Intel TDX / 10% fixed burn) contract and the v3 (70% Intel TDX / 30%
+CyberGym / 0% fixed burn) contract. That ownership covers both halves of the
+v3 CyberGym lane — the composition in `scaffold/publisher/weights.py` and the
+admission in `scaffold/validator_thin.py`.
+
+The two halves are a producer and an independent verifier, so they share
+exactly one thing: `wire_vector.V3_CYBERGYM_LANE_FIELDS`, the lane's key set.
+Shape is a wire contract and is stated once; every VALUE inside the lane is
+still re-derived by the validator against its own metagraph read, including the
+UID-to-hotkey bindings that stop a recycled UID from collecting another miner's
+CyberGym share.
+
+A second implementation of the v3 lane in any other repository is a fork
+hazard, not a convenience: a vector composed against one copy and reproduced
+against the other can disagree, which is the one failure this contract exists
+to make impossible. `cathedralai/cathedral` is not a v3 allocation source.
+
 ## Connected repositories
 
 The validator consumes contracts from two repositories without transferring

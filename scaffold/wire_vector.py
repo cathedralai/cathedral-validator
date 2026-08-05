@@ -24,6 +24,33 @@ _UTC_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})Z$"
 )
 
+# The exact key set of the v3 allocation contract's CyberGym lane, carried on
+# the wire as ``policy_metadata["cybergym_lane"]``.
+#
+# This lives here, in the module both sides already import, because the lane's
+# SHAPE is a wire contract rather than a judgment: the orchestrator
+# (``scaffold.publisher.weights._compose_cybergym_lane_v3``) emits it and the
+# validator (``scaffold.validator_thin``) admits it by exact-set equality, so a
+# field added on one side and not the other rejects every vector for the whole
+# epoch. Stating the set once means that class of drift cannot be introduced by
+# editing a single file.
+#
+# Note what is deliberately NOT shared: the validator still re-derives every
+# VALUE independently — lane mass, the burn UID against this tick's metagraph,
+# and the UID-to-hotkey bindings that stop a recycled UID from being paid. The
+# publisher is trusted for the shape of the envelope and for nothing inside it.
+V3_CYBERGYM_LANE_FIELDS = frozenset(
+    {
+        "fraction",
+        "weights",
+        "contributing_fraction",
+        "forfeited_fraction",
+        "burn_uid",
+        "uid_hotkeys",
+        "cybergym",
+    }
+)
+
 
 class VectorError(Exception):
     """Signature, key-id, or structural-invariant check failed."""
