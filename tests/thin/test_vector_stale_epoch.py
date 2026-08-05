@@ -573,3 +573,34 @@ def test_the_deployed_alert_script_does_not_match_the_stale_event():
             "contains an alerting name would alert too"
         )
         assert "PROVENANCE_VECTOR_STALE_EPOCH" not in line
+
+
+# -- the lag bound is the safety of the whole classification -----------------
+
+
+def test_a_vector_lagging_more_than_one_epoch_is_not_stale_but_wrong(fake_cathedral):
+    """Beyond one epoch it is not a serving race.
+
+    A publisher that stopped advancing, or a replay of an older genuinely
+    signed vector, must keep firing PROVENANCE_VECTOR_MISMATCH: the recurring
+    thin tick submits the signed vector whatever the audit concludes, so
+    classifying this as merely stale would pin SN39 weights to an old epoch
+    while emitting only the non-alerting event.
+    """
+    store = _BlobStore()
+    # A POSITIVE epoch, three behind the verified one — so this exercises the
+    # lag bound itself, not the negative-epoch guard beside it.
+    older = STALE_EPOCH - 2
+    rows = [
+        _epoch_row(store, older, shares=SHARES),
+        _epoch_row(store, STALE_EPOCH, shares=SHARES),
+        _epoch_row(store, LATEST_EPOCH, shares=SHARES),
+    ]
+    assert (
+        _classify(fake_cathedral, store, _vector(epoch=older, shares=SHARES), rows=rows)
+        is None
+    )
+
+
+def test_the_lag_bound_is_exactly_one_epoch():
+    assert pa.MAX_STALE_VECTOR_LAG_EPOCHS == 1
