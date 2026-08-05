@@ -5,7 +5,14 @@ set -u
 EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
 
 CUTOFF=$(date -u -d "-30 minutes" "+%Y-%m-%dT%H:%M")
-RECENT=$(grep "PROVENANCE_VECTOR_MISMATCH" "$EVENTS" 2>/dev/null | tail -5 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF" "substr(\$0,1,16) >= c" | wc -l)
+# Match the event FIELD, not the bare name: PROVENANCE_VECTOR_STALE_EPOCH is a
+# different event and must never alert. That one means the audit re-verified
+# the signed vector IN FULL against the older epoch it names (signed manifest,
+# report body digest, recomputed shares) and found it correct there — the
+# publisher's ~60s serving race against the 311s epoch, self-resolving. Only a
+# vector that could NOT be re-verified that way stays a mismatch, and that is
+# what this alert is for.
+RECENT=$(grep "\"event\":\"PROVENANCE_VECTOR_MISMATCH\"" "$EVENTS" 2>/dev/null | tail -5 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF" "substr(\$0,1,16) >= c" | wc -l)
 if [ "$RECENT" -gt 0 ]; then
   echo "ALERT: $RECENT PROVENANCE_VECTOR_MISMATCH event(s) within 30m — the audit disagreed with an accepted vector"
   exit 1

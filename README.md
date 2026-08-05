@@ -76,6 +76,15 @@ vector. Alert on `PROVENANCE_VECTOR_MISMATCH` in the event stream — it means
 the audit disagreed with a vector that was already accepted for submission;
 the write is not blocked, so the alert is the response path.
 
+Do not alert on `PROVENANCE_VECTOR_STALE_EPOCH`. The publisher signs and
+caches a vector for up to a minute while the evidence index flips to the next
+epoch, so a consumer can hold last epoch's vector beside this epoch's
+evidence. When that happens the audit re-verifies the vector IN FULL against
+the epoch it names — that epoch's signed manifest, its report body digest,
+and its recomputed shares — and reports this event instead. A vector that
+cannot be re-verified that way is never reclassified: it stays
+`PROVENANCE_VECTOR_MISMATCH`.
+
 ## Self-composing (advanced)
 
 The profile above follows the remote Cathedral publisher feed. A self-composing

@@ -1581,6 +1581,37 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
         # disagrees with the independently recomputed receipts. Emit that
         # structured failure before the partial-assurance early return so
         # shadow-mode reproduction can never mislabel disagreement as PASS.
+        stale_epoch = getattr(audit, "vector_stale_epoch", None)
+        if stale_epoch is not None:
+            # A vector the audit re-verified IN FULL against the older epoch it
+            # names — that epoch's signed manifest, report body digest, and
+            # recomputed shares (see provenance_audit._classify_stale_vector).
+            # It is the publisher's ~60s signing/serving race against the 311s
+            # epoch, and calling it tampering is what made the one event that
+            # means "a bad vector landed" fire on a benign, self-resolving
+            # condition. It is still a disagreement: NOT_PROVEN, no PASS, no
+            # state persisted, and vector_agrees stays False.
+            events.event(
+                "PROVENANCE_VECTOR_STALE_EPOCH",
+                stage="provenance",
+                status=NOT_PROVEN,
+                detail=(
+                    f"signed vector re-verified in full against its own signed "
+                    f"epoch {stale_epoch} (manifest, report body digest, and "
+                    f"recomputed shares); the verified evidence has since "
+                    f"advanced to epoch {audit.source_epoch}"
+                )[:512],
+                remediation=audit.remediation,
+                vector_agrees=False,
+            )
+            _lifecycle(
+                "PROVENANCE vector stale",
+                f"vector_epoch={stale_epoch} evidence_epoch={audit.source_epoch}",
+            )
+            # Terminal for exactly the reason the mismatch branch is: never
+            # append a later PASS a tail-based consumer could read as the
+            # verdict for this audit.
+            return False
         events.event(
             "PROVENANCE_VECTOR_MISMATCH",
             stage="provenance",
