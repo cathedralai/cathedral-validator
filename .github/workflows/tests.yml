@@ -91,10 +91,18 @@ jobs:
     # is exactly how they rotted unnoticed for nine days, on the file that
     # covers core weight-mapping and UID-replacement safety.
     #
-    # So the validator-facing file is now a REQUIRED step, and the rest of the
+    # So the validator-facing files are now REQUIRED steps, and the rest of the
     # publisher suite keeps its advisory posture in a separate step that is
     # allowed to fail. Advisory is a fine status for legacy fixtures; it is not
     # a fine status for the tests that cover the write path.
+    #
+    # #88 promoted only test_validator_thin_validated_supply.py, which left the
+    # chain weight-cooldown safety guards (#76) defended by an advisory file.
+    # Mutation testing confirmed the gap: deleting the cooldown stand-down,
+    # re-seeding its anchor every tick, and downgrading an unreadable cooldown
+    # to a routine skip ALL survived tests/thin, tests/boundary and the one
+    # required publisher file. Only test_validator_lifecycle.py caught them, and
+    # it could not fail the build. It is required now, for the same reason.
     name: Publisher suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -113,6 +121,14 @@ jobs:
         run: |
           python -m pytest -q --no-header \
             scaffold/publisher/tests/test_validator_thin_validated_supply.py
+      # REQUIRED. Covers the tick lifecycle, endpoint/credential sanitization,
+      # the durable attempt fence, and the chain weight-cooldown stand-down --
+      # the guards that decide whether a refused write is a skip or a fault.
+      # Same vacuous-pass rule: a collection error exits non-zero.
+      - name: Validator lifecycle and cooldown guards (required)
+        run: |
+          python -m pytest -q --no-header \
+            scaffold/publisher/tests/test_validator_lifecycle.py
       # Advisory: legacy publisher fixtures still being reconciled with the
       # canonical validator output. Allowed to fail, and its failure is visible
       # in the step, but it does not gate.
@@ -120,7 +136,8 @@ jobs:
         continue-on-error: true
         run: |
           python -m pytest -q scaffold/publisher/tests \
-            --ignore=scaffold/publisher/tests/test_validator_thin_validated_supply.py
+            --ignore=scaffold/publisher/tests/test_validator_thin_validated_supply.py \
+            --ignore=scaffold/publisher/tests/test_validator_lifecycle.py
 
   integration:
     # GATING. Exercises the default-OFF Compute+Distill integration lane against the
