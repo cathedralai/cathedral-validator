@@ -1,0 +1,31 @@
+# Installed as /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf.
+#
+# The third-party counterpart to cathedral-sn39-validator.tmpfiles. That file
+# provisions the evidence PRODUCER's published tree under
+# /var/lib/cathedral-public-evidence, including a logs/ directory owned by
+# polaris. A relay host runs no producer and has no polaris account, so those
+# lines describe a tree it never writes and name an identity it never creates:
+# systemd-tmpfiles refuses a line whose user does not resolve. Shipping the
+# producer contract to a third party therefore produced errors on every boot
+# for directories nothing on that host uses.
+#
+# What a relay host actually needs is the pair of runtime directories the
+# validator writes, created before the unit's first start. The unit's
+# StateDirectory= and LogsDirectory= create them too, but systemd evaluates
+# ConditionPathIsReadWrite= BEFORE it creates them, so on a fresh host the
+# first start of an otherwise correct install is skipped -- and a skipped unit
+# is reported as a successful `systemctl start`, not as a failure.
+#
+# Ownership and mode deliberately match what StateDirectory=/LogsDirectory=
+# converge on for cathedral-validator-sn39-relay.service (User=
+# cathedral-validator, Group=cathedral-validator-log, modes 0700 and 0750), so
+# the two contracts cannot disagree about the same inode.
+#
+# Every mode and ownership field is ':'-prefixed, which systemd-tmpfiles
+# applies ONLY when it creates the inode, for the reason given at length in
+# cathedral-sn39-validator.tmpfiles: an unprefixed field is reapplied on every
+# `systemd-tmpfiles --create`, including at boot, to a directory a running
+# service already owns. Creation-only fields converge a fresh host on the
+# reviewed layout and are a no-op on a host that already has one.
+d /var/lib/cathedral-validator :0700 :cathedral-validator :cathedral-validator-log -
+d /var/log/cathedral-validator :0750 :cathedral-validator :cathedral-validator-log -

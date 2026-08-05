@@ -1,0 +1,103 @@
+# The THIRD-PARTY relay unit. Installed as
+# /etc/systemd/system/cathedral-validator-sn39-relay.service.
+#
+# This is cathedral-validator-sn39.service with the producer-only requirements
+# removed and nothing else changed. Each removal is a thing a third party
+# cannot obtain, and each one failed in the same silent way: systemd reports a
+# successful `systemctl start` for a unit whose conditions were not met, so the
+# operator sees no error and no validator.
+#
+#   1. ConditionPathExists= on the root-signed recurring-write authorization
+#      and its detached signature. Those files authorize the ORIGIN host's
+#      recurring mainnet writes and are signed by the release-attestation key.
+#      A relay never needs one: the runtime demands it only for a host that
+#      owes SN39 its own launch (scaffold/validator_thin.py
+#      _sn39_launch_obligation -> _continuous_transition_required), which means
+#      provenance = "authority", require_full_provenance_for_broadcast, or
+#      possession of the launch material at the release-pinned paths. A pure
+#      relay is none of those, so the condition gated the unit on a file the
+#      code below it never asks for. An unmet Condition= is not a failure to
+#      systemd; the unit is skipped and reported as started.
+#   2. SupplementaryGroups=cathedral-validator-evidence. That group belongs to
+#      the evidence producer and is declared by the producer's own deploy tree,
+#      not by cathedral-sn39-validator.sysusers (see the comment there for why
+#      this tree must not restate producer identities). On a host where it does
+#      not exist the unit fails before ExecStart. It grants read access to the
+#      controlled TDX evidence package, which a relay does not have and does
+#      not audit: its shadow audit is receipts-only by design.
+#   3. ReadOnlyPaths= on the controlled evidence directory and the pinned TDX
+#      verifier binary. Both are Cathedral-controlled paths that do not exist
+#      on a relay host, and an unprefixed ReadOnlyPaths= naming a missing path
+#      fails the mount-namespace setup and takes the whole unit down. (The same
+#      hazard is documented in cathedral-sn39-public-status.service, which
+#      uses a '-' prefix for its optional input.) Dropping them costs nothing:
+#      ProtectSystem=strict below already mounts the entire hierarchy
+#      read-only, so those two entries were belt-and-braces for paths this unit
+#      never opens.
+#
+# Everything that decides whether a submission is CORRECT is unchanged, because
+# none of it lives here: feed signature and key pin, freshness, the monotonic
+# rollback fence, the validated_supply contract, burn destination and floor,
+# UID-replacement safety, and the single-writer guard all run in the validator
+# on every tick regardless of which unit started it.
+[Unit]
+Description=Cathedral SN39 third-party relay validator
+After=network-online.target cathedral-thin-validator.service cathedral-validator-sn39.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
+Wants=network-online.target
+# cathedral-validator-sn39.service is listed because one host must never run
+# both postures against one hotkey. systemd derives the reverse conflict, so
+# the origin unit does not have to be edited to gain the same protection.
+Conflicts=cathedral-thin-validator.service cathedral-validator-sn39.service cathedral-validator-sn39-launch.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
+# Satisfiable on a fresh host because cathedral-sn39-validator-relay.tmpfiles
+# creates this directory. StateDirectory= below also creates it, but conditions
+# are evaluated BEFORE that happens, so on a host with no tmpfiles contract the
+# first start of a correct install is silently skipped.
+ConditionPathIsReadWrite=/var/lib/cathedral-validator
+
+[Service]
+Type=simple
+User=cathedral-validator
+# Primary group is cathedral-validator-log, NOT cathedral-validator, matching
+# the origin unit. LogsDirectory= below creates /var/log/cathedral-validator
+# 0750 owned by this process's primary group. A relay installs no status
+# publisher, so nothing reads that directory today; the group is kept identical
+# so the two units differ only in the producer-only lines named above, and so
+# that the launcher's CATHEDRAL_VALIDATOR_STATUS_GROUP (which it sets
+# unconditionally for continuous mode) names a group this account is in.
+Group=cathedral-validator-log
+Environment=HOME=/var/lib/cathedral-validator
+# The reader group is granted to the SANITIZED status projection only.
+# CATHEDRAL_VALIDATOR_JSONL_GROUP is deliberately NOT set, so the raw
+# journal stays 0600 and the validator refuses to open it any other way.
+Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=cathedral-validator-log
+# A service writes to the journal, never a tty, so the renderer would otherwise
+# emit monochrome forever. journalctl renders ANSI fine, and NO_COLOR still wins.
+Environment=CATHEDRAL_VALIDATOR_FORCE_COLOR=1
+# The journal has no terminal to measure, so the layout needs a width to target.
+Environment=COLUMNS=100
+# Belt and braces. Conflicts= only acts on units systemd is asked to start;
+# it cannot stop a writer someone launched by hand. This refuses to start
+# at all while any known SN39 writer is active, because those writers use
+# their own state files and runtime roots and therefore share no
+# cross-process submission lock with this unit. Two writers on one hotkey
+# means nonce races and a second weight extrinsic.
+ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-validator-sn39.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service'
+ExecStart=/usr/bin/python3.12 -I -E -s /usr/local/libexec/cathedral-sn39-release continuous
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+LogsDirectory=cathedral-validator
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cathedral-validator /var/log/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
