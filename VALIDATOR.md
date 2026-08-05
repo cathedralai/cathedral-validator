@@ -187,6 +187,26 @@ behavior—not a reason to preserve an old positive vector.
 
 ## Observe the validator
 
+### Is it working right now? (`status`)
+
+```bash
+cathedral-validator status --config my-validator.toml
+```
+
+One screen, one exit code. `status` reads the event journal and only the
+journal — no chain call, no wallet, no publisher fetch, no lock — so it is
+safe to run beside a live validator as often as you like, and it still answers
+when the thing that broke is the network. It prints the journal it read, when
+the last tick completed, the last weight write, the last accepted vector, the
+last shadow-audit verdict, and when the next tick is due.
+
+It exits `0` when healthy, `1` when it is not — naming the reason — and `2`
+when there is no journal configured to read at all. It applies the same five
+rules as the systemd alert below, so the two can never disagree about what
+"healthy" means. Pass `--jsonl PATH` to point it at a preview journal, and
+`--interval-secs` if the running validator's tick interval is not the one in
+the config you gave it.
+
 TTY output is designed for a human operator. JSONL is the stable integration
 surface — the path is whatever `--jsonl` or `[logs].jsonl` set, so for a
 quickstart preview:
@@ -208,19 +228,48 @@ after an uncertain submission. Keep both on durable owner-only storage; never
 delete, roll back, or replace them to clear a refused attempt. Follow the
 release runbook for recovery.
 
-### Shadow-audit mismatch alert (systemd)
+### Liveness and shadow-audit alert (systemd)
 
-`deploy/sn39/cathedral-mismatch-check` turns two shadow-audit conditions in
-the event journal into a failing oneshot service — the unit failing IS the
-alert; there is no separate notification channel:
+`deploy/sn39/cathedral-mismatch-check` turns five conditions in the event
+journal into a failing oneshot service — the unit failing IS the alert; there
+is no separate notification channel:
 
-1. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
+1. the journal is missing, is not a regular file, is unreadable, is empty, or
+   holds no parseable record. **This check fails closed**: a monitor that
+   cannot see the validator must never report that the validator is fine;
+2. the newest record is older than 3 tick intervals — the validator is
+   stopped, wedged, or writing to a different path;
+3. no tick has COMPLETED in the last 4 tick intervals — no
+   `WEIGHTS_SUBMITTED`, `WEIGHTS_DRY_RUN`, `WEIGHT_COOLDOWN_SKIPPED` or
+   `WAITING_FOR_JOB`. That is what a validator which has silently stopped
+   writing weights looks like. A tick declined by the subnet's
+   `weights_rate_limit`, and a tick that found nothing to score, both count as
+   alive; a process that restarted inside the window is given until the end of
+   it to finish its first tick;
+4. any `PROVENANCE_VECTOR_MISMATCH` in the last 30 minutes — the audit
    disagreed with a vector that was already accepted for submission, and
    could not re-verify that vector against the epoch it names either; and
-2. persistent audit failure (#64) — at least one `PROVENANCE_AUDIT_FAIL` and
+5. persistent audit failure (#64) — at least one `PROVENANCE_AUDIT_FAIL` and
    zero `PROVENANCE_AUDIT_PASS` in the last 90 minutes (about three audit
    cycles). A transient `FAIL` followed by a `PASS` does not alert; an empty
-   window does not alert.
+   window does not alert on this rule, because rules 1-3 have already proved
+   the journal is live.
+
+Rule 3 also fires when the process is perfectly healthy but the signed feed
+has been unreachable for the whole window, because the fail-closed idle state
+writes nothing and the operator is losing emission either way. The `ALERT:`
+line says "the validator is not writing weights", which is what is true; the
+journal and `cathedral-validator status` say which of the two it is.
+
+Rules 1-3 exist because rules 4 and 5 alone were green for a dead validator:
+both greps returned zero matches for a journal that no longer existed, and
+zero matches read as "nothing is wrong". The expensive SN39 failure is not a
+bad vector, it is no vector at all.
+
+The two liveness windows are tick multiples, so a validator configured to tick
+faster is declared dead sooner rather than later. They are measured against
+the shipped `[weights].interval_secs` of 1500s; if you changed it, set
+`CATHEDRAL_TICK_SECS` in the unit to match (`Environment=CATHEDRAL_TICK_SECS=…`).
 
 `PROVENANCE_VECTOR_STALE_EPOCH` deliberately does NOT alert. The publisher
 signs and caches a vector for up to a minute while the evidence index flips to
@@ -252,8 +301,30 @@ systemctl enable --now cathedral-mismatch-alert.timer
 
 Watch `systemctl status cathedral-mismatch-alert.service` (a failed unit is
 the alert) and `journalctl -u cathedral-mismatch-alert` for the reason line.
-A healthy run prints `no recent mismatch; shadow audit not persistently
-failing` and exits 0.
+A healthy run names the tick it saw and exits 0:
+
+```
+validator alive (last completed tick at 2026-08-05T18:26:03.228Z); no recent
+mismatch; shadow audit not persistently failing
+```
+
+An unhealthy run exits 1 with one `ALERT:` line naming the condition and what
+to do about it, for example:
+
+```
+ALERT: event journal has not grown since 2026-08-05T15:06:03.228Z, more than 3
+tick intervals (75m) — the validator is stopped, wedged, or writing to a
+different path. Check: systemctl status cathedral-validator-sn39
+```
+
+Verify the alert can actually see your journal after installing it — the one
+failure this design cannot detect for you is a timer running as a user that
+cannot read an owner-only `0600` journal. That now alerts rather than passing
+silently, but only if you run it once and look:
+
+```bash
+sudo /usr/local/bin/cathedral-mismatch-check
+```
 
 ## Chain-writing launch gate
 

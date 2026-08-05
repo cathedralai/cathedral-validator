@@ -577,6 +577,50 @@ def _cmd_preflight_launch(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_status(ns: argparse.Namespace) -> int:
+    """Answer "is it working right now?" from the journal, and only the journal.
+
+    Deliberately offline: no chain call, no wallet, no publisher fetch, no
+    lock. It is safe to run beside a live validator as often as you like, and
+    it still works when the thing that broke is the network. Exit code 0 means
+    healthy; 1 means a named problem; 2 means it could not even look.
+    """
+    from . import health, render
+
+    cfg = _resolve_serve_config(ns)
+    journal = getattr(cfg, "jsonl", None)
+    if not journal:
+        print(
+            "error: no event journal configured, so there is nothing to read. "
+            "Set [logs].jsonl in your config (absolute path), or pass "
+            "--jsonl /var/log/cathedral-validator/validator-events.jsonl.\n"
+            "It must be the SAME path `cathedral-validator serve` writes to — "
+            "a status check pointed at the wrong file is not a status check.",
+            file=sys.stderr,
+        )
+        return 2
+    report = health.evaluate(journal, interval_secs=getattr(cfg, "interval_secs", None))
+    render.banner(
+        [(label, value) for label, value in report.rows],
+        "SN39 validator status",
+        f"{cfg.network} · netuid {cfg.netuid}",
+    )
+    # Outside the banner on purpose: the banner neutralizes absolute paths, and
+    # a mistyped journal path is one of the failures this command exists to
+    # catch, so the operator has to be able to read it back.
+    print(f"   {render.dim('path'.ljust(11))}{journal}")
+    print()
+    for problem in report.problems:
+        print(f"   {render.red('UNHEALTHY')}  {problem}")
+    if report.ok:
+        print(
+            f"   {render.green('healthy')}    ticks are completing and the shadow "
+            "audit is not alarming"
+        )
+        return 0
+    return 1
+
+
 def _cmd_version(ns: argparse.Namespace) -> int:
     from . import __version__
 
@@ -813,6 +857,39 @@ def main(argv: list[str] | None = None) -> int:
         broadcast=False,
         once=True,
         offline=False,
+    )
+
+    stp = sub.add_parser(
+        "status",
+        help="is it working right now? read the event journal and say so "
+        "(exit 1 if not)",
+    )
+    stp.add_argument(
+        "--config",
+        default=os.environ.get("CATHEDRAL_VALIDATOR_CONFIG"),
+        help="path to the SAME TOML config the running validator uses; the "
+        "journal path and tick interval are read from it",
+    )
+    stp.add_argument(
+        "--jsonl",
+        dest="jsonl",
+        default=None,
+        help="read this journal instead of the configured [logs].jsonl",
+    )
+    stp.add_argument(
+        "--interval-secs",
+        dest="interval_secs",
+        type=float,
+        default=None,
+        help="tick interval the staleness and liveness windows are measured in "
+        "ticks of; defaults to the configured [weights].interval_secs",
+    )
+    stp.set_defaults(
+        func=_cmd_status,
+        dry_run=True,
+        broadcast=False,
+        once=True,
+        offline=True,
     )
 
     vp = sub.add_parser("version", help="print version")

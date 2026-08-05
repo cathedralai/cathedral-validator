@@ -1,10 +1,122 @@
 #!/bin/bash
-# Fail loudly if the shadow audit flagged a vector mismatch in the last 30 minutes,
-# or if the shadow audit has been persistently failing for 90 minutes with no PASS (#64).
+# The SN39 validator's alert of last resort. Exits non-zero — which is the
+# alert, because the systemd unit failing IS the notification — when ANY of
+# these is true of the event journal:
+#
+#   1. it is missing, is not a regular file, is unreadable, is empty, or holds
+#      no parseable record (fail closed: a check that cannot see the validator
+#      must never report that the validator is fine);
+#   2. its newest record is older than 3 tick intervals (the validator is
+#      stopped, wedged, or writing somewhere else);
+#   3. no tick has COMPLETED in the last 4 tick intervals — no
+#      WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED or
+#      WAITING_FOR_JOB — which is what a validator that has silently stopped
+#      writing weights looks like;
+#   4. the shadow audit flagged a vector mismatch in the last 30 minutes; or
+#   5. the shadow audit has been failing for 90 minutes with no PASS (#64).
+#
+# Rules 1-3 exist because rules 4 and 5 alone were green for a dead validator:
+# both greps returned zero matches for a journal that no longer existed, and
+# zero matches read as "nothing wrong". The expensive failure on SN39 is not a
+# bad vector, it is no vector at all, and it used to have no detector.
+#
+# Tick interval defaults to the shipped 1500s ([weights].interval_secs). Set
+# CATHEDRAL_TICK_SECS to match your config if you changed it; the windows are
+# tick multiples so a faster validator is declared dead sooner, not later.
+#
+# `cathedral-validator status --config <cfg>` applies these same five rules and
+# prints the detail behind them. This script is the unattended half.
 set -u
-EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
+# Every window here is decided by comparing ISO-8601 timestamp strings, so the
+# collation the comparison uses must not depend on the host's locale.
+export LC_ALL=C
 
-CUTOFF=$(date -u -d "-30 minutes" "+%Y-%m-%dT%H:%M")
+EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
+TICK_SECS="${CATHEDRAL_TICK_SECS:-1500}"
+
+alert() {
+  echo "ALERT: $*"
+  exit 1
+}
+
+case "$TICK_SECS" in
+  '' | *[!0-9]*)
+    alert "CATHEDRAL_TICK_SECS must be a whole number of seconds; got '$TICK_SECS'"
+    ;;
+esac
+[ "$TICK_SECS" -gt 0 ] || alert "CATHEDRAL_TICK_SECS must be greater than zero"
+
+STALE_SECS=$((TICK_SECS * 3))
+LIVENESS_SECS=$((TICK_SECS * 4))
+
+# Rule 1 — fail closed. Each condition names its own fix, because "monitoring
+# is green" and "monitoring is blind" must never look the same to an operator.
+[ -e "$EVENTS" ] || alert "event journal '$EVENTS' does not exist — this check is blind. Point it at the path the validator's --jsonl / [logs].jsonl actually names."
+[ -f "$EVENTS" ] || alert "event journal '$EVENTS' is not a regular file — this check is blind."
+[ -r "$EVENTS" ] || alert "event journal '$EVENTS' is not readable by $(id -un 2>/dev/null || echo "this user") — this check is blind. The journal is owner-only 0600 by design; run the timer as a user that can read it."
+[ -s "$EVENTS" ] || alert "event journal '$EVENTS' is empty — this check is blind. The validator has never written a record here."
+
+# One bounded read of the tail, reused by every rule below: the journal is
+# append-only and unbounded, and no rule here looks back further than 90
+# minutes. A read error is an alert, not a silent zero.
+TAIL=$(tail -n 5000 -- "$EVENTS") || alert "event journal '$EVENTS' could not be read — this check is blind."
+
+# Seconds-resolution UTC cutoff, comparable against a record's ts prefix.
+cutoff() { date -u -d "-$1 seconds" "+%Y-%m-%dT%H:%M:%S"; }
+
+# Newest ts among the named events (ERE alternation), or empty if none.
+latest() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"($1)\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1
+}
+
+# True when timestamp $1 is strictly before cutoff $2, at seconds resolution.
+older_than() {
+  awk -v t="$1" -v c="$2" 'BEGIN { exit !(substr(t, 1, 19) < substr(c, 1, 19)) }'
+}
+
+count_since() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"$1\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 |
+    awk -v c="$2" "substr(\$0,1,19) >= c" | wc -l
+}
+
+# Rule 2 — the journal must still be growing.
+NEWEST=$(printf '%s\n' "$TAIL" | grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1)
+[ -n "$NEWEST" ] || alert "event journal '$EVENTS' holds no parseable event record — this check is blind."
+STALE_CUTOFF=$(cutoff "$STALE_SECS")
+if older_than "$NEWEST" "$STALE_CUTOFF"; then
+  alert "event journal has not grown since $NEWEST, more than 3 tick intervals ($((STALE_SECS / 60))m) — the validator is stopped, wedged, or writing to a different path. Check: systemctl status cathedral-validator-sn39"
+fi
+
+# Rule 3 — liveness. A tick that submitted, dry-ran, was declined by the
+# subnet's weight rate limit, or found nothing to score has all COMPLETED; only
+# the absence of every one of them means the loop is not running.
+LIVENESS_EVENTS='WEIGHTS_SUBMITTED|WEIGHTS_DRY_RUN|WEIGHT_COOLDOWN_SKIPPED|WAITING_FOR_JOB'
+LIVE_TS=$(latest "$LIVENESS_EVENTS")
+START_TS=$(latest 'STARTUP')
+LIVE_CUTOFF=$(cutoff "$LIVENESS_SECS")
+WARMING=0
+# A process that (re)started inside the window has not been given a full window
+# to finish its first tick. Rule 2 still catches one that started and hung, a
+# whole tick interval sooner than this rule would.
+if [ -n "$START_TS" ] && ! older_than "$START_TS" "$LIVE_CUTOFF"; then
+  if [ -z "$LIVE_TS" ] || older_than "$LIVE_TS" "$START_TS"; then
+    WARMING=1
+  fi
+fi
+if [ "$WARMING" -eq 0 ] && { [ -z "$LIVE_TS" ] || older_than "$LIVE_TS" "$LIVE_CUTOFF"; }; then
+  if [ -z "$LIVE_TS" ]; then
+    SEEN="there is none in this journal at all"
+  else
+    SEEN="the last one was at $LIVE_TS"
+  fi
+  alert "no completed tick (WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED, WAITING_FOR_JOB) in the last $((LIVENESS_SECS / 60))m — $SEEN. The validator is not writing weights."
+fi
+
+# Rule 4 — any PROVENANCE_VECTOR_MISMATCH in the last 30 minutes.
 # Match the event FIELD, not the bare name: PROVENANCE_VECTOR_STALE_EPOCH is a
 # different event and must never alert. That one means the audit re-verified
 # the signed vector IN FULL against the older epoch it names (signed manifest,
@@ -12,21 +124,25 @@ CUTOFF=$(date -u -d "-30 minutes" "+%Y-%m-%dT%H:%M")
 # publisher's ~60s serving race against the 311s epoch, self-resolving. Only a
 # vector that could NOT be re-verified that way stays a mismatch, and that is
 # what this alert is for.
-RECENT=$(grep "\"event\":\"PROVENANCE_VECTOR_MISMATCH\"" "$EVENTS" 2>/dev/null | tail -5 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF" "substr(\$0,1,16) >= c" | wc -l)
+CUTOFF=$(cutoff 1800)
+RECENT=$(count_since "PROVENANCE_VECTOR_MISMATCH" "$CUTOFF")
 if [ "$RECENT" -gt 0 ]; then
-  echo "ALERT: $RECENT PROVENANCE_VECTOR_MISMATCH event(s) within 30m — the audit disagreed with an accepted vector"
-  exit 1
+  alert "$RECENT PROVENANCE_VECTOR_MISMATCH event(s) within 30m — the audit disagreed with an accepted vector"
 fi
 
-# Rule 2 (#64): persistent audit failure — at least one PROVENANCE_AUDIT_FAIL and
-# zero PROVENANCE_AUDIT_PASS in the last 90 minutes (~3 audit cycles).
-# A transient FAIL followed by a PASS does not alert; an empty window does not alert.
-CUTOFF90=$(date -u -d "-90 minutes" "+%Y-%m-%dT%H:%M")
-FAILS=$(grep "\"event\":\"PROVENANCE_AUDIT_FAIL\"" "$EVENTS" 2>/dev/null | tail -20 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF90" "substr(\$0,1,16) >= c" | wc -l)
-PASSES=$(grep "\"event\":\"PROVENANCE_AUDIT_PASS\"" "$EVENTS" 2>/dev/null | tail -20 | grep -oE "\"ts\":\"[0-9T:.-]+" | cut -d\" -f4 | awk -v c="$CUTOFF90" "substr(\$0,1,16) >= c" | wc -l)
+# Rule 5 (#64) — persistent audit failure: at least one PROVENANCE_AUDIT_FAIL
+# and zero PROVENANCE_AUDIT_PASS in the last 90 minutes (~3 audit cycles).
+# A transient FAIL followed by a PASS does not alert; an empty window does not
+# alert on this rule, because rules 1-3 have already proved the journal is live.
+CUTOFF90=$(cutoff 5400)
+FAILS=$(count_since "PROVENANCE_AUDIT_FAIL" "$CUTOFF90")
+PASSES=$(count_since "PROVENANCE_AUDIT_PASS" "$CUTOFF90")
 if [ "$FAILS" -gt 0 ] && [ "$PASSES" -eq 0 ]; then
-  echo "ALERT: shadow audit failing for 90m with no PASS — $FAILS PROVENANCE_AUDIT_FAIL event(s) and zero PROVENANCE_AUDIT_PASS in the last 90 minutes"
-  exit 1
+  alert "shadow audit failing for 90m with no PASS — $FAILS PROVENANCE_AUDIT_FAIL event(s) and zero PROVENANCE_AUDIT_PASS in the last 90 minutes"
 fi
 
-echo "no recent mismatch; shadow audit not persistently failing"
+if [ "$WARMING" -eq 1 ]; then
+  echo "validator starting up (STARTUP at $START_TS, first tick not yet complete); no recent mismatch; shadow audit not persistently failing"
+else
+  echo "validator alive (last completed tick at $LIVE_TS); no recent mismatch; shadow audit not persistently failing"
+fi

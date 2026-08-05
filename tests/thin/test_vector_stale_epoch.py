@@ -560,18 +560,24 @@ def test_the_deployed_alert_script_does_not_match_the_stale_event():
         / "sn39"
         / "cathedral-mismatch-check"
     ).read_text(encoding="utf-8")
+    matchers = [
+        line.replace("\\", "")
+        for line in script.splitlines()
+        if "grep" in line and "event" in line
+    ]
+    assert matchers, "the alert script no longer selects records by event here"
+    for line in matchers:
+        assert '"event": *"' in line, (
+            "alerting must match the event FIELD, or a future event whose name "
+            "contains an alerting name would alert too"
+        )
     alerting = [
         line
         for line in script.splitlines()
         if line.startswith(("RECENT=", "FAILS=", "PASSES="))
     ]
     assert alerting, "the alert script no longer builds its match lines here"
-    for escaped in alerting:
-        line = escaped.replace("\\", "")
-        assert '"event":"' in line, (
-            "alerting must match the event FIELD, or a future event whose name "
-            "contains an alerting name would alert too"
-        )
+    for line in alerting:
         assert "PROVENANCE_VECTOR_STALE_EPOCH" not in line
 
 

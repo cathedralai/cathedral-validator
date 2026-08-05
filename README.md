@@ -120,6 +120,44 @@ archive the previous state file and start fresh
 (`deploy/publisher/init-clean-journal.sh` provisions a clean runtime root —
 see `deploy/publisher/README.md`).
 
+### Is it working right now?
+
+One command answers that:
+
+```bash
+cathedral-validator status --config my-validator.toml
+```
+
+```
+   SN39 validator status  finney · netuid 39
+   ──────────────────────────────────────────────────────────────
+   journal    fresh · newest record 6m ago
+   tick       WEIGHTS_SUBMITTED 6m ago
+   write      WEIGHTS_SUBMITTED 6m ago · 42 uids
+   vector     VECTOR_ACCEPTED 7m ago · id 9f3c1a2b-3 · policy_version 7
+   audit      PROVENANCE_AUDIT_PASS 6m ago
+   next tick  ~19m from now
+
+   path       /var/log/cathedral-validator/validator-events.jsonl
+
+   healthy    ticks are completing and the shadow audit is not alarming
+```
+
+It reads the event journal and only the journal — no chain call, no wallet, no
+publisher fetch, no lock — so it is safe to run beside a live validator as
+often as you like, and it still answers when the thing that broke is the
+network. Exit `0` means healthy, `1` names what is wrong, `2` means no journal
+was configured for it to read. Add `--jsonl PATH` if you previewed with the
+path flags above instead of the shipped config.
+
+The unattended half of the same five rules is
+`deploy/sn39/cathedral-mismatch-check`, a 10-minute systemd timer whose unit
+failing is the alert — see
+[VALIDATOR.md](VALIDATOR.md#liveness-and-shadow-audit-alert-systemd). Install
+it before you broadcast: a validator that quietly stops writing weights costs
+you the emission it did not earn, and the journal is the only place that shows
+up first.
+
 ### The two `[launch]` settings a relay depends on
 
 SN39's launch was a one-shot, subnet-level event. A relay cannot perform one,
