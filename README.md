@@ -363,6 +363,9 @@ it; none of them restates it.
   cycle before a write.
 - [Provenance contract](docs/PROVENANCE.md) — every pin the shadow audit uses.
 - [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
+- [SN39 v3 publisher cutover](docs/SN39_V3_PUBLISHER_CUTOVER.md) — what the live
+  publisher actually imports, the ordered steps to make it v3-capable, and how
+  flipping the contract first fails without failing a check.
 - [Miner error contract](docs/MINER_ERROR_CONTRACT.md)
 
 ## Repository boundary
