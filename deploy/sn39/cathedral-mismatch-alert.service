@@ -1,5 +1,8 @@
 [Unit]
-Description=ALERT if the shadow audit flagged a vector mismatch in the last 30 minutes
+Description=ALERT if the SN39 validator stopped completing ticks, or the shadow audit flagged a vector mismatch
 [Service]
 Type=oneshot
+# The liveness windows are multiples of the validator's tick interval. Set this
+# to [weights].interval_secs if you changed it from the shipped 1500s.
+Environment=CATHEDRAL_TICK_SECS=1500
 ExecStart=/usr/local/bin/cathedral-mismatch-check
