@@ -6,7 +6,8 @@ is the Cathedral ORIGIN host: it pins the controlled-disclosure TDX verifier
 binary and the producer-side status publisher. `--relay` builds the manifest a
 THIRD PARTY can actually produce — same reviewed source, same environment
 commitment, same bootstrap binding, minus the two external files a relay can
-neither obtain nor install. The relay manifest is refused outright on a host
+neither obtain nor install, plus the shadow-audit mismatch alert that is a
+relay's only health surface. The relay manifest is refused outright on a host
 holding SN39 launch material, so it cannot be used to weaken the origin host.
 """
 
@@ -62,12 +63,22 @@ RELEASE_FILES = (
     "deploy/sn39/cathedral-sn39-validator.tmpfiles",
 )
 # The relay manifest binds a SUPERSET of the reviewed source above: every file
-# the Cathedral manifest binds, plus the two files only a relay host installs.
+# the Cathedral manifest binds, plus the files only a relay host installs.
 # Binding more source, not less, is the point — what a relay manifest omits is
 # an EXTERNAL file (the controlled verifier binary), never reviewed source.
+#
+# The three shadow-audit alert files are here because README's relay install
+# installs them and enables the timer: on a relay the failed
+# `cathedral-mismatch-alert.service` unit is the ONLY health surface, so an
+# alert script a compromised service account could edit would be no alert at
+# all. Binding them puts the relay's whole monitoring path inside the same
+# tamper-evidence boundary as the validator it watches.
 RELAY_RELEASE_FILES = RELEASE_FILES + (
     "deploy/sn39/cathedral-validator-sn39-relay.service",
     "deploy/sn39/cathedral-sn39-validator-relay.tmpfiles",
+    "deploy/sn39/cathedral-mismatch-check",
+    "deploy/sn39/cathedral-mismatch-alert.service",
+    "deploy/sn39/cathedral-mismatch-alert.timer",
 )
 # The release-pinned absolute paths that make a host owe SN39 its own launch.
 # `scaffold.validator_thin._sn39_launch_obligation` reads exactly these three,
@@ -122,6 +133,13 @@ class InstallProfile(NamedTuple):
     # external_files entry for a file that is absent is an unbuildable
     # manifest, not a stricter one.
     binds_status_publisher: bool
+    # TRUE for a relay only. The relay install enables the shadow-audit
+    # mismatch timer and has no other health surface, so its manifest binds the
+    # check script and both units. The Cathedral posture is left byte-identical
+    # to what it has always emitted — the origin host's alerting is governed by
+    # Cathedral's own release runbook, and changing what an origin manifest
+    # requires is not a documentation gap this fixes.
+    binds_mismatch_alert: bool
 
 
 CATHEDRAL_PROFILE = InstallProfile(
@@ -133,6 +151,7 @@ CATHEDRAL_PROFILE = InstallProfile(
     tmpfiles_path=Path("/etc/tmpfiles.d/cathedral-sn39-validator.conf"),
     pins_verifier_binary=True,
     binds_status_publisher=True,
+    binds_mismatch_alert=False,
 )
 RELAY_PROFILE = InstallProfile(
     name="relay",
@@ -145,6 +164,7 @@ RELAY_PROFILE = InstallProfile(
     tmpfiles_path=Path("/etc/tmpfiles.d/cathedral-sn39-validator-relay.conf"),
     pins_verifier_binary=False,
     binds_status_publisher=False,
+    binds_mismatch_alert=True,
 )
 
 
@@ -527,8 +547,8 @@ def main() -> int:
         action="store_true",
         help=(
             "build the third-party relay manifest: no controlled verifier "
-            "binary pin, the relay unit and tmpfiles, and no producer-side "
-            "status publisher"
+            "binary pin, the relay unit and tmpfiles, the shadow-audit "
+            "mismatch alert, and no producer-side status publisher"
         ),
     )
     parser.add_argument(
@@ -564,6 +584,11 @@ def main() -> int:
     parser.add_argument("--continuous-unit", type=Path)
     parser.add_argument("--status-unit", type=Path)
     parser.add_argument("--status-timer", type=Path)
+    # Relay-only, and refused rather than ignored in the Cathedral posture for
+    # the same reason the Cathedral-only paths are refused with --relay.
+    parser.add_argument("--mismatch-check", type=Path)
+    parser.add_argument("--mismatch-unit", type=Path)
+    parser.add_argument("--mismatch-timer", type=Path)
     parser.add_argument(
         "--sysusers",
         type=Path,
@@ -592,6 +617,14 @@ def main() -> int:
                     f"{flag} is a Cathedral-only path and is refused with --relay"
                 )
         require_no_launch_material()
+    else:
+        for flag, value in (
+            ("--mismatch-check", args.mismatch_check),
+            ("--mismatch-unit", args.mismatch_unit),
+            ("--mismatch-timer", args.mismatch_timer),
+        ):
+            if value is not None:
+                raise SystemExit(f"{flag} is a relay-only path and needs --relay")
     verifier = args.verifier or Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier")
     continuous_unit = args.continuous_unit or profile.continuous_unit_path
     status_unit = args.status_unit or Path(
@@ -599,6 +632,15 @@ def main() -> int:
     )
     status_timer = args.status_timer or Path(
         "/etc/systemd/system/cathedral-sn39-public-status.timer"
+    )
+    mismatch_check = args.mismatch_check or Path(
+        "/usr/local/bin/cathedral-mismatch-check"
+    )
+    mismatch_unit = args.mismatch_unit or Path(
+        "/etc/systemd/system/cathedral-mismatch-alert.service"
+    )
+    mismatch_timer = args.mismatch_timer or Path(
+        "/etc/systemd/system/cathedral-mismatch-alert.timer"
     )
     tmpfiles = args.tmpfiles or profile.tmpfiles_path
     root = args.release.resolve()
@@ -647,6 +689,21 @@ def main() -> int:
             if profile.binds_status_publisher
             else ()
         ),
+        *(
+            (
+                (mismatch_check, root / "deploy/sn39/cathedral-mismatch-check"),
+                (
+                    mismatch_unit,
+                    root / "deploy/sn39/cathedral-mismatch-alert.service",
+                ),
+                (
+                    mismatch_timer,
+                    root / "deploy/sn39/cathedral-mismatch-alert.timer",
+                ),
+            )
+            if profile.binds_mismatch_alert
+            else ()
+        ),
         (args.sysusers, root / "deploy/sn39/cathedral-sn39-validator.sysusers"),
         (tmpfiles, root / profile.tmpfiles_source),
     )
@@ -687,6 +744,10 @@ def main() -> int:
     if profile.binds_status_publisher:
         external_files[str(status_unit)] = digest(status_unit)
         external_files[str(status_timer)] = digest(status_timer)
+    if profile.binds_mismatch_alert:
+        external_files[str(mismatch_check)] = digest(mismatch_check)
+        external_files[str(mismatch_unit)] = digest(mismatch_unit)
+        external_files[str(mismatch_timer)] = digest(mismatch_timer)
     print(
         json.dumps(
             {

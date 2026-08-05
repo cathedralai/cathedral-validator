@@ -250,11 +250,34 @@ for key in registry report index; do
     "/etc/cathedral-validator/provenance/$key-keys.json"
 done
 
+install -D -o root -g root -m 0755 \
+  "$release/deploy/sn39/cathedral-mismatch-check" \
+  /usr/local/bin/cathedral-mismatch-check
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-mismatch-alert.service" \
+  /etc/systemd/system/cathedral-mismatch-alert.service
+install -D -o root -g root -m 0644 \
+  "$release/deploy/sn39/cathedral-mismatch-alert.timer" \
+  /etc/systemd/system/cathedral-mismatch-alert.timer
+
 systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
 systemctl mask --now cathedral-thin-validator.service
 systemctl daemon-reload
+systemctl enable --now cathedral-mismatch-alert.timer
 ```
+
+The alert timer is not part of the launch gate and is safe to enable now: it
+reads the event journal every 10 minutes and writes nothing to chain. It fails
+the `cathedral-mismatch-alert.service` unit — the failed unit **is** the alert,
+there is no notification channel — on a `PROVENANCE_VECTOR_MISMATCH` in the
+last 30 minutes or a shadow audit that has failed for 90 minutes with no pass.
+It does **not** tell you the validator is running, submitting, or reachable: an
+absent or stale journal reads as healthy, so watch the unit's state and the
+validator unit separately.
+[VALIDATOR.md](VALIDATOR.md#shadow-audit-mismatch-alert-systemd) has the rules
+in full, including why `PROVENANCE_VECTOR_STALE_EPOCH` deliberately does not
+alert.
 
 The two files that differ from Cathedral's own install are the ones a third
 party could not otherwise use:
@@ -295,8 +318,15 @@ mv "$manifest_tmp" /etc/cathedral-validator/sn39-release-manifest.json
 verifier binary — along with the producer-side status publisher unit and timer,
 which write the producer's evidence tree as the producer's account. It binds a
 *superset* of the reviewed source: everything the Cathedral manifest binds plus
-the relay unit and its tmpfiles. The environment commitment, the pristine
-checkout proof and the bootstrap-interpreter binding are unchanged.
+the relay unit, its tmpfiles, and the three shadow-audit alert files installed
+above. The environment commitment, the pristine checkout proof and the
+bootstrap-interpreter binding are unchanged.
+
+Binding the alert is the point of installing it first: the mismatch check is a
+relay's only health surface, so the launcher re-verifies its bytes on every
+start exactly as it does the unit's. Delete or edit
+`/usr/local/bin/cathedral-mismatch-check` and the validator refuses to start
+with `SN39 immutable-install check failed:` rather than running unwatched.
 
 `--relay` is refused outright on a host holding SN39 launch material at the
 release-pinned paths, so it cannot be used to give the one host that owes SN39
@@ -361,7 +391,9 @@ If the signed feed is unreachable there is nothing to verify, so there is
 nothing to submit: the validator idles and retries rather than inventing a
 vector. Alert on `PROVENANCE_VECTOR_MISMATCH` in the event stream — it means
 the audit disagreed with a vector that was already accepted for submission;
-the write is not blocked, so the alert is the response path.
+the write is not blocked, so the alert is the response path. The alert ships
+in this repository as `deploy/sn39/cathedral-mismatch-check` and its timer, and
+the relay install above enables it.
 
 Do not alert on `PROVENANCE_VECTOR_STALE_EPOCH`. The publisher signs and
 caches a vector for up to a minute while the evidence index flips to the next
@@ -407,8 +439,8 @@ The quickstart above is the one path to a running preview. These pick up from
 it; none of them restates it.
 
 - [Validator runbook](VALIDATOR.md) — what each gate proves, how to read the
-  event journal, the checklist that must be true before `--broadcast`, and key
-  rotation.
+  event journal, the shadow-audit mismatch alert the install above enables, the
+  checklist that must be true before `--broadcast`, and key rotation.
 - [Review gates](VALIDATOR-ONBOARDING.md) — what a reviewer must prove from one
   cycle before a write.
 - [Provenance contract](docs/PROVENANCE.md) — every pin the shadow audit uses.

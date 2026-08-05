@@ -12,7 +12,9 @@ the supported pinned install — Cathedral-only.
 weaker manifest: it binds a SUPERSET of the reviewed source, the same
 environment commitment, and the same bootstrap binding. What it omits are
 EXTERNAL files a relay host does not install, because an `external_files` entry
-naming an absent file is an unbuildable manifest rather than a stricter one.
+naming an absent file is an unbuildable manifest rather than a stricter one. It
+also binds one thing the Cathedral manifest does not: the shadow-audit mismatch
+alert, which on a relay is the only health surface there is.
 
 The relay profile is only sound because the relay's audit never needed the
 verifier: `config/validator-thin-sn39-relay.toml` omits `controlled_dir` and
@@ -69,7 +71,14 @@ _CATHEDRAL_EXTERNAL = frozenset(
         "tmpfiles",
     }
 )
-_RELAY_EXTERNAL = _CATHEDRAL_EXTERNAL - {"verifier", "status_unit", "status_timer"}
+_MISMATCH_EXTERNAL = frozenset({"mismatch_check", "mismatch_unit", "mismatch_timer"})
+# A relay drops the three Cathedral-only externals and gains the shadow-audit
+# alert. The alert is bound because a relay has no other health surface: an
+# alert script outside the manifest could be edited by the same compromised
+# service account the whole immutable install exists to contain.
+_RELAY_EXTERNAL = (
+    _CATHEDRAL_EXTERNAL - {"verifier", "status_unit", "status_timer"}
+) | _MISMATCH_EXTERNAL
 
 
 def _load(path: pathlib.Path, name: str):
@@ -179,9 +188,26 @@ def install(tmp_path, monkeypatch):
             "deploy/sn39/cathedral-sn39-validator.sysusers",
             "cathedral-sn39-validator.conf",
         ),
+        "mismatch_check": _install(
+            "deploy/sn39/cathedral-mismatch-check", "cathedral-mismatch-check"
+        ),
+        "mismatch_unit": _install(
+            "deploy/sn39/cathedral-mismatch-alert.service",
+            "cathedral-mismatch-alert.service",
+        ),
+        "mismatch_timer": _install(
+            "deploy/sn39/cathedral-mismatch-alert.timer",
+            "cathedral-mismatch-alert.timer",
+        ),
     }
 
-    def build(*, relay: bool, verifier: pathlib.Path | None = None, **overrides):
+    def build(
+        *,
+        relay: bool,
+        verifier: pathlib.Path | None = None,
+        mismatch_check: pathlib.Path | None = None,
+        **overrides,
+    ):
         profile = _builder.install_profile(relay=relay)
         paths = dict(external)
         paths["continuous_unit"] = _install(
@@ -216,7 +242,15 @@ def install(tmp_path, monkeypatch):
             str(paths["tmpfiles"]),
         ]
         if relay:
-            argv.append("--relay")
+            argv += [
+                "--relay",
+                "--mismatch-check",
+                str(paths["mismatch_check"]),
+                "--mismatch-unit",
+                str(paths["mismatch_unit"]),
+                "--mismatch-timer",
+                str(paths["mismatch_timer"]),
+            ]
         else:
             argv += [
                 "--status-unit",
@@ -226,6 +260,10 @@ def install(tmp_path, monkeypatch):
             ]
         if verifier is not None:
             argv += ["--verifier", str(verifier)]
+        # Named explicitly (rather than through `overrides`) so a test can pass
+        # a relay-only path to the Cathedral posture and see it refused.
+        if mismatch_check is not None:
+            argv += ["--mismatch-check", str(mismatch_check)]
         monkeypatch.setattr("sys.argv", ["build_sn39_release_manifest.py", *argv])
         return _builder.main()
 
@@ -266,6 +304,61 @@ def test_the_relay_manifest_binds_the_relay_unit_and_its_tmpfiles(install, capsy
         "deploy/sn39/cathedral-sn39-validator-relay.tmpfiles",
     ):
         assert relative in document["release_files"]
+
+
+def test_the_relay_manifest_binds_the_shadow_audit_mismatch_alert(install, capsys):
+    """A relay's only health surface must be inside the tamper-evidence boundary.
+
+    The failed `cathedral-mismatch-alert.service` unit IS the alert; there is
+    no separate notification channel. An alert script the manifest does not
+    bind could be edited or emptied by the same compromised service account the
+    immutable install exists to contain, and the launcher would still exec.
+    """
+    assert install(relay=True) == 0
+    document = _document(capsys)
+    for key in ("mismatch_check", "mismatch_unit", "mismatch_timer"):
+        assert str(install.paths[key]) in document["external_files"]
+    for relative in (
+        "deploy/sn39/cathedral-mismatch-check",
+        "deploy/sn39/cathedral-mismatch-alert.service",
+        "deploy/sn39/cathedral-mismatch-alert.timer",
+    ):
+        assert relative in document["release_files"]
+
+
+def test_a_relay_manifest_cannot_be_built_without_the_alert_installed(
+    install, tmp_path
+):
+    """Skipping the alert must fail at install time, not go unnoticed at run time."""
+    with pytest.raises(SystemExit, match="required release file is unavailable"):
+        install(relay=True, mismatch_check=tmp_path / "not-installed")
+
+
+def test_the_cathedral_posture_refuses_the_relay_only_alert_paths(install):
+    """Refused rather than ignored, exactly as the Cathedral-only paths are."""
+    with pytest.raises(SystemExit, match="relay-only"):
+        install(relay=False, mismatch_check=pathlib.Path("/nonexistent"))
+
+
+def test_the_readme_relay_install_installs_and_enables_the_alert():
+    """The alert must be IN the procedure README calls the supported install.
+
+    An operator who follows README top to bottom and nothing else — which is
+    what README tells them to do — otherwise finishes with a running validator
+    and no monitoring at all, and nothing tells them anything is missing.
+    """
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Supported systemd install (relay)")
+    end = readme.index("## What it does", start)
+    section = readme[start:end]
+    for line in (
+        '"$release/deploy/sn39/cathedral-mismatch-check"',
+        "/usr/local/bin/cathedral-mismatch-check",
+        '"$release/deploy/sn39/cathedral-mismatch-alert.service"',
+        '"$release/deploy/sn39/cathedral-mismatch-alert.timer"',
+        "systemctl enable --now cathedral-mismatch-alert.timer",
+    ):
+        assert line in section, line
 
 
 def test_the_relay_manifest_binds_a_superset_of_the_reviewed_source(install, capsys):
