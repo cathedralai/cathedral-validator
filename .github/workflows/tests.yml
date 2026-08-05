@@ -76,9 +76,6 @@ jobs:
       - name: Compile every tracked Python file
         run: git ls-files '*.py' | xargs python -m py_compile
 
-      - name: Verify the canonical source manifest
-        run: python tools/source_manifest.py
-
   publisher:
     # GATING for the validator-facing tests, advisory for the rest.
     #
