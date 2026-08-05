@@ -34,10 +34,13 @@ git ls-files '*.py' | xargs python -m py_compile
 
 The integration and release-install tests are files inside `tests/thin`, not
 separate suites; the command above runs them. They only run *for real* with the
-`integration` extra installed — without it, nine modules `importorskip` the
-shared cathedral-distill contract and roughly 40% of the thin suite silently
-does not run while the summary looks unremarkable. A skipped contract is a
-failure, not a pass. Install the extras CI uses, listed under "Local review" in
+`integration` extra installed. Without it, 215 of 830 tests (26%) do not run:
+nine modules `importorskip` the shared cathedral-distill contract and skip
+quietly, and `test_cybergym_prelaunch_e2e.py` imports it at module scope, so the
+run ends in a collection error and a non-zero exit rather than a quiet green.
+Keep that loud import as it is — it is the only thing that makes the shortfall
+visible. A skipped contract is a failure, not a pass. Install the extras CI
+uses, listed under "Local review" in
 [`VALIDATOR-ONBOARDING.md`](VALIDATOR-ONBOARDING.md); the operator install
 itself is README's quickstart and is not restated anywhere.
 
