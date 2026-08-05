@@ -3002,6 +3002,31 @@ def _validated_supply_v3_meta(
     return policy
 
 
+def _dry_run_contract_version(payload: dict[str, Any]) -> str | None:
+    """The allocation contract a submission event should stamp, or None for v2.
+
+    The public reproducer cross-checks the resolved `policy_pin` against this
+    stamp: a v3 pin must produce a v3 result and vice versa, so neither
+    direction of a pin/lane disagreement can reproduce. Nothing emitted the
+    field before, which made a genuine v3 run unreproducible (it fails closed,
+    reading as `contract_version=None` against a v3 pin) — this is the producer
+    side of that contract.
+
+    v2 deliberately stamps nothing: it is the launch wire contract and its
+    absence is what the reproducer maps a v1 pin onto, so adding a value here
+    would invalidate every existing v1 release.
+    """
+    # A plain read of the DECLARED contract, not a re-validation: by the time a
+    # submission event is emitted the mapping path has already accepted this
+    # payload (or raised with a precise message), so re-running the v3 shape
+    # checks here would only add a second place to disagree. Anything that is
+    # not an explicit v3 declaration stamps nothing, which a v3 pin then refuses.
+    metadata = payload.get("policy_metadata")
+    supply = metadata.get("validated_supply") if isinstance(metadata, dict) else None
+    declared = supply.get("contract_version") if isinstance(supply, dict) else None
+    return REQUIRE_POLICY_VALIDATED_SUPPLY_V3 if declared == "v3" else None
+
+
 def _validated_supply_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Detect and validate the signed validated_supply contract (v2 or v3).
 
@@ -6727,6 +6752,9 @@ def _thin_tick_locked(args) -> bool:
         ),
         artifact=str(payload.get("vector_id", ""))[:36] or None,
         authority=submission_authority,
+        # The allocation contract this result was produced under. The public
+        # reproducer cross-checks it against the resolved policy pin.
+        contract_version=_dry_run_contract_version(payload),
         uid_count=len(ordered),
         burn_uid=burn_uid,
         burn_share=burn_share,
