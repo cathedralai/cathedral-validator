@@ -384,3 +384,43 @@ def test_the_evidence_manifest_is_audience_and_epoch_bound():
     assert base != contract.evidence_manifest_digest(
         network="finney", netuid=39, source_epoch=12, entries=rows
     )
+
+
+# --- attestation_receipt optional key (#115 review, finding 1) ------------
+_RECEIPT = {
+    "receipt": {"schema": "cathedral_customer_receipt_v1", "id": "x"},
+    "result_b64": "eA==",
+}
+
+
+def test_attestation_receipt_is_carried_and_bound_to_the_digest():
+    doc = _document(nonce="cgnonce-x", dispatched_units=10.0, attestation_receipt=_RECEIPT)
+    assert contract.semantic_view(doc)["attestation_receipt"] == _RECEIPT
+    norm = contract.normalize_semantic_document(doc)
+    assert norm["attestation_receipt"] == {
+        "receipt": {"schema": "cathedral_customer_receipt_v1", "id": "x"},
+        "result_b64": "eA==",
+    }
+    # folding it in changes the digest, so a signer binds it and it cannot be added
+    # or swapped after signing.
+    without = _document(nonce="cgnonce-x", dispatched_units=10.0)
+    assert contract.report_digest(doc) != contract.report_digest(without)
+
+
+def test_attestation_receipt_digest_is_key_order_independent():
+    a = _document(attestation_receipt={"receipt": {"a": 1, "b": 2}, "result_b64": "eA=="})
+    b = _document(attestation_receipt={"result_b64": "eA==", "receipt": {"b": 2, "a": 1}})
+    assert contract.report_digest(a) == contract.report_digest(b)
+
+
+@pytest.mark.parametrize("bad", [
+    "notadict",
+    {"result_b64": "eA=="},
+    {"receipt": {}, "result_b64": "eA=="},
+    {"receipt": {"a": 1}},
+    {"receipt": {"a": 1}, "result_b64": "!!!not-base64"},
+    {"receipt": {"a": 1}, "result_b64": ""},
+])
+def test_invalid_attestation_receipt_is_rejected_by_normalize(bad):
+    with pytest.raises(ValueError):
+        contract.normalize_semantic_document(_document(attestation_receipt=bad))

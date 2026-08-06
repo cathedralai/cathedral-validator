@@ -99,6 +99,7 @@ tables.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -443,6 +444,26 @@ def validate_report(
         ):
             raise CybergymIngestError("invalid_dispatched_units")
         document["dispatched_units"] = dispatched
+    if "attestation_receipt" in payload:
+        # The spot-check sample the producer attached (cathedral-distill #115). Carried
+        # into `document` so normalize + the digest bind it (a producer that signed it
+        # cannot have it silently dropped here), and so the posture ratchet in
+        # store_report sees a report that carries it. Shape validated here for a precise
+        # ingest reason; normalize re-validates + canonicalizes it identically.
+        ar = payload.get("attestation_receipt")
+        if not isinstance(ar, dict):
+            raise CybergymIngestError("invalid_attestation_receipt")
+        receipt = ar.get("receipt")
+        result_b64 = ar.get("result_b64")
+        if not isinstance(receipt, dict) or not receipt:
+            raise CybergymIngestError("invalid_attestation_receipt")
+        if not isinstance(result_b64, str) or not result_b64 or len(result_b64) > 65536:
+            raise CybergymIngestError("invalid_attestation_receipt")
+        try:
+            base64.b64decode(result_b64, validate=True)
+        except (ValueError, TypeError):
+            raise CybergymIngestError("invalid_attestation_receipt")
+        document["attestation_receipt"] = ar
     semantic = normalize_semantic_document(document)
     digest = report_digest(semantic)
     report = dict(semantic)
@@ -519,7 +540,12 @@ def store_report(
         hashlib.sha256(body_text.encode("utf-8")).hexdigest(), str(body_digest)
     ):
         raise CybergymIngestError("authenticated_body_digest_mismatch")
-    report_json = canonical_report_bytes(semantic_view(report)).decode("utf-8")
+    report_semantic = semantic_view(report)
+    report_json = canonical_report_bytes(report_semantic).decode("utf-8")
+    # Attestation-posture ratchet input (wallscaler #115 review, finding 1): whether
+    # THIS report carries the spot-check receipt. The enforcement is under the audience
+    # fence lock in _write so the check-and-adopt is race-free.
+    carries_receipt = "attestation_receipt" in report_semantic
 
     def _write(conn):
         if store.backend == "postgres":
@@ -583,6 +609,23 @@ def store_report(
                         )
                 return None  # sentinel: byte-identical retry, already stored
 
+        # Attestation-posture ratchet (wallscaler #115 review, finding 1). Absence must
+        # not be a free opt-out: the moment an audience has EVER ingested a report
+        # carrying attestation_receipt, a later report for that audience WITHOUT one is
+        # refused (the CyberGym lane then burns for the missing epoch rather than paying
+        # unattested). First-write-wins on the flag; it never clears. The field stays
+        # genuinely optional for a producer that has never used it — nothing breaks on
+        # rollout — while silent removal becomes impossible once adopted, so a
+        # compromised producer cannot drop the receipt to dodge the spot-check. Runs
+        # under the same audience fence as the epoch check above (Postgres advisory lock
+        # / SQLite single-writer), so the read-then-write cannot race.
+        adopted = conn.execute(
+            "SELECT 1 FROM cybergym_attestation_posture WHERE network=? AND netuid=?",
+            (network, netuid),
+        ).fetchone() is not None
+        if adopted and not carries_receipt:
+            raise CybergymIngestError("attestation_receipt_required")
+
         conn.execute(
             "INSERT OR REPLACE INTO cybergym_score_reports"
             "(id, network, netuid, source_epoch, producer_hotkey, complete, "
@@ -628,6 +671,16 @@ def store_report(
                     report["generated_at"],
                     received_at,
                 ),
+            )
+        if carries_receipt and not adopted:
+            # First report for this audience to carry the receipt: latch the posture on
+            # (first-write-wins; the ratchet above refuses any later omission). A plain
+            # INSERT guarded by `not adopted` — the fence lock makes it race-free, so no
+            # dialect-specific upsert is needed.
+            conn.execute(
+                "INSERT INTO cybergym_attestation_posture"
+                "(network, netuid, adopted_at_iso) VALUES (?, ?, ?)",
+                (network, netuid, received_at),
             )
         return True  # newly stored
 
@@ -689,6 +742,9 @@ _REASON_HTTP_STATUS = {
     "epoch_too_old": 409,
     "epoch_conflict": 409,
     "producer_hotkey_mismatch": 403,
+    # An audience that adopted the attestation spot-check dropping it later: a posture
+    # regression, refused like the other fence conflicts (#115 review, finding 1).
+    "attestation_receipt_required": 409,
 }
 
 

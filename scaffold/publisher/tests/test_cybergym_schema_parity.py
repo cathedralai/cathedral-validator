@@ -18,6 +18,7 @@ from scaffold.publisher.store import _MIGRATIONS, _MIGRATIONS_PG, Store, _transl
 
 MIGRATION_ID = "0048_cybergym_scores"
 AUTHENTICATED_BODY_MIGRATION_ID = "0049_cybergym_authenticated_body"
+ATTESTATION_POSTURE_MIGRATION_ID = "0050_cybergym_attestation_posture"
 TABLES = ("cybergym_score_reports", "cybergym_scores")
 
 
@@ -47,8 +48,8 @@ def _columns(sql: str, table: str) -> list[str]:
 
 
 def test_migration_is_the_last_one_in_both_dialects():
-    assert _MIGRATIONS[-1][0] == AUTHENTICATED_BODY_MIGRATION_ID
-    assert _MIGRATIONS_PG[-1][0] == AUTHENTICATED_BODY_MIGRATION_ID
+    assert _MIGRATIONS[-1][0] == ATTESTATION_POSTURE_MIGRATION_ID
+    assert _MIGRATIONS_PG[-1][0] == ATTESTATION_POSTURE_MIGRATION_ID
 
 
 def test_authenticated_body_upgrade_is_present_in_both_dialects():
@@ -56,6 +57,18 @@ def test_authenticated_body_upgrade_is_present_in_both_dialects():
     postgres = _ddl_for(_MIGRATIONS_PG, AUTHENTICATED_BODY_MIGRATION_ID)
     for sql in (sqlite, postgres):
         assert "authenticated_body TEXT NOT NULL DEFAULT ''" in sql
+
+
+def test_attestation_posture_table_is_present_and_identical_in_both_dialects():
+    sqlite = _ddl_for(_MIGRATIONS, ATTESTATION_POSTURE_MIGRATION_ID)
+    postgres = _ddl_for(_MIGRATIONS_PG, ATTESTATION_POSTURE_MIGRATION_ID)
+    # Portable DDL (TEXT/INTEGER/composite PK), so the two dialect strings are identical.
+    assert sqlite.strip() == postgres.strip()
+    assert _columns(sqlite, "cybergym_attestation_posture") == [
+        "network TEXT NOT NULL",
+        "netuid INTEGER NOT NULL",
+        "adopted_at_iso TEXT NOT NULL",
+    ]
 
 
 @pytest.mark.parametrize("table", TABLES)

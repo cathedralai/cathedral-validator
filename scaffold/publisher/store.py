@@ -803,6 +803,20 @@ _MIGRATIONS: list[tuple[str, str]] = [
         ALTER TABLE cybergym_score_reports
             ADD COLUMN authenticated_body TEXT NOT NULL DEFAULT '';
     """),
+    # 0050: attestation-posture ratchet. First time an audience ingests a report
+    # carrying `attestation_receipt`, a row is written here (first-write-wins); from
+    # then on a report for that audience WITHOUT the receipt is refused, so a
+    # compromised producer cannot silently drop the spot-check (cathedral-distill
+    # #115 review, finding 1). Audience-scoped, monotonic, and never cleared —
+    # exactly the epoch fence's shape.
+    ("0050_cybergym_attestation_posture", """
+        CREATE TABLE IF NOT EXISTS cybergym_attestation_posture (
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            adopted_at_iso TEXT NOT NULL,
+            PRIMARY KEY (network, netuid)
+        );
+    """),
 ]
 
 # Postgres DDL — the same logical schema, portable. REAL->DOUBLE PRECISION,
@@ -1485,6 +1499,14 @@ _MIGRATIONS_PG: list[tuple[str, str]] = [
     ("0049_cybergym_authenticated_body", """
         ALTER TABLE cybergym_score_reports
             ADD COLUMN IF NOT EXISTS authenticated_body TEXT NOT NULL DEFAULT '';
+    """),
+    ("0050_cybergym_attestation_posture", """
+        CREATE TABLE IF NOT EXISTS cybergym_attestation_posture (
+            network TEXT NOT NULL,
+            netuid INTEGER NOT NULL,
+            adopted_at_iso TEXT NOT NULL,
+            PRIMARY KEY (network, netuid)
+        );
     """),
 ]
 

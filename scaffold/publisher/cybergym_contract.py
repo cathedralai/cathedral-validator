@@ -30,6 +30,7 @@ burns.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -63,9 +64,18 @@ SEMANTIC_KEYS = (
 #                      denominator (`epoch_score_base100(solved, dispatched)`).
 # Absent them, the tournament composer forfeits the lane (see the adapter) rather
 # than inventing a ranking, so the lane simply burns until the producer emits them.
+#
+#   attestation_receipt — {receipt, result_b64}: one representative Intel-TDX receipt
+#                      the chain nonce named (cathedral-distill #115), for the validator
+#                      to independently DCAP-verify. Carried VERBATIM so the receipt bytes
+#                      Cathedral signed survive the round-trip; folded into the digest so a
+#                      producer cannot add or swap it after signing. Its presence is also
+#                      ratcheted per audience in cybergym_ingest (once seen, never optional
+#                      again), so a compromised producer cannot silently drop it.
 OPTIONAL_SEMANTIC_KEYS = (
     "nonce",
     "dispatched_units",
+    "attestation_receipt",
 )
 _ALL_SEMANTIC_KEYS = SEMANTIC_KEYS + OPTIONAL_SEMANTIC_KEYS
 
@@ -188,6 +198,26 @@ def normalize_semantic_document(document: dict[str, Any]) -> dict[str, Any]:
         if not math.isfinite(dispatched) or dispatched < 0.0:
             raise ValueError("invalid dispatched_units")
         normalized["dispatched_units"] = dispatched
+    if "attestation_receipt" in document:
+        # Mirror cathedral-distill cybergym_score_report.normalize_report EXACTLY: only
+        # the two-key {receipt, result_b64} shell is validated; the receipt object is
+        # carried verbatim (the validator re-derives the exact bytes Cathedral signed) and
+        # canonical_report_bytes sort_keys-canonicalizes it recursively, so both sides
+        # derive one identical digest from one identical object.
+        ar = document["attestation_receipt"]
+        if not isinstance(ar, Mapping):
+            raise ValueError("invalid attestation_receipt")
+        receipt = ar.get("receipt")
+        result_b64 = ar.get("result_b64")
+        if not isinstance(receipt, Mapping) or not receipt:
+            raise ValueError("invalid attestation_receipt receipt")
+        if not isinstance(result_b64, str) or not result_b64 or len(result_b64) > 65536:
+            raise ValueError("invalid attestation_receipt result_b64")
+        try:
+            base64.b64decode(result_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid attestation_receipt result_b64") from exc
+        normalized["attestation_receipt"] = {"receipt": dict(receipt), "result_b64": result_b64}
     return normalized
 
 

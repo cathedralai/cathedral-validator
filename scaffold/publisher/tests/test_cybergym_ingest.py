@@ -726,3 +726,59 @@ def test_validate_report_rejects_invalid_dispatched_units():
         with pytest.raises(ingest.CybergymIngestError) as exc:
             ingest.validate_report(doc, audience=(NETWORK, NETUID), producer=PRODUCER)
         assert exc.value.reason == "invalid_dispatched_units"
+
+
+# --- attestation-posture ratchet (#115 review, finding 1) ----------------
+_RECEIPT_SAMPLE = {
+    "receipt": {"schema": "cathedral_customer_receipt_v1", "id": "x"},
+    "result_b64": "eA==",  # base64("x")
+}
+
+
+def test_a_report_carrying_the_attestation_receipt_is_accepted(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    r = _post(_client(store), {**_doc(source_epoch=1), "attestation_receipt": _RECEIPT_SAMPLE})
+    assert r.status_code == 200, r.text
+    # the receipt round-trips into the stored canonical body (bound to the digest)
+    stored = store.query("SELECT report_json FROM cybergym_score_reports")[0]["report_json"]
+    assert '"attestation_receipt"' in stored
+
+
+def test_attestation_posture_ratchets_once_an_audience_adopts_it(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    client = _client(store)
+    # epoch 1 carries the spot-check receipt -> accepted, and latches the posture on.
+    assert _post(client, {**_doc(source_epoch=1), "attestation_receipt": _RECEIPT_SAMPLE}).status_code == 200
+    # epoch 2 drops it -> refused: absence is no longer a free opt-out.
+    r2 = _post(client, _doc(source_epoch=2))
+    assert r2.status_code == 409
+    assert r2.json()["detail"] == "attestation_receipt_required"
+    # epoch 2 that keeps carrying it -> accepted.
+    assert _post(client, {**_doc(source_epoch=2), "attestation_receipt": _RECEIPT_SAMPLE}).status_code == 200
+
+
+def test_attestation_receipt_stays_optional_until_first_adopted(tmp_path, monkeypatch):
+    # An audience that has never sent a receipt ingests exactly as before, so the field
+    # is a safe non-breaking rollout — fail-open is allowed ONLY before first adoption.
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    client = _client(store)
+    assert _post(client, _doc(source_epoch=1)).status_code == 200
+    assert _post(client, _doc(source_epoch=2)).status_code == 200
+
+
+@pytest.mark.parametrize("bad", [
+    "notadict",
+    {"result_b64": "eA=="},                                # missing receipt
+    {"receipt": {}, "result_b64": "eA=="},                 # empty receipt
+    {"receipt": {"a": 1}},                                 # missing result_b64
+    {"receipt": {"a": 1}, "result_b64": "!!!not-base64"},  # invalid base64
+    {"receipt": {"a": 1}, "result_b64": ""},               # empty b64
+])
+def test_invalid_attestation_receipt_is_refused(bad):
+    doc = {**_doc(), "attestation_receipt": bad}
+    with pytest.raises(ingest.CybergymIngestError) as exc:
+        ingest.validate_report(doc, audience=(NETWORK, NETUID), producer=PRODUCER)
+    assert exc.value.reason == "invalid_attestation_receipt"
