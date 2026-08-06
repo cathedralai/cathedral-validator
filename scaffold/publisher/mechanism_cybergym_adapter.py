@@ -627,13 +627,19 @@ def cybergym_score_snapshot(
     # Intel-TDX receipt — a real Cathedral signature over a receipt whose committed
     # (nonce, miner) is the one the CHAIN named this epoch. #103 requires the receipt's
     # PRESENCE; this verifies it. Advisory by default (records the outcome in `info`);
-    # under CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT, a receipt that is absent or
-    # does not verify burns the lane rather than paying on an unproven claim. Gating here
+    # under CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT, a receipt that is absent,
+    # unbindable (present but nonce-less), or invalid burns the lane rather than paying
+    # on an unproven claim. Gating here
     # (before the branch) covers the tournament and legacy paths alike.
     att_receipt = newest_doc.get("attestation_receipt")
     att_nonce = newest_doc.get("nonce")
-    if att_nonce is None:
-        att_ok, att_reason = True, "no_nonce"  # pre-#114 report: spot-check does not apply
+    if att_nonce is None and att_receipt is None:
+        att_ok, att_reason = True, "no_nonce"  # genuinely pre-#114: nothing to spot-check
+    elif att_nonce is None:
+        # Receipt present but no nonce to bind it to. A latched audience (#103 ratchet)
+        # ALWAYS carries a receipt, so dropping the nonce must not dodge the spot-check;
+        # fail closed rather than fall through to the pre-#114 "no_nonce" pass.
+        att_ok, att_reason = False, "nonce_absent"
     elif att_receipt is None:
         att_ok, att_reason = False, "absent"  # #114 report that carries no receipt
     else:

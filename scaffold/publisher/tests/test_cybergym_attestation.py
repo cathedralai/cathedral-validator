@@ -177,3 +177,26 @@ def test_require_flag_reads_the_env(monkeypatch):
     assert att.require_attestation() is True
     monkeypatch.setenv(att.REQUIRE_ATTESTATION_ENV, "off")
     assert att.require_attestation() is False
+
+
+def test_a_key_whose_window_excludes_issued_at_is_not_trusted(signer, tmp_path, monkeypatch):
+    """Anchor the validity window (the mutation survivor from #105 review: deleting
+    `valid_from <= issued <= valid_until` leaves `status` pinned but the window open). An
+    ACTIVE key is still refused when the receipt's issued_at falls outside its window —
+    expired or not-yet-valid — so an expired-but-active key cannot sail through."""
+    ar = _build(signer)  # receipt issued_at = 2026-08-05T12:00:00Z
+    raw = signer.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+    def _point_at(valid_from: str, valid_until: str) -> None:
+        path = tmp_path / ("win-" + valid_from + "-" + valid_until + ".json").replace(":", "")
+        path.write_text(json.dumps({"keys": {KEY_ID: {
+            "algorithm": "ed25519", "status": "active",
+            "public_key_base64": base64.b64encode(raw).decode(),
+            "valid_from": valid_from, "valid_until": valid_until}}}))
+        monkeypatch.setenv(att.TRUSTED_KEYS_ENV, str(path))
+
+    _point_at("2026-07-01T00:00:00.000000Z", "2026-08-01T00:00:00.000000Z")  # expired
+    assert _verify(ar) == (False, "bad_signature")
+    _point_at("2026-09-01T00:00:00.000000Z", "2027-01-01T00:00:00.000000Z")  # not yet valid
+    assert _verify(ar) == (False, "bad_signature")

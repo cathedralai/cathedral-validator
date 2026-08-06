@@ -12,12 +12,15 @@ mechanism forfeits its share (which the composition layer burns).
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scaffold.publisher import (
     cybergym_attestation,
@@ -33,6 +36,7 @@ SECRET = "adapter-test-hmac-secret"
 PRODUCER = "5Producer"
 UNITS = "level_weighted_verified_solves"
 NOW = datetime(2026, 7, 29, 12, 0, 0, tzinfo=timezone.utc)
+ATT_KEY_ID = "cathedral-customer-receipt-2026-07-31-01"  # trusted-keys id for the DCAP tests
 
 
 def _iso(dt: datetime) -> str:
@@ -52,6 +56,7 @@ def _document(
     complete: bool = True, network: str = NETWORK, netuid: int = NETUID,
     producer: str = PRODUCER, nonce: str | None = None,
     dispatched_units: float | None = None,
+    attestation_receipt: dict | None = None,
 ) -> dict:
     raw = {
         "producer_hotkey": producer,
@@ -68,6 +73,8 @@ def _document(
         raw["nonce"] = nonce
     if dispatched_units is not None:
         raw["dispatched_units"] = dispatched_units
+    if attestation_receipt is not None:
+        raw["attestation_receipt"] = attestation_receipt
     return contract.semantic_view(raw)
 
 
@@ -90,6 +97,7 @@ def _report(
     close_epoch: bool = True,
     nonce: str | None = None,
     dispatched_units: float | None = None,
+    attestation_receipt: dict | None = None,
 ) -> str:
     """Persist one report the way the authenticated ingest route would.
 
@@ -102,6 +110,7 @@ def _report(
         epoch=epoch, scores=scores, generated_at=generated,
         complete=bool(complete), network=network, netuid=netuid,
         nonce=nonce, dispatched_units=dispatched_units,
+        attestation_receipt=attestation_receipt,
     )
     body_text = body if body is not None else contract.canonical_report_bytes(
         document
@@ -837,12 +846,91 @@ def test_require_attestation_burns_a_report_carrying_no_receipt(tmp_path, monkey
 
 
 def test_a_report_with_no_nonce_skips_the_spot_check_even_when_required(tmp_path, monkeypatch):
-    """A pre-#114 report (no nonce) predates the spot-check; enforcing must not burn it."""
+    """A genuinely pre-#114 report (no nonce AND no receipt) predates the spot-check, so
+    enforcing must not burn it. Contrast the receipt-present case below, which must burn."""
     _env(monkeypatch)
     monkeypatch.setenv(cybergym_attestation.REQUIRE_ATTESTATION_ENV, "1")
     store = _store(tmp_path)
-    _report(store, epoch=1, scores={"5Alice": 8.0})  # no nonce -> legacy path
+    _report(store, epoch=1, scores={"5Alice": 8.0})  # no nonce, no receipt -> legacy path
     _uid(store, "5Alice", 10)
     vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
     assert info["attestation"] == "no_nonce"
     assert vec == {10: 8.0}
+
+
+def test_require_attestation_burns_a_receipt_report_that_drops_the_nonce(tmp_path, monkeypatch):
+    """The bypass wallscaler reproduced (#105 review): the #103 ratchet latches on receipt
+    PRESENCE, so a compromised producer that keeps the receipt but drops the *nonce* used to
+    reach `no_nonce` and skip verification entirely — paid in full even under the require
+    flag. A latched audience always carries a receipt, so a nonce-less report must fail
+    closed. (The receipt here could never verify; nonce-absence burns before it is tried.)"""
+    _env(monkeypatch)
+    monkeypatch.setenv(cybergym_attestation.REQUIRE_ATTESTATION_ENV, "1")
+    store = _store(tmp_path)
+    junk = {"receipt": {"schema": "cathedral_customer_receipt_v1", "cpu_tee": "amd_sev"},
+            "result_b64": "eA=="}
+    _report(store, epoch=1, scores={"5Alice": 8.0}, attestation_receipt=junk)  # receipt, NO nonce
+    _uid(store, "5Alice", 10)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert vec == {}
+    assert info["reason"] == "attestation_nonce_absent"
+
+
+def _trusted_signer(tmp_path, monkeypatch) -> Ed25519PrivateKey:
+    """Mint an Ed25519 'Cathedral' key and point the module at a trust file for it."""
+    sk = Ed25519PrivateKey.generate()
+    raw = sk.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    path = tmp_path / "trusted.json"
+    path.write_text(json.dumps({"keys": {ATT_KEY_ID: {
+        "algorithm": "ed25519", "status": "active",
+        "public_key_base64": base64.b64encode(raw).decode(),
+        "valid_from": "2026-07-31T00:00:00.000000Z",
+        "valid_until": "2027-08-01T00:00:00.000000Z"}}}))
+    monkeypatch.setenv(cybergym_attestation.TRUSTED_KEYS_ENV, str(path))
+    return sk
+
+
+def _valid_receipt(sk: Ed25519PrivateKey, *, miner: str, nonce: str) -> dict:
+    """A fully consistent {receipt, result_b64} committing to (miner, nonce)."""
+    envelope = {
+        "schema": "cathedral_cybergym_tdx_enclave_commitment_v1",
+        "commitment": {"miner_hotkey": miner, "nonce": nonce,
+                       "task_id": "arvo:1", "poc_sha256": "sha256:" + "a" * 64},
+        "enclave_pubkey_b64": "", "signature_b64": ""}
+    result_bytes = json.dumps(envelope).encode()
+    receipt = {
+        "schema": "cathedral_customer_receipt_v1", "cpu_tee": "intel_tdx",
+        "intel_verified": True, "execution_binding_verified": True,
+        "signing_key_id": ATT_KEY_ID, "issued_at": "2026-08-05T12:00:00.000000Z",
+        "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "workload_sha256": "w" * 8}
+    unsigned = {k: v for k, v in receipt.items() if k != "signature"}
+    signed = json.dumps(unsigned, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=True, allow_nan=False).encode("ascii")
+    receipt["signature"] = {"algorithm": "ed25519",
+                            "value_base64": base64.b64encode(sk.sign(signed)).decode()}
+    return {"receipt": receipt, "result_b64": base64.b64encode(result_bytes).decode()}
+
+
+def test_require_attestation_pays_on_a_valid_receipt(tmp_path, monkeypatch):
+    """Enforce ON + a genuine receipt for the chain-named miner -> the lane PAYS and records
+    attestation:ok. The only test that drives the gate through a PASS, so it guards the
+    scored/source_epoch/nonce plumbing into the verifier: a regression there would mis-name
+    the miner and burn every honest lane while the rest of the suite stayed green."""
+    _env(monkeypatch)
+    monkeypatch.setenv(cybergym_attestation.REQUIRE_ATTESTATION_ENV, "1")
+    sk = _trusted_signer(tmp_path, monkeypatch)
+    store = _store(tmp_path)
+    nonce, epoch = "cgnonce-sha256:" + "ab" * 32, 1
+    scores = {"5Alice": 8.0, "5Bob": 4.0}
+    named = cybergym_attestation.chain_named_miner(
+        {h for h, v in scores.items() if v > 0.0}, nonce=nonce, source_epoch=epoch)
+    receipt = _valid_receipt(sk, miner=named, nonce=nonce)
+    _report(store, epoch=epoch, scores=scores, nonce=nonce, attestation_receipt=receipt)
+    _uid(store, "5Alice", 10)
+    _uid(store, "5Bob", 20)
+    vec, meta, info = adapter.cybergym_score_snapshot(store, epoch=epoch, now=NOW)
+    assert info["attestation"] == "ok"
+    assert vec == {10: 8.0, 20: 4.0}          # legacy proportional pass-through, paid
+    assert meta.sig_ok is True
