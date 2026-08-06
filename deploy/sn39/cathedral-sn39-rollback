@@ -1,0 +1,252 @@
+#!/bin/bash
+# Move the SN39 validator back to a version that was already staged on this
+# host, by repointing the systemd drop-in — and nothing else.
+#
+# WHY THIS EXISTS
+#
+# Upgrades here are side-by-side: each version is installed under its own
+# /opt/<prefix><version> directory with its own venv, and the running version is
+# whichever one the unit's drop-in names. That makes "go back" a one-line edit
+# in principle, but in practice it was a hand-run sequence of sed, daemon-reload
+# and restart, performed under exactly the time pressure that makes hand-run
+# sequences go wrong. This script is that sequence, with the refusals that the
+# hand-run version relied on the operator remembering.
+#
+# WHAT IT WILL NEVER DO
+#
+# It repoints CODE. It does not touch validator state, and there is no flag that
+# makes it. `thin-state.json` carries the submission fences and the anti-rollback
+# high-water marks, and the journal is the evidence trail — restoring either to
+# an earlier point is not a rollback, it is asking the validator to re-use a
+# fence it has already spent. Roll the code back as far as you like; the state
+# only ever moves forward.
+#
+# It also never installs, fetches or builds anything. A version it cannot see
+# already staged, with a usable venv, is a version it refuses to select — so a
+# rollback cannot be the thing that first introduces a tree to the host.
+#
+# USAGE
+#
+#   cathedral-sn39-rollback list            # staged versions, marking the current one
+#   cathedral-sn39-rollback current         # print the running version
+#   cathedral-sn39-rollback to <version>    # repoint to a named staged version
+#   cathedral-sn39-rollback previous        # repoint to the version in use before
+#                                           # the last change this script made
+#
+# Add --dry-run to any repointing form to print the plan and change nothing.
+#
+# Paths and the service manager are overridable so this can be exercised in a
+# test harness, and so a host whose unit is named differently (the relay unit
+# rather than the passive one, say) does not need the script edited:
+#
+#   CATHEDRAL_RELEASE_ROOT     default /opt
+#   CATHEDRAL_STAGING_PREFIX   default cathedral-validator-staging-
+#   CATHEDRAL_DROPIN           default the passive unit's 20-quickstart.conf
+#   CATHEDRAL_SYSTEMCTL        default systemctl
+#   CATHEDRAL_UNIT             default derived from the drop-in's own path
+set -u
+# Version directories are compared and sorted as strings; the ordering must not
+# depend on the host's locale.
+export LC_ALL=C
+
+ROOT="${CATHEDRAL_RELEASE_ROOT:-/opt}"
+PREFIX="${CATHEDRAL_STAGING_PREFIX:-cathedral-validator-staging-}"
+DROPIN="${CATHEDRAL_DROPIN:-/etc/systemd/system/cathedral-validator-passive.service.d/20-quickstart.conf}"
+SYSTEMCTL="${CATHEDRAL_SYSTEMCTL:-systemctl}"
+# One line per change this script applies: <iso8601>\t<from>\t<to>. `previous`
+# reads the last line's <from>. It lives beside the drop-in because it describes
+# the drop-in, and because a host that loses the drop-in has lost the history
+# the file was describing anyway.
+HISTORY="$DROPIN.rollback-history"
+
+# A drop-in lives at /etc/systemd/system/<unit>.d/<something>.conf, so the unit
+# it belongs to is already stated by its path. Deriving it removes the one
+# setting an operator could get wrong in a way that repoints one unit and
+# restarts another.
+derive_unit() {
+  local dir
+  dir="$(dirname -- "$DROPIN")"
+  dir="${dir##*/}"
+  case "$dir" in
+    *.d) printf '%s\n' "${dir%.d}" ;;
+    *) printf '%s\n' '' ;;
+  esac
+}
+UNIT="${CATHEDRAL_UNIT:-$(derive_unit)}"
+
+die() {
+  echo "REFUSED: $*" >&2
+  exit 1
+}
+
+# A version names a directory this script will select and a systemd unit will
+# execve out of. Restricting it to the characters a git sha or a release tag
+# actually uses is what stops an argument from being path traversal or shell
+# metacharacters that reach `sed`.
+validate_version() {
+  case "$1" in
+    '') die "empty version" ;;
+    *[!A-Za-z0-9._-]*) die "version '$1' has characters outside [A-Za-z0-9._-]" ;;
+    .* | *..*) die "version '$1' is not a plain directory name" ;;
+  esac
+}
+
+require_dropin() {
+  [ -e "$DROPIN" ] || die "no drop-in at $DROPIN (set CATHEDRAL_DROPIN)"
+  [ -f "$DROPIN" ] || die "$DROPIN is not a regular file"
+  [ -r "$DROPIN" ] || die "$DROPIN is not readable"
+}
+
+# The running version is whatever the drop-in points at. Reading it back from
+# the file the service manager actually consults — rather than from a note this
+# script wrote earlier — is what keeps it correct after a hand edit.
+current_version() {
+  named_versions | head -1
+}
+
+# Every distinct version this drop-in names, deduplicated. A correct drop-in
+# names exactly one: the tree it runs from and the interpreter it execve's are
+# the same install. A drop-in naming two is the hand-edit that has already cost
+# this project once — an ExecStart repointed to a new tree while WorkingDirectory
+# still named the old one, which left the profile's relative provenance key paths
+# resolving against the wrong install and silently degraded the shadow audit. It
+# is not something to rewrite blind, so it is something to refuse.
+named_versions() {
+  sed -n "s|.*${PREFIX}\([A-Za-z0-9._-]*\).*|\1|p" "$DROPIN" | awk '!seen[$0]++'
+}
+
+staged_versions() {
+  local d name
+  for d in "$ROOT/$PREFIX"*; do
+    [ -d "$d" ] || continue
+    name="${d##*/}"
+    printf '%s\n' "${name#"$PREFIX"}"
+  done | sort
+}
+
+# Staged is not the same as usable: a half-finished install leaves the directory
+# behind. Selecting one of those swaps a working validator for a unit that
+# cannot execve, so the interpreter has to be there before the version is
+# eligible.
+require_usable() {
+  local version="$1" dir="$ROOT/$PREFIX$1"
+  [ -d "$dir" ] || die "version '$version' is not staged at $dir"
+  [ -x "$dir/.venv/bin/python" ] || die "version '$version' has no usable venv at $dir/.venv/bin/python"
+}
+
+repoint() {
+  local target="$1" dry_run="$2" current backup stamp
+  validate_version "$target"
+  require_dropin
+  require_usable "$target"
+
+  current="$(current_version)"
+  [ -n "$current" ] || die "$DROPIN does not name a $PREFIX* version; refusing to guess"
+  [ -n "$UNIT" ] || die "cannot derive the unit from $DROPIN; set CATHEDRAL_UNIT"
+  if [ "$(named_versions | wc -l)" -ne 1 ]; then
+    die "$DROPIN names more than one version ($(named_versions | tr '\n' ' ')); repair it by hand before rolling back"
+  fi
+  [ "$current" != "$target" ] || die "already running '$target'"
+
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup="$DROPIN.pre-$target-$stamp"
+
+  if [ "$dry_run" = yes ]; then
+    echo "would repoint $current -> $target"
+    echo "  drop-in : $DROPIN"
+    echo "  backup  : $backup"
+    echo "  restart : $SYSTEMCTL daemon-reload && $SYSTEMCTL restart <unit>"
+    return 0
+  fi
+
+  cp -p -- "$DROPIN" "$backup" || die "could not back up $DROPIN to $backup"
+  # Rewrite only the version token, in place, so every other line the operator
+  # or the installer put in this drop-in survives untouched.
+  if ! sed -i "s|${PREFIX}${current}|${PREFIX}${target}|g" "$DROPIN"; then
+    cp -p -- "$backup" "$DROPIN"
+    die "could not rewrite $DROPIN; restored from $backup"
+  fi
+
+  # Verify the edit did what it claimed before anything is restarted. The test is
+  # that the drop-in now names the target and NOTHING ELSE: a file still carrying
+  # a second version would start the unit against a mixed install, which is the
+  # failure this script exists to make impossible rather than merely unlikely.
+  if [ "$(named_versions)" != "$target" ]; then
+    cp -p -- "$backup" "$DROPIN"
+    die "post-edit check failed: $DROPIN names '$(named_versions | tr '\n' ' ')' rather than '$target' alone; restored from $backup"
+  fi
+
+  printf '%s\t%s\t%s\n' "$stamp" "$current" "$target" >>"$HISTORY"
+
+  if ! "$SYSTEMCTL" daemon-reload; then
+    echo "WARNING: daemon-reload failed; drop-in is repointed but not yet loaded" >&2
+    exit 1
+  fi
+  if ! "$SYSTEMCTL" restart "$UNIT"; then
+    echo "WARNING: restart failed; drop-in names '$target' — check the unit" >&2
+    exit 1
+  fi
+
+  echo "repointed $current -> $target"
+  echo "backup: $backup"
+  echo "verify: the next completed tick should appear within one tick interval;"
+  echo "        deploy/sn39/cathedral-mismatch-check is the unattended check."
+}
+
+previous_version() {
+  [ -s "$HISTORY" ] || die "no rollback history at $HISTORY; name a version explicitly"
+  local from
+  from="$(tail -n 1 -- "$HISTORY" | cut -f2)"
+  [ -n "$from" ] || die "last history entry has no previous version"
+  printf '%s\n' "$from"
+}
+
+DRY_RUN=no
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=yes ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+case "${1:-}" in
+  list)
+    require_dropin
+    running="$(current_version)"
+    found=no
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      found=yes
+      if [ "$v" = "$running" ]; then
+        echo "* $v (running)"
+      else
+        echo "  $v"
+      fi
+    done <<EOF
+$(staged_versions)
+EOF
+    [ "$found" = yes ] || echo "no staged versions under $ROOT/$PREFIX*"
+    ;;
+  current)
+    require_dropin
+    running="$(current_version)"
+    [ -n "$running" ] || die "$DROPIN does not name a $PREFIX* version"
+    printf '%s\n' "$running"
+    ;;
+  to)
+    [ $# -ge 2 ] || die "usage: cathedral-sn39-rollback to <version>"
+    repoint "$2" "$DRY_RUN"
+    ;;
+  previous)
+    require_dropin
+    repoint "$(previous_version)" "$DRY_RUN"
+    ;;
+  '' | -h | --help | help)
+    sed -n '2,40p' "$0" | sed 's|^# \{0,1\}||'
+    ;;
+  *)
+    die "unknown command '${1:-}'; try: list, current, to <version>, previous"
+    ;;
+esac
