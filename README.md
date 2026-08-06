@@ -21,6 +21,12 @@ here, and pick up where this leaves off.
 Everything below runs as an ordinary user. No root, no systemd, no chain
 write. Use Python 3.11 or 3.12 on Linux x86-64.
 
+> **Shortcuts (optional).** This native path is canonical and auditable. For a one-shot
+> native onboarding, `deploy/sn39/wallet-host-quickstart.sh` runs exactly these steps plus
+> a validator-candidate check. For a cross-platform Docker option (macOS/Windows/Linux, 3
+> commands), see [`deploy/sn39/docker/`](deploy/sn39/docker/README.md). Neither replaces the
+> production staged-systemd model in `deploy/sn39/`.
+
 ```bash
 git clone https://github.com/cathedralai/cathedral-validator.git
 cd cathedral-validator

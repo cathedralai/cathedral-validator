@@ -1,0 +1,21 @@
+# SN39 relay validator — one service, built from this repo. Run via ./cathedral.
+name: cathedral-sn39
+
+services:
+  validator:
+    image: cathedral-sn39-validator:latest
+    build:
+      context: ../../..                       # repo root
+      dockerfile: deploy/sn39/docker/Dockerfile
+    env_file: .env
+    command: ["validator"]
+    restart: unless-stopped
+    volumes:
+      # Wallet is READ-ONLY: the validator only reads the hotkey to sign, never writes it.
+      - ${HOST_WALLET_PATH:-~/.bittensor/wallets}:/root/.bittensor/wallets:ro
+      # Validator state (submission fences + anti-rollback high-water marks) — a named
+      # volume so it only ever moves forward; a container rebuild never rewinds it.
+      - cathedral-sn39-state:/state
+
+volumes:
+  cathedral-sn39-state:
