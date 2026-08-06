@@ -643,6 +643,38 @@ leaves it alone. Re-diff it against
 carries the trust pins, and the validator refuses a broadcast whose config
 differs from the release constants rather than silently honoring it.
 
+### Rolling back a staged (side-by-side) install
+
+Everything above describes the **editable checkout** the quickstart installs,
+where the running code is the clone and rolling back is `git checkout --detach`.
+A host built the other way — each version unpacked under its own
+`/opt/cathedral-validator-staging-<version>` with its own venv, and a systemd
+drop-in naming the one that runs — rolls back by repointing that drop-in
+instead. `deploy/sn39/cathedral-sn39-rollback` is that sequence:
+
+```bash
+cathedral-sn39-rollback list             # staged versions, marking the running one
+cathedral-sn39-rollback to <version> --dry-run
+cathedral-sn39-rollback to <version>     # repoint, reload, restart
+cathedral-sn39-rollback previous         # undo the last move it made
+```
+
+It refuses rather than guesses: a version that is not staged, one whose venv has
+no interpreter, the version already running, anything that is not a plain
+directory name, and — the one worth knowing about — a drop-in that already names
+**two** versions, which is the hand-edit that leaves `ExecStart` on a new tree
+while `WorkingDirectory` still points at the old one. It backs the drop-in up
+before touching it and restores that backup if the rewrite does not come out
+clean.
+
+It does not install, fetch or build: a version it cannot already see staged is a
+version it will not select, so a rollback can never be the thing that first
+introduces a tree to the host.
+
+The rule above still holds and the script obeys it — **it moves code and never
+state**. There is no flag that makes it touch the state file, the runtime root or
+the journal.
+
 ### Rotating a signing key
 
 Treat a signing-key change as a new trust decision, not an upgrade:
