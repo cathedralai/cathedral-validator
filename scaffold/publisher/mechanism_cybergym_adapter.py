@@ -78,7 +78,7 @@ import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from . import cybergym_contract, cybergym_tournament
+from . import cybergym_attestation, cybergym_contract, cybergym_tournament
 from .mechanism_router import ScoreVector, ScoreVectorMeta
 from .store import Store
 from .weights import NETUID_ENV, NETWORK_ENV
@@ -622,6 +622,37 @@ def cybergym_score_snapshot(
     # over the last WINDOW epochs instead of the single-epoch proportional split.
     # A report without them keeps the original behaviour exactly (below).
     newest_doc = verified["document"]
+
+    # DCAP spot-check (distill #115): independently verify the carried representative
+    # Intel-TDX receipt — a real Cathedral signature over a receipt whose committed
+    # (nonce, miner) is the one the CHAIN named this epoch. #103 requires the receipt's
+    # PRESENCE; this verifies it. Advisory by default (records the outcome in `info`);
+    # under CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT, a receipt that is absent or
+    # does not verify burns the lane rather than paying on an unproven claim. Gating here
+    # (before the branch) covers the tournament and legacy paths alike.
+    att_receipt = newest_doc.get("attestation_receipt")
+    att_nonce = newest_doc.get("nonce")
+    if att_nonce is None:
+        att_ok, att_reason = True, "no_nonce"  # pre-#114 report: spot-check does not apply
+    elif att_receipt is None:
+        att_ok, att_reason = False, "absent"  # #114 report that carries no receipt
+    else:
+        scored = {h for h, v in verified["scores"].items() if v > 0.0}
+        att_ok, att_reason = cybergym_attestation.verify_attestation_receipt(
+            att_receipt,
+            nonce=att_nonce,
+            source_epoch=int(report["source_epoch"]),
+            scored_hotkeys=scored,
+        )
+    info["attestation"] = att_reason
+    if cybergym_attestation.require_attestation() and not att_ok:
+        logger.warning(
+            "cybergym report %s attestation not verified (%s) and the require flag is "
+            "set; burning the CyberGym lane this epoch",
+            report["report_id"], att_reason,
+        )
+        return _empty("attestation_" + att_reason, signed_at_ms=signed_at_ms, sig_ok=True)
+
     if "nonce" in newest_doc and "dispatched_units" in newest_doc:
         return _compose_tournament(
             store, network=network, netuid=netuid, newest=newest_doc,

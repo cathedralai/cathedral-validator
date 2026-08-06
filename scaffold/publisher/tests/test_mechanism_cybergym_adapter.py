@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from scaffold.publisher import (
+    cybergym_attestation,
     cybergym_contract as contract,
     mechanism_cybergym_adapter as adapter,
     weights,
@@ -807,3 +808,41 @@ def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
     assert T.WINDOW == 5 and T.WINNER_SLOTS == 5
     assert [str(w) for w in T.ROLLING_WEIGHTS] == ["0.03", "0.07", "0.15", "0.25", "0.50"]
     assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.65", "0.14", "0.10", "0.07", "0.04"]
+
+
+# --- DCAP attestation gate (distill #115 follow-on) --------------------------
+def test_attestation_is_advisory_by_default_and_does_not_burn(tmp_path, monkeypatch):
+    """With the require flag unset, a report whose receipt cannot be verified (here,
+    absent) still contributes — the outcome is only recorded, so turning the check on
+    later cannot have silently zeroed a healthy lane."""
+    _env(monkeypatch)  # REQUIRE flag unset
+    store = _store(tmp_path)
+    _report(store, epoch=1, scores={"5Alice": 8.0}, nonce="cgnonce-x", dispatched_units=8.0)
+    _uid(store, "5Alice", 10)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert info["attestation"] == "absent"
+    assert info["contributing"] is True
+    assert vec  # the lane still pays
+
+
+def test_require_attestation_burns_a_report_carrying_no_receipt(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setenv(cybergym_attestation.REQUIRE_ATTESTATION_ENV, "1")  # enforce
+    store = _store(tmp_path)
+    _report(store, epoch=1, scores={"5Alice": 8.0}, nonce="cgnonce-x", dispatched_units=8.0)
+    _uid(store, "5Alice", 10)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert vec == {}
+    assert info["reason"] == "attestation_absent"
+
+
+def test_a_report_with_no_nonce_skips_the_spot_check_even_when_required(tmp_path, monkeypatch):
+    """A pre-#114 report (no nonce) predates the spot-check; enforcing must not burn it."""
+    _env(monkeypatch)
+    monkeypatch.setenv(cybergym_attestation.REQUIRE_ATTESTATION_ENV, "1")
+    store = _store(tmp_path)
+    _report(store, epoch=1, scores={"5Alice": 8.0})  # no nonce -> legacy path
+    _uid(store, "5Alice", 10)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert info["attestation"] == "no_nonce"
+    assert vec == {10: 8.0}
