@@ -10,7 +10,10 @@ COPY . /opt/cathedral-validator
 
 # The relay validator: the [provenance] extra pulls the pinned bittensor 10.5 SDK,
 # numpy, and — by design — the version-coupled cathedral-compute at a pinned sha, so
-# the image is a coherent release set, not a floating checkout.
+# the image is a coherent release set, not a floating checkout. Distill (the CyberGym
+# verifier) is deliberately NOT bundled: it requires the PRIVATE sealed holdout to run
+# (require_admitted_private_manifest), which a third-party validator does not — and must
+# not — have, so the CyberGym lane is scored centrally and relayed, not self-composed.
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir '.[provenance]'
 
