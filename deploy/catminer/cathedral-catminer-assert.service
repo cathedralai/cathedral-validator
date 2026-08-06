@@ -1,0 +1,8 @@
+[Unit]
+Description=Assert one epoch of the reference miner loop and journal it
+After=cathedral-catminer-reference.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/cathedral/catminer-reference.env
+ExecStart=/usr/local/bin/cathedral-catminer-assert

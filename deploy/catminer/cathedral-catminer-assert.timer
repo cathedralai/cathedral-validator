@@ -1,0 +1,8 @@
+[Unit]
+Description=Run the reference-miner epoch assertion once per epoch
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=25min
+AccuracySec=1min
+[Install]
+WantedBy=timers.target

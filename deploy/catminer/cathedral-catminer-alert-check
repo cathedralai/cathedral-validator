@@ -1,0 +1,156 @@
+#!/bin/bash
+# The standing reference-miner loop's alert of last resort (issue #108, gate 1).
+#
+# Exits non-zero — which IS the alert, because the systemd unit failing is the
+# notification — when ANY of these is true:
+#
+#   1. the journal is missing, is not a regular file, is unreadable, is empty
+#      with no rotated generation beside it, or holds no parseable record;
+#   2. the miner service is not active (the direct detector for "killed
+#      mid-epoch", which rules 3-5 would otherwise only catch an epoch later);
+#   3. the newest record is older than 3 epoch intervals — the loop is stopped,
+#      wedged, or writing somewhere else;
+#   4. no epoch has COMPLETED in the last 4 epoch intervals (no EPOCH_STATUS),
+#      with one grace window dated from the FIRST startup since the last
+#      completed epoch, so a crash loop cannot keep renewing its own grace;
+#   5. any epoch was RED in the last 30 minutes; or
+#   6. the last two consecutive completed epochs were RED with no GREEN since.
+#
+# Rules 1-4 exist for the reason deploy/sn39/cathedral-mismatch-check documents:
+# rules 5 and 6 alone are GREEN for a loop that no longer exists, because both
+# greps return zero matches for a journal that was never written, and zero
+# matches reads as "nothing wrong". The expensive failure here is not a bad
+# epoch, it is no epoch at all. "Cannot see the miner" and "miner is fine" must
+# never produce the same exit code.
+#
+# Windows are multiples of CATMINER_EPOCH_SECS, so a faster loop is declared
+# dead sooner, not later.
+set -u
+export LC_ALL=C
+
+JOURNAL="${1:-${CATMINER_JOURNAL:-/var/log/cathedral-catminer/catminer-events.jsonl}}"
+ROTATED="$JOURNAL.1"
+EPOCH_SECS="${CATMINER_EPOCH_SECS:-1500}"
+MINER_UNIT="${CATMINER_UNIT:-cathedral-catminer-reference.service}"
+
+alert() {
+  echo "ALERT: $*"
+  exit 1
+}
+
+case "$EPOCH_SECS" in
+  '' | *[!0-9]*) alert "CATMINER_EPOCH_SECS must be a whole number of seconds; got '$EPOCH_SECS'" ;;
+esac
+[ "$EPOCH_SECS" -gt 0 ] || alert "CATMINER_EPOCH_SECS must be greater than zero"
+
+STALE_SECS=$((EPOCH_SECS * 3))
+LIVENESS_SECS=$((EPOCH_SECS * 4))
+
+# Rule 1 — fail closed. Each condition names its own fix, because "monitoring is
+# green" and "monitoring is blind" must never look the same to an operator.
+[ -e "$JOURNAL" ] || alert "journal '$JOURNAL' does not exist — this check is blind. Point it at the path cathedral-catminer-assert actually writes (CATMINER_JOURNAL)."
+[ -f "$JOURNAL" ] || alert "journal '$JOURNAL' is not a regular file — this check is blind."
+[ -r "$JOURNAL" ] || alert "journal '$JOURNAL' is not readable by $(id -un 2>/dev/null || echo "this user") — this check is blind. Run the timer as a user that can read it."
+if [ ! -s "$JOURNAL" ] && [ ! -s "$ROTATED" ]; then
+  alert "journal '$JOURNAL' is empty — this check is blind. The loop has never written a record here."
+fi
+
+# Rule 2 — the miner itself. Checked before the journal rules because a killed
+# miner is the failure this gate must catch inside the epoch, and the journal
+# rules cannot see it until a window expires. Skipped only when systemctl is
+# absent (a container or a test harness), never when it merely says "inactive".
+if command -v systemctl >/dev/null 2>&1; then
+  STATE=$(systemctl is-active -- "$MINER_UNIT" 2>/dev/null)
+  case "$STATE" in
+    active|activating) ;;
+    '')  alert "miner unit '$MINER_UNIT' is unknown to systemd — this check cannot confirm the miner is running. Set CATMINER_UNIT to the unit that runs the loop." ;;
+    *)   alert "miner unit '$MINER_UNIT' is '$STATE', not active — the reference miner is not running. Check: systemctl status $MINER_UNIT" ;;
+  esac
+fi
+
+# One bounded read of the tail, reused by every rule below; nothing here looks
+# back further than 90 minutes. A read error on the LIVE journal is an alert,
+# not a silent zero. The rotated generation is optional, so an unreadable one is
+# skipped rather than fatal.
+TAIL=$(tail -n 5000 -- "$JOURNAL") || alert "journal '$JOURNAL' could not be read — this check is blind."
+if [ -f "$ROTATED" ] && [ -r "$ROTATED" ] && [ -s "$ROTATED" ]; then
+  ROTATED_TAIL=$(tail -n 5000 -- "$ROTATED") && TAIL=$(printf '%s\n%s' "$ROTATED_TAIL" "$TAIL")
+fi
+
+cutoff() { date -u -d "-$1 seconds" "+%Y-%m-%dT%H:%M:%S"; }
+
+older_than() {
+  awk -v t="$1" -v c="$2" 'BEGIN { exit !(substr(t, 1, 19) < substr(c, 1, 19)) }'
+}
+
+# Newest ts among records whose event field matches the ERE $1, or empty.
+latest() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"($1)\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1
+}
+
+# Rule 3 — the journal must still be growing.
+NEWEST=$(printf '%s\n' "$TAIL" | grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1)
+[ -n "$NEWEST" ] || alert "journal '$JOURNAL' holds no parseable record — this check is blind."
+if older_than "$NEWEST" "$(cutoff "$STALE_SECS")"; then
+  alert "journal has not grown since $NEWEST, more than 3 epoch intervals ($((STALE_SECS / 60))m) — the loop is stopped, wedged, or writing to a different path. Check: systemctl status cathedral-catminer-assert.timer"
+fi
+
+# Rule 4 — liveness. Only the absence of EPOCH_STATUS means the loop is not
+# completing epochs; a RED status still counts as completed here, because rules
+# 5 and 6 are what judge its content.
+LIVE_TS=$(latest "EPOCH_STATUS")
+LIVE_CUTOFF=$(cutoff "$LIVENESS_SECS")
+# Grace runs from the FIRST startup since the last completed epoch, not the
+# newest. Measured from the newest, a crash-restart loop renews its own grace
+# with the very crashes that prove it is broken.
+START_TS=$(printf '%s\n' "$TAIL" |
+  grep -E "\"event\": *\"MINER_STARTUP\"" |
+  grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort |
+  awk -v live="$LIVE_TS" 'live == "" || substr($0,1,19) > substr(live,1,19) {print; exit}')
+WARMING=0
+if [ -n "$START_TS" ] && ! older_than "$START_TS" "$LIVE_CUTOFF"; then
+  WARMING=1
+fi
+if [ "$WARMING" -eq 0 ] && { [ -z "$LIVE_TS" ] || older_than "$LIVE_TS" "$LIVE_CUTOFF"; }; then
+  if [ -z "$LIVE_TS" ]; then
+    SEEN="there is none in this journal at all"
+  else
+    SEEN="the last one was at $LIVE_TS"
+  fi
+  alert "no completed epoch (EPOCH_STATUS) in the last $((LIVENESS_SECS / 60))m — $SEEN. The reference loop is not producing epochs."
+fi
+
+# Rule 5 — any RED epoch in the last 30 minutes.
+CUTOFF30=$(cutoff 1800)
+RECENT_RED=$(printf '%s\n' "$TAIL" |
+  grep -E "\"event\": *\"EPOCH_STATUS\"" | grep -E "\"verdict\": *\"RED\"" |
+  grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 |
+  awk -v c="$CUTOFF30" 'substr($0,1,19) >= c' | wc -l | tr -d ' ')
+if [ "${RECENT_RED:-0}" -gt 0 ]; then
+  LAST_REASON=$(printf '%s\n' "$TAIL" | grep -E "\"verdict\": *\"RED\"" | tail -1 |
+    grep -oE '"reason": *"[^"]*"' | cut -d\" -f4)
+  alert "$RECENT_RED RED epoch(s) within 30m — the reference miner did not earn a clean epoch${LAST_REASON:+ (newest reason: $LAST_REASON)}"
+fi
+
+# Rule 6 — persistent failure: the unbroken run of REDs at the END of the last
+# 90 minutes is two or more. Recovery is a completed GREEN epoch, not merely the
+# absence of RED, because absence is also what a stopped loop looks like.
+CUTOFF90=$(cutoff 5400)
+TIMELINE=$(printf '%s\n' "$TAIL" |
+  grep -E "\"event\": *\"EPOCH_STATUS\"" |
+  sed -nE 's/.*"ts": *"([0-9-]{10}T[0-9]{2}:[0-9]{2})[^"]*".*"verdict": *"([A-Z]+)".*/\1 \2/p' |
+  awk -v c="$CUTOFF90" '$1 >= c {print $2}')
+STREAK=$(printf '%s\n' "$TIMELINE" | awk '$1=="RED" {n+=1; next} $1!="" {n=0} END {print n+0}')
+if [ "$STREAK" -ge 2 ]; then
+  alert "the last $STREAK consecutive epochs were RED within 90m with no GREEN since — the loop is not recovering on its own"
+fi
+
+if [ "$WARMING" -eq 1 ]; then
+  echo "reference miner starting up (MINER_STARTUP at $START_TS, first epoch not yet complete); no RED epoch; miner unit active"
+else
+  LAST_EARNED=$(printf '%s\n' "$TAIL" | grep -E "\"verdict\": *\"GREEN\"" | tail -1 |
+    grep -oE '"earned": *[0-9.eE+-]+' | cut -d: -f2 | tr -d ' ')
+  echo "reference miner green (last completed epoch at $LIVE_TS, earned ${LAST_EARNED:-unknown}); no RED epoch in 30m; miner unit active"
+fi
