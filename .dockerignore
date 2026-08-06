@@ -1,0 +1,14 @@
+.git
+.github
+**/*.egg-info
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/*venv*
+**/*.sqlite
+**/*.log
+*-compute-work-evidence
+deploy/sn39/docker/.env
+deploy/sn39/docker/my-validator.toml
+my-validator.toml
