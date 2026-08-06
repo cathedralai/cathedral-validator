@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -146,6 +147,27 @@ def test_a_retired_key_is_not_trusted(signer, tmp_path, monkeypatch):
 def test_a_malformed_receipt_is_refused(signer):
     assert _verify("notadict")[1] == "malformed"
     assert _verify({"result_b64": "eA=="})[1] == "malformed"
+
+
+def test_a_genuine_cathedral_intel_tdx_receipt_verifies(monkeypatch):
+    """The one that proves this reimplementation actually matches Cathedral: a REAL
+    captured `attest.v1` receipt (Intel-TDX hardware, Cathedral-signed) verifies against
+    the pinned published trusted-keys file — and its committed nonce/miner bind. If
+    Cathedral ever changed the receipt or signed-bytes shape, this fails first."""
+    fixtures = Path(__file__).parent / "fixtures"
+    monkeypatch.setenv(att.TRUSTED_KEYS_ENV, str(fixtures / "cathedral-customer-receipt-trusted-keys.json"))
+    fix = json.loads((fixtures / "cybergym-real-tdx-receipt.json").read_text())
+    ar = {"receipt": fix["receipt"], "result_b64": fix["result_b64"]}
+    commitment = json.loads(base64.b64decode(fix["result_b64"]))["commitment"]
+    miner, nonce = commitment["miner_hotkey"], commitment["nonce"]
+
+    assert att.verify_attestation_receipt(
+        ar, nonce=nonce, source_epoch=21, scored_hotkeys={miner}) == (True, "ok")
+    # the chain binding is real, not vacuous:
+    assert att.verify_attestation_receipt(
+        ar, nonce="cgnonce-other", source_epoch=21, scored_hotkeys={miner})[1] == "nonce_mismatch"
+    assert att.verify_attestation_receipt(
+        ar, nonce=nonce, source_epoch=21, scored_hotkeys={"5NotThisMiner"})[1] == "miner_mismatch"
 
 
 def test_require_flag_reads_the_env(monkeypatch):
