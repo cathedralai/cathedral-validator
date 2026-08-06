@@ -76,8 +76,9 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from . import cybergym_contract
+from . import cybergym_contract, cybergym_tournament
 from .mechanism_router import ScoreVector, ScoreVectorMeta
 from .store import Store
 from .weights import NETUID_ENV, NETWORK_ENV
@@ -277,6 +278,179 @@ def _report_rows(store: Store, *, report_id: str) -> dict[str, float]:
     return out
 
 
+# --- CyberGym tournament composition (top-5 rank, 5-epoch recency) ------------
+#
+# When the newest report carries the optional `nonce` + `dispatched_units`, the
+# lane is awarded by the rank tournament (`cybergym_tournament`) over the last
+# WINDOW epochs, replacing the single-epoch proportional pass-through. This is a
+# DELIBERATE relaxation of the "reads EXACTLY ONE report / no epoch mixing" rule
+# above — but only for the tournament path, which is a pure function of the last
+# ≤5 *authenticated* reports (each still verified), the disclosed nonce, and
+# source_epoch, so every validator derives byte-identical standings.
+
+def _empty_result(reason: str, info: dict, *, signed_at_ms: int = 0, sig_ok: bool = False):
+    """Module-level empty (vector, meta, info) for the tournament helpers."""
+    info["reason"] = reason
+    return (
+        {},
+        ScoreVectorMeta(
+            mechanism_id=MECHANISM_ID, signed_at_ms=signed_at_ms, sig_ok=sig_ok, source=SOURCE
+        ),
+        info,
+    )
+
+
+def _prior_complete_reports(
+    store: Store, *, network: str, netuid: int, before_epoch: int, n: int
+) -> list[dict]:
+    """The up-to-``n`` newest COMPLETE reports strictly older than ``before_epoch``.
+
+    Same columns/shape as ``_latest_complete_report``, newest first — fills the
+    tournament's recency window with the epochs preceding the composed one. A
+    missing older epoch just shortens the window (it counts as 0).
+    """
+    rows = store.query(
+        "SELECT id, network, netuid, source_epoch, producer_hotkey, complete, "
+        "generated_at_iso, report_sha256, body_sha256, score_count, signature, "
+        "authenticated_body, report_json FROM cybergym_score_reports "
+        "WHERE network=? AND netuid=? AND complete=1 AND source_epoch<? "
+        "ORDER BY source_epoch DESC LIMIT ?",
+        (network, netuid, int(before_epoch), int(n)),
+    )
+    out: list[dict] = []
+    for row in rows:
+        out.append({
+            "report_id": str(row["id"]),
+            "network": str(row["network"]),
+            "netuid": int(row["netuid"]),
+            "source_epoch": int(row["source_epoch"]),
+            "producer_hotkey": str(row["producer_hotkey"]),
+            "complete": bool(row["complete"]),
+            "generated_at_iso": str(row["generated_at_iso"]),
+            "report_sha256": str(row["report_sha256"]),
+            "body_sha256": str(row["body_sha256"] or ""),
+            "score_count": int(row["score_count"]),
+            "signature": str(row["signature"] or ""),
+            "authenticated_body": row["authenticated_body"],
+            "report_json": row["report_json"],
+        })
+    return out
+
+
+def _verified_doc(store: Store, report: dict) -> dict | None:
+    """The authenticated semantic doc for one report, or None if it fails verify.
+
+    A prior-epoch report that no longer verifies is counted as an empty epoch in
+    the window rather than trusted — it can never lift a rolling total on bad data.
+    """
+    rows = _report_rows(store, report_id=report["report_id"])
+    try:
+        result = cybergym_contract.verify_stored_report(
+            report,
+            body=report.get("report_json"),
+            authenticated_body=report.get("authenticated_body"),
+            signature=report.get("signature"),
+            rows=rows,
+        )
+    except cybergym_contract.ReportVerificationError as exc:
+        logger.warning(
+            "cybergym prior report %s failed verification (%s); counts as an empty "
+            "epoch in the tournament window", report["report_id"], exc.reason,
+        )
+        return None
+    return result["document"]
+
+
+def _epoch_base100(verified: dict) -> dict[str, Decimal]:
+    """{hotkey: base-100 score} for one epoch, from its own ``dispatched_units``.
+
+    An epoch with no or zero ``dispatched_units`` contributes 0 for everyone (a
+    pre-field or empty epoch does not lift any rolling total). A producer
+    over-count (solved > dispatched) is clamped to full completion rather than
+    raising, so a malformed older epoch cannot nuke the lane.
+    """
+    dispatched = verified.get("dispatched_units")
+    if not isinstance(dispatched, (int, float)) or isinstance(dispatched, bool):
+        return {}
+    dispatched_dec = Decimal(str(float(dispatched)))
+    if dispatched_dec <= 0:
+        return {}
+    out: dict[str, Decimal] = {}
+    for hotkey, solved in verified.get("scores", {}).items():
+        try:
+            solved_dec = Decimal(str(float(solved)))
+        except (TypeError, ValueError, ArithmeticError):
+            continue
+        if solved_dec < 0:
+            continue
+        if solved_dec > dispatched_dec:
+            solved_dec = dispatched_dec
+        out[str(hotkey)] = cybergym_tournament.epoch_score_base100(solved_dec, dispatched_dec)
+    return out
+
+
+def _compose_tournament(
+    store: Store, *, network: str, netuid: int, newest: dict,
+    signed_at_ms: int, info: dict,
+):
+    """Top-5 rank-tournament vector over the recency window ending at ``newest``.
+
+    ``newest`` is the already-verified newest report (carrying ``nonce`` +
+    ``dispatched_units``). Reads the preceding ≤``WINDOW-1`` complete reports,
+    base-100s each epoch, ranks by rolling total, and awards the CyberGym lane
+    shares via ``cybergym_tournament.build_scoreboard`` — read-only throughout.
+    """
+    newest_epoch = int(newest["source_epoch"])
+    prior = _prior_complete_reports(
+        store, network=network, netuid=netuid, before_epoch=newest_epoch,
+        n=cybergym_tournament.WINDOW - 1,
+    )
+    # oldest -> latest; the newest carries the 0.50 recency weight.
+    window = [d for d in (_verified_doc(store, r) for r in reversed(prior)) if d is not None]
+    window.append(newest)
+    per_epoch = [_epoch_base100(doc) for doc in window]
+
+    miners = sorted({hk for scores in per_epoch for hk in scores})
+    per_miner_scores = {
+        hk: [scores.get(hk, Decimal(0)) for scores in per_epoch] for hk in miners
+    }
+    try:
+        board = cybergym_tournament.build_scoreboard(
+            newest_epoch, per_miner_scores, nonce=newest["nonce"],
+        )
+    except cybergym_tournament.TournamentError as exc:
+        info["tournament_detail"] = str(exc)
+        return _empty_result("tournament_error", info, signed_at_ms=signed_at_ms, sig_ok=True)
+
+    info["tournament"] = True
+    info["window_epochs"] = [int(d["source_epoch"]) for d in window]
+    info["winners"] = list(board.winners)
+    info["lane_burn"] = str(board.lane_burn)
+    info["tiebreak_nonce"] = board.tiebreak_nonce
+
+    hotkey_to_uid = _load_hotkey_to_uid(store, network=network, netuid=netuid)
+    vector: ScoreVector = {}
+    dropped = 0
+    for standing in board.standings:
+        if standing.lane_share <= 0:
+            continue
+        uid = hotkey_to_uid.get(standing.miner_hotkey)
+        if uid is None:
+            dropped += 1
+            continue
+        vector[uid] = vector.get(uid, 0.0) + float(standing.lane_share)
+    info["dropped_unmapped_hotkeys"] = dropped
+    if not vector:
+        return _empty_result("no_uid_mapping", info, signed_at_ms=signed_at_ms, sig_ok=True)
+    info["contributing"] = True
+    info["reason"] = "ok_tournament"
+    info["n_uids"] = len(vector)
+    meta = ScoreVectorMeta(
+        mechanism_id=MECHANISM_ID, signed_at_ms=signed_at_ms, sig_ok=True, source=SOURCE,
+    )
+    return vector, meta, info
+
+
 def cybergym_score_snapshot(
     store: Store,
     *,
@@ -442,6 +616,17 @@ def cybergym_score_snapshot(
         info["verification_detail"] = exc.detail
         return _empty(exc.reason, signed_at_ms=signed_at_ms, sig_ok=False)
     info["verified"] = True
+
+    # Tournament path: when the producer emits the optional recency-window inputs
+    # (`nonce` + `dispatched_units`), award the lane by the top-5 rank tournament
+    # over the last WINDOW epochs instead of the single-epoch proportional split.
+    # A report without them keeps the original behaviour exactly (below).
+    newest_doc = verified["document"]
+    if "nonce" in newest_doc and "dispatched_units" in newest_doc:
+        return _compose_tournament(
+            store, network=network, netuid=netuid, newest=newest_doc,
+            signed_at_ms=signed_at_ms, info=info,
+        )
 
     # Scores come from the VERIFIED document, not from the projection rows. The
     # rows were only a cross-check; the document is the authenticated truth.

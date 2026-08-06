@@ -694,3 +694,35 @@ def test_constant_time_equal_handles_non_ascii():
     assert ingest._constant_time_equal("tok", "tok") is True
     assert ingest._constant_time_equal("toké", "tok") is False
     assert ingest._constant_time_equal("tok", "toké") is False
+
+
+# --- optional tournament fields (nonce, dispatched_units) --------------------
+def test_validate_report_accepts_optional_tournament_fields():
+    doc = {**_doc(), "nonce": "cgnonce-abc", "dispatched_units": 10.0}
+    report = ingest.validate_report(doc, audience=(NETWORK, NETUID), producer=PRODUCER)
+    assert report["nonce"] == "cgnonce-abc"
+    assert report["dispatched_units"] == 10.0
+    # and they enter the semantic digest (present in the semantic view)
+    assert "nonce" in ingest.semantic_view(report)
+    assert "dispatched_units" in ingest.semantic_view(report)
+
+
+def test_validate_report_without_optional_fields_is_unchanged():
+    report = ingest.validate_report(_doc(), audience=(NETWORK, NETUID), producer=PRODUCER)
+    assert "nonce" not in report and "dispatched_units" not in report
+
+
+def test_validate_report_rejects_invalid_nonce():
+    for bad in ("", "   ", "x" * 257):
+        doc = {**_doc(), "nonce": bad}
+        with pytest.raises(ingest.CybergymIngestError) as exc:
+            ingest.validate_report(doc, audience=(NETWORK, NETUID), producer=PRODUCER)
+        assert exc.value.reason == "invalid_nonce"
+
+
+def test_validate_report_rejects_invalid_dispatched_units():
+    for bad in (-1.0, "10", True, float("nan")):
+        doc = {**_doc(), "dispatched_units": bad}
+        with pytest.raises(ingest.CybergymIngestError) as exc:
+            ingest.validate_report(doc, audience=(NETWORK, NETUID), producer=PRODUCER)
+        assert exc.value.reason == "invalid_dispatched_units"
