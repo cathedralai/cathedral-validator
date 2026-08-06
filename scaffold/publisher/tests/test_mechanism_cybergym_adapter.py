@@ -49,9 +49,10 @@ def _store(tmp_path) -> Store:
 def _document(
     *, epoch: int, scores: dict[str, float], generated_at: datetime,
     complete: bool = True, network: str = NETWORK, netuid: int = NETUID,
-    producer: str = PRODUCER,
+    producer: str = PRODUCER, nonce: str | None = None,
+    dispatched_units: float | None = None,
 ) -> dict:
-    return contract.semantic_view({
+    raw = {
         "producer_hotkey": producer,
         "network": network,
         "netuid": netuid,
@@ -61,7 +62,12 @@ def _document(
         "score_units": UNITS,
         "scores": scores,
         "evidence_sha256": "c" * 64,
-    })
+    }
+    if nonce is not None:
+        raw["nonce"] = nonce
+    if dispatched_units is not None:
+        raw["dispatched_units"] = dispatched_units
+    return contract.semantic_view(raw)
 
 
 def _report(
@@ -81,6 +87,8 @@ def _report(
     score_count: int | None = None,
     rows: dict[str, float] | None = None,
     close_epoch: bool = True,
+    nonce: str | None = None,
+    dispatched_units: float | None = None,
 ) -> str:
     """Persist one report the way the authenticated ingest route would.
 
@@ -92,6 +100,7 @@ def _report(
     document = _document(
         epoch=epoch, scores=scores, generated_at=generated,
         complete=bool(complete), network=network, netuid=netuid,
+        nonce=nonce, dispatched_units=dispatched_units,
     )
     body_text = body if body is not None else contract.canonical_report_bytes(
         document
@@ -738,3 +747,63 @@ def test_epoch_closed_literal_matches_the_writer():
     # import spans the boundary, so drift must fail here rather than silently
     # matching no row in production.
     assert adapter.EPOCH_CLOSED == "closed"
+
+
+# --------------------------------------------------------------------------- #
+# Tournament path (top-5 rank, 5-epoch recency) — engaged when a report carries
+# the optional `nonce` + `dispatched_units`. Absent them, the legacy proportional
+# pass-through above stays in force (its tests are unchanged).
+# --------------------------------------------------------------------------- #
+def test_tournament_awards_top5_shares_when_fields_present(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    # Six miners, distinct absolute completion in one epoch (dispatched=10).
+    solved = {"5A": 10.0, "5B": 8.0, "5C": 6.0, "5D": 4.0, "5E": 2.0, "5F": 1.0}
+    _report(store, epoch=21, scores=solved, nonce="cgnonce-abc", dispatched_units=10.0)
+    for i, hk in enumerate(solved, start=1):
+        _uid(store, hk, i)
+    vec, meta, info = adapter.cybergym_score_snapshot(store, now=NOW)
+    assert info["reason"] == "ok_tournament"
+    assert info["tournament"] is True and meta.sig_ok is True
+    assert info["winners"] == ["5A", "5B", "5C", "5D", "5E"]  # F is 6th, no slot
+    # Top-5 fixed shares, mapped to uid; the 6th miner earns nothing.
+    assert vec == pytest.approx({1: 0.65, 2: 0.14, 3: 0.10, 4: 0.07, 5: 0.04})
+    assert 6 not in vec
+
+
+def test_report_without_fields_keeps_legacy_passthrough(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _report(store, epoch=21, scores={"5A": 2.0, "5B": 1.0})  # no nonce / dispatched
+    _uid(store, "5A", 1)
+    _uid(store, "5B", 2)
+    vec, meta, info = adapter.cybergym_score_snapshot(store, now=NOW)
+    assert info["reason"] == "ok"                      # not "ok_tournament"
+    assert "tournament" not in info
+    assert vec == {1: 2.0, 2: 1.0}                     # raw units, verbatim
+
+
+def test_tournament_recency_window_weights_the_latest_epoch(tmp_path, monkeypatch):
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    # A solved everything an epoch ago; B solved everything now. Latest carries the
+    # 0.50 weight, the prior epoch only 0.25, so B outranks A on recency.
+    _report(store, epoch=20, scores={"5A": 10.0}, nonce="n20", dispatched_units=10.0)
+    _report(store, epoch=21, scores={"5B": 10.0}, nonce="n21", dispatched_units=10.0)
+    _uid(store, "5A", 1)
+    _uid(store, "5B", 2)
+    vec, meta, info = adapter.cybergym_score_snapshot(store, now=NOW)
+    assert info["reason"] == "ok_tournament"
+    assert info["window_epochs"] == [20, 21]
+    assert info["winners"] == ["5B", "5A"]             # B (recent) ahead of A
+    # Two winners: 0.65/0.14 renormalized to sum 1.
+    assert vec[2] == pytest.approx(0.822785)           # 5B rank 1
+    assert vec[1] == pytest.approx(0.177215)           # 5A rank 2
+
+
+def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
+    """Pin the vendored constants so a drift from cathedral_distill is caught."""
+    from scaffold.publisher import cybergym_tournament as T
+    assert T.WINDOW == 5 and T.WINNER_SLOTS == 5
+    assert [str(w) for w in T.ROLLING_WEIGHTS] == ["0.03", "0.07", "0.15", "0.25", "0.50"]
+    assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.65", "0.14", "0.10", "0.07", "0.04"]

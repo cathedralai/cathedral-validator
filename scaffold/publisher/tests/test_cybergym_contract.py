@@ -300,7 +300,13 @@ def test_the_ingest_module_reuses_this_contract():
     assert ingest.report_digest is contract.report_digest
     assert ingest.receipt_id is contract.receipt_id
     assert ingest.verify_body_hmac is contract.verify_body_hmac
-    assert set(ingest._ALLOWED_KEYS) == set(contract.SEMANTIC_KEYS)
+    # Required keys are exactly the contract's SEMANTIC_KEYS; the ingest also allows
+    # the contract's OPTIONAL_SEMANTIC_KEYS (nonce, dispatched_units), digest-bound
+    # when present but never required.
+    assert set(ingest._REQUIRED_KEYS) == set(contract.SEMANTIC_KEYS)
+    assert set(ingest._ALLOWED_KEYS) == set(contract.SEMANTIC_KEYS) | set(
+        contract.OPTIONAL_SEMANTIC_KEYS
+    )
 
 
 def test_canonical_body_round_trips_through_json():

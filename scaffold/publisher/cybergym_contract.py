@@ -54,6 +54,21 @@ SEMANTIC_KEYS = (
     "evidence_sha256",
 )
 
+# Keys a producer MAY carry — accepted, and folded into the semantic digest WHEN
+# PRESENT, but not required, so a report without them still ingests unchanged
+# (backward compatible). The CyberGym tournament composer consumes them:
+#   nonce            — the epoch's chain-anchored nonce (hex/str), keys the
+#                      ungrindable top-5 tie-break (`cybergym_tournament._nonce_digest`);
+#   dispatched_units — the epoch batch's total difficulty-weight, the base-100
+#                      denominator (`epoch_score_base100(solved, dispatched)`).
+# Absent them, the tournament composer forfeits the lane (see the adapter) rather
+# than inventing a ranking, so the lane simply burns until the producer emits them.
+OPTIONAL_SEMANTIC_KEYS = (
+    "nonce",
+    "dispatched_units",
+)
+_ALL_SEMANTIC_KEYS = SEMANTIC_KEYS + OPTIONAL_SEMANTIC_KEYS
+
 HMAC_SECRET_ENV = "CATHEDRAL_CYBERGYM_SCORES_HMAC_SECRET"
 
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -72,8 +87,13 @@ def canonical_report_bytes(body: dict[str, Any]) -> bytes:
 
 
 def semantic_view(document: dict[str, Any]) -> dict[str, Any]:
-    """Just the contract keys, so derived fields cannot enter the digest."""
-    return {key: document[key] for key in SEMANTIC_KEYS if key in document}
+    """Just the contract keys, so derived fields cannot enter the digest.
+
+    Optional keys are folded in only when present, so a producer that emits them
+    signs (and a validator re-derives) a digest that binds them, while a report
+    without them keeps its original digest byte-for-byte.
+    """
+    return {key: document[key] for key in _ALL_SEMANTIC_KEYS if key in document}
 
 
 def normalize_semantic_document(document: dict[str, Any]) -> dict[str, Any]:
@@ -86,11 +106,11 @@ def normalize_semantic_document(document: dict[str, Any]) -> dict[str, Any]:
     database columns.
     """
     keys = set(document)
-    expected_keys = set(SEMANTIC_KEYS)
     missing = [key for key in SEMANTIC_KEYS if key not in keys]
     if missing:
         raise ValueError("missing " + ",".join(missing))
-    if keys != expected_keys:
+    unexpected = keys - set(_ALL_SEMANTIC_KEYS)
+    if unexpected:
         raise ValueError("unexpected semantic fields")
 
     producer = document["producer_hotkey"]
@@ -141,7 +161,7 @@ def normalize_semantic_document(document: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("invalid score hotkey")
         normalized_scores[normalized_hotkey] = score
 
-    return {
+    normalized = {
         "producer_hotkey": producer.strip(),
         "network": network,
         "netuid": netuid,
@@ -152,6 +172,23 @@ def normalize_semantic_document(document: dict[str, Any]) -> dict[str, Any]:
         "scores": normalized_scores,
         "evidence_sha256": evidence,
     }
+    # Optional tournament inputs — validated and canonicalized here (a float
+    # `dispatched_units` normalizes to one form) so the digest, the reader, and the
+    # producer all derive identical semantics, exactly as the scores do.
+    if "nonce" in document:
+        nonce = document["nonce"]
+        if not isinstance(nonce, str) or not nonce.strip() or len(nonce) > 256:
+            raise ValueError("invalid nonce")
+        normalized["nonce"] = nonce.strip()
+    if "dispatched_units" in document:
+        dispatched = document["dispatched_units"]
+        if isinstance(dispatched, bool) or not isinstance(dispatched, (int, float)):
+            raise ValueError("invalid dispatched_units")
+        dispatched = float(dispatched)
+        if not math.isfinite(dispatched) or dispatched < 0.0:
+            raise ValueError("invalid dispatched_units")
+        normalized["dispatched_units"] = dispatched
+    return normalized
 
 
 def report_digest(document: dict[str, Any]) -> str:

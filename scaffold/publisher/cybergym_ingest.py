@@ -113,6 +113,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 # so the writer and the reader can never drift apart on canonicalization.
 from .cybergym_contract import (  # noqa: F401
     HMAC_SECRET_ENV,
+    OPTIONAL_SEMANTIC_KEYS,
     SEMANTIC_KEYS,
     SHA256_HEX_RE as _SHA256_HEX_RE,
     canonical_report_bytes,
@@ -149,7 +150,8 @@ SOURCE = "cathedral_cybergym"
 
 # The document contract itself lives in cybergym_contract so the read side can
 # re-derive the identical digests without importing FastAPI through this module.
-_ALLOWED_KEYS = set(SEMANTIC_KEYS)
+_ALLOWED_KEYS = set(SEMANTIC_KEYS) | set(OPTIONAL_SEMANTIC_KEYS)
+_REQUIRED_KEYS = set(SEMANTIC_KEYS)
 _UNITS_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 # An audience-scoped monotonic-max fence keys on (network, netuid, source_epoch)
 # and refuses any source_epoch below the highest stored, so a single accepted
@@ -346,7 +348,7 @@ def validate_report(
     extra = set(payload.keys()) - _ALLOWED_KEYS
     if extra:
         raise CybergymIngestError("unexpected_fields")
-    missing = _ALLOWED_KEYS - set(payload.keys())
+    missing = _REQUIRED_KEYS - set(payload.keys())
     if missing:
         raise CybergymIngestError("missing_fields")
 
@@ -412,7 +414,7 @@ def validate_report(
             raise CybergymIngestError("duplicate_miner_hotkey")
         scores[key] = score
 
-    semantic = normalize_semantic_document({
+    document = {
         "producer_hotkey": declared,
         "network": network,
         "netuid": netuid,
@@ -422,7 +424,26 @@ def validate_report(
         "score_units": score_units,
         "scores": scores,
         "evidence_sha256": evidence,
-    })
+    }
+    # Optional tournament inputs (nonce, dispatched_units): validated here for a
+    # precise ingest reason, then re-validated + canonicalized in normalize so the
+    # digest binds them. Absent, the report ingests exactly as before.
+    if "nonce" in payload:
+        nonce = payload.get("nonce")
+        if not isinstance(nonce, str) or not nonce.strip() or len(nonce) > 256:
+            raise CybergymIngestError("invalid_nonce")
+        document["nonce"] = nonce
+    if "dispatched_units" in payload:
+        dispatched = payload.get("dispatched_units")
+        if (
+            isinstance(dispatched, bool)
+            or not isinstance(dispatched, (int, float))
+            or not math.isfinite(float(dispatched))
+            or float(dispatched) < 0.0
+        ):
+            raise CybergymIngestError("invalid_dispatched_units")
+        document["dispatched_units"] = dispatched
+    semantic = normalize_semantic_document(document)
     digest = report_digest(semantic)
     report = dict(semantic)
     report["report_sha256"] = digest
