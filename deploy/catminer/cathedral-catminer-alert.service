@@ -1,0 +1,7 @@
+[Unit]
+Description=ALERT if the standing reference miner stopped earning, stopped running, or went RED
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/cathedral/catminer-reference.env
+Environment=CATMINER_EPOCH_SECS=1500
+ExecStart=/usr/local/bin/cathedral-catminer-alert-check

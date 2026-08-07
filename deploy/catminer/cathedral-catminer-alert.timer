@@ -1,0 +1,7 @@
+[Unit]
+Description=Check the reference miner loop every 10 minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
