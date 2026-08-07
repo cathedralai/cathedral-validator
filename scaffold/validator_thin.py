@@ -6638,18 +6638,50 @@ def _bt_wallet(bt):
     return getattr(bt, "wallet", None) or bt.Wallet
 
 
+@contextlib.contextmanager
+def _chain_connection(network: str):
+    """Yield a subtensor and ALWAYS close it.
+
+    bittensor's Subtensor opens a websocket in its constructor and does NOT
+    close it when the object is garbage collected — the live connection is
+    owned by a background thread that keeps the instance reachable. Every
+    connection built and dropped therefore strands a socket and a file
+    descriptor for the remaining life of the process.
+
+    The validator builds several of these per tick. Measured on SN39 mainnet
+    at 4 stranded descriptors per 25-minute tick (~10/hour), which walks a
+    long-running validator into its RLIMIT_NOFILE ceiling (1024 by default)
+    in about three days. Past that it cannot open a socket at all, so it
+    stops reaching the chain and silently stops writing weights.
+
+    This first surfaced as `HTTP 429` from the shared finney entrypoint,
+    because the stranded connections tripped that endpoint's per-IP
+    connection cap long before the fd ceiling. Moving to a dedicated RPC
+    removes the 429 but not the leak; it only changes which ceiling is hit.
+
+    Close deterministically rather than trusting refcounting.
+    """
+    with _isolated_argv():
+        import bittensor as bt  # import under blanked argv — bittensor parses
+
+        subtensor = _bt_subtensor(bt)(network=connection_target(network))
+    try:
+        yield subtensor
+    finally:
+        # A failed close must never fail the tick: the caller's work is already
+        # done, and a raise here would mask the real result.
+        with contextlib.suppress(Exception):
+            subtensor.close()
+
+
 def _block_hash_lookup(network: str):
     """A callable resolving a historical block number to its hash via the
     validator's own subtensor connection (independent of Cathedral)."""
 
     def lookup(block: int):
         try:
-            with _isolated_argv():
-                import bittensor as bt
-
-                return _bt_subtensor(bt)(
-                    network=connection_target(network)
-                ).get_block_hash(block)
+            with _chain_connection(network) as subtensor:
+                return subtensor.get_block_hash(block)
         except Exception:  # noqa: BLE001 - unavailable lookup is None, not a pass
             return None
 
@@ -6688,15 +6720,14 @@ def _historical_metagraph_lookup(network: str, netuid: int):
 
     def lookup(block: int):
         try:
-            with _isolated_argv():
-                import bittensor as bt
-
-                mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(
-                    netuid, block=int(block)
-                )
+            with _chain_connection(network) as subtensor:
+                mg = subtensor.metagraph(netuid, block=int(block))
+                # Read the snapshot before the connection closes.
+                raw_hotkeys = list(getattr(mg, "hotkeys", None) or ())
+                metagraph_block = getattr(mg, "block", None)
             return _validated_historical_hotkeys(
-                list(getattr(mg, "hotkeys", None) or ()),
-                metagraph_block=getattr(mg, "block", None),
+                raw_hotkeys,
+                metagraph_block=metagraph_block,
                 requested_block=block,
             )
         except Exception:  # noqa: BLE001 - unavailable history is None, not a pass
@@ -6709,32 +6740,29 @@ def _metagraph_snapshot(
     *, network: str, netuid: int
 ) -> tuple[dict[str, int], int | None]:
     """Read the UID map at the node's exact canonical finalized head."""
-    with _isolated_argv():
-        import bittensor as bt
-
-        subtensor = _bt_subtensor(bt)(network=connection_target(network))
+    with _chain_connection(network) as subtensor:
         finalized_block, _finalized_hash = _finalized_chain_head(subtensor)
         mg = subtensor.metagraph(netuid, block=finalized_block)
         commit_reveal_enabled = _strict_commit_reveal_state(
             subtensor.commit_reveal_enabled(netuid=netuid, block=finalized_block)
         )
+        # Materialise every read off the snapshot before the connection closes.
+        mg_block = getattr(mg, "block", None)
+        mapping = {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
     if commit_reveal_enabled:
         raise wire.VectorError(
             "SN39 release health requires commit-reveal disabled at the "
             "finalized snapshot"
         )
-    if _finalized_block(getattr(mg, "block", None)) != finalized_block:
+    if _finalized_block(mg_block) != finalized_block:
         raise wire.VectorError("metagraph snapshot did not resolve at finalized head")
-    mapping = {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
     return mapping, finalized_block
 
 
 def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
-    with _isolated_argv():
-        import bittensor as bt  # import under blanked argv — bittensor parses
-
-        mg = _bt_subtensor(bt)(network=connection_target(network)).metagraph(netuid)
-    return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
+    with _chain_connection(network) as subtensor:
+        mg = subtensor.metagraph(netuid)
+        return {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
 
 
 # -- main loop --------------------------------------------------------------------
