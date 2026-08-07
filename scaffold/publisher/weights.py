@@ -349,6 +349,26 @@ def validated_supply_metadata() -> dict[str, Any] | None:
     differs only in that the FIXED burn allocation is 0 rather than 10%.
     """
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
+        # Unset is the legitimate default for anyone not running validated
+        # supply, so this cannot raise unconditionally.
+        #
+        # But a v3 contract declared WITHOUT the enable flag is not a default,
+        # it is a half-applied cutover. The operator has stated the intent to
+        # run 70/30; returning None here makes the composer apply no contract
+        # at all and publish a flat-recent vector instead, with no v3 stamp and
+        # no CyberGym lane. Nothing downstream can tell that apart from a
+        # deliberate v2 run, which is why every live v3 attempt failed this way
+        # without anyone noticing.
+        #
+        # allocation_contract() above already refuses an unrecognized contract
+        # rather than silently falling back to a default split. Same principle,
+        # same blast radius: this is live economic policy, so fail closed.
+        if allocation_contract() == "v3":
+            raise VectorError(
+                f"{ALLOCATION_CONTRACT_ENV}=v3 requires "
+                f"{VALIDATED_SUPPLY_ENABLED_ENV}; refusing to silently compose "
+                "a non-v3 vector"
+            )
         return None
     if external_scores_mode() != "confidential_primary":
         raise VectorError("validated_supply requires confidential_primary mode")

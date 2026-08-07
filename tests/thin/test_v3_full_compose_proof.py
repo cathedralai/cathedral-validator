@@ -13,12 +13,13 @@ uid250) the way a producer signs it, runs the real composer, and asserts the
 signed ``validated_supply`` stamp, the 70/30 split, the uid-keyed CyberGym lane,
 and zero fixed burn.
 
-``test_missing_validated_supply_enabled_silently_falls_back`` pins the failure
-that silently broke every live v3 attempt: without
-``CATHEDRAL_VALIDATED_SUPPLY_ENABLED``, ``validated_supply_metadata()`` returns
-``None`` and ``build_signed_vector`` never applies the contract at all — no v3
-stamp, no CyberGym lane, just the flat-recent fallback. That flag is the whole
-difference between a working cutover and a silent burn, so it gets a loud guard.
+``test_missing_validated_supply_enabled_fails_closed`` covers the failure that
+silently broke every live v3 attempt: a v3 contract declared without
+``CATHEDRAL_VALIDATED_SUPPLY_ENABLED``. That used to return ``None``, apply no
+contract at all, and publish a flat-recent vector with no v3 stamp and no
+CyberGym lane, which nothing downstream could tell apart from a deliberate v2
+run. It now raises. The full matrix (v2 untouched, no contract untouched, full
+v3 still composes) lives in ``test_v3_requires_validated_supply_enabled.py``.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from scaffold.publisher import (
 )
 from scaffold.publisher import mechanism_cybergym_adapter as adapter
 from scaffold.publisher.store import Store
+from scaffold.wire_vector import VectorError
 
 BURN = "5FBurnHotkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 UID163 = (
@@ -166,11 +168,15 @@ def test_v3_compose_credits_the_cybergym_solver(monkeypatch, tmp_path):
     assert any(str(uid) == "250" for uid in lane), lane
 
 
-def test_missing_validated_supply_enabled_silently_falls_back(monkeypatch, tmp_path):
-    """Without the enable flag the composer applies no contract at all — the
-    exact silent fallback that broke every live v3 attempt."""
-    _apply_env(monkeypatch, validated_supply_enabled=False)
-    vector = _compose(tmp_path, datetime.now(timezone.utc))
+def test_missing_validated_supply_enabled_fails_closed(monkeypatch, tmp_path):
+    """A v3 contract without the enable flag refuses to compose.
 
-    assert "validated_supply" not in vector["policy_metadata"]
-    assert "cybergym_lane" not in vector["policy_metadata"]
+    This assertion was inverted deliberately. It previously pinned the silent
+    fallback as expected behaviour, which made a half-applied cutover
+    indistinguishable from a deliberate v2 run. Declaring v3 is a statement of
+    intent, so the composer now fails closed instead of quietly publishing
+    something else.
+    """
+    _apply_env(monkeypatch, validated_supply_enabled=False)
+    with pytest.raises(VectorError, match="CATHEDRAL_VALIDATED_SUPPLY_ENABLED"):
+        _compose(tmp_path, datetime.now(timezone.utc))
