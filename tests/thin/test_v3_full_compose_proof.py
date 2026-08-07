@@ -20,18 +20,26 @@ that silently broke every live v3 attempt: without
 stamp, no CyberGym lane, just the flat-recent fallback. That flag is the whole
 difference between a working cutover and a silent burn, so it gets a loud guard.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 import pytest
 
-from scaffold.publisher import cybergym_contract, cybergym_ingest, external_scores, weights
+from scaffold.publisher import (
+    cybergym_contract,
+    cybergym_ingest,
+    external_scores,
+    weights,
+)
 from scaffold.publisher import mechanism_cybergym_adapter as adapter
 from scaffold.publisher.store import Store
 
 BURN = "5FBurnHotkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-UID163 = "5CtobNq2yNmUKaaR9HL5eSY2jN4j43iz1GLXNeNp2tbkwawK"  # confidential TDX lane owner
+UID163 = (
+    "5CtobNq2yNmUKaaR9HL5eSY2jN4j43iz1GLXNeNp2tbkwawK"  # confidential TDX lane owner
+)
 UID250 = "5FCBM1y64aoDvuGWbDuerfPzzJNYWoXjofAjzVrnz3pYhFg3"  # cybergym solver
 PRODUCER = "cathedral-cybergym-producer-sn39"
 HMAC = "test-cybergym-hmac-secret"
@@ -74,21 +82,32 @@ def _seed(store: Store, now: datetime) -> None:
     # Confidential TDX lane -> uid163, authenticated body bound like the intake does.
     conf = external_scores.normalize_report(
         {
-            "source": "cathedral_confidential_tdx", "network": "finney", "netuid": 39,
-            "epoch": epoch, "generated_at": gen, "complete": True,
+            "source": "cathedral_confidential_tdx",
+            "network": "finney",
+            "netuid": 39,
+            "epoch": epoch,
+            "generated_at": gen,
+            "complete": True,
             "scores": [{"miner_hotkey": UID163, "score": 1.0, "uid": 163}],
         },
         now=now,
     )
-    conf = external_scores.bind_authenticated_body(conf, external_scores._canonical(conf))
+    conf = external_scores.bind_authenticated_body(
+        conf, external_scores._canonical(conf)
+    )
     external_scores.store_report(store, conf)
 
     # CyberGym lane -> uid250. Signed over the SEMANTIC body exactly as a producer
     # signs the wire report, so the adapter's verify_stored_report accepts it.
     payload = {
-        "producer_hotkey": PRODUCER, "network": "finney", "netuid": 39,
-        "source_epoch": epoch, "generated_at": gen, "complete": True,
-        "score_units": "level_weighted_verified_solves", "scores": {UID250: 2.0},
+        "producer_hotkey": PRODUCER,
+        "network": "finney",
+        "netuid": 39,
+        "source_epoch": epoch,
+        "generated_at": gen,
+        "complete": True,
+        "score_units": "level_weighted_verified_solves",
+        "scores": {UID250: 2.0},
         "evidence_sha256": EVIDENCE,
     }
     body = cybergym_contract.canonical_report_bytes(
@@ -100,18 +119,28 @@ def _seed(store: Store, now: datetime) -> None:
     )
     cyb = cybergym_ingest.bind_authenticated_body(cyb, body)
     cybergym_ingest.store_report(store, cyb, signature=signature)
-    store.write(lambda c: c.execute(
-        "CREATE TABLE IF NOT EXISTS cybergym_epoch_status(epoch INTEGER PRIMARY KEY, state TEXT NOT NULL)"))
-    store.write(lambda c: c.execute(
-        "INSERT OR REPLACE INTO cybergym_epoch_status(epoch, state) VALUES (?, ?)",
-        (epoch, adapter.EPOCH_CLOSED)))
+    store.write(
+        lambda c: c.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_status(epoch INTEGER PRIMARY KEY, state TEXT NOT NULL)"
+        )
+    )
+    store.write(
+        lambda c: c.execute(
+            "INSERT OR REPLACE INTO cybergym_epoch_status(epoch, state) VALUES (?, ?)",
+            (epoch, adapter.EPOCH_CLOSED),
+        )
+    )
 
     # Registration snapshot: both lane owners plus the burn sink.
     for hotkey, uid in ((UID163, 163), (UID250, 250), (BURN, 204)):
-        store.write(lambda c, hk=hotkey, u=uid: c.execute(
-            "INSERT OR REPLACE INTO metagraph_hotkeys"
-            "(network, netuid, hotkey, uid, coldkey, block, updated_at_iso) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)", ("finney", 39, hk, u, "", 100, gen)))
+        store.write(
+            lambda c, hk=hotkey, u=uid: c.execute(
+                "INSERT OR REPLACE INTO metagraph_hotkeys"
+                "(network, netuid, hotkey, uid, coldkey, block, updated_at_iso) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("finney", 39, hk, u, "", 100, gen),
+            )
+        )
 
 
 def _compose(tmp_path, now: datetime) -> dict:
