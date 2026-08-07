@@ -349,6 +349,19 @@ def validated_supply_metadata() -> dict[str, Any] | None:
     differs only in that the FIXED burn allocation is 0 rather than 10%.
     """
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
+        # A master switch that is off must not crash a validator that never opted
+        # in -- returning None (clean flat-recent fallback) is correct there. But
+        # an operator who explicitly set ALLOCATION_CONTRACT and forgot the enable
+        # flag has opted in and been ignored: their contract request is discarded
+        # before it is ever read, and the subnet silently composes a flat vector
+        # for a full tempo. Every other misconfiguration in this function fails
+        # closed; this one must too, or "five of the six settings present" -- the
+        # single most likely operator error -- is the one mistake that is silent.
+        if os.environ.get(ALLOCATION_CONTRACT_ENV):
+            raise VectorError(
+                f"{ALLOCATION_CONTRACT_ENV} is set but {VALIDATED_SUPPLY_ENABLED_ENV} "
+                "is not; refusing to fall back silently"
+            )
         return None
     if external_scores_mode() != "confidential_primary":
         raise VectorError("validated_supply requires confidential_primary mode")
