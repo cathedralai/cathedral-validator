@@ -174,8 +174,27 @@ def test_v3_requested_without_enable_flag_now_refuses(monkeypatch, tmp_path):
     in validated_supply_metadata() raises; this one now does too."""
     # V3_ENV sets ALLOCATION_CONTRACT=v3; _apply_env(..False) omits the enable flag.
     _apply_env(monkeypatch, validated_supply_enabled=False)
-    with pytest.raises(VectorError, match="refusing to fall back silently"):
+    # Names the variable that is set (=v3), not just "something is wrong" — the
+    # message has to point the operator at the exact half-applied knob.
+    with pytest.raises(
+        VectorError,
+        match=r"CATHEDRAL_ALLOCATION_CONTRACT=v3.*refusing to fall back silently",
+    ):
         _compose(tmp_path, datetime.now(timezone.utc))
+
+
+def test_a_plain_v2_run_is_untouched(monkeypatch, tmp_path):
+    """The guard must fire on the half-applied v3 cutover ONLY, never on a legitimate
+    v2 deployment. An operator who pins the documented default
+    (CATHEDRAL_ALLOCATION_CONTRACT=v2) with no enable flag is a normal v2 run; the
+    earlier "ALLOCATION_CONTRACT is set to anything" condition crashed their publisher.
+    It must fall through cleanly, exactly like the never-opted-in case. (wallscaler, #113.)"""
+    _apply_env(monkeypatch, validated_supply_enabled=False)
+    monkeypatch.setenv("CATHEDRAL_ALLOCATION_CONTRACT", "v2")
+    vector = _compose(tmp_path, datetime.now(timezone.utc))  # must NOT raise
+
+    assert "validated_supply" not in vector["policy_metadata"]
+    assert "cybergym_lane" not in vector["policy_metadata"]
 
 
 def test_never_opted_in_still_falls_back_clean(monkeypatch, tmp_path):
