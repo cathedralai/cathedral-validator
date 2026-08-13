@@ -124,12 +124,20 @@ EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM
 # (#5) Sources whose live composition must never silently inherit the legacy
 # 50% BASE_WEIGHT/WEIGHT default. An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION
 # is required for these; without one the blend fails closed to base-only.
-EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {
+    "cathedral_confidential_tdx",
+    "cathedral_voice_hybrid",
+}
 # (#6) Sources that must never run in external_primary (100% external intent)
 # mode, confirmed or not. A confidential/attested source stays capped-blend
 # only; external_scores_mode() enforces this centrally.
-EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {"cathedral_confidential_tdx"}
+EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {
+    "cathedral_confidential_tdx",
+    "cathedral_voice_hybrid",
+}
 # Sources subject to the final-attribution accounting control.
+# Voice hybrid is capped via FRACTION_REQUIRED + NO_PRIMARY only — it does NOT
+# inherit the confidential TDX 10% global hard-cap or confidential_primary mode.
 EXTERNAL_SCORES_GLOBAL_CAP_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
 # Sources eligible for the explicit 100%-confidential-compute scoring mode
