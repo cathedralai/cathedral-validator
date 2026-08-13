@@ -22,7 +22,6 @@ def test_storage_key_ignores_a_submitter_supplied_report_id():
     a = ext._storage_key(source_name="cathedral_confidential_tdx", digest="a" * 64)
     b = ext._storage_key(source_name="cathedral_confidential_tdx", digest="b" * 64)
     assert a != b
-    assert "a" * 64 in a
 
 
 def test_two_sources_can_never_collide_even_on_identical_content():
@@ -45,9 +44,26 @@ def test_the_key_is_stable_for_the_same_source_and_content():
 
 
 def test_the_key_is_a_pure_function_of_source_and_digest():
-    """Nothing else can influence it, so nothing a caller sends can steer it."""
-    assert ext._storage_key(source_name="violet_audio", digest="e" * 64) == (
-        f"ext:violet_audio:{'e' * 64}"
+    """Same inputs, same key. Nothing a caller sends elsewhere can steer it."""
+    first = ext._storage_key(source_name="violet_audio", digest="e" * 64)
+    second = ext._storage_key(source_name="violet_audio", digest="e" * 64)
+    assert first == second
+    assert first.startswith("ext:")
+
+
+def test_a_separator_in_the_source_cannot_forge_another_sources_key():
+    """Plain concatenation was ambiguous and a Codex review caught it.
+
+    ("foo", "bar:baz") and ("foo:bar", "baz") both rendered as ext:foo:bar:baz,
+    so a source name containing the separator could address another source's
+    row. The route normalizes source names today, but a primary key whose
+    uniqueness depends on its callers is not unique.
+    """
+    assert ext._storage_key(source_name="foo", digest="bar:baz") != ext._storage_key(
+        source_name="foo:bar", digest="baz"
+    )
+    assert ext._storage_key(source_name="a:b", digest="c") != ext._storage_key(
+        source_name="a", digest="b:c"
     )
 
 

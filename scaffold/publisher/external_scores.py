@@ -58,8 +58,20 @@ def _storage_key(*, source_name: str, digest: str) -> str:
 
     Server-derived from the source and the content digest. A submitter cannot
     influence it, so no source can address, overwrite, or erase another's row.
+
+    The two parts are hashed as a length-prefixed structure rather than joined
+    with a separator. Plain concatenation is ambiguous: ("foo", "bar:baz") and
+    ("foo:bar", "baz") both render as ext:foo:bar:baz, so a source name
+    containing the separator could address another source's row. The HTTP route
+    happens to prevent that today through normalization and a fixed digest
+    shape, but a key whose uniqueness depends on its callers is not unique, and
+    this one exists precisely to survive a caller that misbehaves.
     """
-    return f"ext:{source_name}:{digest}"
+    material = b"".join(
+        len(part).to_bytes(4, "big") + part
+        for part in (source_name.encode("utf-8"), digest.encode("utf-8"))
+    )
+    return "ext:" + hashlib.sha256(material).hexdigest()
 
 
 COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
