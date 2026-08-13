@@ -97,6 +97,130 @@ def test_contradictory_finalized_record_is_rejected() -> None:
         vt._recover_common_finalized_submission(SimpleNamespace(), state)
 
 
+# -- (e) an aborted unsigned attempt must not wedge a proven finalization ---
+
+
+_FINALIZED = "sha256:" + "b" * 64
+_RESERVED = "sha256:" + "c" * 64
+
+_IDENTITY = {
+    "validator_hotkey": "5Test",
+    "uid_weights": [[0, 1.0]],
+    "uid_hotkeys": [[0, "5Test"]],
+    "burn_hotkey": "5Test",
+    "network": "finney",
+    "netuid": 39,
+    "mapping_block": 100,
+    "policy_version": 1,
+    "vector_id": "v1",
+    "signed_vector_sha256": "sha256:" + "d" * 64,
+}
+_INTENT = {
+    "extrinsic_hash": "0x" + "1" * 64,
+    "nonce": 1,
+    "era_reference_block": 100,
+    "mortal_period_blocks": vt.SN39_MORTAL_PERIOD_BLOCKS,
+    "version_key": 1,
+    "wire_uids": [0],
+    "wire_weights": [65535],
+}
+_RECEIPT = {
+    "extrinsic_hash": "0x" + "1" * 64,
+    "block_hash": "0x" + "2" * 64,
+    "block_number": 101,
+    "version_key": 1,
+    "wire_uids": [0],
+    "wire_weights": [65535],
+}
+
+
+def _post_finalize_state() -> dict:
+    """The journal shape _finalize_common_submission leaves behind.
+
+    It writes the ``submission_finalized_*`` record and leaves the
+    ``submission_pending_*`` mirror of the same attempt in place; the fence
+    clears only ``submission_pending_id``.
+    """
+    return {
+        "submission_pending_id": None,
+        "submission_pending_lane": "thin",
+        "submission_pending_phase": "signed_intent",
+        "submission_pending_identity": _IDENTITY,
+        "submission_pending_broadcast_intent": _INTENT,
+        "submission_pending_proof_status": vt.PASS,
+        "submission_pending_launch_attempt": False,
+        "submission_finalized_id": _FINALIZED,
+        "submission_finalized_lane": "thin",
+        "submission_finalized_identity": _IDENTITY,
+        "submission_finalized_broadcast_intent": _INTENT,
+        "submission_finalized_receipt": _RECEIPT,
+        "submission_active_lane": "thin",
+        "submission_attempt_ids": [_FINALIZED],
+        "submission_highest_policy_version": 1,
+        "submission_genesis_hash": vt.FINNEY_GENESIS_HASH,
+        "submission_validator_hotkey": "5Test",
+        "submission_extrinsic_hash": _RECEIPT["extrinsic_hash"],
+        "submission_block_hash": _RECEIPT["block_hash"],
+        "submission_block_number": 101,
+        "submission_version_key": 1,
+    }
+
+
+def test_abort_of_a_later_unsigned_attempt_does_not_wedge_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """The Aug 3/4/7/10 production wedge, in order.
+
+    A proven finalization, then a later tick reserves an attempt, then the
+    chain call fails before signing. The abort is entitled to clear every
+    pending key, which erases the mirror of the FINALIZED attempt. Recovery
+    must still accept the finalization: it is proven on chain and the aborted
+    attempt was never signed, so there is nothing ambiguous to protect.
+    """
+    journal = tmp_path / "journal-test.json"
+    monkeypatch.setattr(vt, "_submission_state_path", lambda args: journal)
+    monkeypatch.setattr(vt, "_wire_weights", lambda uids, weights: ([0], [65535]))
+    args = SimpleNamespace(state_file=str(tmp_path / "thin-state.json"), netuid=39)
+
+    vt._write_state(journal, _post_finalize_state())
+
+    # A later tick reserves an attempt that never reaches signed intent.
+    vt._write_state_fenced(
+        journal,
+        {
+            "submission_pending_id": _RESERVED,
+            "_provisional_submission": True,
+            "submission_pending_lane": "thin",
+            "submission_pending_identity": {"validator_hotkey": "5Test"},
+            "submission_highest_policy_version": 2,
+        },
+    )
+    assert vt._read_state(journal)["submission_pending_phase"] == "unsigned_reserved"
+
+    # The chain call fails; the in-tick abort releases the reservation and
+    # clears the pending keys, including the finalized attempt's mirror.
+    assert vt._abort_unsigned_common_submission(args, attempt_id=_RESERVED) is True
+    after = vt._read_state(journal)
+    assert after.get("submission_pending_lane") is None
+    assert after["submission_finalized_id"] == _FINALIZED
+
+    # Restart. This raised _PostSignedSubmissionMismatch before the finalized
+    # record was made self-validating, and did so on every restart thereafter.
+    recovered = vt._recover_common_finalized_submission(args, after)
+    assert recovered is not None
+    assert recovered.attempt_id == _FINALIZED
+    assert recovered.extrinsic_hash == _RECEIPT["extrinsic_hash"]
+    assert recovered.block_number == _RECEIPT["block_number"]
+
+    # Every later restart finds the lane mirror already written and has
+    # nothing left to recover. None here means clean, not wedged.
+    for _restart in range(3):
+        assert (
+            vt._recover_common_finalized_submission(args, vt._read_state(journal))
+            is None
+        )
+
+
 # -- (d) the init helper enforces archive-not-edit --------------------------
 
 
