@@ -29,7 +29,9 @@ def _iso(dt: datetime) -> str:
 
 
 def _sample_report(source: str = "cathedral_sat_fast") -> dict:
-    report = {
+    # Every source is bound to the publisher's exact audience, not just the
+    # confidential one: an unaudienced report shares one cross-audience fence.
+    return {
         "source": source,
         "generated_at": _now_iso(),
         "scores": [
@@ -37,11 +39,9 @@ def _sample_report(source: str = "cathedral_sat_fast") -> dict:
         ],
         "complete": True,
         "epoch": 1,
+        "network": "finney",
+        "netuid": 39,
     }
-    if source == "cathedral_confidential_tdx":
-        report["network"] = "finney"
-        report["netuid"] = 39
-    return report
 
 
 def _tdx_auth(monkeypatch):
@@ -826,7 +826,8 @@ def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
 def test_route_accepts_exact_cap_boundary(client, monkeypatch):
     """Payload exactly at cap is accepted."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN", "shared-token")
-    report = {"source": "violet_audio", "generated_at": _now_iso(), "scores": [], "complete": True, "epoch": 1}
+    report = _sample_report("violet_audio")
+    report["scores"] = []
     body = json.dumps(report).encode("utf-8")
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", str(len(body)))
     resp = client.post(
