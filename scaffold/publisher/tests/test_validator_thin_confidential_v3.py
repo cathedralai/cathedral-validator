@@ -53,35 +53,97 @@ def test_full_map_preserves_exact_mixed_union_vector() -> None:
     assert result == {10: 0.45, 11: 0.5, 12: 0.05}
 
 
-def test_missing_base_hotkey_rebuilds_from_mapped_base_components() -> None:
+def test_deregistered_hotkey_refuses_rather_than_repricing_every_row() -> None:
+    """One deregistration must not re-cut the whole signed allocation.
+
+    The mapper used to read ``base_component`` for EVERY row as soon as any
+    signed hotkey was unmappable, which strips the external component from
+    rows whose own hotkey is still registered.
+    """
+    rows = [
+        _row("deregistered-base", 0.45, 0.0),
+        _row("overlap", 0.45, 0.05),
+        _row("compute", 0.0, 0.05),
+    ]
+
+    # The signed allocation while every hotkey maps: `overlap` keeps its
+    # external component and the compute-only row is paid.
+    assert validator_thin.vector_to_uid_weights(
+        _v3_payload(rows), {"deregistered-base": 10, "overlap": 11, "compute": 12}
+    ) == {10: 0.45, 11: 0.5, 12: 0.05}
+
+    # Dropping ONE base hotkey used to silently pay {11: 1.0}: `overlap` lost
+    # its external component and the still-registered compute lane went to 0.
+    with pytest.raises(validator_thin.wire.VectorError) as excinfo:
+        validator_thin.vector_to_uid_weights(
+            _v3_payload(rows), {"overlap": 11, "compute": 12}
+        )
+
+    message = str(excinfo.value)
+    assert "deregistered-base" in message
+    assert "not in the metagraph" in message
+
+
+def test_deregistered_compute_hotkey_also_refuses_the_vector() -> None:
+    """The refusal is all-or-nothing, not a cap-breach heuristic.
+
+    Losing a compute row can only lower the realized external fraction, so no
+    cap is at risk; the vector is still one the validator cannot apply as
+    signed.
+    """
+    payload = _v3_payload([
+        _row("base", 0.45, 0.0),
+        _row("overlap", 0.45, 0.05),
+        _row("deregistered-compute", 0.0, 0.05),
+    ])
+
+    with pytest.raises(validator_thin.wire.VectorError,
+                       match="deregistered-compute"):
+        validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 11})
+
+
+def test_unmappable_hotkey_refusal_names_every_missing_row() -> None:
+    """The message is the operator's evidence: it reaches the structured
+    journal as the ``detail`` of VECTOR_REJECTED/TICK_FAILED."""
+    payload = _v3_payload([
+        _row("gone-a", 0.30, 0.0),
+        _row("gone-b", 0.30, 0.0),
+        _row("stays", 0.30, 0.10),
+    ])
+
+    with pytest.raises(validator_thin.wire.VectorError) as excinfo:
+        validator_thin.vector_to_uid_weights(payload, {"stays": 11})
+
+    message = str(excinfo.value)
+    assert "gone-a" in message
+    assert "gone-b" in message
+    assert "2 of 3 rows" in message
+
+
+def test_missing_base_hotkey_never_rebuilds_from_base_components() -> None:
     payload = _v3_payload([
         _row("missing-base", 0.45, 0.0),
         _row("overlap", 0.45, 0.05),
         _row("compute", 0.0, 0.05),
     ])
 
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"overlap": 11, "compute": 12}
-    )
-
-    assert result == {11: 1.0}
+    with pytest.raises(validator_thin.wire.VectorError, match="missing-base"):
+        validator_thin.vector_to_uid_weights(payload, {"overlap": 11, "compute": 12})
 
 
-def test_missing_compute_hotkey_drops_all_external_mass() -> None:
+def test_missing_compute_hotkey_never_drops_external_mass_from_other_rows() -> None:
     payload = _v3_payload([
         _row("base", 0.45, 0.0),
         _row("overlap", 0.45, 0.05),
         _row("compute", 0.0, 0.05),
     ])
 
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"base": 10, "overlap": 11}
-    )
-
-    assert result == {10: 0.5, 11: 0.5}
+    with pytest.raises(validator_thin.wire.VectorError, match="compute"):
+        validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 11})
 
 
-def test_incomplete_v3_fallback_applies_existing_burn_to_base_only() -> None:
+def test_incomplete_v3_refusal_precedes_any_burn_application() -> None:
+    """A configured burn does not make an unmappable v3 vector payable."""
     payload = _v3_payload(
         [
             _row("base", 0.45, 0.0),
@@ -92,11 +154,8 @@ def test_incomplete_v3_fallback_applies_existing_burn_to_base_only() -> None:
         forced_burn_percentage=20.0,
     )
 
-    result = validator_thin.vector_to_uid_weights(
-        payload, {"base": 10, "overlap": 11}
-    )
-
-    assert result == {10: 0.4, 11: 0.4, 99: 0.2}
+    with pytest.raises(validator_thin.wire.VectorError, match="not in the metagraph"):
+        validator_thin.vector_to_uid_weights(payload, {"base": 10, "overlap": 11})
 
 
 def test_compute_only_row_is_retained_within_valid_base_union() -> None:
