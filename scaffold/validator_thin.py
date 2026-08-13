@@ -10896,7 +10896,13 @@ def main() -> int:
             "--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "
             "validators must pin the orchestrator's signing key"
         )
-    if args.require_policy and args.require_policy not in REQUIRE_POLICY_CHOICES:
+    # Unconditional, NOT `if args.require_policy and ...`: the flag's default is
+    # always a real pin, so an empty value is a value someone supplied, never an
+    # absent one. Skipping the check on falsy conflated the two and let
+    # `--require-policy ''` drop the allocation-contract pin in silence, leaving
+    # one binary willing to map v2, v3, confidential_primary and legacy vectors
+    # alike, which is the exact ambiguity the pin exists to remove.
+    if args.require_policy not in REQUIRE_POLICY_CHOICES:
         p.error(
             f"--require-policy (or CATHEDRAL_VALIDATOR_REQUIRE_POLICY) must be one of "
             f"{', '.join(REQUIRE_POLICY_CHOICES)}; got {args.require_policy!r}"
