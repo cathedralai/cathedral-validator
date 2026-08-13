@@ -287,7 +287,8 @@ def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> t
     - Bad/missing signature returns (False, False) -> 401
 
     For other sources:
-    - Optional global HMAC secret (backward compatible)
+    - A per-source secret, when set, is required and the global does NOT substitute
+    - Otherwise the optional global HMAC secret applies (backward compatible)
     - Missing/invalid signature returns (False, False) -> 401
     - No secret configured returns (True, False) -> pass (signature optional)
     """
@@ -306,8 +307,15 @@ def verify_hmac_for_source(source: str, body: bytes, signature: str | None) -> t
         is_valid = hmac.compare_digest(supplied, expected)
         return is_valid, False
     else:
-        # Optional global HMAC (backward compatible)
-        secret = (os.environ.get(HMAC_SECRET_ENV) or "").strip()
+        # A per-source secret is derivable for ANY source, so an operator can set
+        # one here too. Consult it first and let it override the global: a
+        # configured secret that the route silently ignores is worse than no
+        # secret, because it reads as an enforced control while the route
+        # degrades to bearer-token-only and accepts unsigned bodies.
+        secret = (os.environ.get(_source_hmac_secret_env(source)) or "").strip()
+        if not secret:
+            # Optional global HMAC (backward compatible)
+            secret = (os.environ.get(HMAC_SECRET_ENV) or "").strip()
         if not secret:
             return True, False  # No secret configured, pass
         if not signature:

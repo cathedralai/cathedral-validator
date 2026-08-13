@@ -802,6 +802,109 @@ def test_route_other_sources_pass_when_no_global_hmac_configured(client, monkeyp
     assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
 
 
+# ---- Per-source HMAC secret for non-mandatory sources -----------------
+# _source_hmac_secret_env() derives a per-source env name for EVERY source, so
+# an operator can set one for a source outside MANDATORY_HMAC_SOURCES. A
+# configured secret that the route never consults is worse than no secret: it
+# reads as an enforced control while the route silently degrades to
+# bearer-token-only.
+
+
+def test_route_enforces_per_source_hmac_secret_without_global(client, monkeypatch):
+    """A per-source secret alone makes a signature mandatory for that source."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-token")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_SAT_FAST", "sat-hmac-secret")
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", raising=False)
+    report = _sample_report("cathedral_sat_fast")
+    body = json.dumps(report).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sat-token",
+        }
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_external_scores_signature"
+
+
+def test_route_rejects_bad_signature_against_per_source_hmac_secret(client, monkeypatch):
+    """A signature that does not verify against the per-source secret is 401."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-token")
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_SAT_FAST", "sat-hmac-secret")
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", raising=False)
+    report = _sample_report("cathedral_sat_fast")
+    body = json.dumps(report).encode("utf-8")
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sat-token",
+            "X-Cathedral-External-Signature": f"sha256={'a' * 64}",
+        }
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_external_scores_signature"
+
+
+def test_route_accepts_valid_signature_against_per_source_hmac_secret(client, monkeypatch):
+    """A signature that verifies against the per-source secret is accepted."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-token")
+    secret = "sat-hmac-secret"
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_SAT_FAST", secret)
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", raising=False)
+    report = _sample_report("cathedral_sat_fast")
+    body = json.dumps(report).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sat-token",
+            "X-Cathedral-External-Signature": f"sha256={sig}",
+        }
+    )
+    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.json()}"
+
+
+def test_route_per_source_hmac_secret_takes_precedence_over_global(client, monkeypatch):
+    """The narrower per-source secret wins; the global one no longer signs for it."""
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_SAT_FAST", "sat-token")
+    global_secret = "global-hmac-secret"
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", global_secret)
+    monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_SAT_FAST", "sat-hmac-secret")
+    report = _sample_report("cathedral_sat_fast")
+    body = json.dumps(report).encode("utf-8")
+    global_sig = hmac.new(global_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    resp = client.post(
+        "/v1/external-scores/violet",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sat-token",
+            "X-Cathedral-External-Signature": f"sha256={global_sig}",
+        }
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_external_scores_signature"
+
+
+def test_verify_hmac_for_source_consults_per_source_secret(monkeypatch):
+    """Unit-level: the derived per-source env name is actually read."""
+    source = "cathedral_sat_fast"
+    secret = "sat-hmac-secret"
+    monkeypatch.setenv(external_scores._source_hmac_secret_env(source), secret)
+    monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET", raising=False)
+    body = b'{"source":"cathedral_sat_fast"}'
+    sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+    assert external_scores.verify_hmac_for_source(source, body, None) == (False, False)
+    assert external_scores.verify_hmac_for_source(source, body, sig) == (True, False)
+
+
 # ---- Bounded body consumption tests (CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES) -----
 
 def test_route_rejects_declared_oversize_with_413(client, monkeypatch):
