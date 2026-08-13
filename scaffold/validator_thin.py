@@ -6810,6 +6810,21 @@ def tick(args) -> bool:
                 raise
             if not _full_path_provisioned(args):
                 raise
+            # Degrading up rewrites the trust model of the whole process, which
+            # is the same choice _validate_runtime_contract admits or refuses
+            # before the loop starts. Hold the switch to that contract instead
+            # of stepping past it: a validated_supply_v3 pin under authority
+            # mode is refused at startup precisely because it fails closed on
+            # every tick, and taking that state at tick time is worse, because
+            # nothing switches back and the validator goes dark for good.
+            # Idling until the publisher returns is the recoverable failure.
+            switch_refusal = _feed_down_switch_refusal(args)
+            if switch_refusal is not None:
+                _lifecycle(
+                    "FEED unavailable",
+                    f"reason={exc} switching_to=none refused={switch_refusal}",
+                )
+                raise
             fallback_reason = str(exc)
     # Outside the thin lock: the authority tick takes its own.
     _lifecycle(
@@ -6830,6 +6845,42 @@ def tick(args) -> bool:
 
 class _FeedUnavailableForThin(wire.VectorError):
     """The signed vector could not be fetched, so thin has nothing to follow."""
+
+
+class _ProvenanceView:
+    """Read-only view of args carrying one substituted provenance mode.
+
+    The contract check has to be answered BEFORE the live args are rewritten,
+    or a refused switch would have to be undone on an object other threads and
+    later ticks read. A view keeps the runtime unchanged until the switch is
+    known to be admissible.
+    """
+
+    def __init__(self, args: Any, provenance: str) -> None:
+        object.__setattr__(self, "_args", args)
+        object.__setattr__(self, "provenance", provenance)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_args"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # A contract check that started writing would write to the view and lose
+        # it. Fail loudly rather than silently discard a runtime mutation.
+        raise AttributeError(f"provenance view is read-only; refused write to {name}")
+
+
+def _feed_down_switch_refusal(args: Any) -> str | None:
+    """Why this runtime may not degrade up into FULL, or None when it may.
+
+    Answered by the startup contract itself rather than by a copy of one of its
+    rules, so a configuration the guard would refuse under authority mode stays
+    refused when the feed, not the operator, is what proposes the change.
+    """
+    try:
+        _validate_runtime_contract(_ProvenanceView(args, "authority"))
+    except wire.VectorError as exc:
+        return str(exc)
+    return None
 
 
 def _full_path_provisioned(args: Any) -> bool:

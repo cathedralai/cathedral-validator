@@ -269,6 +269,40 @@ def test_v1_pin_with_authority_provenance_is_unaffected() -> None:
 
 
 # --------------------------------------------------------------------------
+# The same contract, re-asked before the feed-down switch
+# --------------------------------------------------------------------------
+
+
+def test_the_feed_down_switch_is_held_to_this_profile() -> None:
+    """A dead publisher must not buy a runtime the posture its config was refused.
+
+    The switch is one-way and happens after startup, so without this the guard
+    above only covers configs an operator wrote down, not the one the process
+    ends up running.
+    """
+    args = _profile_args(require_policy=vt.REQUIRE_POLICY_VALIDATED_SUPPLY_V3)
+    vt._validate_runtime_contract(args)
+    refusal = vt._feed_down_switch_refusal(args)
+    assert refusal is not None
+    assert "incompatible with provenance=authority" in refusal
+
+
+def test_the_feed_down_switch_still_serves_a_gated_v1_runtime() -> None:
+    """The fallback stays available where authority is an admissible posture."""
+    assert vt._feed_down_switch_refusal(_profile_args()) is None
+
+
+def test_the_feed_down_switch_does_not_hand_out_the_completed_launch_gate(
+    no_launch_material,
+) -> None:
+    """Escalating makes the runtime originate weights, which is the capability
+    the completed-launch gate protects. An ungated relay stays thin."""
+    args = _profile_args(require_completed_launch_for_broadcast=False)
+    vt._validate_runtime_contract(args)
+    assert "completed-launch gate" in str(vt._feed_down_switch_refusal(args))
+
+
+# --------------------------------------------------------------------------
 # The same contract, re-asked against the resolved chain
 # --------------------------------------------------------------------------
 
