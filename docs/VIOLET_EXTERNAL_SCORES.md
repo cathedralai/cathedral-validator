@@ -105,15 +105,22 @@ CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX=<confidential_secret>
 CATHEDRAL_EXTERNAL_SCORES_TOKEN=<shared_token>
 ```
 
-### Legacy Weights (Used Only if FRACTION Unset)
+### Legacy Weights (Unreachable)
 
 ```bash
 CATHEDRAL_EXTERNAL_SCORES_BASE_WEIGHT=1.0
 CATHEDRAL_EXTERNAL_SCORES_WEIGHT=1.0
 # Effective share = weight / (base_weight + weight)
 # Capped at MAX_FRACTION (default 0.5)
-# WARNING: This 50% default is almost never correct; always set FRACTION explicitly.
 ```
+
+`FRACTION` is required for **every** source, not just confidential ones. With
+`FRACTION` unset the blend fails closed to a zero external share and these two
+knobs are never read; they apply only to a source named in
+`weights.EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES`, which is empty. The 1.0/1.0
+default they used to supply resolved to a 50% external share, and because the
+external vector is L1-normalized, one accepted report naming a single hotkey
+paid it half the emission.
 
 ---
 

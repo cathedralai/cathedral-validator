@@ -121,10 +121,16 @@ EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
 EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
 EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
-# (#5) Sources whose live composition must never silently inherit the legacy
-# 50% BASE_WEIGHT/WEIGHT default. An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION
-# is required for these; without one the blend fails closed to base-only.
-EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+# (#5) An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION is required before any
+# source gets live external mass; without one the blend fails closed to
+# base-only. This rail is opt-OUT, not opt-in: naming a source below lets it
+# inherit the legacy 1.0/1.0 BASE_WEIGHT/WEIGHT default, which resolves to a
+# 50% external share with no per-source cap. Because the external vector is
+# L1-normalized, one accepted report naming a single hotkey then moves half the
+# emission to it, so an opt-in rail meant every newly allowlisted source
+# arrived unprotected. Keep this set empty unless a source can prove it does
+# not feed real weights.
+EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES: set[str] = set()
 # (#6) Sources that must never run in external_primary (100% external intent)
 # mode, confirmed or not. A confidential/attested source stays capped-blend
 # only; external_scores_mode() enforces this centrally.
@@ -1082,17 +1088,18 @@ def _external_blend_weights() -> tuple[float, float, float]:
     """Return (base_weight, external_weight, effective_external_share).
 
     An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION wins (share == fraction).
-    Otherwise the legacy base/external weights are used, but the effective
-    external share is HARD-CAPPED at CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION
-    (default 0.5) so a fat external_weight cannot silently take the vector."""
+    Without one every source fails closed to a zero external share; only a
+    source explicitly exempted may fall through to the legacy base/external
+    weights, and even then the effective share is HARD-CAPPED at
+    CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION (default 0.5)."""
     max_frac = min(1.0, max(0.0, _env_float(EXTERNAL_SCORES_MAX_FRACTION_ENV, 0.5)))
     frac_raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
     if frac_raw:
         frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
         return (1.0 - frac), frac, frac
-    if external_scores_source() in EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES:
-        # (#5) Fail closed: this source must never inherit the legacy 1.0/1.0
-        # (50%) default. No explicit fraction => zero external share.
+    if external_scores_source() not in EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES:
+        # (#5) Fail closed: no source inherits the legacy 1.0/1.0 (50%)
+        # default. No explicit fraction => zero external share.
         return 1.0, 0.0, 0.0
     base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
     external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))
