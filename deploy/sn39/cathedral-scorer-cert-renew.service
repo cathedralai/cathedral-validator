@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew the SN39 scorer TLS leaf before it expires
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cathedral-scorer-cert-renew

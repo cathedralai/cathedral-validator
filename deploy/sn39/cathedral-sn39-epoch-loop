@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+umask 077
+
+readonly PRODUCER_ROOT=/opt/cathedral-sn39/venvs/26ebdbb885746f1835ea67ff314e384b4838560f
+readonly BIN="${PRODUCER_ROOT}/bin/cathedral"
+readonly LEDGER=/var/lib/cathedral-confidential-sn39/ledger.sqlite
+readonly EXPORTER=/usr/local/sbin/cathedral-sn39-export-evidence
+readonly RUNNER=/usr/local/sbin/cathedral-sn39-fresh-evidence-epoch
+readonly LOCK=/run/cathedral-sn39-epoch.lock
+readonly INTERVAL="${CATHEDRAL_SN39_EPOCH_INTERVAL_SECONDS:-300}"
+
+log() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+  log "another epoch loop already owns the launch lock"
+  exit 1
+fi
+
+while true; do
+  status_json="$("${BIN}" runtime status --ledger-db "${LEDGER}" 2>/dev/null || true)"
+  blocking_status="$(
+    python3 -c \
+      'import json,sys; d=json.load(sys.stdin).get("blocking_epoch") or {}; print(d.get("status","none"))' \
+      <<<"${status_json}" 2>/dev/null || printf 'invalid'
+  )"
+  case "${blocking_status}" in
+    complete)
+      epoch_id="$(
+        python3 -c \
+          'import json,sys; print(json.load(sys.stdin)["blocking_epoch"]["epoch_id"])' \
+          <<<"${status_json}"
+      )"
+      log "retrying signed-feed publication for frozen epoch=${epoch_id}"
+      # retry-publish runs from THIS script, not from the runner, so it must
+      # source the same publisher credentials the runner does. Without them the
+      # retry fails on missing CATHEDRAL_PUBLISHER_* forever and one failed
+      # publication wedges the loop permanently on the frozen epoch.
+      if ! ( set -a
+             . /home/polaris/cathedral/.env.sh
+             . /etc/cathedral/scorer-canary.env.sh
+             # Same local trust anchor the runner pins; the scorer serves a
+             # private-CA cert on 127.0.0.1:8012.
+             SSL_CERT_FILE=/etc/cathedral/tls/epoch-trust-sn39.crt
+             REQUESTS_CA_BUNDLE=/etc/cathedral/tls/epoch-trust-sn39.crt
+             set +a
+             exec "${BIN}" runtime retry-publish \
+               --ledger-db "${LEDGER}" \
+               --publisher-endpoint https://127.0.0.1:8012/v1/external-scores/violet \
+               --score-network finney --score-netuid 39 \
+               --epoch-id "${epoch_id}" --pretty ); then
+        log "signed-feed publication retry failed epoch=${epoch_id}"
+      fi
+      ;;
+    running)
+      log "aborting an interrupted, non-frozen epoch"
+      "${BIN}" runtime abort-running --ledger-db "${LEDGER}" || \
+        log "interrupted epoch abort failed"
+      ;;
+    none)
+      # Reconcile the latest frozen epoch before admitting a new one. Every
+      # export command is content-addressed/idempotent, so a crash at any
+      # point resumes the same report, public bundle, and controlled mirror.
+      if ! "${EXPORTER}" latest-published; then
+        log "latest frozen epoch reconciliation failed; not starting a newer epoch"
+      elif ! "${RUNNER}"; then
+        log "fresh anchored evidence epoch failed"
+      fi
+      ;;
+    *)
+      log "ledger status unreadable; fail closed"
+      ;;
+  esac
+  sleep "${INTERVAL}"
+done
