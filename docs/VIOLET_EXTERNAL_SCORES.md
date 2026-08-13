@@ -51,6 +51,7 @@ CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION=0.5             # Hard ceiling on externa
 CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES=4096              # Max scores per report (default 4096)
 CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_AGE_SECS=3600     # Reject if generated_at too old (default 1 hour)
 CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS=120   # Reject if generated_at too far ahead (default 120 s)
+CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=0           # Zero-credit any positive score with no evidence block (default 0)
 ```
 
 ### Mode and Confirmation
@@ -253,7 +254,20 @@ hotkey map is incomplete.
 | `miner_hotkey` | string | Yes | Must be a valid hotkey |
 | `score` | float | Yes | Finite 0.0..1.0; normalized internally; 0.0 explicit revoke |
 | `uid` | int | No | Metadata; not used in blend |
+| `evidence` | object | No | `{evidence_sha256, kind?, receipt_id?}`. `evidence_sha256` must be 64 lowercase hex; unknown keys rejected as `invalid_evidence_<idx>`. Required for credit only when `CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=1` |
 | Other | any | No | Stored in metadata; not used in composition |
+
+### Evidence Enforcement
+
+A positive score with no `evidence` block is credited on the request's bearer
+token and body HMAC alone. `CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=1`
+refuses it instead: the entry is normalized to `score=0.0` (zero credit, never a
+partial discount), which the snapshot reader then treats as revoked.
+
+Default is off, because no producer emits evidence yet. Intake logs a warning
+per unevidenced positive score plus one summary line per report in both modes,
+so the log tells you what fraction of the live vector enforcement would refuse
+before you turn it on.
 
 ---
 
