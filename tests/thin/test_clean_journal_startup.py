@@ -215,7 +215,10 @@ def test_abort_of_a_later_unsigned_attempt_does_not_wedge_recovery(
     # Every later restart finds the lane mirror already written and has
     # nothing left to recover. None here means clean, not wedged.
     for _restart in range(3):
-        assert vt._recover_common_finalized_submission(args, vt._read_state(journal)) is None
+        assert (
+            vt._recover_common_finalized_submission(args, vt._read_state(journal))
+            is None
+        )
 
 
 # -- (d) the init helper enforces archive-not-edit --------------------------
