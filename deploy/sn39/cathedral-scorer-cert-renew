@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Renew the scorer's local TLS certificate before it expires.
+#
+# On 2026-08-12 this certificate and its CA both expired at 08:37:29Z, thirty days
+# after issue. Three minutes later the evidence epoch died on
+# CERTIFICATE_VERIFY_FAILED and froze, and nginx simultaneously began returning 502
+# for api.cathedral.computer because it verifies the scorer against the same CA.
+# One expiry, two outages, no warning. The certificate was renewed by hand.
+#
+# Renewal is now mechanical and runs long before the cliff. The CA is long-lived
+# because rotating it requires touching every consumer (the epoch trust bundle and
+# nginx's proxy_ssl_trusted_certificate); the leaf is the part that turns over.
+set -euo pipefail
+
+TLS_DIR=/etc/cathedral/tls
+LEAF_CRT="${TLS_DIR}/scorer-canary.crt"
+LEAF_KEY="${TLS_DIR}/scorer-canary.key"
+CA_CRT="${TLS_DIR}/scorer-canary-ca.crt"
+CA_KEY="${TLS_DIR}/scorer-canary-ca.key"
+BUNDLE="${TLS_DIR}/epoch-trust-sn39.crt"
+RENEW_BEFORE_DAYS="${RENEW_BEFORE_DAYS:-30}"
+
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+if [ ! -f "$CA_KEY" ]; then
+  # Without the CA key a leaf cannot be reissued, which is how the 2026-08-12
+  # expiry became a hand-built replacement CA under time pressure.
+  log "FATAL: no CA key at ${CA_KEY}; cannot renew. Reissue the CA deliberately."
+  exit 1
+fi
+
+if openssl x509 -in "$LEAF_CRT" -noout \
+     -checkend $((RENEW_BEFORE_DAYS * 86400)) >/dev/null 2>&1; then
+  log "leaf valid for more than ${RENEW_BEFORE_DAYS}d; nothing to do"
+  exit 0
+fi
+
+log "leaf expires within ${RENEW_BEFORE_DAYS}d; renewing"
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+
+openssl req -newkey rsa:3072 -nodes -sha256 -subj "/CN=127.0.0.1" \
+  -keyout "$WORK/leaf.key" -out "$WORK/leaf.csr" 2>/dev/null
+printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' > "$WORK/ext"
+openssl x509 -req -in "$WORK/leaf.csr" -CA "$CA_CRT" -CAkey "$CA_KEY" \
+  -CAcreateserial -days 825 -sha256 -extfile "$WORK/ext" -out "$WORK/leaf.crt" 2>/dev/null
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+cp -a "$LEAF_CRT" "${LEAF_CRT}.pre-renew-${STAMP}"
+cp -a "$LEAF_KEY" "${LEAF_KEY}.pre-renew-${STAMP}"
+install -o root -g polaris -m 640 "$WORK/leaf.crt" "$LEAF_CRT"
+install -o root -g polaris -m 640 "$WORK/leaf.key" "$LEAF_KEY"
+
+# The scorer holds the cert open; nginx caches the CA it verifies against. Both
+# must be told, or a renewed certificate still presents the old one to callers.
+systemctl restart cathedral-scorer-sn39.service
+systemctl reload nginx || log "WARNING: nginx reload failed; api.cathedral.computer may 502"
+
+if echo | openssl s_client -connect 127.0.0.1:8012 -CAfile "$BUNDLE" 2>/dev/null \
+     | grep -q "Verify return code: 0"; then
+  log "renewed and verified against the epoch trust bundle"
+else
+  log "FATAL: renewed leaf does not verify against ${BUNDLE}"
+  exit 1
+fi

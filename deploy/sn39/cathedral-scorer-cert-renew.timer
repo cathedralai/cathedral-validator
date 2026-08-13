@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the SN39 scorer TLS leaf daily
+# Daily against a 30-day renewal window: 29 consecutive failures would have to go
+# unnoticed before an expiry could reach production.
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

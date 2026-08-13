@@ -123,7 +123,7 @@ NEWEST=$(printf '%s\n' "$TAIL" | grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 
 [ -n "$NEWEST" ] || alert "event journal '$EVENTS' holds no parseable event record — this check is blind."
 STALE_CUTOFF=$(cutoff "$STALE_SECS")
 if older_than "$NEWEST" "$STALE_CUTOFF"; then
-  alert "event journal has not grown since $NEWEST, more than 3 tick intervals ($((STALE_SECS / 60))m) — the validator is stopped, wedged, or writing to a different path. Check: systemctl status cathedral-validator-sn39"
+  alert "event journal has not grown since $NEWEST, more than 3 tick intervals ($((STALE_SECS / 60))m) — the validator is stopped, wedged, or writing to a different path. Check: systemctl status the active validator unit"
 fi
 
 # Rule 3 — liveness. A tick that submitted, dry-ran, was declined by the
