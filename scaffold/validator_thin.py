@@ -8131,7 +8131,17 @@ def _recover_common_finalized_submission(
     args: Any,
     state: dict[str, Any],
 ) -> RecoveredSubmission | RecoveredAuthoritySubmission | None:
-    """Mirror a proven common finalization after a lane-telemetry crash."""
+    """Mirror a proven common finalization after a lane-telemetry crash.
+
+    The finalized record is validated only against itself. It already carries
+    its own lane, identity, broadcast intent, and receipt, so it does not need
+    the `submission_pending_*` residue that finalization happened to leave
+    behind. Requiring that residue wedged the writer permanently: a later
+    unsigned reservation that never reached the chain is entitled to clear
+    every pending key (`_abort_unsigned_common_submission`), which erased the
+    mirror and made an already-proven finalization fail its own check on the
+    next restart.
+    """
     attempt_id = state.get("submission_finalized_id")
     lane = state.get("submission_finalized_lane")
     identity = state.get("submission_finalized_identity")
@@ -8155,11 +8165,6 @@ def _recover_common_finalized_submission(
         or attempt_id not in history
         or state.get("submission_pending_id") is not None
         or state.get("submission_active_lane") != lane
-        or state.get("submission_pending_lane") != lane
-        or state.get("submission_pending_phase") != "signed_intent"
-        or state.get("submission_pending_identity") != identity
-        or state.get("submission_pending_broadcast_intent") != intent
-        or state.get("submission_pending_proof_status") != PASS
         or set(intent)
         != {
             "extrinsic_hash",
