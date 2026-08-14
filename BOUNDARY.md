@@ -24,7 +24,7 @@ source for the validator.
 This repository is the sole owner of the signed allocation contracts, both the
 v2 (90% Intel TDX / 10% fixed burn) contract and the v3 (70% Intel TDX / 30%
 CyberGym / 0% fixed burn) contract. That ownership covers both halves of the
-v3 CyberGym lane — the composition in `scaffold/publisher/weights.py` and the
+v3 CyberGym lane, the composition in `scaffold/publisher/weights.py` and the
 admission in `scaffold/validator_thin.py`.
 
 The two halves are a producer and an independent verifier, so they share
@@ -71,11 +71,22 @@ Any required failed gate stops the decision. `NOT_PROVEN` is not success.
 ## Execution boundary
 
 Thin mode verifies the signed candidate and reads the live metagraph. It does
-not need Intel TDX on the validator host.
+not need Intel TDX on the validator host. It verifies that Cathedral signed the
+numbers; it does not verify the numbers. The provenance audit runs concurrently
+and its verdict arrives after the submission, so in thin mode a failed audit
+records a bad write rather than preventing one.
 
-Authority mode independently replays controlled evidence. It requires a Linux
-x86-64 host, the pinned verifier binary, the controlled evidence tree, and all
-configured key and digest pins.
+Authority mode independently replays controlled evidence and submits its own
+recomputation. A failed audit stops the write. It requires a Linux x86-64 host,
+the pinned verifier binary, the controlled evidence tree, and all configured key
+and digest pins.
+
+**The controlled evidence tree is the constraint that decides who can run
+authority.** Cathedral publishes a validator-readable mirror on its own host, so
+Cathedral's validator can run authority. That mirror is not published externally,
+so a third-party validator cannot, and runs thin. Independent verification by
+outside operators is therefore a property this stack does not have yet, and no
+amount of validator code changes that: it is an evidence-distribution decision.
 
 Workers provide hardware evidence. They never receive the validator wallet.
 The validator host stores only the registered validator hotkey needed for a
@@ -96,9 +107,16 @@ bypass those gates or sign a weight transaction.
 ## Release boundary
 
 Operators run `main` from a git checkout, installed editable. That is the
-supported path and it is what SN39's own uid 30 runs.
+supported path.
 
-The hardened path below — an immutable content-addressed release on Linux —
+It is not currently what SN39's own uid 30 runs. The live writer runs from a
+pinned checkout under `/opt`, selected by a systemd drop-in, at a revision that
+can sit behind `main`. That is deployment drift, not a second supported path,
+and it is recorded here rather than smoothed over because a boundary document
+that describes an intended state instead of the real one is worth nothing to
+the person reading it to decide what to trust.
+
+The hardened path below, an immutable content-addressed release on Linux,
 remains available for operators who want it, and is documented under "Supported
 systemd install (relay)" in [README](README.md). Where it is used, the release
 manifest binds:

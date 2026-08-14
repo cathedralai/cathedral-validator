@@ -1,11 +1,27 @@
 # Cathedral Validator
 
 Cathedral Validator is the canonical operator repository for Cathedral SN39.
-It fetches the signed weight vector, enforces the weight-policy signature,
-freshness, the rollback fence, UID-replacement safety, and the burn pin, and
-broadcasts exactly what it verified — while a full-provenance verifier
-re-checks the published evidence chain concurrently and never delays the
-write. One mode, one command.
+
+It runs in one of two modes, and the difference is what happens when the
+evidence disagrees with the numbers.
+
+| | **shadow** (default) | **authority** |
+|---|---|---|
+| What it submits | Cathedral's signed vector | its own recomputation |
+| Where the numbers come from | the signed feed | replayed TDX evidence |
+| What it enforces before writing | signature, freshness, rollback fence, UID-replacement safety, burn pin | all of that, plus the evidence itself |
+| If the audit disagrees | the write already happened; the disagreement is logged | it refuses, and submits what it proved |
+
+**Shadow verifies authenticity, not arithmetic.** It proves Cathedral's key
+signed exactly these numbers. It does not prove the numbers are right, because
+the provenance audit runs concurrently and its verdict lands after the
+submission. That is a deliberate trade for a relay that must keep writing, and
+it is the honest description of what a shadow validator is: an authenticated
+relay.
+
+**Authority proves the arithmetic.** It replays the raw TDX evidence, derives
+the vector itself, and submits that. A failed audit stops the write rather than
+annotating it. See [Authority mode](#authority-mode).
 
 Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
@@ -14,7 +30,7 @@ path, and broadcast gates.
 ## Quickstart
 
 **This section is the canonical operator path.** Follow it top to bottom and
-nothing else — [VALIDATOR.md](VALIDATOR.md) and
+nothing else, [VALIDATOR.md](VALIDATOR.md) and
 [VALIDATOR-ONBOARDING.md](VALIDATOR-ONBOARDING.md) both start by pointing back
 here, and pick up where this leaves off.
 
@@ -40,7 +56,7 @@ cp config/validator-thin-sn39-relay.toml my-validator.toml
 `config/validator-thin-sn39-relay.toml` is the **third-party relay profile**:
 it follows Cathedral's remote signed feed, carries the trust pins verbatim,
 and is the profile a validator that is not Cathedral should run. Copy it to
-the repository root as shown — the copy's relative provenance key pins resolve
+the repository root as shown, the copy's relative provenance key pins resolve
 against the directory it sits in.
 
 Edit `my-validator.toml` and set your wallet under `[network]`:
@@ -83,7 +99,7 @@ reached the configured minimum assurance in that same run. A relay has no
 controlled raw-evidence package, so its audit is `receipts_only` and cannot,
 and the run ends with `PROVENANCE_AUDIT_NOT_PROVEN` and
 `PROVENANCE_HEALTH_GATE_FAILED` in `$HOME/.cathedral/validator-events.jsonl`.
-That is the expected relay outcome, not a misconfiguration — what it tells you
+That is the expected relay outcome, not a misconfiguration, what it tells you
 is that the audit ran. A `FileNotFoundError` naming a key bundle, or no
 `PROVENANCE_*` record at all, would mean it did not. The exit status is
 computed only on the `--once` path; the continuous service does not gate on
@@ -118,7 +134,7 @@ wallet there, the tick fails before it fetches anything:
 and usernames, so the message will not tell you where it looked. The path
 above is where. Create or import that hotkey with the Bittensor CLI (`btcli
 wallet new_hotkey` or `btcli wallet regen_hotkey`, from the separate
-`bittensor-cli` package — this repository does not install it), passing
+`bittensor-cli` package, this repository does not install it), passing
 `--wallet.name validator --wallet.hotkey default` to match the labels, or edit
 the two labels to name a wallet you already have. Never put a coldkey or
 mnemonic on a validator host.
@@ -131,7 +147,7 @@ closed with:
 ```
 
 Both failures come from the same preflight, which runs **before** the signed
-feed is fetched — so neither one says anything about the feed, the trust pins,
+feed is fetched, so neither one says anything about the feed, the trust pins,
 or the miner UID mapping. What the second proves is narrower and still worth
 having: this host reached Finney, read the SN39 metagraph, and loaded your
 hotkey. Step 1 is what exercises the feed and the pins; a step-2 journal that
@@ -156,13 +172,12 @@ checklist that must be true before anyone adds `--broadcast` is in
 A validator that will broadcast must start from a **clean journal**: never
 hand-edit live submission state. To migrate a host that ran an older release,
 archive the previous state file and start fresh
-(`deploy/publisher/init-clean-journal.sh` provisions a clean runtime root —
-see `deploy/publisher/README.md`).
+(`deploy/publisher/init-clean-journal.sh` provisions a clean runtime root, see `deploy/publisher/README.md`).
 
 ### Is it working right now?
 
-One command answers that. It reads the event journal and only the journal — no
-chain call, no wallet, no publisher fetch, no lock — so it is safe to run
+One command answers that. It reads the event journal and only the journal, no
+chain call, no wallet, no publisher fetch, no lock, so it is safe to run
 beside a live validator as often as you like, and it still answers when the
 thing that broke is the network. **A preview wrote its journal under `$HOME`,
 so name it**; a service uses the path in its own config and needs no flag:
@@ -172,8 +187,8 @@ cathedral-validator status --config my-validator.toml \
   --jsonl "$HOME/.cathedral/validator-events.jsonl"
 ```
 
-What it prints depends on which step you ran last. After step 1 alone — a
-completed dry run and nothing since — it looks like this:
+What it prints depends on which step you ran last. After step 1 alone, a
+completed dry run and nothing since, it looks like this:
 
 ```
    SN39 validator status  finney · netuid 39
@@ -203,11 +218,11 @@ configured for it to read. Point it at the wrong file and it says so rather
 than reporting green: without the `--jsonl` above, the shipped config sends it
 to `/var/log/cathedral-validator/validator-events.jsonl`, which a preview never
 writes, and it exits 1 with `journal cannot be read (No such file or
-directory) — nothing is being monitored`.
+directory), nothing is being monitored`.
 
 The unattended half of the same five rules is
 `deploy/sn39/cathedral-mismatch-check`, a 10-minute systemd timer whose unit
-failing is the alert — see
+failing is the alert, see
 [VALIDATOR.md](VALIDATOR.md#liveness-and-shadow-audit-alert-systemd). Install
 it before you broadcast: a validator that quietly stops writing weights costs
 you the emission it did not earn, and the journal is the only place that shows
@@ -217,7 +232,7 @@ up first.
 
 A tick that writes nothing has its own event code for each reason, and every
 `FAIL` or `NOT_PROVEN` one carries a `remediation` field saying what a person
-has to do — including when the honest answer is "nothing was signed, and the
+has to do, including when the honest answer is "nothing was signed, and the
 next tick rebuilds". [What each one means and which ones page a
 human](VALIDATOR.md#when-a-tick-does-not-write-alert-on-these); [recovering
 from the ones that do](VALIDATOR.md#recovering-from-a-refused-or-fenced-write);
@@ -235,12 +250,12 @@ they are not interchangeable:
 | `require_completed_launch_for_broadcast = false` | Every third-party relay. | Defaults to `true`, so broadcast is refused pending a completed launch this validator can never have. |
 | `beta_skip_launch_ceremony = true` | A runtime that **does** owe a launch: `provenance = "authority"`, or a host holding the controlled launch material at the release-pinned paths. | The line above is ignored for such a runtime and the ceremony is still required. |
 
-For a pure relay the second setting changes nothing — the obligation it waives
+For a pure relay the second setting changes nothing, the obligation it waives
 is one the relay does not have. The shipped profile sets it anyway so the
 profile stays runnable on a host that once held launch material.
 
 The waiver is narrow. It clears the one-shot ceremony and the recurring-write
-authorization derived from it — process controls that make a single mainnet
+authorization derived from it, process controls that make a single mainnet
 launch auditable. Every gate that keeps a submission *correct* still runs on
 every tick and is not reachable from either setting: feed signature and key
 pin, freshness and expiry, the monotonic rollback fence, the
@@ -262,7 +277,7 @@ Everything a relay needs to build and verify this install is in the
 repository. It was not before: the manifest builder pinned the
 controlled-disclosure Intel TDX verifier binary, and the shipped unit
 conditioned on root-signed authorization files. A relay needs neither, because
-a relay does not originate weights — it relays a vector Cathedral signed, and
+a relay does not originate weights, it relays a vector Cathedral signed, and
 its shadow audit is receipts-only by design.
 
 The install is one immutable release: a pristine `git` checkout, a hash-locked
@@ -273,9 +288,9 @@ change what runs.
 
 ### Build the release and install its reviewed files
 
-`$release_sha` is any commit of `main` you have reviewed — there are no tags;
-`git rev-parse origin/main` is the normal answer. Use `/usr/bin/python3.12` — the
-versioned regular file, not the `python3` symlink — because the manifest binds
+`$release_sha` is any commit of `main` you have reviewed, there are no tags;
+`git rev-parse origin/main` is the normal answer. Use `/usr/bin/python3.12`, the
+versioned regular file, not the `python3` symlink, because the manifest binds
 its digest.
 
 ```bash
@@ -338,8 +353,8 @@ systemctl enable --now cathedral-mismatch-alert.timer
 
 The alert timer is not part of the launch gate and is safe to enable now: it
 reads the event journal every 10 minutes and writes nothing to chain. It fails
-the `cathedral-mismatch-alert.service` unit — the failed unit **is** the alert,
-there is no notification channel — on a `PROVENANCE_VECTOR_MISMATCH` in the
+the `cathedral-mismatch-alert.service` unit, the failed unit **is** the alert,
+there is no notification channel, on a `PROVENANCE_VECTOR_MISMATCH` in the
 last 30 minutes or a shadow audit that has failed for 90 minutes with no pass.
 It does **not** tell you the validator is running, submitting, or reachable: an
 absent or stale journal reads as healthy, so watch the unit's state and the
@@ -350,8 +365,7 @@ alert.
 
 `/etc/logrotate.d/cathedral-validator` bounds the two append-only streams in
 `/var/log/cathedral-validator` at 14 daily generations, or sooner at 64 MB. It
-needs no unit of its own — the host's existing logrotate timer picks it up —
-and `logrotate --debug /etc/logrotate.d/cathedral-validator` shows what it
+needs no unit of its own, the host's existing logrotate timer picks it up, and `logrotate --debug /etc/logrotate.d/cathedral-validator` shows what it
 would do without waiting. It rotates with `copytruncate` because the validator
 holds its journal descriptor open, and keeps the newest rotated generation
 uncompressed because both the alert and `cathedral-validator status` read it to
@@ -371,7 +385,7 @@ Install the shipped `.sysusers` unchanged: it declares only the validator
 identities (`cathedral-validator` and `cathedral-validator-log`) and
 deliberately restates no producer identity.
 
-**The installed config must be byte-identical to the reviewed one** — the
+**The installed config must be byte-identical to the reviewed one**, the
 manifest builder compares them and refuses otherwise. So do not edit
 `/etc/cathedral-validator/validator-thin-sn39-relay.toml`. The shipped profile
 names `wallet_name = "validator"` and `validator_hotkey = "default"`, and those
@@ -394,8 +408,8 @@ mv "$manifest_tmp" /etc/cathedral-validator/sn39-release-manifest.json
 ```
 
 `--relay` is what makes this runnable off a Cathedral host. It omits the one
-`external_files` entry a relay cannot produce — the controlled-disclosure TDX
-verifier binary — along with the producer-side status publisher unit and timer,
+`external_files` entry a relay cannot produce, the controlled-disclosure TDX
+verifier binary, along with the producer-side status publisher unit and timer,
 which write the producer's evidence tree as the producer's account. It binds a
 *superset* of the reviewed source: everything the Cathedral manifest binds plus
 the relay unit, its tmpfiles, and the three shadow-audit alert files installed
@@ -428,7 +442,7 @@ journalctl -u cathedral-validator-sn39-relay.service -n 50
 ```
 
 Read the journal, not the exit status of `systemctl start`. Confirm the unit
-reached `ExecStart` at all — that is the failure the relay unit exists to
+reached `ExecStart` at all, that is the failure the relay unit exists to
 remove, and the only proof is a log line from the validator itself. When the
 launch notice permits a write, `systemctl enable --now
 cathedral-validator-sn39-relay.service` makes it durable.
@@ -437,8 +451,7 @@ That proof is only readable because the validator's operator stream is
 line-buffered: every line reaches the journal as it happens, so a quiet
 `journalctl` means nothing has happened yet, not that output is waiting in a
 buffer. Do not restart a validator merely because `journalctl -f` has been
-quiet, or because the newest line is a tick divider with no outcome under it —
-ticks are ~25 minutes apart, so both are normal mid-cycle. The authoritative
+quiet, or because the newest line is a tick divider with no outcome under it, ticks are ~25 minutes apart, so both are normal mid-cycle. The authoritative
 record of what a tick did is the JSONL journal
 (`/var/log/cathedral-validator/validator-events.jsonl`); check it for a
 `WEIGHTS_SUBMITTED` before concluding anything is stuck. A needless restart
@@ -461,7 +474,7 @@ On every cycle the validator:
    any UID whose mapping cannot be proven stable;
 4. enforces the pinned burn destination and floor;
 5. prints and records the exact UID vector it will submit;
-6. submits before chain finality advances — the concurrent full-provenance
+6. submits before chain finality advances, the concurrent full-provenance
    audit (TDX attestation and signed score reports re-checked against the
    published evidence chain) runs in the background and never blocks the
    write; its verdicts land in the event journal as `PROVENANCE_AUDIT_*`;
@@ -469,7 +482,7 @@ On every cycle the validator:
 
 If the signed feed is unreachable there is nothing to verify, so there is
 nothing to submit: the validator idles and retries rather than inventing a
-vector. Alert on `PROVENANCE_VECTOR_MISMATCH` in the event stream — it means
+vector. Alert on `PROVENANCE_VECTOR_MISMATCH` in the event stream, it means
 the audit disagreed with a vector that was already accepted for submission;
 the write is not blocked, so the alert is the response path. The alert ships
 in this repository as `deploy/sn39/cathedral-mismatch-check` and its timer, and
@@ -479,8 +492,8 @@ Do not alert on `PROVENANCE_VECTOR_STALE_EPOCH`. The publisher signs and
 caches a vector for up to a minute while the evidence index flips to the next
 epoch, so a consumer can hold last epoch's vector beside this epoch's
 evidence. When that happens the audit re-verifies the vector IN FULL against
-the epoch it names — that epoch's signed manifest, its report body digest,
-and its recomputed shares — and reports this event instead. A vector that
+the epoch it names, that epoch's signed manifest, its report body digest,
+and its recomputed shares, and reports this event instead. A vector that
 cannot be re-verified that way is never reclassified: it stays
 `PROVENANCE_VECTOR_MISMATCH`.
 
@@ -490,8 +503,7 @@ The profile above follows the remote Cathedral publisher feed. A self-composing
 validator runs the publisher role on the same host and follows its own local
 feed instead: use `config/validator-selfcompose-sn39.toml` (its `[publisher]`
 url points at the local `cathedral-publisher.service`) and the units in
-`deploy/publisher/`. Everything else — verification, fences, broadcast gates —
-is identical.
+`deploy/publisher/`. Everything else, verification, fences, broadcast gates, is identical.
 
 For a pinned production install (immutable reviewed release, systemd, single
 writer) the relay path is [above](#supported-systemd-install-relay);
@@ -503,31 +515,92 @@ The write path enforces, on every cycle: the ed25519 weight-policy signature
 over the canonical vector bytes; vector freshness and network/netuid identity;
 the monotonic policy-version fence (no rollback); UID-replacement safety for
 every rewarded hotkey; and the pinned burn destination. A vector failing any
-check is refused — the validator fails closed and writes nothing.
+check is refused, the validator fails closed and writes nothing.
 
-The full-provenance verifier runs concurrently in the background and re-checks
-the published evidence chain (TDX attestation, signed score reports, signed
-evidence index) against what was submitted. It labels each epoch `PASS`,
-`FAIL`, or `NOT_PROVEN` in the event journal without delaying the write.
+In shadow mode the full-provenance verifier runs concurrently and re-checks the
+published evidence chain (TDX attestation, signed score reports, signed evidence
+index) against what was submitted. It labels each epoch `PASS`, `FAIL`, or
+`NOT_PROVEN` in the event journal.
+
+Read that carefully, because it is the limit of what shadow proves: the verifier
+does not delay the write, so its verdict describes a submission that has already
+happened. A `FAIL` is a record, not a refusal. If you need the audit to be able
+to stop a bad write, run [authority mode](#authority-mode).
 
 Compute workers need Intel TDX when their policy requires TDX evidence; the
 validator host itself does not.
+
+## Authority mode
+
+Authority mode derives the vector from evidence instead of accepting one. It
+replays the raw TDX evidence for the epoch, recomputes each miner's units,
+composes the vector itself, and submits that. If the audit does not pass, it
+writes nothing.
+
+It needs three things beyond the relay profile:
+
+| | |
+|---|---|
+| `--provenance authority` | select the mode |
+| `--provenance-controlled-dir` | the controlled evidence for the epoch |
+| `--provenance-verifier-binary` | the pinned TDX verifier |
+
+The controlled evidence rotates every epoch, so point at the `current` symlink
+rather than a fixed epoch directory:
+
+```bash
+cathedral-validator serve \
+  --config my-validator.toml \
+  --provenance authority \
+  --provenance-controlled-dir /var/lib/cathedral-validator-controlled-sn39/current \
+  --provenance-verifier-binary /opt/cathedral/bin/cathedral-tdx-verifier-<rev> \
+  --once --dry-run
+```
+
+A healthy tick prints what it derived rather than what it received:
+
+```
+authority  full · independent recomputation is what gets submitted
+chain      block 8844537 · epoch in 2m · 169 uids replacement-safe
+evidence   independently derived vector (1 verified miners)
+```
+
+And when the feed has not caught up with the evidence yet, it says so instead of
+following it:
+
+```
+✗ independent recomputation DISAGREES with the signed vector · discrepancies=1
+  signed vector is bound to ingested source epoch 1786730876, not the verified
+  evidence epoch 1786731188; same proportions never prove the same epoch
+```
+
+That disagreement is usually benign. The signed feed refreshes on a shorter
+cycle than epochs export, so there is a window where verified evidence is newer
+than the vector being served. Identical proportions are not the same claim as
+identical epochs, and authority mode will not sign one while meaning the other.
+
+**Who can run it.** Authority requires the controlled evidence package. Cathedral
+publishes a validator-readable mirror on its own host, so Cathedral's validator
+can run authority today. A third-party validator cannot, because that package is
+not published externally. Until it is, an independent operator runs shadow, and
+shadow is an authenticated relay. Saying otherwise would be claiming a property
+the evidence distribution does not support.
 
 ## Operator documents
 
 The quickstart above is the one path to a running preview. These pick up from
 it; none of them restates it.
 
-- [Validator runbook](VALIDATOR.md) — what each gate proves, how to read the
+- [Validator runbook](VALIDATOR.md), what each gate proves, how to read the
   event journal, **what to do when a write is refused or fenced**, the
   shadow-audit mismatch alert the install above enables, the checklist that
   must be true before `--broadcast`, and upgrade, rollback and key rotation.
-- [Review gates](VALIDATOR-ONBOARDING.md) — the extras a reviewer installs on
+- [Review gates](VALIDATOR-ONBOARDING.md), the extras a reviewer installs on
   top of the quickstart; [REVIEW.md](REVIEW.md) has the review order and the
   gates a broadcast must prove in one cycle.
-- [Provenance contract](docs/PROVENANCE.md) — every pin the shadow audit uses.
+- [Provenance contract](docs/PROVENANCE.md), every pin the shadow audit uses.
 - [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
-- [SN39 v3 publisher cutover](docs/SN39_V3_PUBLISHER_CUTOVER.md) — what the live
+- [SN39 v3 publisher cutover](docs/SN39_V3_PUBLISHER_CUTOVER.md), what the live
   publisher actually imports, the ordered steps to make it v3-capable, and how
   flipping the contract first fails without failing a check.
 - [Miner error contract](docs/MINER_ERROR_CONTRACT.md)
