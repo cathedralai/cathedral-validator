@@ -141,9 +141,5 @@ The raw validator journal is private operator data. The public status stream is
 a separate allowlisted projection. Neither stream includes wallet seeds,
 private keys, bearer tokens, cloud credentials, or controlled raw evidence.
 
-## Historical note
-
-This code was initially extracted from a larger repository. The extraction
-period is over. Its origin manifest and one-way sync tooling were retired when
-this repository became the validator authority. Historical release documents
-describe earlier states and are not operator routing.
+Historical release documents under `docs/history/` describe earlier states and
+are not operator routing.
