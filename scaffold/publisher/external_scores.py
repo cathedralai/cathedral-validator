@@ -53,6 +53,27 @@ ALLOWED_ENDPOINT_SOURCES = {
 # confidential/attested source's whole trust model is "the report is the full
 # truth at its epoch" — a partial report from it must never be stored as if it
 # were live-composable.
+def _storage_key(*, source_name: str, digest: str) -> str:
+    """The primary key a report is stored under.
+
+    Server-derived from the source and the content digest. A submitter cannot
+    influence it, so no source can address, overwrite, or erase another's row.
+
+    The two parts are hashed as a length-prefixed structure rather than joined
+    with a separator. Plain concatenation is ambiguous: ("foo", "bar:baz") and
+    ("foo:bar", "baz") both render as ext:foo:bar:baz, so a source name
+    containing the separator could address another source's row. The HTTP route
+    happens to prevent that today through normalization and a fixed digest
+    shape, but a key whose uniqueness depends on its callers is not unique, and
+    this one exists precisely to survive a caller that misbehaves.
+    """
+    material = b"".join(
+        len(part).to_bytes(4, "big") + part
+        for part in (source_name.encode("utf-8"), digest.encode("utf-8"))
+    )
+    return "ext:" + hashlib.sha256(material).hexdigest()
+
+
 COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 AUDIENCE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 WEIGHT_POLICY_NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
@@ -528,7 +549,14 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
     conflicting epoch is rejected.
     """
     received_at = _now_iso()
-    report_id = str(report["report_id"])
+    # The storage key is DERIVED, never the submitter's. `external_score_reports.id`
+    # is a PRIMARY KEY written with INSERT OR REPLACE, so a caller-chosen id lets one
+    # source overwrite another source's row wholesale: its snapshot, its epoch
+    # high-water (re-opening replay), and its `source` column. A lower-trust source
+    # reusing the confidential lane's report_id collapsed the signed vector to 100%
+    # burn. Scoping the key to (source, content digest) makes a cross-source
+    # collision unrepresentable rather than merely unlikely.
+    report_id = _storage_key(source_name=report["source"], digest=report["report_sha256"])
     report_json = json.dumps(report, sort_keys=True, separators=(",", ":"))
     scores = list(report.get("scores") or [])
     epoch = int(report.get("epoch") or 0)
