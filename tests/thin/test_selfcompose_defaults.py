@@ -233,9 +233,42 @@ def test_a_host_without_launch_material_never_needed_the_waiver(
     vt._validate_runtime_contract(args)
 
 
-def test_no_authority_config_profile_ships() -> None:
-    # The authority/full mode profiles were removed in the shadow-only cleanup;
-    # no shipped config may select the deleted mode.
+def test_an_authority_profile_carries_everything_authority_requires() -> None:
+    # This replaces test_no_authority_config_profile_ships, which asserted that no
+    # config may select "the deleted mode". The mode was never deleted: only its
+    # profiles were, in the shadow-only cleanup, and the code path stayed intact
+    # and runnable the whole time.
+    #
+    # So the useful invariant is not "never ship authority", it is "never ship a
+    # BROKEN authority profile". Each of these is mandatory at runtime and the
+    # failure arrives as a refused tick, which on a live validator reads as an
+    # outage rather than a missing config line:
+    #
+    #   controlled_dir         the evidence to replay
+    #   verifier_binary        the pinned TDX verifier
+    #   max_anchor_lag_blocks  without it the producer chooses the block every
+    #                          independent chain check is evaluated at
+    required = ("provenance_controlled_dir", "provenance_verifier_binary",
+                "provenance_max_anchor_lag_blocks")
     for cfg_path in sorted((ROOT / "config").glob("*.toml")):
         cfg = cli._load_config_file(str(cfg_path))
-        assert cfg.get("provenance") != "authority", cfg_path.name
+        if cfg.get("provenance") != "authority":
+            continue
+        for key in required:
+            assert cfg.get(key), f"{cfg_path.name} selects authority without {key}"
+
+
+def test_the_controlled_dir_tracks_the_rotating_symlink() -> None:
+    # Controlled evidence is exported one directory per epoch and `current` is
+    # repointed after each export. A profile pinned to an epoch directory replays
+    # stale evidence and then refuses on an epoch mismatch minutes later, which
+    # looks like a validator fault instead of a stale path.
+    for cfg_path in sorted((ROOT / "config").glob("*.toml")):
+        cfg = cli._load_config_file(str(cfg_path))
+        controlled = cfg.get("provenance_controlled_dir")
+        if not controlled:
+            continue
+        assert "epoch-" not in controlled, (
+            f"{cfg_path.name} pins an epoch directory; point at the rotating "
+            "`current` symlink instead"
+        )
