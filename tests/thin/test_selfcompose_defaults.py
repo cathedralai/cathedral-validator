@@ -248,8 +248,11 @@ def test_an_authority_profile_carries_everything_authority_requires() -> None:
     #   verifier_binary        the pinned TDX verifier
     #   max_anchor_lag_blocks  without it the producer chooses the block every
     #                          independent chain check is evaluated at
-    required = ("provenance_controlled_dir", "provenance_verifier_binary",
-                "provenance_max_anchor_lag_blocks")
+    required = (
+        "provenance_controlled_dir",
+        "provenance_verifier_binary",
+        "provenance_max_anchor_lag_blocks",
+    )
     for cfg_path in sorted((ROOT / "config").glob("*.toml")):
         cfg = cli._load_config_file(str(cfg_path))
         if cfg.get("provenance") != "authority":
