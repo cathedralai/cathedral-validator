@@ -622,9 +622,19 @@ def _run_recurring_loop(
     max_sleeps: int,
     interval_secs: int = 1500,
 ) -> list[float]:
-    """Drive validator_thin.run()'s recurring loop and record every sleep."""
+    """Drive validator_thin.run()'s recurring loop and record every sleep.
+
+    The head-drift phase offset is pinned to zero here. These tests are about
+    re-arm CADENCE (short delay versus a whole write interval, and the cap that
+    falls back to it), and a random offset would make every expected duration
+    approximate for a reason none of them are testing. The offset's own
+    behaviour is covered in tests/thin/test_head_drift_phase_offset.py.
+    """
     args = _run_loop_args(once=False, interval_secs=interval_secs)
     sleeps: list[float] = []
+    monkeypatch.setattr(
+        validator_thin, "_head_drift_phase_offset", lambda _width: 0.0
+    )
 
     def _sleep(seconds: float) -> None:
         sleeps.append(seconds)

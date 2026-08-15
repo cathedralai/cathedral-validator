@@ -10585,9 +10585,11 @@ def run(args) -> int:
                 # attempt made 8 times. Nothing is reserved or signed while we
                 # wait, so the only cost is latency inside a tick that would
                 # otherwise be abandoned.
-                time.sleep(
-                    _head_drift_phase_offset(SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
+                phase_offset = _head_drift_phase_offset(
+                    SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS
                 )
+                if phase_offset > 0.0:
+                    time.sleep(phase_offset)
                 continue
             except _PostSignedSubmissionMismatch as e:
                 render.outcome(
