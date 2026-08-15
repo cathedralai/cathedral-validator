@@ -75,7 +75,6 @@ def _storage_key(*, source_name: str, digest: str) -> str:
 
 
 COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
-AUDIENCE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 WEIGHT_POLICY_NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 WEIGHT_POLICY_NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 MAX_NETUID = 2**16 - 1
@@ -96,11 +95,16 @@ class ExternalScoreError(ValueError):
         self.reason = reason
 
 
-def configured_score_audience(source: str) -> tuple[str, int] | None:
-    """Return the exact local audience required for a scoped score source."""
+def configured_score_audience() -> tuple[str, int]:
+    """Return the exact local audience every score source must carry.
 
-    if source not in AUDIENCE_REQUIRED_SOURCES:
-        return None
+    A score is only meaningful for the (network, netuid) this publisher signs
+    weights for, so the audience is a property of the publisher, not of the
+    source label. Scoping it per source leaves the unscoped sources sharing
+    one cross-audience epoch fence, where a foreign report can fence the local
+    one out of its own source.
+    """
+
     network = os.environ.get(WEIGHT_POLICY_NETWORK_ENV)
     netuid_raw = os.environ.get(WEIGHT_POLICY_NETUID_ENV)
     if (
@@ -119,29 +123,16 @@ def configured_score_audience(source: str) -> tuple[str, int] | None:
     return network, netuid
 
 
-def _report_audience(payload: dict[str, Any], source: str) -> tuple[str | None, int | None]:
+def _report_audience(payload: dict[str, Any]) -> tuple[str, int]:
     """Validate and preserve an exact report audience."""
 
-    expected = configured_score_audience(source)
-    if expected is not None:
-        network = payload.get("network")
-        netuid = payload.get("netuid")
-        if not isinstance(network, str) or type(netuid) is not int:
-            raise ExternalScoreError("invalid_score_audience")
-        if (network, netuid) != expected:
-            raise ExternalScoreError("score_audience_mismatch")
-        return network, netuid
-
-    network_raw = payload.get("network")
-    if network_raw is not None and not isinstance(network_raw, str):
-        raise ExternalScoreError("invalid_network")
-    network = network_raw.strip() if isinstance(network_raw, str) else None
-    if network_raw is not None and not network:
-        raise ExternalScoreError("invalid_network")
-    try:
-        netuid = None if payload.get("netuid") is None else int(payload.get("netuid"))
-    except (TypeError, ValueError):
-        raise ExternalScoreError("invalid_netuid")
+    expected = configured_score_audience()
+    network = payload.get("network")
+    netuid = payload.get("netuid")
+    if not isinstance(network, str) or type(netuid) is not int:
+        raise ExternalScoreError("invalid_score_audience")
+    if (network, netuid) != expected:
+        raise ExternalScoreError("score_audience_mismatch")
     return network, netuid
 
 
@@ -220,10 +211,10 @@ def _canonical(obj: Any) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _audience_lock_key(source: str, network: str | None, netuid: int | None) -> int:
+def _audience_lock_key(source: str, network: str, netuid: int) -> int:
     """Stable signed 64-bit key for one source/audience epoch fence."""
 
-    material = f"external-score-epoch\0{source}\0{network or ''}\0{netuid}".encode("utf-8")
+    material = f"external-score-epoch\0{source}\0{network}\0{netuid}".encode("utf-8")
     return int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
 
 
@@ -394,7 +385,7 @@ def _normalize_report(
 
     source = _source(payload.get("source") or payload.get("mechanism"), default=default_source)
     generated_at = _normalize_iso(payload.get("generated_at"), "generated_at")
-    network, netuid = _report_audience(payload, source)
+    network, netuid = _report_audience(payload)
 
     # -- freshness gate (generated_at) ------------------------------------
     ref = now or datetime.now(timezone.utc)
@@ -478,13 +469,12 @@ def _normalize_report(
         "mechanism": str(payload.get("mechanism") or source),
         "epoch": epoch,
         "complete": bool(complete) if complete is not None else None,
+        "network": network,
         "netuid": netuid,
         "generated_at": generated_at,
         "scores": scores,
         "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
     }
-    if network is not None:
-        normalized["network"] = network
     digest = hashlib.sha256(_canonical(normalized)).hexdigest()
     normalized["report_sha256"] = digest
     normalized["report_id"] = str(payload.get("report_id") or f"ext-{digest[:32]}")
@@ -523,25 +513,18 @@ def normalize_stale_idempotent_retry(
         now=now,
         enforce_max_age=False,
     )
-    if report["source"] in AUDIENCE_REQUIRED_SOURCES:
-        rows = store.query(
-            "SELECT report_sha256 FROM external_score_reports "
-            "WHERE source=? AND network=? AND netuid=? AND epoch=? "
-            "AND report_sha256=? LIMIT 1",
-            (
-                report["source"],
-                report["network"],
-                report["netuid"],
-                report["epoch"],
-                report["report_sha256"],
-            ),
-        )
-    else:
-        rows = store.query(
-            "SELECT report_sha256 FROM external_score_reports "
-            "WHERE source=? AND epoch=? AND report_sha256=? LIMIT 1",
-            (report["source"], report["epoch"], report["report_sha256"]),
-        )
+    rows = store.query(
+        "SELECT report_sha256 FROM external_score_reports "
+        "WHERE source=? AND network=? AND netuid=? AND epoch=? "
+        "AND report_sha256=? LIMIT 1",
+        (
+            report["source"],
+            report["network"],
+            report["netuid"],
+            report["epoch"],
+            report["report_sha256"],
+        ),
+    )
     if not rows:
         raise ExternalScoreError("report_too_old")
     return report
@@ -595,8 +578,7 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
         raise ExternalScoreError("authenticated_body_digest_required")
     network = report.get("network")
     netuid = report.get("netuid")
-    expected_audience = configured_score_audience(source)
-    if expected_audience is not None and (network, netuid) != expected_audience:
+    if (network, netuid) != configured_score_audience():
         raise ExternalScoreError("score_audience_mismatch")
 
     def _write(conn):
@@ -608,19 +590,14 @@ def store_report(store: Store, report: dict[str, Any]) -> dict[str, Any]:
                 "SELECT pg_advisory_xact_lock(?)",
                 (_audience_lock_key(source, network, netuid),),
             )
-        if expected_audience is not None:
-            cur = conn.execute(
-                "SELECT epoch, report_sha256 FROM external_score_reports "
-                "WHERE source=? AND network=? AND netuid=? "
-                "ORDER BY epoch DESC LIMIT 1",
-                (source, network, netuid),
-            )
-        else:
-            cur = conn.execute(
-                "SELECT epoch, report_sha256 FROM external_score_reports "
-                "WHERE source=? ORDER BY epoch DESC LIMIT 1",
-                (source,),
-            )
+        # Same key as the lock above: the fence a writer holds must be the fence
+        # it then reads, or the lock serialises nothing the gate depends on.
+        cur = conn.execute(
+            "SELECT epoch, report_sha256 FROM external_score_reports "
+            "WHERE source=? AND network=? AND netuid=? "
+            "ORDER BY epoch DESC LIMIT 1",
+            (source, network, netuid),
+        )
         row = cur.fetchone()
         if row is not None:
             stored_epoch = int(row[0])
@@ -733,23 +710,15 @@ def latest_snapshot_scores(
     """
     now = now or datetime.now(timezone.utc)
     cutoff = _ms_iso(now - timedelta(seconds=max_age_secs))
-    # Find the latest report for this source and, where required, this exact
-    # configured audience. Legacy unscoped rows are deliberately ignored.
-    audience = configured_score_audience(source)
-    if audience is not None:
-        reports = store.query(
-            "SELECT id, epoch, generated_at_iso, received_at_iso, report_json "
-            "FROM external_score_reports WHERE source=? AND network=? AND netuid=? "
-            "ORDER BY epoch DESC LIMIT 1",
-            (source, audience[0], audience[1]),
-        )
-    else:
-        reports = store.query(
-            "SELECT id, epoch, generated_at_iso, received_at_iso, report_json "
-            "FROM external_score_reports WHERE source=? "
-            "ORDER BY epoch DESC LIMIT 1",
-            (source,),
-        )
+    # Find the latest report for this source at this exact configured audience.
+    # Legacy unscoped and foreign-audience rows are deliberately ignored.
+    audience = configured_score_audience()
+    reports = store.query(
+        "SELECT id, epoch, generated_at_iso, received_at_iso, report_json "
+        "FROM external_score_reports WHERE source=? AND network=? AND netuid=? "
+        "ORDER BY epoch DESC LIMIT 1",
+        (source, audience[0], audience[1]),
+    )
     if not reports:
         return None
     report_row = reports[0]
@@ -762,9 +731,7 @@ def latest_snapshot_scores(
         report_obj = json.loads(report_row["report_json"])
     except Exception:
         return None
-    if audience is not None and (
-        report_obj.get("network"), report_obj.get("netuid")
-    ) != audience:
+    if (report_obj.get("network"), report_obj.get("netuid")) != audience:
         raise ExternalScoreError("invalid_stored_score_audience")
     if not report_obj.get("complete"):
         # For live external sources, require complete=true.
@@ -807,23 +774,14 @@ def status(store: Store, *, source: str, since_iso: str) -> dict[str, Any]:
     ``since_iso`` (generated_at cutoff, same convention callers already use
     for the blend window).
     """
-    audience = configured_score_audience(source)
-    if audience is not None:
-        reports = store.query(
-            "SELECT id, epoch, generated_at_iso, received_at_iso, score_count, "
-            "report_sha256, report_json FROM external_score_reports "
-            "WHERE source=? AND network=? AND netuid=? "
-            "ORDER BY epoch DESC LIMIT 1",
-            (source, audience[0], audience[1]),
-        )
-    else:
-        reports = store.query(
-            "SELECT id, epoch, generated_at_iso, received_at_iso, score_count, "
-            "report_sha256, report_json "
-            "FROM external_score_reports WHERE source=? "
-            "ORDER BY epoch DESC LIMIT 1",
-            (source,),
-        )
+    audience = configured_score_audience()
+    reports = store.query(
+        "SELECT id, epoch, generated_at_iso, received_at_iso, score_count, "
+        "report_sha256, report_json FROM external_score_reports "
+        "WHERE source=? AND network=? AND netuid=? "
+        "ORDER BY epoch DESC LIMIT 1",
+        (source, audience[0], audience[1]),
+    )
     latest = reports[0] if reports else None
     is_complete = False
     is_fresh = False
@@ -832,10 +790,8 @@ def status(store: Store, *, source: str, since_iso: str) -> dict[str, Any]:
     if latest is not None:
         try:
             report_obj = json.loads(latest["report_json"])
-            is_complete = bool(report_obj.get("complete")) and (
-                audience is None
-                or (report_obj.get("network"), report_obj.get("netuid")) == audience
-            )
+            stored_audience = (report_obj.get("network"), report_obj.get("netuid"))
+            is_complete = bool(report_obj.get("complete")) and stored_audience == audience
             body_digest = report_obj.get("body_sha256")
             if (
                 isinstance(body_digest, str)

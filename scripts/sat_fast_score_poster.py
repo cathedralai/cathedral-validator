@@ -57,6 +57,12 @@ SUBMIT_PATH = "/v1/external-scores/violet"
 TOKEN_ENV = "CATHEDRAL_EXTERNAL_SCORES_TOKEN"
 HMAC_SECRET_ENV = "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET"
 
+# The intake binds every report to the exact audience the publisher signs
+# weights for, so the poster must name the audience it scored. Same env the
+# publisher reads, so one deployment cannot post into another's fence.
+NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
+NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
+
 
 # --------------------------------------------------------------------------
 # Pure parsing / normalization logic (unit-tested with no network)
@@ -104,6 +110,15 @@ def _positive_float(value: Any) -> float | None:
     return out
 
 
+def configured_audience() -> tuple[str, int] | None:
+    """The (network, netuid) this poster scored for, or None if unconfigured."""
+    network = (os.environ.get(NETWORK_ENV) or "").strip()
+    netuid_raw = (os.environ.get(NETUID_ENV) or "").strip()
+    if not network or not netuid_raw.isdigit():
+        return None
+    return network, int(netuid_raw)
+
+
 def build_report(
     scoreboard: dict[str, Any],
     *,
@@ -113,9 +128,12 @@ def build_report(
     """Map a v2 scoreboard payload to an external-scores report.
 
     Returns None for an empty/degraded scoreboard (no weights, or nothing with
-    a positive score) — callers should treat that as "post nothing", not an
-    error.
+    a positive score), or when the local audience is unconfigured. Callers
+    should treat that as "post nothing", not an error.
     """
+    audience = configured_audience()
+    if audience is None:
+        return None
     if not isinstance(scoreboard, dict):
         return None
     candidates = normalize_scores(scoreboard.get("weights"))
@@ -145,6 +163,8 @@ def build_report(
         "mechanism": source,
         "epoch": epoch,
         "generated_at": _ms_iso(now),
+        "network": audience[0],
+        "netuid": audience[1],
         "scores": scores,
         "metadata": {
             "upstream_vector_id": scoreboard.get("vector_id"),
@@ -231,6 +251,12 @@ def post_report(
 # Runner
 # --------------------------------------------------------------------------
 def run_once(args: argparse.Namespace) -> int:
+    # Misconfiguration, not an empty scoreboard: an unaudienced report is
+    # rejected by the intake, so say so instead of silently posting nothing.
+    if configured_audience() is None:
+        print(f"[sat_fast_poster] {NETWORK_ENV}/{NETUID_ENV} unset -> no audience "
+              "to post for")
+        return 1
     fetched = fetch_scoreboard(args.challenge_base, timeout=args.timeout)
     if fetched["error"] is not None or fetched["status"] is None:
         print(f"[sat_fast_poster] scoreboard fetch failed: {fetched['error']}")
