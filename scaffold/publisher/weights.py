@@ -349,6 +349,27 @@ def validated_supply_metadata() -> dict[str, Any] | None:
     differs only in that the FIXED burn allocation is 0 rather than 10%.
     """
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
+        # A master switch that is off must not crash a validator that never opted
+        # in -- returning None (clean flat-recent fallback) is correct there. But
+        # an operator who requested the v3 cutover and forgot the enable flag has
+        # opted in and been ignored: their contract request is discarded before it
+        # is ever read, and the subnet silently composes a flat vector for a full
+        # tempo. Every other misconfiguration in this function fails closed; this
+        # one must too, or "five of the six settings present" -- the single most
+        # likely operator error -- is the one mistake that is silent.
+        #
+        # Narrow to exactly the half-applied cutover: `allocation_contract() == "v3"`,
+        # not "ALLOCATION_CONTRACT is set to anything". An operator who pins the
+        # documented default (`CATHEDRAL_ALLOCATION_CONTRACT=v2`) with no enable flag
+        # is a legitimate v2 deployment and must fall through cleanly, not be crashed;
+        # and reusing `allocation_contract()` (just above) inherits its rejection of
+        # unrecognized values rather than re-reading the raw env. (Credit: wallscaler,
+        # #113 — same fix written in parallel; this narrows my over-raising condition.)
+        if allocation_contract() == "v3":
+            raise VectorError(
+                f"{ALLOCATION_CONTRACT_ENV}=v3 is set but {VALIDATED_SUPPLY_ENABLED_ENV} "
+                "is not; refusing to fall back silently"
+            )
         return None
     if external_scores_mode() != "confidential_primary":
         raise VectorError("validated_supply requires confidential_primary mode")
