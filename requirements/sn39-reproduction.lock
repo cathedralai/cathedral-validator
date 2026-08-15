@@ -201,7 +201,7 @@ bittensor-wallet==4.1.1 \
     --hash=sha256:ede1bb321aa3aa373d6ffb56b19c4802150a7982c1ce43b003618ca6d63be2ae \
     --hash=sha256:f50b71c440d47a9f1bb6f965dc64519e7bc3c99d1d63c6518d953d931120618a
 cathedral @ https://github.com/cathedralai/cathedral-compute/archive/26ebdbb885746f1835ea67ff314e384b4838560f.tar.gz \
-    --hash=sha256:02b95787cf2247d264bb45b1938b20ff005b1ac127261264dfe5e5a9b4aab240
+    --hash=sha256:559dd8e347dcf635a76d4f930f251184fa09948ad3173ba36211a967c1f5d46e
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
