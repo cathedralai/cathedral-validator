@@ -868,10 +868,14 @@ def _verify_recent_chain_bridge(
         ),
         key=lambda row: int(row["source_epoch"]),
     )
-    catchup = (
-        "operator catch-up required (see the archived "
-        "cathedral_provenance_catchup_v1 procedure)"
-    )
+    # Name a procedure that exists. This used to point at an "archived
+    # cathedral_provenance_catchup_v1 procedure" that was never written down
+    # anywhere in this repository or on the validator host, so the one message
+    # an operator reads mid-incident sent them looking for a document that did
+    # not exist. The recovery is also not guessable: the tip is monotonic and
+    # the anchor cannot be rewound, so clearing two state keys off-line is the
+    # only exit.
+    catchup = "operator catch-up required (see docs/PROVENANCE_CATCHUP.md)"
     if recent_rows:
         window_floor = min(int(row["source_epoch"]) for row in recent_rows)
         if last_epoch < window_floor:
