@@ -3506,11 +3506,11 @@ def vector_to_uid_weights(
     v3_rows = _confidential_tdx_v3_rows(payload)
     if v3_rows is not None:
         mapped_uids: set[int] = set()
-        missing = False
+        unmapped: list[str] = []
         for row in v3_rows:
             hotkey = row["miner_hotkey"]
             if hotkey not in hotkey_to_uid:
-                missing = True
+                unmapped.append(hotkey)
                 continue
             uid = hotkey_to_uid[hotkey]
             if uid in mapped_uids:
@@ -3519,17 +3519,30 @@ def vector_to_uid_weights(
                 )
             mapped_uids.add(uid)
 
-        if missing:
-            print(
-                "  confidential_tdx v3 map incomplete; falling back to signed base components"
+        if unmapped:
+            # This branch used to re-read `base_component` for EVERY row so the
+            # signed 10% external cap could not be breached by the rows that
+            # survived. It bought that at the price of paying an allocation
+            # nobody signed: one deregistration stripped the external component
+            # from rows whose own hotkey was still registered, and it announced
+            # the switch with a bare print() that no journal consumer reads.
+            # The signed vector is the only allocation this validator may
+            # apply, so a vector it cannot map in full is refused. The refusal
+            # reaches the structured stream through the callers' VECTOR_REJECTED
+            # (stage=map) and TICK_FAILED events, which carry this message as
+            # their `detail`.
+            shown = ", ".join(sorted(unmapped)[:5])
+            if len(unmapped) > 5:
+                shown += f", +{len(unmapped) - 5} more"
+            raise wire.VectorError(
+                f"confidential_tdx v3 signed hotkeys not in the metagraph "
+                f"({len(unmapped)} of {len(v3_rows)} rows): {shown}; refusing to "
+                f"re-derive a base-only allocation the publisher never signed"
             )
         scores: dict[int, float] = {}
         for row in v3_rows:
-            hotkey = row["miner_hotkey"]
-            if hotkey not in hotkey_to_uid:
-                continue
-            uid = hotkey_to_uid[hotkey]
-            value = row["base_component"] if missing else row["weight"]
+            uid = hotkey_to_uid[row["miner_hotkey"]]
+            value = row["weight"]
             if value > 0.0:
                 scores[uid] = value
         return apply_burn(

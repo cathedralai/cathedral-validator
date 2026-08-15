@@ -199,12 +199,15 @@ The boundary behavior is fail-closed:
 | **Confidential only** (no base) | Return an **empty vector** |
 | **Neither** | Return an **empty vector** |
 | **Both** | Return the 90% base + 10% confidential union vector |
-| **Thin validator lacks any signed hotkey** | Drop all confidential mass and reconstruct a base-only vector from mapped signed base components |
+| **Thin validator lacks any signed hotkey** | Reject the vector; the tick submits nothing |
 | **Two signed hotkeys map to one UID** | Reject the vector as a duplicate UID |
 
-The fallback reconstruction is all-or-nothing for confidential mass: it does
-not retain a partial confidential vector when the thin validator's current
-hotkey map is incomplete.
+An incomplete hotkey map is refused rather than repaired. The validator used to
+rebuild a base-only vector from the signed `base_component` values, which kept
+the 10% cap intact but paid an allocation nobody signed: a single deregistration
+stripped the confidential component from every row, including rows whose own
+hotkey was still registered. The refusal names the unmappable hotkeys and
+reaches the journal as `VECTOR_REJECTED` (stage `map`) and `TICK_FAILED`.
 
 ---
 
