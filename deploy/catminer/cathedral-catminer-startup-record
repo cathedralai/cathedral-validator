@@ -1,0 +1,9 @@
+#!/bin/bash
+# Record a MINER_STARTUP so the alert's grace window is dated from a real
+# restart. Fails closed: if the journal cannot be written the miner does not
+# start, because an unwritable journal makes the whole canary blind.
+set -eu
+JOURNAL="${CATMINER_JOURNAL:-/var/log/cathedral-catminer/catminer-events.jsonl}"
+mkdir -p -- "$(dirname -- "$JOURNAL")"
+printf '{"ts":"%s","event":"MINER_STARTUP","miner":"%s"}\n' \
+  "$(date -u "+%Y-%m-%dT%H:%M:%S.000Z")" "${CATMINER_MINER_HOTKEY:-unset}" >> "$JOURNAL"

@@ -1,0 +1,29 @@
+[Unit]
+Description=Cathedral SN39 standing reference CyberGym miner (gate 1 canary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=catminer
+Group=catminer
+EnvironmentFile=/etc/cathedral/catminer-reference.env
+WorkingDirectory=/opt/cathedral-catminer
+# Writes MINER_STARTUP so the alert's grace window is dated from a real restart
+# rather than assumed. The loop itself dispatches, solves and submits one batch
+# per epoch with the attestation client active.
+ExecStartPre=/usr/local/bin/cathedral-catminer-startup-record
+ExecStart=/opt/cathedral-catminer/.venv/bin/cathedral-cybergym-agent \
+  --dispatch-url ${CATMINER_DISPATCH_URL} \
+  --miner ${CATMINER_MINER_HOTKEY} \
+  --submit
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/cathedral-catminer /var/lib/cathedral-catminer
+
+[Install]
+WantedBy=multi-user.target
