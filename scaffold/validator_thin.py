@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import sys
 import threading
@@ -224,6 +225,39 @@ EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # only: the pre-sign check itself stays exact.
 SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 
+# Retrying IMMEDIATELY made those 8 attempts one attempt tried 8 times.
+#
+# The note above assumed "the very next attempt from a fresh finalized head is
+# as likely to win the race as any other". Measured on the live writer, it is
+# not: a tick takes about as long as a block, so an immediate retry re-enters
+# the block cycle at the phase it just failed at. The attempts are correlated,
+# not independent draws.
+#
+# 120 consecutive ticks, retries needed before the tick ended:
+#
+#     0 retries  29 ticks     <- won immediately
+#     1           9
+#     2          19
+#     3           4
+#     4          10
+#     5           9
+#     6          10
+#     7           4
+#     8          26 ticks     <- hit the cap, 20 of them wrote nothing
+#
+# An independent per-attempt race decays monotonically. This is bimodal: win at
+# once, or burn the whole budget. Median gap between consecutive retries was
+# 12.57s against a 12s block. That is the phase lock, and it abandoned ~17% of
+# ticks (10 of 33 writes on 2026-08-15).
+#
+# Sleeping a uniform random fraction of one block before retrying decorrelates
+# the attempts, which is the property the retry budget always assumed it had.
+# Uniform over a full block period rather than a smaller nudge: a partial
+# offset still correlates, and only full-period coverage makes the next sample
+# independent of the phase that just lost. Not a cryptographic draw; this only
+# has to be unpredictable with respect to block arrival.
+SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS = 12.0
+
 # Exhausting that budget is a TIMING outcome, not a fault: nothing was
 # reserved, nothing was signed, and the very next attempt from a fresh
 # finalized head is as likely to win the race as any other. Sleeping the whole
@@ -237,6 +271,22 @@ SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 # retrying forever at the short interval.
 SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS = 60
 SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE = 3
+
+
+def _head_drift_phase_offset(width_secs: float) -> float:
+    """A delay drawn uniformly from one block period, to break the phase lock.
+
+    Both head-drift delays claim to start the next attempt at "an independently
+    drawn offset into a block". Neither did. The inner retry slept not at all,
+    and the re-arm slept exactly 60s, which is 5 block times: a whole number of
+    periods lands on the same phase just as reliably as sleeping nothing does.
+
+    Offsetting by a uniform draw over one full period is what actually makes the
+    next attempt's phase independent of the one that just lost.
+    """
+    if not (width_secs > 0.0):
+        return 0.0
+    return random.uniform(0.0, width_secs)  # noqa: S311 - timing, not secrecy
 
 
 def _ms_iso_now() -> str:
@@ -10528,6 +10578,16 @@ def run(args) -> int:
                 # preflight, recurring authorization, UID mapping, provenance,
                 # and inclusion-policy construction instead of reusing any
                 # mutable proof from the aborted attempt.
+                #
+                # Offset first. A tick takes about one block, so retrying
+                # immediately re-enters the block cycle at the phase that just
+                # lost, which is what turned this budget of 8 attempts into one
+                # attempt made 8 times. Nothing is reserved or signed while we
+                # wait, so the only cost is latency inside a tick that would
+                # otherwise be abandoned.
+                time.sleep(
+                    _head_drift_phase_offset(SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
+                )
                 continue
             except _PostSignedSubmissionMismatch as e:
                 render.outcome(
@@ -10697,7 +10757,16 @@ def run(args) -> int:
             consecutive_head_drift_rearms += 1
             # Never lengthen a short interval: a fast cadence already re-arms
             # sooner than the drift re-arm would.
-            time.sleep(min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs))
+            #
+            # The base delay is a whole number of block times (60s = 5 blocks),
+            # so on its own it re-arms onto the same phase it just failed at.
+            # The offset is what delivers the independence this re-arm was
+            # always documented as having.
+            rearm_secs = min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs)
+            time.sleep(
+                rearm_secs
+                + _head_drift_phase_offset(SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
+            )
             continue
         consecutive_head_drift_rearms = 0
         time.sleep(args.interval_secs)
