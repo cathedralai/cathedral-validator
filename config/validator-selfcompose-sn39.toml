@@ -96,7 +96,7 @@ index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac
 verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
-burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC" # pragma: allowlist secret
+burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi" # pragma: allowlist secret
 # controlled_dir and verifier_binary are deliberately absent: the raw TDX
 # evidence package is Cathedral-controlled, so the shadow audit reports
 # receipts_only and never delays or blocks the thin submission.

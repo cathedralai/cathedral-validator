@@ -78,7 +78,7 @@ mechanism = "validated_supply_v1"
 # controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
 # verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
 # source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f"
-# burn_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+# burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi"
 
 [logs]
 # Stable machine-readable event stream (one JSON object per line). Absolute
