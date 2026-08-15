@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -17,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .store import Store
+
+logger = logging.getLogger(__name__)
 
 INGEST_ENABLED_ENV = "CATHEDRAL_EXTERNAL_SCORES_INGEST_ENABLED"
 AUTH_TOKEN_ENV = "CATHEDRAL_EXTERNAL_SCORES_TOKEN"
@@ -32,6 +35,12 @@ MAX_REPORT_AGE_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_AGE_SECS"
 # Default 120 s to absorb clock skew.  Reports further in the future are
 # rejected.
 MAX_REPORT_FUTURE_SECS_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS"
+# Refuse credit to any positive score that carries no evidence block.
+# Default OFF, because today's producers emit none and flipping this on before
+# they do would refuse the whole live vector. Intake warns per unevidenced
+# positive score either way, so an operator can measure the blast radius from
+# the logs before turning it on.
+REQUIRE_EVIDENCE_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE"
 
 _DEFAULT_SOURCE = "violet_audio"
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -197,6 +206,40 @@ def _int_nonnegative(value: Any, field: str, *, default: int = 0) -> int:
         raise ExternalScoreError(f"invalid_{field}")
     if out < 0:
         raise ExternalScoreError(f"invalid_{field}")
+    return out
+
+
+def require_evidence() -> bool:
+    """True when an unevidenced positive score must be refused credit."""
+    return _env_bool(REQUIRE_EVIDENCE_ENV, False)
+
+
+def _evidence(value: Any, field: str) -> dict[str, Any] | None:
+    """Validate an optional per-score evidence block.
+
+    ``evidence_sha256`` commits to the work that earned the score, the same
+    digest discipline a CyberGym report's ``evidence_sha256`` already carries;
+    the other keys only label it. Unknown keys are refused rather than dropped,
+    so a producer cannot ship decoration and have it read as proof.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ExternalScoreError(f"invalid_{field}")
+    keys = set(value)
+    if "evidence_sha256" not in keys or keys - {"evidence_sha256", "kind", "receipt_id"}:
+        raise ExternalScoreError(f"invalid_{field}")
+    digest = value.get("evidence_sha256")
+    if not isinstance(digest, str) or _SHA256_HEX_RE.fullmatch(digest) is None:
+        raise ExternalScoreError(f"invalid_{field}")
+    out: dict[str, Any] = {"evidence_sha256": digest}
+    for key in ("kind", "receipt_id"):
+        if key not in keys:
+            continue
+        label = value.get(key)
+        if not isinstance(label, str) or not label.strip() or len(label) > 128:
+            raise ExternalScoreError(f"invalid_{field}")
+        out[key] = label.strip()
     return out
 
 
@@ -422,6 +465,9 @@ def _normalize_report(
 
     seen: set[str] = set()
     scores: list[dict[str, Any]] = []
+    enforce_evidence = require_evidence()
+    positive_count = 0
+    unevidenced_count = 0
     for idx, raw in enumerate(raw_scores):
         if not isinstance(raw, dict):
             raise ExternalScoreError(f"invalid_score_{idx}")
@@ -440,7 +486,8 @@ def _normalize_report(
         validity = _float_01(raw.get("validity"), f"validity_{idx}")
         confidence = _float_01(raw.get("confidence"), f"confidence_{idx}")
         tasks_scored = _int_nonnegative(raw.get("tasks_scored"), f"tasks_scored_{idx}")
-        scores.append({
+        evidence = _evidence(raw.get("evidence"), f"evidence_{idx}")
+        entry: dict[str, Any] = {
             "miner_hotkey": hotkey,
             "uid": uid,
             "score": round(score, 9),
@@ -450,7 +497,39 @@ def _normalize_report(
             "tasks_scored": tasks_scored,
             "confidence": None if confidence is None else round(confidence, 9),
             "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
-        })
+        }
+        if evidence is not None:
+            # Present only when supplied: an unevidenced report must canonicalize
+            # to the exact bytes it did before this field existed, or every
+            # producer's report_sha256 (the epoch fence and the idempotent-retry
+            # key) would move the moment this shipped.
+            entry["evidence"] = evidence
+        if score > 0.0:
+            positive_count += 1
+            if evidence is None:
+                unevidenced_count += 1
+                if enforce_evidence:
+                    # Fail closed: no evidence is zero credit, never a discount.
+                    entry["score"] = 0.0
+                logger.warning(
+                    "%s unevidenced external score: source=%s hotkey=%s score=%s",
+                    "refused" if enforce_evidence else "accepted",
+                    source,
+                    hotkey,
+                    round(score, 9),
+                )
+        scores.append(entry)
+
+    if unevidenced_count:
+        logger.warning(
+            "%d of %d positive external scores from %s carry no evidence "
+            "(%.1f%% of the credited vector is refused with %s=1)",
+            unevidenced_count,
+            positive_count,
+            source,
+            100.0 * unevidenced_count / positive_count,
+            REQUIRE_EVIDENCE_ENV,
+        )
 
     # An omitted or null epoch still means "epoch 0"; legacy producers rely on
     # that. A declared one must be a real in-contract counter.
