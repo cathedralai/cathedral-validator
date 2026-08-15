@@ -52,8 +52,22 @@ test = [
 # pinned Compute revision reserves the `cathedral-validator` console script for
 # this package. Update the commit, archive digest, release builder, source pin,
 # and regression tests together. Never use a mutable branch ref.
+#
+# 2026-08-15: the digest changed from 02b95787... to 559dd8e3... with NO change
+# to the pinned commit. GitHub re-generated the auto-archive with different gzip
+# output, so the bytes moved while the tree did not. Verified before re-pinning:
+# the tarball was extracted and hashed file-by-file against a clone checked out
+# at 26ebdbb, and both trees digest to 15567727dcd2ea8a738d77f465a40bc906151a45
+# 9e6fadcd1f7800a25dd9f2f1. Content identical, compression only.
+#
+# This is the second time an unchanged tree has invalidated this pin (#16 was
+# the cathedralconfidential -> cathedral-compute rename). The `integration`
+# extra below already uses `git+https://...@<commit-sha>`, which is immune
+# because a commit SHA addresses the tree rather than an archive's bytes. This
+# extra cannot follow it yet: sn39-reproduction.lock installs under pip
+# hash-checking, and a VCS URL cannot carry `--hash=`. Tracked separately.
 provenance = [
-    "cathedral @ https://github.com/cathedralai/cathedral-compute/archive/26ebdbb885746f1835ea67ff314e384b4838560f.tar.gz#sha256=02b95787cf2247d264bb45b1938b20ff005b1ac127261264dfe5e5a9b4aab240",
+    "cathedral @ https://github.com/cathedralai/cathedral-compute/archive/26ebdbb885746f1835ea67ff314e384b4838560f.tar.gz#sha256=559dd8e347dcf635a76d4f930f251184fa09948ad3173ba36211a967c1f5d46e",
 ]
 # Default-OFF Compute+Distill integration lane (cathedral-validator#1). Pulls the
 # shared receipt/lane/config contract from cathedral-distill so this validator can

@@ -16,7 +16,7 @@ from scaffold import sn39_public_reproduction, validator_thin
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COMPUTE_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
 COMPUTE_ARCHIVE_SHA256 = (
-    "02b95787cf2247d264bb45b1938b20ff005b1ac127261264dfe5e5a9b4aab240"
+    "559dd8e347dcf635a76d4f930f251184fa09948ad3173ba36211a967c1f5d46e"
 )
 
 
