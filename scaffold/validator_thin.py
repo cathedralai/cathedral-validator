@@ -90,7 +90,19 @@ SN39_VERIFIER_DIGEST = (
     "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 )
 SN39_PRODUCER_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
-SN39_BURN_HOTKEY = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+# The burn destination must be the LIVE SN39 subnet owner. The broadcast path
+# refuses to sign when this hotkey is not the owner on the finalized head
+# ("requires the pinned burn hotkey to remain the live subnet owner"), which is
+# deliberate: a stale pin would keep paying an address the subnet has moved off.
+#
+# The cost of that safety is that an on-chain owner change stops the writer until
+# this pin, the relay config's `burn_hotkey`, and the publisher's
+# CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY are moved together. Moving only this one
+# swaps the failure for "signed vector burn destination is not the pinned burn
+# hotkey"; all three are one change, not three.
+#
+# 2026-08-14: owner moved 5G3qVaXz... (uid 204) -> 5GP7c3fF... (uid 136).
+SN39_BURN_HOTKEY = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi"
 SN39_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
 SN39_LAUNCH_CONTROLLED_DIR = Path(
     "/var/lib/cathedral-validator-controlled-sn39/current"
