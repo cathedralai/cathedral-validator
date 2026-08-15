@@ -79,6 +79,15 @@ AUDIENCE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
 WEIGHT_POLICY_NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 WEIGHT_POLICY_NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 MAX_NETUID = 2**16 - 1
+# ``store_report``'s fence refuses any epoch below the highest already stored for
+# a source/audience, so one accepted absurd epoch would refuse every later
+# legitimate report as ``epoch_too_old`` forever, and nothing deletes those rows.
+# Bound it well above any real producer counter (2**31-1 epochs is hundreds of
+# millennia at any realistic tempo) so a single oversized post cannot poison it.
+# Same fence, same bound as ``cybergym_ingest._MAX_SOURCE_EPOCH``. A legitimate
+# producer downgrade is still refused by design (anti-rollback); recovering from
+# that is an owner/DB decision.
+_MAX_EPOCH = 2**31 - 1
 
 
 class ExternalScoreError(ValueError):
@@ -444,9 +453,17 @@ def _normalize_report(
             "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
         })
 
-    try:
-        epoch = int(payload.get("epoch", 0) or 0)
-    except (TypeError, ValueError):
+    # An omitted or null epoch still means "epoch 0"; legacy producers rely on
+    # that. A declared one must be a real in-contract counter.
+    epoch = payload.get("epoch")
+    if epoch is None:
+        epoch = 0
+    if (
+        isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 0
+        or epoch > _MAX_EPOCH
+    ):
         raise ExternalScoreError("invalid_epoch")
     normalized: dict[str, Any] = {
         "source": source,
