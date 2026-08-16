@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
@@ -2132,7 +2133,21 @@ def verify_frozen_evidence(
     }
 
 
-def verify_public_release() -> dict[str, Any]:
+def _release_artifact_paths(release_sha256: str | None) -> tuple[str, str]:
+    """Select the historical root seal or one immutable release generation."""
+    if release_sha256 is None:
+        return "/release.json", "/release.json.sig"
+    if not _is_hash(release_sha256, prefix="sha256:"):
+        raise ReproductionError("versioned release digest is malformed")
+    name = release_sha256.split(":", 1)[1]
+    release_path = f"/releases/sha256/{name}.json"
+    return release_path, release_path + ".sig"
+
+
+def verify_public_release(
+    *,
+    release_sha256: str | None = None,
+) -> dict[str, Any]:
     from scaffold.provenance_audit import (
         ProvenanceAuditError,
         ProvenanceSettings,
@@ -2157,8 +2172,9 @@ def verify_public_release() -> dict[str, Any]:
             deadline=deadline,
             include_raw_fetch=True,
         )
-        release_bytes = fetch_named("/release.json")
-        signature_bytes = fetch_named("/release.json.sig")
+        release_path, signature_path = _release_artifact_paths(release_sha256)
+        release_bytes = fetch_named(release_path)
+        signature_bytes = fetch_named(signature_path)
         if not isinstance(release_bytes, bytes) or not isinstance(
             signature_bytes, bytes
         ):
@@ -2170,6 +2186,13 @@ def verify_public_release() -> dict[str, Any]:
             or len(signature_bytes) > MAX_RELEASE_BYTES
         ):
             raise ReproductionError("public release artifact exceeds its size cap")
+        if (
+            release_sha256 is not None
+            and "sha256:" + hashlib.sha256(release_bytes).hexdigest() != release_sha256
+        ):
+            raise ReproductionError(
+                "versioned release bytes differ from their requested digest"
+            )
         result = verify_release_bytes(
             release_bytes,
             signature_bytes,
@@ -2553,11 +2576,14 @@ def assert_current_dry_run(
 
 def assert_public_reproduction(
     *,
+    release_sha256: str | None = None,
     release_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reproduce the immutable launch without consulting the mutable live feed."""
     release_result = (
-        verify_public_release() if release_result is None else release_result
+        verify_public_release(release_sha256=release_sha256)
+        if release_result is None
+        else release_result
     )
     required = {
         "release_attestation": "signed release attestation",
@@ -2573,9 +2599,7 @@ def assert_public_reproduction(
         # there is nothing to replay. The summary says so explicitly rather
         # than implying a replay happened.
         if release_result.get("evidence_scope") != "signed_feed_relay":
-            raise ReproductionError(
-                "unclaimed frozen evidence lacks the relay scope"
-            )
+            raise ReproductionError("unclaimed frozen evidence lacks the relay scope")
         for field, label in evidence_fields.items():
             if field in release_result:
                 raise ReproductionError(
@@ -2611,15 +2635,17 @@ def assert_public_reproduction(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = sys.argv[1:] if argv is None else argv
-    if args:
-        print(
-            "usage: assert_sn39_public_reproduction.py",
-            file=sys.stderr,
-        )
-        return 2
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--release-sha256",
+        help=(
+            "reproduce a versioned release under /releases/sha256; "
+            "omit only for the historical root release"
+        ),
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        summary = assert_public_reproduction()
+        summary = assert_public_reproduction(release_sha256=args.release_sha256)
     except ReproductionNotProven as exc:
         print(f"SN39 public reproduction: NOT_PROVEN: {exc}", file=sys.stderr)
         return 3

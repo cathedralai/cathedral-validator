@@ -599,6 +599,8 @@ it; none of them restates it.
   top of the quickstart; [REVIEW.md](REVIEW.md) has the review order and the
   gates a broadcast must prove in one cycle.
 - [Provenance contract](docs/PROVENANCE.md), every pin the shadow audit uses.
+- [Versioned release sealing](docs/SN39_VERSIONED_RELEASES.md), the read-only
+  ceremony preflight, immutable generation paths, and external reproduction.
 - [CyberGym pre-launch E2E testing](docs/CYBERGYM_E2E_TESTING.md)
 - [SN39 v3 publisher cutover](docs/SN39_V3_PUBLISHER_CUTOVER.md), what the live
   publisher actually imports, the ordered steps to make it v3-capable, and how
