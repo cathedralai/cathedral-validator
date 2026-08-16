@@ -35,6 +35,8 @@
 d /var/lib/cathedral-public-evidence :0755 :root :root -
 d /var/lib/cathedral-public-evidence/blobs :0755 :root :root -
 d /var/lib/cathedral-public-evidence/blobs/sha256 :0755 :root :root -
+d /var/lib/cathedral-public-evidence/releases :0755 :root :root -
+d /var/lib/cathedral-public-evidence/releases/sha256 :0755 :root :root -
 d /var/lib/cathedral-public-evidence/epochs :0755 :root :root -
 d /var/lib/cathedral-public-evidence/pins :0755 :root :root -
 d /var/lib/cathedral-public-evidence/receipts :0755 :root :root -

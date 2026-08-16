@@ -32,7 +32,7 @@ CONFIGS = {
     # "local publisher publishes to the public feed; validator fetches it back".
     "continuous": INSTALL_ROOT / "validator-thin-sn39-relay.toml",
 }
-MODES = frozenset({*CONFIGS, "status", "finalize"})
+MODES = frozenset({*CONFIGS, "status", "preflight", "finalize"})
 JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
 FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
@@ -356,7 +356,11 @@ def _git_output(release: Path, *args: str) -> str:
             cwd=release,
             text=True,
             stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LC_ALL": "C",
+                "GIT_OPTIONAL_LOCKS": "0",
+            },
         ).strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise InstallError("cannot verify immutable release checkout") from exc
@@ -424,12 +428,16 @@ def _verify(mode: str) -> tuple[Path, Path, str]:
 
 def _finalizer_context_digest(
     *,
+    operation: str,
     release_sha: str,
     journal: Path,
     manifest_digest: str,
 ) -> str:
+    if operation not in {"preflight", "finalize"}:
+        raise InstallError("release finalizer operation is invalid")
     payload = (
-        "cathedral-sn39-finalizer-context-v1\n"
+        "cathedral-sn39-finalizer-context-v2\n"
+        f"{operation}\n"
         f"{release_sha}\n"
         f"{manifest_digest}\n"
         f"{journal}\n"
@@ -450,22 +458,23 @@ def _finalizer_journal(value: str) -> Path:
 
 def main(argv: list[str]) -> int:
     mode = argv[0] if argv else ""
-    finalize = mode == "finalize"
+    ceremony = mode in {"preflight", "finalize"}
     if (
         mode not in MODES
-        or (finalize and len(argv) != 2)
-        or (not finalize and len(argv) != 1)
+        or (ceremony and len(argv) != 2)
+        or (not ceremony and len(argv) != 1)
     ):
         print(
-            "usage: cathedral-sn39-release {continuous|status|finalize JOURNAL}",
+            "usage: cathedral-sn39-release "
+            "{continuous|status|preflight JOURNAL|finalize JOURNAL}",
             file=sys.stderr,
         )
         return 2
-    if finalize and os.geteuid() != ROOT_UID:
-        print("SN39 finalize launcher must run as root", file=sys.stderr)
+    if ceremony and os.geteuid() != ROOT_UID:
+        print("SN39 release ceremony launcher must run as root", file=sys.stderr)
         return 1
     try:
-        journal = _finalizer_journal(argv[1]) if finalize else None
+        journal = _finalizer_journal(argv[1]) if ceremony else None
         release, python, manifest_digest = _verify(mode)
     except InstallError as exc:
         print(f"SN39 immutable-install check failed: {exc}", file=sys.stderr)
@@ -484,7 +493,7 @@ def main(argv: list[str]) -> int:
     # from a systemd drop-in, a shell, a compose file -- never reaches the
     # child; and the unit's digest is bound in the release manifest, so they
     # cannot edit it either.
-    if finalize:
+    if ceremony:
         assert journal is not None
         command = [
             str(python),
@@ -499,6 +508,8 @@ def main(argv: list[str]) -> int:
             "--journal",
             str(journal),
         ]
+        if mode == "preflight":
+            command.append("--preflight")
     elif mode == "status":
         command = [str(python), "-u", "scripts/publish_sn39_validator_status.py"]
     else:
@@ -518,9 +529,10 @@ def main(argv: list[str]) -> int:
         release_sha=release.name,
         launch_config_sha256=_digest(config) if config is not None else None,
     )
-    if finalize:
+    if ceremony:
         assert journal is not None
         environment[FINALIZER_CONTEXT_ENV] = _finalizer_context_digest(
+            operation=mode,
             release_sha=release.name,
             journal=journal,
             manifest_digest=manifest_digest,
