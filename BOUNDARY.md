@@ -68,6 +68,12 @@ self-reports work. The active path checks:
 
 Any required failed gate stops the decision. `NOT_PROVEN` is not success.
 
+Customer sandbox execution is not a validator dependency. Seed-provider and
+miner-provider attempts finish, clean up, settle, and return a customer receipt
+before a bounded verified-work fact reaches a score-class producer. The exact
+separation and activation order are documented in
+[`docs/CUSTOMER_EXECUTION_SUPPLY_BOUNDARY.md`](docs/CUSTOMER_EXECUTION_SUPPLY_BOUNDARY.md).
+
 ## Execution boundary
 
 Thin mode verifies the signed candidate and reads the live metagraph. It does
