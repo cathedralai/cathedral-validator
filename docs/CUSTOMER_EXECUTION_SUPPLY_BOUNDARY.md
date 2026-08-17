@@ -44,17 +44,36 @@ hold:
 
 1. The provider identity kind is `subnet_hotkey` and the hotkey appears in the finalized candidate
    snapshot for the report epoch.
-2. The logical job and terminal attempt are unique under the producer's durable high-water state.
+2. The logical job and terminal attempt are unique under the producer's durable high-water state,
+   and each consuming validator independently rejects a repeated `(job_id, attempt_id)` against its
+   own replay state. Producer-side deduplication is a first filter, not the authority. The validator
+   contract below never falls back to provider self-reporting, and a producer high-water mark is a
+   producer assertion.
 3. The attempt reached `SUCCEEDED` through `EVIDENCE_VERIFIED` and
-   `SUCCESS_CLEANUP_PENDING`.
+   `SUCCESS_CLEANUP_PENDING`, and the slot reconciler recorded confirmed
+   provider-resource absence for that attempt.
+
+   Terminal state alone is not sufficient. An attempt also reaches a terminal
+   state when the cleanup deadline expires without confirmed absence. Admitting
+   that case would pay a provider that never tore down its resource, which
+   inverts the incentive on the one behavior the customer plane most needs to
+   enforce. A deadline-expired attempt settles the customer normally and
+   produces no reward-eligible fact.
 4. The result, policy, workload, assignment, and receipt digests match the accepted customer record.
 5. The customer invoice decision is terminal and carries no charge above the reserved cap.
 6. The receipt and evidence kinds required by the validator's local policy are present.
-7. The exported metric is a bounded fact such as `verified_work_units`. The producer does not assign
-   weights.
+7. The exported metric is exactly `verified_work_units`: a non-negative integer count of attempts
+   satisfying conditions 1 through 6, carrying no latency, uptime, or capacity component. Adding a
+   metric or changing this definition is a versioned reward-policy change under step 5 of the
+   activation order, not an implementation detail. The producer does not assign weights.
 
 `cathedral_seed` attempts may contribute operational benchmark data. They must produce zero subnet
 reward entries because no miner hotkey performed the work.
+
+Seed capacity is Cathedral-operated. Using its measurements as a comparative baseline that scores
+miner capacity would let the operator set the bar it grades competitors against. Seed benchmark data
+is therefore limited to operational monitoring until a versioned reward-policy decision states
+otherwise under step 5 of the activation order.
 
 ## Private and public data
 
