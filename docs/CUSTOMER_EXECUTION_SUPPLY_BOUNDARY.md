@@ -50,15 +50,19 @@ hold:
    contract below never falls back to provider self-reporting, and a producer high-water mark is a
    producer assertion.
 3. The attempt reached `SUCCEEDED` through `EVIDENCE_VERIFIED` and
-   `SUCCESS_CLEANUP_PENDING`, and the slot reconciler recorded confirmed
-   provider-resource absence for that attempt.
+   `SUCCESS_CLEANUP_PENDING`, and its terminal transition carries
+   `TerminalBasis.PROVIDER_ABSENCE` with `ProviderAbsenceStatus.PROVEN_ABSENT`.
 
    Terminal state alone is not sufficient. An attempt also reaches a terminal
-   state when the cleanup deadline expires without confirmed absence. Admitting
-   that case would pay a provider that never tore down its resource, which
-   inverts the incentive on the one behavior the customer plane most needs to
-   enforce. A deadline-expired attempt settles the customer normally and
-   produces no reward-eligible fact.
+   state on `TerminalBasis.CUSTOMER_CLEANUP_DEADLINE`, when the deadline expires
+   without confirmed absence. Admitting that case would pay a provider that
+   never tore down its resource, which inverts the incentive on the one
+   behavior the customer plane most needs to enforce.
+
+   The shipped provider contract already enforces this: a deadline basis
+   targeting `SUCCEEDED` is rejected outright, so such an attempt ends `FAILED`
+   with a refund. This condition is written in the contract's own terms so a
+   consumer implementing from this document alone cannot reintroduce the gap.
 4. The result, policy, workload, assignment, and receipt digests match the accepted customer record.
 5. The customer invoice decision is terminal and carries no charge above the reserved cap.
 6. The receipt and evidence kinds required by the validator's local policy are present.
@@ -69,6 +73,21 @@ hold:
 
 `cathedral_seed` attempts may contribute operational benchmark data. They must produce zero subnet
 reward entries because no miner hotkey performed the work.
+
+### No subnet_hotkey attempt can satisfy these conditions yet
+
+Condition 3 requires proven provider-resource absence. Absence is proven by the party that controls
+the resource lifecycle, which today is Cathedral for seed capacity. A miner cannot prove the absence
+of its own hardware, so no `subnet_hotkey` attempt can currently reach a reward-eligible terminal
+state. The reward condition is unsatisfiable for the only identity kind it rewards.
+
+This is deliberate. Miner supply is shadow-only until a miner lifecycle receipt version defines how
+an external provider demonstrates teardown. It is recorded here because an unsatisfiable gate that
+is not written down reads as a working path that is merely quiet, and this project has already paid
+for that lesson once with the FULL assurance gate.
+
+Do not relax condition 3 to unblock miner rewards. Add the miner teardown evidence version, or keep
+the lane shadow-only until it exists.
 
 Seed capacity is Cathedral-operated. Using its measurements as a comparative baseline that scores
 miner capacity would let the operator set the bar it grades competitors against. Seed benchmark data
