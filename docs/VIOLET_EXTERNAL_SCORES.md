@@ -15,6 +15,7 @@ The blend injects external (non-base) scoring into the real signed weight vector
 - **Fail-closed:** No external scores, stale snapshot, or incomplete report degrades to base-only. External-only (no base) also fails closed to empty.
 - **Source separation:** Dedicated per-source tokens isolate credentials; a confidential source cannot be authorized by the shared token.
 - **Confidential sources:** Sources like `cathedral_confidential_tdx` require `complete=true`, forbid `external_primary` mode, and require an explicit `FRACTION` env var (no legacy 50% default).
+- **Voice hybrid:** `cathedral_voice_hybrid` is admitted with the same complete / dedicated-token / mandatory-HMAC / fraction-required / no-`external_primary` posture, plus receipt and honest-GPU gates. It does **not** use `confidential_primary` or the confidential TDX 10% global hard-cap.
 
 ---
 
@@ -31,7 +32,7 @@ CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET=<shared hmac secret>
 
 # ========== COMPOSITION (include scores in weight calculation) ==========
 CATHEDRAL_EXTERNAL_SCORES_ENABLED=1
-CATHEDRAL_EXTERNAL_SCORES_SOURCE=violet_audio          # or cathedral_confidential_tdx, etc.
+CATHEDRAL_EXTERNAL_SCORES_SOURCE=violet_audio          # or cathedral_confidential_tdx / cathedral_voice_hybrid, etc.
 CATHEDRAL_EXTERNAL_SCORES_MODE=blend                    # blend | external_primary
 CATHEDRAL_EXTERNAL_SCORES_FRACTION=0.1                  # External share (0..1)
                                                          # Explicit FRACTION required for confidential sources
@@ -102,8 +103,12 @@ When pinned, every vector lacking a valid `confidential_primary` v1 policy block
 ```bash
 # Dedicated token for a specific source (e.g., cathedral_confidential_tdx)
 CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX=<confidential_secret>
+CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_VOICE_HYBRID=<hybrid_secret>
 # Fallback token when no dedicated token exists
 CATHEDRAL_EXTERNAL_SCORES_TOKEN=<shared_token>
+# Dedicated HMAC (mandatory for confidential_tdx and voice_hybrid)
+CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX=<confidential_hmac>
+CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_VOICE_HYBRID=<hybrid_hmac>
 ```
 
 ### Legacy Weights (Unreachable)
@@ -160,10 +165,45 @@ Because filtering happens pre-allocation (not post), the realized external contr
 
 ```python
 ALLOWED_ENDPOINT_SOURCES = {
-    "violet_audio",              # Legacy public scorer
-    "cathedral_sat_fast",        # Cathedral's fast-path SAT scoreboard
+    "violet_audio",               # Legacy public scorer
+    "cathedral_sat_fast",         # Cathedral's fast-path SAT scoreboard
     "cathedral_confidential_tdx", # Confidential/attested source
+    "cathedral_voice_hybrid",     # Cathedral Voice hybrid (receipt-gated)
 }
+```
+
+### Voice Hybrid (`cathedral_voice_hybrid`)
+
+Cathedral Voice posts hybrid miner scores with per-row `cathedral_voice_receipt_v1` evidence. Publisher admission mirrors confidential completeness / auth / audience binding, but stays on capped blend (not confidential-primary / not the TDX 10% global cap):
+
+| Requirement | Rationale |
+|---|---|
+| Bound to configured `(network, netuid)` | Publisher-wide audience bind (every source); HMAC is not a substitute |
+| `complete=true` **mandatory** | Snapshot is the full truth at its epoch |
+| No `external_primary` mode | Always capped-blend; hybrid never reaches 100% |
+| Explicit `FRACTION` env var required | Cannot inherit legacy 50% default |
+| Dedicated bearer + mandatory HMAC | Isolates credentials; shared HMAC cannot substitute |
+| `metadata.receipt_verified=true` | Hybrid publisher asserts receipt verification ran |
+| Positive scores require `receipt` | Fail-closed without `cathedral_voice_receipt_v1` |
+| `gpu_attested` / `gpu_memory_confidential` forbidden | Honest hybrid boundary (CPU/controller only) |
+| Simulated TDX rejected unless explicitly allowed | Production must not accept `CATHEDRAL_TDX_SIMULATION` |
+
+```bash
+# Ingest credentials (dedicated; shared token/HMAC do not authorize this source)
+CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_VOICE_HYBRID=<hybrid_token>
+CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_VOICE_HYBRID=<hybrid_hmac>
+
+# Composition (blend only; set FRACTION explicitly)
+CATHEDRAL_EXTERNAL_SCORES_ENABLED=1
+CATHEDRAL_EXTERNAL_SCORES_SOURCE=cathedral_voice_hybrid
+CATHEDRAL_EXTERNAL_SCORES_MODE=blend
+CATHEDRAL_EXTERNAL_SCORES_FRACTION=0.1
+CATHEDRAL_WEIGHT_POLICY_NETWORK=finney
+CATHEDRAL_WEIGHT_POLICY_NETUID=39
+
+# CI / dry-run only — leave unset in production
+# CATHEDRAL_VOICE_HYBRID_ALLOW_SIMULATION=1
+# Optional: CATHEDRAL_VOICE_HYBRID_REQUIRE_TDX=0 to skip controller measurement
 ```
 
 ### Confidential Sources (e.g., cathedral_confidential_tdx)

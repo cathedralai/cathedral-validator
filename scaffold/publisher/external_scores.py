@@ -26,7 +26,7 @@ AUTH_TOKEN_ENV = "CATHEDRAL_EXTERNAL_SCORES_TOKEN"
 HMAC_SECRET_ENV = "CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET"
 ALLOW_UNAUTH_ENV = "CATHEDRAL_EXTERNAL_SCORES_ALLOW_UNAUTHENTICATED"
 # Sources requiring their own mandatory HMAC secret (fail 503 if absent)
-MANDATORY_HMAC_SOURCES = {"cathedral_confidential_tdx"}
+MANDATORY_HMAC_SOURCES = {"cathedral_confidential_tdx", "cathedral_voice_hybrid"}
 MAX_SCORES_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES"
 # Maximum age (seconds) a report's generated_at may lag behind now.
 # Default 1 hour.  Reports older than this are rejected as stale.
@@ -55,6 +55,7 @@ ALLOWED_ENDPOINT_SOURCES = {
     "violet_audio",
     "cathedral_sat_fast",
     "cathedral_confidential_tdx",
+    "cathedral_voice_hybrid",
 }
 
 # Sources that must never be accepted as an incomplete snapshot, regardless of
@@ -83,7 +84,7 @@ def _storage_key(*, source_name: str, digest: str) -> str:
     return "ext:" + hashlib.sha256(material).hexdigest()
 
 
-COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx", "cathedral_voice_hybrid"}
 WEIGHT_POLICY_NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 WEIGHT_POLICY_NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 MAX_NETUID = 2**16 - 1
@@ -465,6 +466,17 @@ def _normalize_report(
 
     seen: set[str] = set()
     scores: list[dict[str, Any]] = []
+    report_metadata = (
+        payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    )
+    if source == "cathedral_voice_hybrid":
+        from .voice_hybrid import VoiceHybridError, validate_report_metadata
+
+        try:
+            validate_report_metadata(report_metadata)
+        except VoiceHybridError as exc:
+            raise ExternalScoreError(exc.reason) from exc
+
     enforce_evidence = require_evidence()
     positive_count = 0
     unevidenced_count = 0
@@ -486,6 +498,19 @@ def _normalize_report(
         validity = _float_01(raw.get("validity"), f"validity_{idx}")
         confidence = _float_01(raw.get("confidence"), f"confidence_{idx}")
         tasks_scored = _int_nonnegative(raw.get("tasks_scored"), f"tasks_scored_{idx}")
+        receipt = raw.get("receipt")
+        if source == "cathedral_voice_hybrid":
+            from .voice_hybrid import VoiceHybridError, validate_hybrid_score_row
+
+            try:
+                receipt = validate_hybrid_score_row(
+                    miner_hotkey=hotkey,
+                    score=float(score),
+                    receipt=receipt,
+                    report_metadata=report_metadata,
+                ) or receipt
+            except VoiceHybridError as exc:
+                raise ExternalScoreError(f"{exc.reason}_{idx}") from exc
         evidence = _evidence(raw.get("evidence"), f"evidence_{idx}")
         entry: dict[str, Any] = {
             "miner_hotkey": hotkey,
@@ -498,6 +523,8 @@ def _normalize_report(
             "confidence": None if confidence is None else round(confidence, 9),
             "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
         }
+        if isinstance(receipt, dict):
+            entry["receipt"] = receipt
         if evidence is not None:
             # Present only when supplied: an unevidenced report must canonicalize
             # to the exact bytes it did before this field existed, or every
