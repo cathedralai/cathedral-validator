@@ -51,6 +51,16 @@ SAMPLE_SCOREBOARD = {
     "signature": "deadbeef==",
 }
 
+NETWORK = "finney"
+NETUID = 39
+
+
+@pytest.fixture(autouse=True)
+def _local_audience(monkeypatch):
+    """The intake binds every report to one audience, so the poster needs one."""
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", NETWORK)
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", str(NETUID))
+
 
 # ---- normalize_scores -------------------------------------------------------
 def test_normalize_scores_extracts_hotkey_and_raw_score():
@@ -123,6 +133,13 @@ def test_build_report_not_a_dict_returns_none():
     assert poster.build_report([], now=NOW) is None
 
 
+def test_unconfigured_audience_posts_nothing(monkeypatch):
+    """No audience, no report: an unaudienced report is not postable."""
+    monkeypatch.delenv("CATHEDRAL_WEIGHT_POLICY_NETWORK")
+    assert poster.build_report(SAMPLE_SCOREBOARD, now=NOW) is None
+    assert poster.run_once(_Args()) != 0
+
+
 # ---- interop with the real hardened intake ----------------------------------
 def test_report_accepted_by_normalize_report():
     """The poster's report must be exactly what the real intake accepts —
@@ -131,6 +148,7 @@ def test_report_accepted_by_normalize_report():
     report = poster.build_report(SAMPLE_SCOREBOARD, now=NOW)
     normalized = external_scores.normalize_report(report, default_source="violet_audio", now=NOW)
     assert normalized["source"] == "cathedral_sat_fast"
+    assert (normalized["network"], normalized["netuid"]) == (NETWORK, NETUID)
     assert normalized["source"] in external_scores.ALLOWED_ENDPOINT_SOURCES
     assert len(normalized["scores"]) == len(report["scores"])
     for s in normalized["scores"]:

@@ -52,10 +52,11 @@ max_submissions = 0
 root = "/var/lib/cathedral-validator"
 
 [provenance]
-# Relays MUST stay in shadow. "authority" submits an independent recomputation
-# instead of Cathedral's signed vector; that originates weights and therefore
-# requires the root-signed launch and recurring-write authorization.
-mode = "shadow"
+# Authority submits an independent recomputation instead of Cathedral's signed
+# vector. It originates weights, so it requires the controlled evidence package
+# and the root-signed authorization below; a relay without them must stay on
+# validator-thin-sn39-relay.toml.
+mode = "authority"
 evidence_url = "https://api.cathedral.computer/v1/evidence"
 registry_keys = "config/provenance/registry-keys.json"
 registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
@@ -67,9 +68,24 @@ verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16
 source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f" # pragma: allowlist secret
 mechanism = "validated_supply_v1"
 burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi" # pragma: allowlist secret
-# controlled_dir and verifier_binary are deliberately absent: the raw TDX
-# evidence package is Cathedral-controlled, so the shadow audit reports
-# receipts_only here and still never delays or blocks the thin submission.
+# The controlled evidence rotates: the exporter writes one directory per epoch
+# and repoints `current` after each successful export. Pin the symlink, never an
+# epoch directory, or the audit silently replays stale evidence and starts
+# refusing on an epoch mismatch a few minutes later.
+controlled_dir = "/var/lib/cathedral-validator-controlled-sn39/current"
+verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier-24a96d5"
+# Mandatory in authority mode: every independent chain check is evaluated at the
+# anchored candidate block, so without a ceiling the producer chooses the block
+# its own evidence is judged against.
+#
+# Measured on the live producer: the anchor sits 22 blocks behind the finalized
+# head and advances every ~26 blocks (300s epochs at 12s blocks). 100 allows
+# roughly four epochs of staleness, which is generous for normal jitter and
+# still refuses a producer that has stopped exporting. That second property is
+# the one worth having: the epoch loop wedged for 17 hours on 2026-08-12 while
+# weights kept publishing, and a ceiling this tight turns that into a refusal
+# instead of a silent divergence.
+max_anchor_lag_blocks = 100
 
 [launch]
 # A relay performs no launch transaction.

@@ -35,6 +35,7 @@ from scaffold.publisher import (
 )
 from scaffold.publisher import mechanism_cybergym_adapter as adapter
 from scaffold.publisher.store import Store
+from scaffold.wire_vector import VectorError
 
 BURN = "5FBurnHotkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 UID163 = (
@@ -166,10 +167,41 @@ def test_v3_compose_credits_the_cybergym_solver(monkeypatch, tmp_path):
     assert any(str(uid) == "250" for uid in lane), lane
 
 
-def test_missing_validated_supply_enabled_silently_falls_back(monkeypatch, tmp_path):
-    """Without the enable flag the composer applies no contract at all — the
-    exact silent fallback that broke every live v3 attempt."""
+def test_v3_requested_without_enable_flag_now_refuses(monkeypatch, tmp_path):
+    """The footgun, now fail-closed. An operator who set ALLOCATION_CONTRACT=v3
+    but forgot CATHEDRAL_VALIDATED_SUPPLY_ENABLED used to get a silently flat
+    vector for a full tempo — "opted in, ignored". Every other misconfiguration
+    in validated_supply_metadata() raises; this one now does too."""
+    # V3_ENV sets ALLOCATION_CONTRACT=v3; _apply_env(..False) omits the enable flag.
     _apply_env(monkeypatch, validated_supply_enabled=False)
+    # Names the variable that is set (=v3), not just "something is wrong" — the
+    # message has to point the operator at the exact half-applied knob.
+    with pytest.raises(
+        VectorError,
+        match=r"CATHEDRAL_ALLOCATION_CONTRACT=v3.*refusing to fall back silently",
+    ):
+        _compose(tmp_path, datetime.now(timezone.utc))
+
+
+def test_a_plain_v2_run_is_untouched(monkeypatch, tmp_path):
+    """The guard must fire on the half-applied v3 cutover ONLY, never on a legitimate
+    v2 deployment. An operator who pins the documented default
+    (CATHEDRAL_ALLOCATION_CONTRACT=v2) with no enable flag is a normal v2 run; the
+    earlier "ALLOCATION_CONTRACT is set to anything" condition crashed their publisher.
+    It must fall through cleanly, exactly like the never-opted-in case. (wallscaler, #113.)"""
+    _apply_env(monkeypatch, validated_supply_enabled=False)
+    monkeypatch.setenv("CATHEDRAL_ALLOCATION_CONTRACT", "v2")
+    vector = _compose(tmp_path, datetime.now(timezone.utc))  # must NOT raise
+
+    assert "validated_supply" not in vector["policy_metadata"]
+    assert "cybergym_lane" not in vector["policy_metadata"]
+
+
+def test_never_opted_in_still_falls_back_clean(monkeypatch, tmp_path):
+    """The genuinely-not-opted-in case stays a clean fallback: no enable flag AND
+    no explicit contract → None, not a crash for a validator that never asked."""
+    _apply_env(monkeypatch, validated_supply_enabled=False)
+    monkeypatch.delenv("CATHEDRAL_ALLOCATION_CONTRACT", raising=False)
     vector = _compose(tmp_path, datetime.now(timezone.utc))
 
     assert "validated_supply" not in vector["policy_metadata"]

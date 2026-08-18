@@ -17,7 +17,7 @@ import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # The root finalizer imports from the already-verified immutable checkout.
 # Never create ignored bytecode there after the pristine-tree gate passes.
@@ -49,6 +49,16 @@ FINNEY_GENESIS_HASH = (
 
 class ReleaseError(RuntimeError):
     """The irreversible launch cannot be sealed safely."""
+
+
+class PublicationItem(NamedTuple):
+    """One immutable file in a release publication transaction."""
+
+    path: Path
+    payload: bytes
+    size_cap: int
+    label: str
+    conflict: str
 
 
 def canonical_json(document: dict[str, Any]) -> bytes:
@@ -135,7 +145,11 @@ def git(release: Path, *arguments: str) -> str:
             cwd=release,
             text=True,
             stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LC_ALL": "C",
+                "GIT_OPTIONAL_LOCKS": "0",
+            },
             timeout=30,
         ).strip()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -206,12 +220,16 @@ def _read_root_manifest_digest() -> str:
 
 def _launcher_context_digest(
     *,
+    operation: str,
     release_sha: str,
     journal: Path,
     manifest_digest: str,
 ) -> str:
+    if operation not in {"finalize", "preflight"}:
+        raise ReleaseError("release finalizer operation is invalid")
     payload = (
-        "cathedral-sn39-finalizer-context-v1\n"
+        "cathedral-sn39-finalizer-context-v2\n"
+        f"{operation}\n"
         f"{release_sha}\n"
         f"{manifest_digest}\n"
         f"{journal}\n"
@@ -219,11 +237,17 @@ def _launcher_context_digest(
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _require_launcher_context(*, release_sha: str, journal: Path) -> None:
+def _require_launcher_context(
+    *,
+    operation: str,
+    release_sha: str,
+    journal: Path,
+) -> None:
     if os.geteuid() != ROOT_UID:
         raise ReleaseError("release finalizer must run as root")
     manifest_digest = _read_root_manifest_digest()
     expected = _launcher_context_digest(
+        operation=operation,
         release_sha=release_sha,
         journal=journal,
         manifest_digest=manifest_digest,
@@ -984,27 +1008,183 @@ def _validated_broadcast_intent(
     }
 
 
-def _read_controlled_envelope(root: Path, digest: str) -> bytes:
+def _open_trusted_directory(path: Path) -> int:
+    """Open an absolute directory without following any path-component symlink."""
+    if not path.is_absolute():
+        raise ReleaseError("controlled evidence path must be absolute")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open("/", flags)
+        root_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid not in {0, ROOT_UID}
+            or stat.S_IMODE(root_info.st_mode) & 0o022
+        ):
+            raise ReleaseError("controlled evidence ancestor is not root-controlled")
+        parts = path.parts[1:]
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ReleaseError("controlled evidence ancestor path is malformed")
+        for index, part in enumerate(parts):
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise ReleaseError(
+                    "controlled evidence ancestor is unavailable or contains a symlink"
+                ) from exc
+            info = os.fstat(child)
+            mode = stat.S_IMODE(info.st_mode)
+            is_leaf = index == len(parts) - 1
+            sticky_root_ancestor = (
+                not is_leaf and info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+            )
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid not in {0, ROOT_UID}
+                or (mode & 0o022 and not sticky_root_ancestor)
+                or (is_leaf and info.st_uid != ROOT_UID)
+            ):
+                os.close(child)
+                raise ReleaseError(
+                    "controlled evidence ancestor is not owner-controlled"
+                )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+
+
+@contextmanager
+def _open_controlled_directory(root: Path):
+    """Bind one direct, root-controlled epoch selected by ``current``.
+
+    The producer rotates ``current`` atomically. The finalizer permits that one
+    leaf symlink, but walks every ancestor with ``O_NOFOLLOW``, requires its
+    target to be a direct sibling, and holds the selected directory descriptor
+    for the entire replay. A later rotation therefore cannot mix envelopes
+    from different epochs.
+    """
+    if not root.is_absolute() or root.name in {"", ".", ".."}:
+        raise ReleaseError("controlled evidence path is malformed")
+    parent_descriptor = _open_trusted_directory(root.parent)
+    selected_descriptor = -1
+    try:
+        try:
+            selector_info = os.stat(
+                root.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise ReleaseError("controlled evidence selector is unavailable") from exc
+        selected_name = root.name
+        selected_link: str | None = None
+        if stat.S_ISLNK(selector_info.st_mode):
+            if selector_info.st_uid != ROOT_UID or selector_info.st_nlink != 1:
+                raise ReleaseError(
+                    "controlled evidence selector is not root-controlled"
+                )
+            try:
+                selected_link = os.readlink(root.name, dir_fd=parent_descriptor)
+            except OSError as exc:
+                raise ReleaseError(
+                    "controlled evidence selector is unavailable"
+                ) from exc
+            target = Path(selected_link)
+            if (
+                target.is_absolute()
+                or len(target.parts) != 1
+                or selected_link != target.name
+                or selected_link in {"", ".", "..", root.name}
+            ):
+                raise ReleaseError(
+                    "controlled evidence selector must name one direct epoch directory"
+                )
+            selected_name = selected_link
+        elif not stat.S_ISDIR(selector_info.st_mode):
+            raise ReleaseError("controlled evidence selector is not a directory")
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            selected_descriptor = os.open(
+                selected_name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise ReleaseError(
+                "controlled evidence epoch is unavailable or is a symlink"
+            ) from exc
+        selected_info = os.fstat(selected_descriptor)
+        selected_mode = stat.S_IMODE(selected_info.st_mode)
+        if (
+            not stat.S_ISDIR(selected_info.st_mode)
+            or selected_info.st_uid != ROOT_UID
+            or selected_mode & 0o022
+            or selected_mode & 0o007
+        ):
+            raise ReleaseError(
+                "controlled evidence epoch is not private and root-controlled"
+            )
+        try:
+            selected_path_info = os.stat(
+                selected_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            selector_after = os.stat(
+                root.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise ReleaseError("controlled evidence selector changed") from exc
+        if (
+            not stat.S_ISDIR(selected_path_info.st_mode)
+            or selected_path_info.st_dev != selected_info.st_dev
+            or selected_path_info.st_ino != selected_info.st_ino
+            or selector_after.st_dev != selector_info.st_dev
+            or selector_after.st_ino != selector_info.st_ino
+        ):
+            raise ReleaseError("controlled evidence selector changed")
+        if selected_link is not None:
+            try:
+                selected_link_after = os.readlink(
+                    root.name,
+                    dir_fd=parent_descriptor,
+                )
+            except OSError as exc:
+                raise ReleaseError("controlled evidence selector changed") from exc
+            if selected_link_after != selected_link:
+                raise ReleaseError("controlled evidence selector changed")
+        yield selected_descriptor
+    finally:
+        if selected_descriptor >= 0:
+            os.close(selected_descriptor)
+        os.close(parent_descriptor)
+
+
+def _read_controlled_envelope(directory_descriptor: int, digest: str) -> bytes:
     if SHA256.fullmatch(digest) is None:
         raise ReleaseError("controlled envelope digest is malformed")
-    try:
-        root_info = root.lstat()
-    except OSError as exc:
-        raise ReleaseError("controlled evidence directory is unavailable") from exc
-    if (
-        stat.S_ISLNK(root_info.st_mode)
-        or not stat.S_ISDIR(root_info.st_mode)
-        or root_info.st_uid != ROOT_UID
-        or stat.S_IMODE(root_info.st_mode) & 0o022
-        or stat.S_IMODE(root_info.st_mode) & 0o007
-    ):
-        raise ReleaseError(
-            "controlled evidence directory is not private and root-controlled"
-        )
-    path = root / f"{digest.split(':', 1)[1]}.json"
+    name = f"{digest.split(':', 1)[1]}.json"
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
     except OSError as exc:
         raise ReleaseError("controlled replay envelope is unavailable") from exc
     try:
@@ -1199,13 +1379,14 @@ def _replay_frozen_controlled_positive(
             raise ReleaseError(
                 "frozen positive receipt set differs from the rewarded launch set"
             )
-        envelopes = {
-            hotkey: _read_controlled_envelope(
-                controlled_root,
-                str(bindings[hotkey]["envelope_digest"]),
-            )
-            for hotkey in positive_hotkeys
-        }
+        with _open_controlled_directory(controlled_root) as controlled_directory:
+            envelopes = {
+                hotkey: _read_controlled_envelope(
+                    controlled_directory,
+                    str(bindings[hotkey]["envelope_digest"]),
+                )
+                for hotkey in positive_hotkeys
+            }
         verifier_bytes = _read_verifier_binary(verifier_binary_path)
         candidate_snapshot = manifest["candidate_set"]
         replayed = provenance.replay_positive_miners(
@@ -1713,6 +1894,119 @@ def _read_pending_publication(
     return payload, info
 
 
+def _preflight_publish_once(item: PublicationItem) -> None:
+    """Validate one publication target without creating, deleting, or syncing."""
+    path, payload, size_cap, label, conflict = item
+    if not payload or len(payload) > size_cap:
+        raise ReleaseError(f"{label} exceeds its size cap")
+    _safe_public_directory(path.parent)
+    pending = path.parent / f".{path.name}.pending"
+    try:
+        final_info = path.lstat()
+    except FileNotFoundError:
+        final_info = None
+    except OSError as exc:
+        raise ReleaseError(f"{label} is unavailable") from exc
+
+    if final_info is None:
+        # A safe single-link staging inode is recoverable. Its bytes need not
+        # match because finalize replaces only this unpublished internal name.
+        _read_pending_publication(
+            pending,
+            size_cap=size_cap,
+            label=label,
+            allowed_links=frozenset({1}),
+        )
+        return
+
+    if (
+        stat.S_ISLNK(final_info.st_mode)
+        or not stat.S_ISREG(final_info.st_mode)
+        or final_info.st_uid != os.geteuid()
+        or stat.S_IMODE(final_info.st_mode) & 0o022
+    ):
+        raise ReleaseError(f"{label} is not an owner-controlled file")
+    if final_info.st_nlink == 2:
+        recovery = _read_pending_publication(
+            pending,
+            size_cap=size_cap,
+            label=label,
+            allowed_links=frozenset({2}),
+        )
+        if recovery is None:
+            raise ReleaseError(f"{label} has an untrusted hardlink alias")
+        pending_bytes, pending_info = recovery
+        if (
+            pending_info.st_dev != final_info.st_dev
+            or pending_info.st_ino != final_info.st_ino
+            or pending_bytes != payload
+        ):
+            raise ReleaseError(f"{label} has an untrusted hardlink alias")
+    elif final_info.st_nlink == 1:
+        _read_pending_publication(
+            pending,
+            size_cap=size_cap,
+            label=label,
+            allowed_links=frozenset({1}),
+        )
+    else:
+        raise ReleaseError(f"{label} has an untrusted hardlink alias")
+    existing = _read_public_file(path, size_cap=size_cap, label=label)
+    if existing != payload:
+        raise ReleaseError(conflict)
+
+
+def _preflight_publication(
+    items: tuple[PublicationItem, ...],
+    *,
+    public_root: Path,
+) -> None:
+    """Check the complete publication transaction without taking a write lock."""
+    if not items:
+        raise ReleaseError("release publication plan is empty")
+    _safe_public_directory(public_root)
+    allowed_parents = {
+        public_root / "blobs" / "sha256",
+        public_root / "releases" / "sha256",
+    }
+    seen: set[Path] = set()
+    for item in items:
+        if item.path in seen:
+            raise ReleaseError("release publication plan contains a duplicate path")
+        seen.add(item.path)
+        if item.path.parent not in allowed_parents:
+            raise ReleaseError(
+                "release publication target is outside the versioned tree"
+            )
+        if item.path.parent == public_root / "blobs" / "sha256":
+            _safe_public_directory(public_root / "blobs")
+        else:
+            _safe_public_directory(public_root / "releases")
+        _preflight_publish_once(item)
+
+
+def _publish_publication(
+    items: tuple[PublicationItem, ...],
+    *,
+    public_root: Path,
+) -> None:
+    """Publish a prechecked generation under one root-scoped transaction lock."""
+    _preflight_publication(items, public_root=public_root)
+    with _publication_lock(public_root):
+        # Recheck every destination after taking the lock and before the first
+        # blob or release write. A conflict therefore never leaves a partial
+        # generation merely because its conflicting file was ordered later.
+        _preflight_publication(items, public_root=public_root)
+        for item in items:
+            _publish_once_locked(
+                item.path,
+                item.payload,
+                size_cap=item.size_cap,
+                label=item.label,
+                conflict=item.conflict,
+            )
+
+
 @contextmanager
 def _publication_lock(directory: Path):
     """Serialize recovery and publication; process death releases the lock."""
@@ -1885,44 +2179,75 @@ def _publish_once_locked(
         raise ReleaseError(conflict)
 
 
-def _publish_once(
-    path: Path,
-    payload: bytes,
+def _release_publication_plan(
     *,
-    size_cap: int,
-    label: str,
-    conflict: str,
-) -> None:
-    """Crash-recoverable publish-once, serialized across finalizer processes."""
-    if not payload or len(payload) > size_cap:
-        raise ReleaseError(f"{label} exceeds its size cap")
-    with _publication_lock(path.parent):
-        _publish_once_locked(
-            path,
-            payload,
-            size_cap=size_cap,
-            label=label,
-            conflict=conflict,
+    public_root: Path,
+    release_bytes: bytes,
+    signature_bytes: bytes,
+    replay_bytes: bytes,
+    checkpoint: dict[str, Any] | None,
+) -> tuple[str, str | None, Path, Path, tuple[PublicationItem, ...]]:
+    """Build one content-addressed release generation without touching disk."""
+    if not release_bytes or len(release_bytes) > MAX_RELEASE_BYTES:
+        raise ReleaseError("generated release exceeds its size cap")
+    if not signature_bytes or len(signature_bytes) > MAX_RELEASE_BYTES:
+        raise ReleaseError("generated release signature exceeds its size cap")
+    release_digest = "sha256:" + hashlib.sha256(release_bytes).hexdigest()
+    release_name = release_digest.split(":", 1)[1]
+    releases = public_root / "releases" / "sha256"
+    release_path = releases / f"{release_name}.json"
+    signature_path = releases / f"{release_name}.json.sig"
+    items: list[PublicationItem] = []
+    replay_digest: str | None = None
+    if checkpoint is not None:
+        if not replay_bytes or len(replay_bytes) > MAX_PUBLIC_BLOB_BYTES:
+            raise ReleaseError("generated replay result exceeds its size cap")
+        replay_digest = "sha256:" + hashlib.sha256(replay_bytes).hexdigest()
+        if replay_digest != checkpoint.get("replay_result"):
+            raise ReleaseError("replay-result digest differs from the release")
+        items.append(
+            PublicationItem(
+                path=(
+                    public_root / "blobs" / "sha256" / replay_digest.split(":", 1)[1]
+                ),
+                payload=replay_bytes,
+                size_cap=MAX_PUBLIC_BLOB_BYTES,
+                label="public replay-result blob",
+                conflict="public replay-result blob collides with other bytes",
+            )
         )
-
-
-def put_blob(root: Path, payload: bytes) -> str:
-    if not payload or len(payload) > MAX_PUBLIC_BLOB_BYTES:
-        raise ReleaseError("public replay-result blob exceeds its size cap")
-    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
-    directory = root / "blobs" / "sha256"
-    _safe_public_directory(root)
-    _safe_public_directory(root / "blobs")
-    _safe_public_directory(directory)
-    path = directory / digest.split(":", 1)[1]
-    _publish_once(
-        path,
-        payload,
-        size_cap=MAX_PUBLIC_BLOB_BYTES,
-        label="public replay-result blob",
-        conflict="public replay-result blob collides with other bytes",
+    elif replay_bytes:
+        raise ReleaseError("relay release unexpectedly generated replay bytes")
+    items.extend(
+        (
+            PublicationItem(
+                path=release_path,
+                payload=release_bytes,
+                size_cap=MAX_RELEASE_BYTES,
+                label=f"versioned public release {release_digest}",
+                conflict=(
+                    f"versioned public release {release_digest} has different bytes"
+                ),
+            ),
+            PublicationItem(
+                path=signature_path,
+                payload=signature_bytes,
+                size_cap=MAX_RELEASE_BYTES,
+                label=f"versioned public release signature {release_digest}",
+                conflict=(
+                    "versioned public release signature "
+                    f"{release_digest} has different bytes"
+                ),
+            ),
+        )
     )
-    return digest
+    return (
+        release_digest,
+        replay_digest,
+        release_path,
+        signature_path,
+        tuple(items),
+    )
 
 
 def verify_frozen_release_evidence(
@@ -1976,17 +2301,6 @@ def verify_frozen_release_evidence(
         raise ReleaseError("frozen public evidence did not reproduce")
 
 
-def atomic_write(path: Path, payload: bytes) -> None:
-    """Durably publish immutable bytes, accepting only an idempotent rerun."""
-    _publish_once(
-        path,
-        payload,
-        size_cap=MAX_RELEASE_BYTES,
-        label=f"public release artifact {path.name}",
-        conflict=(f"public release artifact {path.name} is already sealed differently"),
-    )
-
-
 def _archive_subtensor() -> Any:
     try:
         import bittensor as bt
@@ -2003,10 +2317,17 @@ def main() -> int:
     parser.add_argument("--release", type=Path, required=True)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--journal", type=Path, required=True)
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run every release gate and publication conflict check without writes",
+    )
     args = parser.parse_args()
     if not args.release.is_absolute():
         raise ReleaseError("release checkout path must be absolute")
+    operation = "preflight" if args.preflight else "finalize"
     _require_launcher_context(
+        operation=operation,
         release_sha=args.release_sha,
         journal=args.journal,
     )
@@ -2044,25 +2365,39 @@ def main() -> int:
         release_root=release_root,
     )
     checkpoint = release["attested_submission"].get("evidence_checkpoint")
-    actual_replay = None
-    if checkpoint is not None:
-        expected_replay = checkpoint["replay_result"]
-        actual_replay = put_blob(PUBLIC_ROOT, replay_bytes)
-        if actual_replay != expected_replay:
-            raise ReleaseError(
-                "published replay-result digest differs from the release"
-            )
-    atomic_write(PUBLIC_ROOT / "release.json", release_bytes)
-    atomic_write(PUBLIC_ROOT / "release.json.sig", signature_bytes)
+    (
+        release_digest,
+        replay_digest,
+        release_path,
+        signature_path,
+        publication,
+    ) = _release_publication_plan(
+        public_root=PUBLIC_ROOT,
+        release_bytes=release_bytes,
+        signature_bytes=signature_bytes,
+        replay_bytes=replay_bytes,
+        checkpoint=checkpoint,
+    )
+    _preflight_publication(publication, public_root=PUBLIC_ROOT)
+    if not args.preflight:
+        _publish_publication(publication, public_root=PUBLIC_ROOT)
     print(
         json.dumps(
             {
                 "extrinsic_hash": release["attested_submission"]["extrinsic"]["hash"],
-                "release_sha256": (
-                    "sha256:" + hashlib.sha256(release_bytes).hexdigest()
+                "mutations": not args.preflight,
+                "publication_generation": 2,
+                "release_path": "/" + release_path.relative_to(PUBLIC_ROOT).as_posix(),
+                "release_sha256": release_digest,
+                "replay_result": replay_digest,
+                "signature_path": (
+                    "/" + signature_path.relative_to(PUBLIC_ROOT).as_posix()
                 ),
-                "replay_result": actual_replay,
-                "status": "SN39_PUBLIC_RELEASE_PUBLISHED",
+                "status": (
+                    "SN39_PUBLIC_RELEASE_PREFLIGHT_PASS"
+                    if args.preflight
+                    else "SN39_PUBLIC_RELEASE_GENERATION_PUBLISHED"
+                ),
             },
             sort_keys=True,
         )

@@ -121,13 +121,16 @@ EXTERNAL_SCORES_MAX_FRACTION_ENV = "CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION"
 EXTERNAL_SCORES_REQUIRE_REGISTERED_ENV = "CATHEDRAL_EXTERNAL_SCORES_REQUIRE_REGISTERED"
 EXTERNAL_SCORES_PRIMARY_CONFIRM_ENV = "CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM"
 
-# (#5) Sources whose live composition must never silently inherit the legacy
-# 50% BASE_WEIGHT/WEIGHT default. An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION
-# is required for these; without one the blend fails closed to base-only.
-EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES = {
-    "cathedral_confidential_tdx",
-    "cathedral_voice_hybrid",
-}
+# (#5) An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION is required before any
+# source gets live external mass; without one the blend fails closed to
+# base-only. This rail is opt-OUT, not opt-in: naming a source below lets it
+# inherit the legacy 1.0/1.0 BASE_WEIGHT/WEIGHT default, which resolves to a
+# 50% external share with no per-source cap. Because the external vector is
+# L1-normalized, one accepted report naming a single hotkey then moves half the
+# emission to it, so an opt-in rail meant every newly allowlisted source
+# arrived unprotected. Keep this set empty unless a source can prove it does
+# not feed real weights. cathedral_voice_hybrid is not exempt.
+EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES: set[str] = set()
 # (#6) Sources that must never run in external_primary (100% external intent)
 # mode, confirmed or not. A confidential/attested source stays capped-blend
 # only; external_scores_mode() enforces this centrally.
@@ -136,7 +139,7 @@ EXTERNAL_SCORES_NO_PRIMARY_SOURCES = {
     "cathedral_voice_hybrid",
 }
 # Sources subject to the final-attribution accounting control.
-# Voice hybrid is capped via FRACTION_REQUIRED + NO_PRIMARY only — it does NOT
+# Voice hybrid is capped via FRACTION (default-required) + NO_PRIMARY only — it does NOT
 # inherit the confidential TDX 10% global hard-cap or confidential_primary mode.
 EXTERNAL_SCORES_GLOBAL_CAP_SOURCES = {"cathedral_confidential_tdx"}
 CONFIDENTIAL_TDX_HARD_CAP: float = 0.10
@@ -357,6 +360,27 @@ def validated_supply_metadata() -> dict[str, Any] | None:
     differs only in that the FIXED burn allocation is 0 rather than 10%.
     """
     if not _env_bool(VALIDATED_SUPPLY_ENABLED_ENV, False):
+        # A master switch that is off must not crash a validator that never opted
+        # in -- returning None (clean flat-recent fallback) is correct there. But
+        # an operator who requested the v3 cutover and forgot the enable flag has
+        # opted in and been ignored: their contract request is discarded before it
+        # is ever read, and the subnet silently composes a flat vector for a full
+        # tempo. Every other misconfiguration in this function fails closed; this
+        # one must too, or "five of the six settings present" -- the single most
+        # likely operator error -- is the one mistake that is silent.
+        #
+        # Narrow to exactly the half-applied cutover: `allocation_contract() == "v3"`,
+        # not "ALLOCATION_CONTRACT is set to anything". An operator who pins the
+        # documented default (`CATHEDRAL_ALLOCATION_CONTRACT=v2`) with no enable flag
+        # is a legitimate v2 deployment and must fall through cleanly, not be crashed;
+        # and reusing `allocation_contract()` (just above) inherits its rejection of
+        # unrecognized values rather than re-reading the raw env. (Credit: wallscaler,
+        # #113 — same fix written in parallel; this narrows my over-raising condition.)
+        if allocation_contract() == "v3":
+            raise VectorError(
+                f"{ALLOCATION_CONTRACT_ENV}=v3 is set but {VALIDATED_SUPPLY_ENABLED_ENV} "
+                "is not; refusing to fall back silently"
+            )
         return None
     if external_scores_mode() != "confidential_primary":
         raise VectorError("validated_supply requires confidential_primary mode")
@@ -1090,17 +1114,18 @@ def _external_blend_weights() -> tuple[float, float, float]:
     """Return (base_weight, external_weight, effective_external_share).
 
     An explicit CATHEDRAL_EXTERNAL_SCORES_FRACTION wins (share == fraction).
-    Otherwise the legacy base/external weights are used, but the effective
-    external share is HARD-CAPPED at CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION
-    (default 0.5) so a fat external_weight cannot silently take the vector."""
+    Without one every source fails closed to a zero external share; only a
+    source explicitly exempted may fall through to the legacy base/external
+    weights, and even then the effective share is HARD-CAPPED at
+    CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION (default 0.5)."""
     max_frac = min(1.0, max(0.0, _env_float(EXTERNAL_SCORES_MAX_FRACTION_ENV, 0.5)))
     frac_raw = os.environ.get(EXTERNAL_SCORES_FRACTION_ENV, "").strip()
     if frac_raw:
         frac = min(max_frac, max(0.0, _env_float(EXTERNAL_SCORES_FRACTION_ENV, 0.0)))
         return (1.0 - frac), frac, frac
-    if external_scores_source() in EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES:
-        # (#5) Fail closed: this source must never inherit the legacy 1.0/1.0
-        # (50%) default. No explicit fraction => zero external share.
+    if external_scores_source() not in EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES:
+        # (#5) Fail closed: no source inherits the legacy 1.0/1.0 (50%)
+        # default. No explicit fraction => zero external share.
         return 1.0, 0.0, 0.0
     base_weight = max(0.0, _env_float(EXTERNAL_SCORES_BASE_WEIGHT_ENV, 1.0))
     external_weight = max(0.0, _env_float(EXTERNAL_SCORES_WEIGHT_ENV, 1.0))

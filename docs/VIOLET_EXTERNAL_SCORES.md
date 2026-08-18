@@ -52,6 +52,7 @@ CATHEDRAL_EXTERNAL_SCORES_MAX_FRACTION=0.5             # Hard ceiling on externa
 CATHEDRAL_EXTERNAL_SCORES_MAX_SCORES=4096              # Max scores per report (default 4096)
 CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_AGE_SECS=3600     # Reject if generated_at too old (default 1 hour)
 CATHEDRAL_EXTERNAL_SCORES_MAX_REPORT_FUTURE_SECS=120   # Reject if generated_at too far ahead (default 120 s)
+CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=0           # Zero-credit any positive score with no evidence block (default 0)
 ```
 
 ### Mode and Confirmation
@@ -110,15 +111,22 @@ CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_CONFIDENTIAL_TDX=<confidential_h
 CATHEDRAL_EXTERNAL_SCORES_HMAC_SECRET_CATHEDRAL_VOICE_HYBRID=<hybrid_hmac>
 ```
 
-### Legacy Weights (Used Only if FRACTION Unset)
+### Legacy Weights (Unreachable)
 
 ```bash
 CATHEDRAL_EXTERNAL_SCORES_BASE_WEIGHT=1.0
 CATHEDRAL_EXTERNAL_SCORES_WEIGHT=1.0
 # Effective share = weight / (base_weight + weight)
 # Capped at MAX_FRACTION (default 0.5)
-# WARNING: This 50% default is almost never correct; always set FRACTION explicitly.
 ```
+
+`FRACTION` is required for **every** source, not just confidential ones. With
+`FRACTION` unset the blend fails closed to a zero external share and these two
+knobs are never read; they apply only to a source named in
+`weights.EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES`, which is empty. The 1.0/1.0
+default they used to supply resolved to a 50% external share, and because the
+external vector is L1-normalized, one accepted report naming a single hotkey
+paid it half the emission.
 
 ---
 
@@ -170,7 +178,7 @@ Cathedral Voice posts hybrid miner scores with per-row `cathedral_voice_receipt_
 
 | Requirement | Rationale |
 |---|---|
-| Bound to configured `(network, netuid)` | Same `AUDIENCE_REQUIRED_SOURCES` posture as `cathedral_confidential_tdx`; HMAC is not a substitute |
+| Bound to configured `(network, netuid)` | Publisher-wide audience bind (every source); HMAC is not a substitute |
 | `complete=true` **mandatory** | Snapshot is the full truth at its epoch |
 | No `external_primary` mode | Always capped-blend; hybrid never reaches 100% |
 | Explicit `FRACTION` env var required | Cannot inherit legacy 50% default |
@@ -239,12 +247,15 @@ The boundary behavior is fail-closed:
 | **Confidential only** (no base) | Return an **empty vector** |
 | **Neither** | Return an **empty vector** |
 | **Both** | Return the 90% base + 10% confidential union vector |
-| **Thin validator lacks any signed hotkey** | Drop all confidential mass and reconstruct a base-only vector from mapped signed base components |
+| **Thin validator lacks any signed hotkey** | Reject the vector; the tick submits nothing |
 | **Two signed hotkeys map to one UID** | Reject the vector as a duplicate UID |
 
-The fallback reconstruction is all-or-nothing for confidential mass: it does
-not retain a partial confidential vector when the thin validator's current
-hotkey map is incomplete.
+An incomplete hotkey map is refused rather than repaired. The validator used to
+rebuild a base-only vector from the signed `base_component` values, which kept
+the 10% cap intact but paid an allocation nobody signed: a single deregistration
+stripped the confidential component from every row, including rows whose own
+hotkey was still registered. The refusal names the unmappable hotkeys and
+reaches the journal as `VECTOR_REJECTED` (stage `map`) and `TICK_FAILED`.
 
 ---
 
@@ -293,7 +304,20 @@ hotkey map is incomplete.
 | `miner_hotkey` | string | Yes | Must be a valid hotkey |
 | `score` | float | Yes | Finite 0.0..1.0; normalized internally; 0.0 explicit revoke |
 | `uid` | int | No | Metadata; not used in blend |
+| `evidence` | object | No | `{evidence_sha256, kind?, receipt_id?}`. `evidence_sha256` must be 64 lowercase hex; unknown keys rejected as `invalid_evidence_<idx>`. Required for credit only when `CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=1` |
 | Other | any | No | Stored in metadata; not used in composition |
+
+### Evidence Enforcement
+
+A positive score with no `evidence` block is credited on the request's bearer
+token and body HMAC alone. `CATHEDRAL_EXTERNAL_SCORES_REQUIRE_EVIDENCE=1`
+refuses it instead: the entry is normalized to `score=0.0` (zero credit, never a
+partial discount), which the snapshot reader then treats as revoked.
+
+Default is off, because no producer emits evidence yet. Intake logs a warning
+per unevidenced positive score plus one summary line per report in both modes,
+so the log tells you what fraction of the live vector enforcement would refuse
+before you turn it on.
 
 ---
 

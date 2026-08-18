@@ -11,7 +11,7 @@ def _payload(contract_version):
                 "intel_tdx_allocation": 0.70,
                 "cybergym_allocation": 0.30,
                 "fixed_burn_allocation": 0.0,
-                "burn_hotkey": "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC",
+                "burn_hotkey": "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi",
             }
         }
     }

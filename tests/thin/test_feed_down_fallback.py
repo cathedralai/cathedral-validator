@@ -19,6 +19,7 @@ refused and is asserted here.
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -184,6 +185,90 @@ def test_without_the_beta_waiver_the_signed_authorization_is_still_required():
             _feed_down_fallback_active=True,
         )
         assert vt._operator_declared_authority(args) is False
+
+
+# -- the switch stays inside the startup contract ---------------------------
+
+
+def _fallback_args(tmp_path, **over):
+    """A thin runtime that is opted in to the fallback and provisioned for FULL."""
+    verifier = tmp_path / "verifier"
+    verifier.write_text("#!/bin/sh\n")
+    base = {
+        "publisher_url": "https://example.invalid/vector.json",
+        "provenance": "shadow",
+        "require_policy": vt.REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
+        "feed_down_fallback": True,
+        "provenance_controlled_dir": str(tmp_path),
+        "provenance_verifier_binary": str(verifier),
+        "max_submissions": 0,
+        "broadcast": False,
+        "offline": False,
+        "launch_preflight": False,
+        "require_full_provenance_for_broadcast": False,
+        "netuid": 39,
+    }
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+@pytest.fixture
+def feed_down_tick(monkeypatch):
+    """tick() with a dead feed: chain preflight, lock and authority tick stubbed."""
+    calls = []
+
+    @contextlib.contextmanager
+    def _no_lock(_args):
+        yield
+
+    def _feed_down(_args):
+        raise vt._FeedUnavailableForThin("signed vector unavailable: ConnectionError")
+
+    def _authority(args, payload):
+        calls.append(payload)
+        return True
+
+    monkeypatch.setattr(vt, "_prepare_tick_preflight", lambda _args: None)
+    monkeypatch.setattr(vt, "_thin_tick_lock", _no_lock)
+    monkeypatch.setattr(vt, "_thin_tick_locked", _feed_down)
+    monkeypatch.setattr(vt, "_authority_tick", _authority)
+    return calls
+
+
+def test_the_fallback_refuses_a_switch_the_startup_guard_would_reject(
+    tmp_path, feed_down_tick
+):
+    """A v3 pin plus authority mode is refused at startup because it fails closed
+    on every tick. The fallback must not reach that state at tick time, where no
+    startup guard runs and nothing ever switches back."""
+    args = _fallback_args(tmp_path)
+    # This runtime is admissible: the pin relays Cathedral's signed v3 vector.
+    vt._validate_runtime_contract(args)
+
+    with pytest.raises(vt._FeedUnavailableForThin):
+        vt.tick(args)
+
+    assert feed_down_tick == []
+    assert args.provenance == "shadow"
+    assert bool(getattr(args, "_feed_down_fallback_active", False)) is False
+    # The decisive assertion: the runtime this tick left behind must still be one
+    # the startup guard would admit.
+    vt._validate_runtime_contract(args)
+
+
+def test_an_admissible_runtime_still_degrades_up(tmp_path, feed_down_tick):
+    """The fallback itself is intact: where authority mode is a configuration the
+    startup guard admits, a dead feed still degrades UP into FULL."""
+    args = _fallback_args(
+        tmp_path, require_policy=vt.REQUIRE_POLICY_VALIDATED_SUPPLY_V1
+    )
+    vt._validate_runtime_contract(args)
+
+    assert vt.tick(args) is True
+
+    assert feed_down_tick == [None]
+    assert args.provenance == "authority"
+    assert args._feed_down_fallback_active is True
 
 
 # --------------------------------------------------------------------------- #

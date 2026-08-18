@@ -83,8 +83,7 @@ def test_voice_hybrid_source_allowed():
     assert "cathedral_voice_hybrid" in external_scores.ALLOWED_ENDPOINT_SOURCES
     assert "cathedral_voice_hybrid" in external_scores.COMPLETE_REQUIRED_SOURCES
     assert "cathedral_voice_hybrid" in external_scores.MANDATORY_HMAC_SOURCES
-    assert "cathedral_voice_hybrid" in external_scores.AUDIENCE_REQUIRED_SOURCES
-    assert "cathedral_voice_hybrid" in weights.EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES
+    assert "cathedral_voice_hybrid" not in weights.EXTERNAL_SCORES_FRACTION_EXEMPT_SOURCES
     assert "cathedral_voice_hybrid" in weights.EXTERNAL_SCORES_NO_PRIMARY_SOURCES
     assert "cathedral_voice_hybrid" not in weights.EXTERNAL_SCORES_GLOBAL_CAP_SOURCES
     assert "cathedral_voice_hybrid" not in weights.CONFIDENTIAL_PRIMARY_SOURCES

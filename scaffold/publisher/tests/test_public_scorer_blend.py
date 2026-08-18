@@ -40,6 +40,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# The audience every report in this module is scored for. External scores are
+# only meaningful for the exact (network, netuid) the publisher signs for, so
+# every source must name it.
+NETWORK = "finney"
+NETUID = 39
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -68,6 +75,8 @@ def _clean_env(monkeypatch):
         "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2",
     ):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", NETWORK)
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", str(NETUID))
     yield
 
 
@@ -112,6 +121,8 @@ class FakeStore:
             "epoch": epoch,
             "complete": complete,
             "generated_at": self._generated_at,
+            "network": NETWORK,
+            "netuid": NETUID,
             "scores": [{"miner_hotkey": hk, "score": s} for hk, s in ext_scores],
         }
         self._report_json = json.dumps(report_obj)
@@ -179,6 +190,8 @@ def _make_report(
             "epoch": epoch,
             "complete": complete,
             "generated_at": _iso(now),
+            "network": NETWORK,
+            "netuid": NETUID,
             "scores": [{"miner_hotkey": hk, "score": s} for hk, s in scores],
         },
         now=now,
@@ -388,6 +401,8 @@ def test_stale_report_rejected():
                 "epoch": 1,
                 "complete": True,
                 "generated_at": _iso(old),
+                "network": NETWORK,
+                "netuid": NETUID,
                 "scores": [{"miner_hotkey": "5A", "score": 0.5}],
             },
             now=now,
@@ -405,6 +420,8 @@ def test_future_report_rejected():
                 "epoch": 1,
                 "complete": True,
                 "generated_at": _iso(future),
+                "network": NETWORK,
+                "netuid": NETUID,
                 "scores": [{"miner_hotkey": "5A", "score": 0.5}],
             },
             now=now,

@@ -387,10 +387,11 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    if (
-        cfg.require_policy
-        and cfg.require_policy not in validator_thin.REQUIRE_POLICY_CHOICES
-    ):
+    # Same unconditional check as validator_thin.main(), and for the same
+    # reason: _DEFAULTS always carries a real pin, so an empty require_policy
+    # came from a TOML line or a flag and must fail loudly instead of silently
+    # unpinning the allocation contract.
+    if cfg.require_policy not in validator_thin.REQUIRE_POLICY_CHOICES:
         print(
             f"error: require_policy must be one of "
             f"{', '.join(validator_thin.REQUIRE_POLICY_CHOICES)}; got {cfg.require_policy!r}",

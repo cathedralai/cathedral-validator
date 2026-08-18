@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import sys
 import threading
@@ -90,7 +91,19 @@ SN39_VERIFIER_DIGEST = (
     "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 )
 SN39_PRODUCER_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
-SN39_BURN_HOTKEY = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+# The burn destination must be the LIVE SN39 subnet owner. The broadcast path
+# refuses to sign when this hotkey is not the owner on the finalized head
+# ("requires the pinned burn hotkey to remain the live subnet owner"), which is
+# deliberate: a stale pin would keep paying an address the subnet has moved off.
+#
+# The cost of that safety is that an on-chain owner change stops the writer until
+# this pin, the relay config's `burn_hotkey`, and the publisher's
+# CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY are moved together. Moving only this one
+# swaps the failure for "signed vector burn destination is not the pinned burn
+# hotkey"; all three are one change, not three.
+#
+# 2026-08-14: owner moved 5G3qVaXz... (uid 204) -> 5GP7c3fF... (uid 136).
+SN39_BURN_HOTKEY = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi"
 SN39_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
 SN39_LAUNCH_CONTROLLED_DIR = Path(
     "/var/lib/cathedral-validator-controlled-sn39/current"
@@ -212,6 +225,39 @@ EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # only: the pre-sign check itself stays exact.
 SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 
+# Retrying IMMEDIATELY made those 8 attempts one attempt tried 8 times.
+#
+# The note above assumed "the very next attempt from a fresh finalized head is
+# as likely to win the race as any other". Measured on the live writer, it is
+# not: a tick takes about as long as a block, so an immediate retry re-enters
+# the block cycle at the phase it just failed at. The attempts are correlated,
+# not independent draws.
+#
+# 120 consecutive ticks, retries needed before the tick ended:
+#
+#     0 retries  29 ticks     <- won immediately
+#     1           9
+#     2          19
+#     3           4
+#     4          10
+#     5           9
+#     6          10
+#     7           4
+#     8          26 ticks     <- hit the cap, 20 of them wrote nothing
+#
+# An independent per-attempt race decays monotonically. This is bimodal: win at
+# once, or burn the whole budget. Median gap between consecutive retries was
+# 12.57s against a 12s block. That is the phase lock, and it abandoned ~17% of
+# ticks (10 of 33 writes on 2026-08-15).
+#
+# Sleeping a uniform random fraction of one block before retrying decorrelates
+# the attempts, which is the property the retry budget always assumed it had.
+# Uniform over a full block period rather than a smaller nudge: a partial
+# offset still correlates, and only full-period coverage makes the next sample
+# independent of the phase that just lost. Not a cryptographic draw; this only
+# has to be unpredictable with respect to block arrival.
+SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS = 12.0
+
 # Exhausting that budget is a TIMING outcome, not a fault: nothing was
 # reserved, nothing was signed, and the very next attempt from a fresh
 # finalized head is as likely to win the race as any other. Sleeping the whole
@@ -225,6 +271,22 @@ SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 # retrying forever at the short interval.
 SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS = 60
 SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE = 3
+
+
+def _head_drift_phase_offset(width_secs: float) -> float:
+    """A delay drawn uniformly from one block period, to break the phase lock.
+
+    Both head-drift delays claim to start the next attempt at "an independently
+    drawn offset into a block". Neither did. The inner retry slept not at all,
+    and the re-arm slept exactly 60s, which is 5 block times: a whole number of
+    periods lands on the same phase just as reliably as sleeping nothing does.
+
+    Offsetting by a uniform draw over one full period is what actually makes the
+    next attempt's phase independent of the one that just lost.
+    """
+    if not (width_secs > 0.0):
+        return 0.0
+    return random.uniform(0.0, width_secs)  # noqa: S311 - timing, not secrecy
 
 
 def _ms_iso_now() -> str:
@@ -3444,11 +3506,11 @@ def vector_to_uid_weights(
     v3_rows = _confidential_tdx_v3_rows(payload)
     if v3_rows is not None:
         mapped_uids: set[int] = set()
-        missing = False
+        unmapped: list[str] = []
         for row in v3_rows:
             hotkey = row["miner_hotkey"]
             if hotkey not in hotkey_to_uid:
-                missing = True
+                unmapped.append(hotkey)
                 continue
             uid = hotkey_to_uid[hotkey]
             if uid in mapped_uids:
@@ -3457,17 +3519,30 @@ def vector_to_uid_weights(
                 )
             mapped_uids.add(uid)
 
-        if missing:
-            print(
-                "  confidential_tdx v3 map incomplete; falling back to signed base components"
+        if unmapped:
+            # This branch used to re-read `base_component` for EVERY row so the
+            # signed 10% external cap could not be breached by the rows that
+            # survived. It bought that at the price of paying an allocation
+            # nobody signed: one deregistration stripped the external component
+            # from rows whose own hotkey was still registered, and it announced
+            # the switch with a bare print() that no journal consumer reads.
+            # The signed vector is the only allocation this validator may
+            # apply, so a vector it cannot map in full is refused. The refusal
+            # reaches the structured stream through the callers' VECTOR_REJECTED
+            # (stage=map) and TICK_FAILED events, which carry this message as
+            # their `detail`.
+            shown = ", ".join(sorted(unmapped)[:5])
+            if len(unmapped) > 5:
+                shown += f", +{len(unmapped) - 5} more"
+            raise wire.VectorError(
+                f"confidential_tdx v3 signed hotkeys not in the metagraph "
+                f"({len(unmapped)} of {len(v3_rows)} rows): {shown}; refusing to "
+                f"re-derive a base-only allocation the publisher never signed"
             )
         scores: dict[int, float] = {}
         for row in v3_rows:
-            hotkey = row["miner_hotkey"]
-            if hotkey not in hotkey_to_uid:
-                continue
-            uid = hotkey_to_uid[hotkey]
-            value = row["base_component"] if missing else row["weight"]
+            uid = hotkey_to_uid[row["miner_hotkey"]]
+            value = row["weight"]
             if value > 0.0:
                 scores[uid] = value
         return apply_burn(
@@ -6810,6 +6885,21 @@ def tick(args) -> bool:
                 raise
             if not _full_path_provisioned(args):
                 raise
+            # Degrading up rewrites the trust model of the whole process, which
+            # is the same choice _validate_runtime_contract admits or refuses
+            # before the loop starts. Hold the switch to that contract instead
+            # of stepping past it: a validated_supply_v3 pin under authority
+            # mode is refused at startup precisely because it fails closed on
+            # every tick, and taking that state at tick time is worse, because
+            # nothing switches back and the validator goes dark for good.
+            # Idling until the publisher returns is the recoverable failure.
+            switch_refusal = _feed_down_switch_refusal(args)
+            if switch_refusal is not None:
+                _lifecycle(
+                    "FEED unavailable",
+                    f"reason={exc} switching_to=none refused={switch_refusal}",
+                )
+                raise
             fallback_reason = str(exc)
     # Outside the thin lock: the authority tick takes its own.
     _lifecycle(
@@ -6830,6 +6920,42 @@ def tick(args) -> bool:
 
 class _FeedUnavailableForThin(wire.VectorError):
     """The signed vector could not be fetched, so thin has nothing to follow."""
+
+
+class _ProvenanceView:
+    """Read-only view of args carrying one substituted provenance mode.
+
+    The contract check has to be answered BEFORE the live args are rewritten,
+    or a refused switch would have to be undone on an object other threads and
+    later ticks read. A view keeps the runtime unchanged until the switch is
+    known to be admissible.
+    """
+
+    def __init__(self, args: Any, provenance: str) -> None:
+        object.__setattr__(self, "_args", args)
+        object.__setattr__(self, "provenance", provenance)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_args"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # A contract check that started writing would write to the view and lose
+        # it. Fail loudly rather than silently discard a runtime mutation.
+        raise AttributeError(f"provenance view is read-only; refused write to {name}")
+
+
+def _feed_down_switch_refusal(args: Any) -> str | None:
+    """Why this runtime may not degrade up into FULL, or None when it may.
+
+    Answered by the startup contract itself rather than by a copy of one of its
+    rules, so a configuration the guard would refuse under authority mode stays
+    refused when the feed, not the operator, is what proposes the change.
+    """
+    try:
+        _validate_runtime_contract(_ProvenanceView(args, "authority"))
+    except wire.VectorError as exc:
+        return str(exc)
+    return None
 
 
 def _full_path_provisioned(args: Any) -> bool:
@@ -10516,6 +10642,18 @@ def run(args) -> int:
                 # preflight, recurring authorization, UID mapping, provenance,
                 # and inclusion-policy construction instead of reusing any
                 # mutable proof from the aborted attempt.
+                #
+                # Offset first. A tick takes about one block, so retrying
+                # immediately re-enters the block cycle at the phase that just
+                # lost, which is what turned this budget of 8 attempts into one
+                # attempt made 8 times. Nothing is reserved or signed while we
+                # wait, so the only cost is latency inside a tick that would
+                # otherwise be abandoned.
+                phase_offset = _head_drift_phase_offset(
+                    SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS
+                )
+                if phase_offset > 0.0:
+                    time.sleep(phase_offset)
                 continue
             except _PostSignedSubmissionMismatch as e:
                 render.outcome(
@@ -10685,7 +10823,16 @@ def run(args) -> int:
             consecutive_head_drift_rearms += 1
             # Never lengthen a short interval: a fast cadence already re-arms
             # sooner than the drift re-arm would.
-            time.sleep(min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs))
+            #
+            # The base delay is a whole number of block times (60s = 5 blocks),
+            # so on its own it re-arms onto the same phase it just failed at.
+            # The offset is what delivers the independence this re-arm was
+            # always documented as having.
+            rearm_secs = min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs)
+            time.sleep(
+                rearm_secs
+                + _head_drift_phase_offset(SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
+            )
             continue
         consecutive_head_drift_rearms = 0
         time.sleep(args.interval_secs)
@@ -10896,7 +11043,13 @@ def main() -> int:
             "--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "
             "validators must pin the orchestrator's signing key"
         )
-    if args.require_policy and args.require_policy not in REQUIRE_POLICY_CHOICES:
+    # Unconditional, NOT `if args.require_policy and ...`: the flag's default is
+    # always a real pin, so an empty value is a value someone supplied, never an
+    # absent one. Skipping the check on falsy conflated the two and let
+    # `--require-policy ''` drop the allocation-contract pin in silence, leaving
+    # one binary willing to map v2, v3, confidential_primary and legacy vectors
+    # alike, which is the exact ambiguity the pin exists to remove.
+    if args.require_policy not in REQUIRE_POLICY_CHOICES:
         p.error(
             f"--require-policy (or CATHEDRAL_VALIDATOR_REQUIRE_POLICY) must be one of "
             f"{', '.join(REQUIRE_POLICY_CHOICES)}; got {args.require_policy!r}"

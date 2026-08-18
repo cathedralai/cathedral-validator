@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -25,18 +26,28 @@ from scripts.assert_sn39_public_reproduction import (  # noqa: E402
 
 def run(
     *,
+    release_sha256: str | None = None,
     release_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify signed release, archive state, and frozen public evidence."""
-    return assert_public_reproduction(release_result=release_result)
+    return assert_public_reproduction(
+        release_sha256=release_sha256,
+        release_result=release_result,
+    )
 
 
 def main() -> int:
-    if len(sys.argv) != 1:
-        print("usage: run_sn39_public_reproduction.py", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--release-sha256",
+        help=(
+            "reproduce a versioned release under /releases/sha256; "
+            "omit only for the historical root release"
+        ),
+    )
+    args = parser.parse_args()
     try:
-        result = run()
+        result = run(release_sha256=args.release_sha256)
     except ReproductionNotProven as exc:
         print(f"SN39 public reproduction: NOT_PROVEN: {exc}", file=sys.stderr)
         return 3
