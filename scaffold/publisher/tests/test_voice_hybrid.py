@@ -44,9 +44,17 @@ def _receipt(*, hotkey: str = "5Alice", simulated: bool = False, **overrides) ->
     return base
 
 
+@pytest.fixture(autouse=True)
+def _local_audience(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+
+
 def _hybrid_report(*, scores=None, metadata=None, complete=True, **overrides) -> dict:
     report = {
         "source": "cathedral_voice_hybrid",
+        "network": "finney",
+        "netuid": 39,
         "epoch": 1,
         "complete": complete,
         "generated_at": _iso(_now()),
@@ -75,10 +83,43 @@ def test_voice_hybrid_source_allowed():
     assert "cathedral_voice_hybrid" in external_scores.ALLOWED_ENDPOINT_SOURCES
     assert "cathedral_voice_hybrid" in external_scores.COMPLETE_REQUIRED_SOURCES
     assert "cathedral_voice_hybrid" in external_scores.MANDATORY_HMAC_SOURCES
+    assert "cathedral_voice_hybrid" in external_scores.AUDIENCE_REQUIRED_SOURCES
     assert "cathedral_voice_hybrid" in weights.EXTERNAL_SCORES_FRACTION_REQUIRED_SOURCES
     assert "cathedral_voice_hybrid" in weights.EXTERNAL_SCORES_NO_PRIMARY_SOURCES
     assert "cathedral_voice_hybrid" not in weights.EXTERNAL_SCORES_GLOBAL_CAP_SOURCES
     assert "cathedral_voice_hybrid" not in weights.CONFIDENTIAL_PRIMARY_SOURCES
+
+
+def test_voice_hybrid_requires_local_audience(monkeypatch):
+    now = _now()
+    with pytest.raises(
+        external_scores.ExternalScoreError, match="invalid_score_audience"
+    ):
+        external_scores.normalize_report(
+            _hybrid_report(network=None, netuid=None),
+            now=now,
+        )
+
+
+def test_voice_hybrid_rejects_audience_mismatch():
+    now = _now()
+    with pytest.raises(
+        external_scores.ExternalScoreError, match="score_audience_mismatch"
+    ):
+        external_scores.normalize_report(
+            _hybrid_report(network="test", netuid=292),
+            now=now,
+        )
+
+
+def test_voice_hybrid_fails_closed_when_audience_unconfigured(monkeypatch):
+    monkeypatch.delenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", raising=False)
+    monkeypatch.delenv("CATHEDRAL_WEIGHT_POLICY_NETUID", raising=False)
+    now = _now()
+    with pytest.raises(
+        external_scores.ExternalScoreError, match="score_audience_not_configured"
+    ):
+        external_scores.normalize_report(_hybrid_report(), now=now)
 
 
 def test_voice_hybrid_requires_complete_true():

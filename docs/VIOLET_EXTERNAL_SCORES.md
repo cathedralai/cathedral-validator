@@ -166,10 +166,11 @@ ALLOWED_ENDPOINT_SOURCES = {
 
 ### Voice Hybrid (`cathedral_voice_hybrid`)
 
-Cathedral Voice posts hybrid miner scores with per-row `cathedral_voice_receipt_v1` evidence. Publisher admission mirrors confidential completeness / auth, but stays on capped blend (not confidential-primary / not the TDX 10% global cap):
+Cathedral Voice posts hybrid miner scores with per-row `cathedral_voice_receipt_v1` evidence. Publisher admission mirrors confidential completeness / auth / audience binding, but stays on capped blend (not confidential-primary / not the TDX 10% global cap):
 
 | Requirement | Rationale |
 |---|---|
+| Bound to configured `(network, netuid)` | Same `AUDIENCE_REQUIRED_SOURCES` posture as `cathedral_confidential_tdx`; HMAC is not a substitute |
 | `complete=true` **mandatory** | Snapshot is the full truth at its epoch |
 | No `external_primary` mode | Always capped-blend; hybrid never reaches 100% |
 | Explicit `FRACTION` env var required | Cannot inherit legacy 50% default |
@@ -189,6 +190,8 @@ CATHEDRAL_EXTERNAL_SCORES_ENABLED=1
 CATHEDRAL_EXTERNAL_SCORES_SOURCE=cathedral_voice_hybrid
 CATHEDRAL_EXTERNAL_SCORES_MODE=blend
 CATHEDRAL_EXTERNAL_SCORES_FRACTION=0.1
+CATHEDRAL_WEIGHT_POLICY_NETWORK=finney
+CATHEDRAL_WEIGHT_POLICY_NETUID=39
 
 # CI / dry-run only — leave unset in production
 # CATHEDRAL_VOICE_HYBRID_ALLOW_SIMULATION=1

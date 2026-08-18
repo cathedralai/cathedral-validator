@@ -55,7 +55,7 @@ ALLOWED_ENDPOINT_SOURCES = {
 # truth at its epoch" — a partial report from it must never be stored as if it
 # were live-composable.
 COMPLETE_REQUIRED_SOURCES = {"cathedral_confidential_tdx", "cathedral_voice_hybrid"}
-AUDIENCE_REQUIRED_SOURCES = {"cathedral_confidential_tdx"}
+AUDIENCE_REQUIRED_SOURCES = {"cathedral_confidential_tdx", "cathedral_voice_hybrid"}
 WEIGHT_POLICY_NETWORK_ENV = "CATHEDRAL_WEIGHT_POLICY_NETWORK"
 WEIGHT_POLICY_NETUID_ENV = "CATHEDRAL_WEIGHT_POLICY_NETUID"
 MAX_NETUID = 2**16 - 1
