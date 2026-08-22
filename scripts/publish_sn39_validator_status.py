@@ -113,7 +113,11 @@ EVENT_STATUS = {
     "WEIGHTS_SUBMITTED": "PASS",
 }
 EVENT_REMEDIATION = {
-    "PROVENANCE_AUDIT_FAIL": "inspect the validator-local audit log; thin authority is unaffected",
+    "PROVENANCE_AUDIT_FAIL": (
+        "if the tip aged out of the signed index, stop the validator and run "
+        "docs/PROVENANCE_CATCHUP.md; the audit will not self-heal. Thin "
+        "authority is unaffected"
+    ),
     "PROVENANCE_AUDIT_NOT_PROVEN": "keep thin authority until every anchored outcome has replayable evidence",
     "PROVENANCE_AUDIT_UNRESOLVED": "inspect the validator-local audit log and evidence endpoint",
     "PROVENANCE_RESERVATION_REFUSED": "inspect the validator-local state fence; nothing was submitted",
@@ -320,6 +324,11 @@ def public_detail(event: str, raw: Any) -> str | None:
             "names; the verified evidence has since advanced"
         )
     if event == "PROVENANCE_AUDIT_FAIL":
+        if "aged out" in detail.lower():
+            return (
+                "the recorded provenance tip aged out of the signed index; "
+                "run docs/PROVENANCE_CATCHUP.md; this does not self-heal"
+            )
         return "the provenance audit failed"
     if event == "PROVENANCE_HEALTH_GATE_FAILED":
         return "the current provenance health gate failed"

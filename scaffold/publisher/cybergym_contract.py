@@ -65,13 +65,12 @@ SEMANTIC_KEYS = (
 # Absent them, the tournament composer forfeits the lane (see the adapter) rather
 # than inventing a ranking, so the lane simply burns until the producer emits them.
 #
-#   attestation_receipt — {receipt, result_b64}: one representative Intel-TDX receipt
-#                      the chain nonce named (cathedral-distill #115), for the validator
-#                      to independently DCAP-verify. Carried VERBATIM so the receipt bytes
-#                      Cathedral signed survive the round-trip; folded into the digest so a
-#                      producer cannot add or swap it after signing. Its presence is also
-#                      ratcheted per audience in cybergym_ingest (once seen, never optional
-#                      again), so a compromised producer cannot silently drop it.
+#   attestation_receipt — {receipt, result_b64}: one representative Cathedral
+#                      customer receipt the chain nonce named (distill #115),
+#                      carried VERBATIM so the bytes Cathedral signed survive
+#                      the round-trip. The validator verifies Cathedral's
+#                      Ed25519 signature, not an Intel DCAP quote. Presence is
+#                      ratcheted per audience in cybergym_ingest.
 OPTIONAL_SEMANTIC_KEYS = (
     "nonce",
     "dispatched_units",

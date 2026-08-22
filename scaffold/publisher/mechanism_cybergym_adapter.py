@@ -623,14 +623,11 @@ def cybergym_score_snapshot(
     # A report without them keeps the original behaviour exactly (below).
     newest_doc = verified["document"]
 
-    # DCAP spot-check (distill #115): independently verify the carried representative
-    # Intel-TDX receipt — a real Cathedral signature over a receipt whose committed
-    # (nonce, miner) is the one the CHAIN named this epoch. #103 requires the receipt's
-    # PRESENCE; this verifies it. Advisory by default (records the outcome in `info`);
-    # under CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT, a receipt that is absent,
-    # unbindable (present but nonce-less), or invalid burns the lane rather than paying
-    # on an unproven claim. Gating here
-    # (before the branch) covers the tournament and legacy paths alike.
+    # Cathedral Ed25519 spot-check (distill #115), not Intel DCAP. #103 requires
+    # the receipt's PRESENCE; this verifies Cathedral's signature over it.
+    # Advisory by default (records the outcome in `info`); under
+    # CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT a missing or invalid
+    # receipt burns the lane. Gating here covers tournament and legacy alike.
     att_receipt = newest_doc.get("attestation_receipt")
     att_nonce = newest_doc.get("nonce")
     if att_nonce is None and att_receipt is None:

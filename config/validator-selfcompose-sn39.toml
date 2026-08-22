@@ -61,9 +61,8 @@ url = "http://127.0.0.1:8010"
 [weight_policy]
 public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26" # pragma: allowlist secret
 key_id = "cathedral-weight-policy"
-# v2 (90% Intel TDX / 10% burn) — the byte-identical default. Flipped to
-# validated_supply_v3 only in the coordinated Phase 5 cutover, paired with the
-# publisher-side v3 flip, and only after CyberGym is confirmed healthy.
+# v2 (90% Intel TDX / 10% burn). Do not flip to validated_supply_v3 until
+# cathedral-distill refuses public-catalog task_ids. See docs/CYBERGYM_LANE.md.
 require_policy = "validated_supply_v1"
 state_file = "/var/lib/cathedral-validator/thin-state.json"
 

@@ -149,6 +149,13 @@ class _PostSignedSubmissionMismatch(wire.VectorError):
     """A signed attempt has a positive receipt or execution contradiction."""
 
 
+# systemd RestartPreventExitStatus=3. A contradiction will not succeed by
+# trying again; returning 1 with Restart=on-failure/always is how #114
+# restarted the writer 66 times against its own "keep every writer stopped"
+# remediation.
+STAY_STOPPED_EXIT = 3
+
+
 class _NothingToScoreYet(wire.VectorError):
     """No paid hotkey was independently proven this epoch. This is NOT a failure:
     the validator verified there is nothing to submit and should idle until the
@@ -10542,7 +10549,7 @@ def run(args) -> int:
                 "and named transaction; never submit a replacement."
             ),
         )
-        return 1
+        return STAY_STOPPED_EXIT
     except _PendingReceiptNotProven as exc:
         render.outcome(False, f"pending receipt not proven: {stable_error(exc)}")
         _get_events(args).event(
@@ -10671,7 +10678,7 @@ def run(args) -> int:
                         "a replacement."
                     ),
                 )
-                return 1
+                return STAY_STOPPED_EXIT
             except _PendingReceiptNotProven as e:
                 render.outcome(False, f"pending receipt not proven: {stable_error(e)}")
                 _get_events(args).event(
