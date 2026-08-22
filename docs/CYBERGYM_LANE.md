@@ -49,8 +49,13 @@ v3 without a posting producer, or without the mechanism flags, fails the
 
 `scaffold/publisher/cybergym_attestation.py` verifies Cathedral's Ed25519
 signature on a `cathedral_customer_receipt_v1`. It does not verify an Intel
-quote. `CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT` is off: failure is
-recorded and the lane still pays.
+quote. `CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT` is off: a missing or
+**invalid carried** receipt is recorded and the lane still pays.
+
+That is not the whole rule. Once an audience has ingested a report that
+carries a receipt, a later report **without** one is refused by the ingest
+ratchet (`cybergym_ingest.py`), even while the require flag stays off.
+After that refused report expires, a v3 compose fails the entire vector.
 
 Do not write "every validator independently DCAP-verifies CyberGym." That
 sentence is how the pitch collapses in public.
@@ -82,15 +87,34 @@ coordinated v3 cutover. Not before.
 ## How to turn the lane on later
 
 Only after distill refuses public catalog ids **and** a producer is posting
-HMAC reports:
+HMAC reports. These are the publisher settings that actually compose v3.
+Omitting any of them fails closed: no `CATHEDRAL_VALIDATED_SUPPLY_ENABLED`
+falls back to a flat vector; a leftover 10% burn fails because v3 requires
+zero fixed burn.
+
+```
+CATHEDRAL_VALIDATED_SUPPLY_ENABLED=1
+CATHEDRAL_ALLOCATION_CONTRACT=v3
+CATHEDRAL_CYBERGYM_MECHANISM_ENABLED=1
+CATHEDRAL_CYBERGYM_WEIGHT_FRACTION=0.30
+CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2=0
+CATHEDRAL_WEIGHT_POLICY_BURN_UID=
+CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY=<burn hotkey>
+CATHEDRAL_EXTERNAL_SCORES_ENABLED=1
+CATHEDRAL_EXTERNAL_SCORES_SOURCE=cathedral_confidential_tdx
+CATHEDRAL_EXTERNAL_SCORES_MODE=confidential_primary
+CATHEDRAL_EXTERNAL_SCORES_PRIMARY_CONFIRM=true
+```
+
+Then:
 
 1. Deploy that distill revision.
-2. Set `CATHEDRAL_CYBERGYM_MECHANISM_ENABLED=1`
-3. Set `CATHEDRAL_CYBERGYM_WEIGHT_FRACTION=0.30`
-4. Set `CATHEDRAL_ALLOCATION_CONTRACT=v3` on the publisher
-5. Set `require_policy = "validated_supply_v3"` on the validator
-6. Flip publisher and validator in one window. See
+2. Apply the publisher stanza above.
+3. Set `require_policy = "validated_supply_v3"` on the validator.
+4. Flip publisher and validator in one window. See
    [SN39_V3_PUBLISHER_CUTOVER.md](SN39_V3_PUBLISHER_CUTOVER.md).
 
 Optional, still not DCAP: `CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT=1`
-makes the Cathedral-signature check fail closed.
+makes an invalid carried receipt fail closed. It does not replace the
+ingest ratchet. Once an audience has carried a receipt, omission is
+already refused.

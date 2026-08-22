@@ -6,8 +6,6 @@ Conflicts=cathedral-thin-validator.service cathedral-validator-sn39-launch.servi
 ConditionPathIsReadWrite=/var/lib/cathedral-validator
 ConditionPathExists=/etc/cathedral-validator/sn39-recurring-write-authorization.json
 ConditionPathExists=/etc/cathedral-validator/sn39-recurring-write-authorization.json.sig
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Service]
 Type=simple

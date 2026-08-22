@@ -11,8 +11,10 @@ receipt verifies under the pinned Cathedral key, and that the committed
 ``(nonce, miner)`` is the one the chain named this epoch.
 
 ``CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT`` is off by default: a failed
-or missing receipt is recorded and the lane still pays. Real Intel DCAP quote
-verification is separate work. Do not describe this module as DCAP.
+or missing *carried* receipt is recorded and the lane still pays. After an
+audience has adopted receipt carriage, ingest refuses a later report that
+omits the field regardless of this flag. Real Intel DCAP quote verification
+is separate work. Do not describe this module as DCAP.
 """
 from __future__ import annotations
 

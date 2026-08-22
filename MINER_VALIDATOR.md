@@ -62,8 +62,10 @@ One neuron, `cathedral-validator serve`. Each tempo:
   That sentence was wrong. The code checks Cathedral's signature.
 
 `CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT` is off by default. When off,
-a missing or bad receipt is recorded and the lane still pays. Real Intel DCAP
-quote verification is separate work.
+a missing or invalid carried receipt is recorded and the lane still pays.
+Once an audience has ingested a receipt-bearing report, a later report
+without one is refused by the ingest ratchet even while this flag stays
+off. Real Intel DCAP quote verification is separate work.
 
 ## Why the two lanes are scored differently (design, not today's defaults)
 
