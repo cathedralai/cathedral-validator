@@ -127,7 +127,12 @@ def _release_checkout(base: pathlib.Path) -> tuple[pathlib.Path, str]:
     _git(release, "add", "--all")
     _git(release, "commit", "--quiet", "--message=fixture")
     for path in [release, *release.rglob("*")]:
-        path.chmod(0o755 if path.is_dir() else 0o644)
+        if ".git" in path.parts:
+            continue
+        try:
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        except FileNotFoundError:
+            continue
     sha = subprocess.check_output(
         ["git", "-c", f"safe.directory={release}", "rev-parse", "HEAD"],
         cwd=release,

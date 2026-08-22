@@ -85,6 +85,10 @@ ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-validator-sn39.
 ExecStart=/usr/bin/python3.12 -I -E -s /usr/local/libexec/cathedral-sn39-release continuous
 Restart=on-failure
 RestartSec=15s
+# Same stay-down as the origin unit. A post-signed contradiction exits 3
+# and must not be restarted. Do not add StartLimitBurst here: pending
+# receipt recovery exits 1 and must keep retrying.
+RestartPreventExitStatus=3
 TimeoutStopSec=30s
 StateDirectory=cathedral-validator
 StateDirectoryMode=0700

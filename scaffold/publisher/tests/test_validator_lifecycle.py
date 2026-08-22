@@ -558,7 +558,7 @@ def test_recurring_loop_exits_on_post_signed_contradiction(
         ),
     )
 
-    assert validator_thin.run(args) == 1
+    assert validator_thin.run(args) == validator_thin.STAY_STOPPED_EXIT
     names = [name for name, _fields in events.rows]
     assert names.count("PENDING_RECEIPT_CONTRADICTION") == 1
     assert "TICK_FAILED" not in names

@@ -37,6 +37,10 @@ case "$ROLE" in
     ;;
 
   validator)
+    if [ -f /state/stay-stopped ]; then
+      echo ">> stay-stopped: previous post-signed contradiction. Not starting." >&2
+      exec sleep infinity
+    fi
     if ! _detect; then
       echo ">> No valid validator candidate for this wallet — see guidance above. Not starting." >&2
       exit 2
@@ -50,11 +54,20 @@ case "$ROLE" in
       FLAG=--dry-run
       echo ">> SHADOW (default): reads chain, composes, writes NOTHING (dry-run)." >&2
     fi
-    exec cathedral-validator serve --config "$CFG" \
+    set +e
+    cathedral-validator serve --config "$CFG" \
       --runtime-root /state \
       --state-file /state/thin-state.json \
       --jsonl /state/validator-events.jsonl \
       "$FLAG" "$@"
+    status=$?
+    set -e
+    if [ "$status" -eq 3 ]; then
+      echo ">> stay-stopped: post-signed contradiction (exit 3)." >&2
+      date -u +"stay-stopped %Y-%m-%dT%H:%M:%SZ" > /state/stay-stopped
+      exec sleep infinity
+    fi
+    exit "$status"
     ;;
 
   shell) exec /bin/bash "$@" ;;

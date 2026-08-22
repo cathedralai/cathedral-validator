@@ -819,7 +819,7 @@ def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
     assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.65", "0.14", "0.10", "0.07", "0.04"]
 
 
-# --- DCAP attestation gate (distill #115 follow-on) --------------------------
+# --- Cathedral Ed25519 attestation gate (distill #115 follow-on) -------------
 def test_attestation_is_advisory_by_default_and_does_not_burn(tmp_path, monkeypatch):
     """With the require flag unset, a report whose receipt cannot be verified (here,
     absent) still contributes — the outcome is only recorded, so turning the check on

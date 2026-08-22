@@ -252,6 +252,27 @@ def test_event_status_mismatch_is_dropped() -> None:
     assert status.clean_event(_event("WEIGHTS_DRY_RUN", "FAIL"))["status"] == "FAIL"
 
 
+def test_aged_out_provenance_fail_gets_catchup_remediation() -> None:
+    aged = status.clean_event(
+        _event(
+            "PROVENANCE_AUDIT_FAIL",
+            "FAIL",
+            detail="recorded chain tip (epoch 12) has aged out of the signed index",
+        )
+    )
+    assert aged is not None
+    assert "PROVENANCE_CATCHUP.md" in aged["remediation"]
+    assert "cathedral-validator-sn39.service" in aged["remediation"]
+
+
+def test_signature_provenance_fail_does_not_get_catchup_remediation() -> None:
+    failed = status.clean_event(
+        _event("PROVENANCE_AUDIT_FAIL", "FAIL", detail="index signature is invalid")
+    )
+    assert failed is not None
+    assert "remediation" not in failed
+
+
 def test_public_status_is_time_bounded() -> None:
     stale = status.clean_event(
         _event(

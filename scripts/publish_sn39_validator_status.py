@@ -112,8 +112,14 @@ EVENT_STATUS = {
     "WEIGHTS_DRY_RUN": "PASS",
     "WEIGHTS_SUBMITTED": "PASS",
 }
+AGED_OUT_REMEDIATION = (
+    "the recorded provenance tip aged out of the signed index; stop the "
+    "writer (cathedral-validator-sn39.service, "
+    "cathedral-validator-sn39-relay.service, or "
+    "cathedral-validator-passive.service) and run docs/PROVENANCE_CATCHUP.md; "
+    "the audit will not self-heal. Thin authority is unaffected"
+)
 EVENT_REMEDIATION = {
-    "PROVENANCE_AUDIT_FAIL": "inspect the validator-local audit log; thin authority is unaffected",
     "PROVENANCE_AUDIT_NOT_PROVEN": "keep thin authority until every anchored outcome has replayable evidence",
     "PROVENANCE_AUDIT_UNRESOLVED": "inspect the validator-local audit log and evidence endpoint",
     "PROVENANCE_RESERVATION_REFUSED": "inspect the validator-local state fence; nothing was submitted",
@@ -320,6 +326,11 @@ def public_detail(event: str, raw: Any) -> str | None:
             "names; the verified evidence has since advanced"
         )
     if event == "PROVENANCE_AUDIT_FAIL":
+        if "aged out" in detail.lower():
+            return (
+                "the recorded provenance tip aged out of the signed index; "
+                "run docs/PROVENANCE_CATCHUP.md; this does not self-heal"
+            )
         return "the provenance audit failed"
     if event == "PROVENANCE_HEALTH_GATE_FAILED":
         return "the current provenance health gate failed"
@@ -532,9 +543,14 @@ def clean_event(document: Any) -> dict[str, Any] | None:
         boundary = parse_weight_boundary(document.get("detail"))
         if boundary is not None:
             clean.update(boundary)
-    remediation = EVENT_REMEDIATION.get(event)
-    if remediation:
-        clean["remediation"] = remediation[: TEXT_LIMITS["remediation"]]
+    if event == "PROVENANCE_AUDIT_FAIL":
+        raw_detail = document.get("detail")
+        if isinstance(raw_detail, str) and "aged out" in raw_detail.lower():
+            clean["remediation"] = AGED_OUT_REMEDIATION[: TEXT_LIMITS["remediation"]]
+    else:
+        remediation = EVENT_REMEDIATION.get(event)
+        if remediation:
+            clean["remediation"] = remediation[: TEXT_LIMITS["remediation"]]
     if not clean.get("event") or not clean.get("ts"):
         return None
     return clean

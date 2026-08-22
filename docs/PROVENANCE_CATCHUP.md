@@ -60,11 +60,20 @@ fences. Stop first.
    sudo python3 -c "import json; d=json.load(open('/var/lib/cathedral-validator/thin-state.json')); print(d.get('provenance_last_source_epoch'), d.get('provenance_last_report_id'))"
    ```
 
-3. **Stop the validator:**
+3. **Stop the writer that is actually running.** Confirm first. The
+   catch-up edits `thin-state.json`; doing that under a live process risks
+   a fence write.
 
    ```bash
-   sudo systemctl stop cathedral-validator-passive.service
+   systemctl is-active cathedral-validator-sn39.service \
+     cathedral-validator-sn39-relay.service \
+     cathedral-validator-passive.service
+   sudo systemctl stop cathedral-validator-sn39.service \
+     cathedral-validator-sn39-relay.service \
+     cathedral-validator-passive.service
    ```
+
+   On a Docker relay, stop the compose service instead of systemd.
 
 4. **Back up, then clear both keys.** Clear both. Clearing only the epoch leaves
    `provenance_last_report_id` set, and the bridge still triggers on it:
@@ -86,16 +95,18 @@ fences. Stop first.
    are what stop a double write; rewinding them is a far worse failure than the
    one being repaired.
 
-5. **Start the validator:**
+5. **Start the same unit you stopped:**
 
    ```bash
-   sudo systemctl start cathedral-validator-passive.service
+   sudo systemctl start cathedral-validator-sn39.service
+   # or cathedral-validator-sn39-relay.service
+   # or cathedral-validator-passive.service on a host that still uses that name
    ```
 
 6. **Verify it actually recovered.** A restart proves nothing on its own:
 
    ```bash
-   sudo journalctl -u cathedral-validator-passive.service -f | grep -i provenance
+   sudo journalctl -u cathedral-validator-sn39.service -f | grep -i provenance
    ```
 
    Expect `PROVENANCE_AUDIT_PASS` within a couple of ticks, and confirm the tip

@@ -1,17 +1,20 @@
-"""Independent DCAP spot-check of the CyberGym attestation receipt (distill #115).
+"""Cathedral Ed25519 spot-check of the CyberGym attestation receipt (distill #115).
 
-cathedral-validator #103 makes the validator *carry* the one representative Intel-TDX
-receipt the report attaches and *ratchet its presence*. This module *verifies* it:
-that it is a genuine Cathedral-signed Intel-TDX receipt whose committed ``(nonce,
-miner)`` is the one the CHAIN named this epoch — turning "a receipt is present" into
-"a real Intel-signed receipt existed for the miner the chain named, this epoch".
+This is not Intel DCAP quote verification. The check verifies Cathedral's own
+Ed25519 signature over a ``cathedral_customer_receipt_v1`` document. Offline
+success proves Cathedral signed those assertions. It does not replay vendor
+evidence and it does not prove an Intel TDX quote.
 
-It depends only on ``cryptography`` and the operator's pinned trusted-keys file; it does
-NOT import ``cathedral_distill`` (the adapter sits on the weight path and must stay off
-that default-off dependency). The signature check is the same trustless shape as the
-producer-side gate (cathedral-distill #113): the receipt's Ed25519 signature must verify
-against Cathedral's PUBLISHED key, the key must be ``active``, and ``issued_at`` must fall
-inside its validity window. Everything fails closed to ``(False, <reason>)``.
+cathedral-validator #103 makes the validator carry the one representative receipt
+the report attaches and ratchet its presence. This module checks that the
+receipt verifies under the pinned Cathedral key, and that the committed
+``(nonce, miner)`` is the one the chain named this epoch.
+
+``CATHEDRAL_CYBERGYM_REQUIRE_ATTESTATION_RECEIPT`` is off by default: a failed
+or missing *carried* receipt is recorded and the lane still pays. After an
+audience has adopted receipt carriage, ingest refuses a later report that
+omits the field regardless of this flag. Real Intel DCAP quote verification
+is separate work. Do not describe this module as DCAP.
 """
 from __future__ import annotations
 

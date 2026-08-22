@@ -1,4 +1,4 @@
-"""Independent DCAP spot-check of the carried CyberGym attestation receipt.
+"""Cathedral Ed25519 spot-check of the carried CyberGym attestation receipt.
 
 Self-contained: it mints an Ed25519 "Cathedral" key, builds an internally consistent
 receipt + result envelope, signs it, and points the module at a trusted-keys file for
