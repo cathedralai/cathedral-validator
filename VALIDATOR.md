@@ -30,13 +30,15 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Validator thin-path checks | Implemented |
 | Concurrent shadow provenance audit | Implemented; default mode |
 | Full-provenance authority mode | Deprecated; no shipped config profile selects it (removal tracked in #40) |
-| Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
+| Current deployed vector vs independent verifier | Re-derive before relying on it — this status moves with each deploy. An earlier release recorded `FAIL` (public v1/GPU-allocation shape vs the v2/fixed-burn/body-binding verifier); the 2026-07-28 redeploy converged production and `cathedral-compute`'s `BUILD_STATUS.md` reported `AGREE` (2026-08-07). Confirm against the live signed vector before broadcasting. |
 | General validator launch | Pending a scoreable corpus and final acceptance |
 
-The current public contract mismatch is a launch blocker. Shadow mode reports
-it but does not veto an otherwise valid thin vector, which is why operators
-must remain in non-writing preview modes until the supported release
-converges.
+Any residual public-contract mismatch is a launch blocker, and shadow mode
+reports it but does not veto an otherwise valid thin vector — so confirm the
+live signed vector reproduces against the pinned verifier before broadcasting,
+and stay in non-writing preview until it does. Do not rely on a static verdict
+here or in `BUILD_STATUS.md`; both are dated and must be re-derived against the
+live vector.
 
 ## What happens on each tick
 

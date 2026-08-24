@@ -3,7 +3,7 @@
 SN39 (Cathedral) rewards **two lanes of verified work**, composed into one weight vector
 each tempo — **70% Intel-TDX compute** / **30% CyberGym vulnerability solving**, with any
 unfilled share burned. This page is the whole mental model. The deeper contracts are in
-[VALIDATOR.md](VALIDATOR.md), [deploy/MECHANISM_ROUTER_CONTRACT.md](deploy/MECHANISM_ROUTER_CONTRACT.md),
+[VALIDATOR.md](VALIDATOR.md), [BOUNDARY.md](BOUNDARY.md),
 and the reward-path docs.
 
 ## A miner
