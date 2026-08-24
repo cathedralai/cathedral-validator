@@ -90,7 +90,8 @@ CATHEDRAL_EXTERNAL_SCORES_TOKEN_CATHEDRAL_CONFIDENTIAL_TDX=<secret>  # Per-sourc
 **Validator policy pin (`confidential_primary_v1`):** operators who run confidential-primary can pin the thin validator so it applies ONLY this contract:
 
 ```bash
-# CLI flag or env; default is unpinned (accepts legacy, v3, and confidential_primary)
+# CLI flag or env. The default PINS validated_supply_v1 (cli.py), which rejects a
+# plain confidential_primary/v3 vector — set this explicitly to accept confidential_primary.
 cathedral-validator serve --require-policy confidential_primary_v1
 export CATHEDRAL_VALIDATOR_REQUIRE_POLICY=confidential_primary_v1
 ```
