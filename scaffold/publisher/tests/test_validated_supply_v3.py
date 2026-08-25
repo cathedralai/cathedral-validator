@@ -290,6 +290,35 @@ def test_publisher_v3_split_matches_the_validator_contract() -> None:
     ] == 1.0
 
 
+def test_v3_publisher_idle_lane_maps_to_compute_through_the_validator(monkeypatch) -> None:
+    # End-to-end seam: the empty lane the PUBLISHER actually composes on idle must be
+    # exactly the shape the validator accepts and maps to 100% compute -- feed the
+    # real composed lane (not a hand-built fixture) straight into the validator.
+    from scaffold.publisher import cybergym_bridge
+    from scaffold.publisher import weights as pub
+
+    monkeypatch.setenv("CATHEDRAL_CYBERGYM_MECHANISM_ENABLED", "1")
+    monkeypatch.setenv("CATHEDRAL_CYBERGYM_WEIGHT_FRACTION", "0.30")
+    monkeypatch.setattr(
+        cybergym_bridge,
+        "cybergym_allocation",
+        lambda store, **kw: {
+            "status": "no_contribution",
+            "cybergym": {"reason": "no_contribution"},
+        },
+    )
+    lane = pub._compose_cybergym_lane_v3(store=None, now=NOW)  # the REAL publisher lane
+
+    doc = v3_payload()
+    doc["policy_metadata"]["validated_supply"]["intel_tdx_allocation"] = 1.0
+    doc["policy_metadata"]["validated_supply"]["cybergym_allocation"] = 0.0
+    doc["policy_metadata"]["cybergym_lane"] = lane
+    out = validator_thin.vector_to_uid_weights(doc, H2U, require_policy=V3_PIN)
+    assert out[10] == pytest.approx(0.6) and out[11] == pytest.approx(0.4)
+    assert 50 not in out and 51 not in out
+    assert math.isclose(math.fsum(out.values()), 1.0, abs_tol=1e-12)
+
+
 def test_v3_lane_mass_drift_fails_closed() -> None:
     doc = v3_payload(lane_weights={50: 0.18, 51: 0.20})  # sums to 0.38 != 0.30
     with pytest.raises(validator_thin.wire.VectorError, match="cybergym_lane mass"):
@@ -399,8 +428,22 @@ def _v3_submission() -> dict:
     }
 
 
+def _v3_idle_submission() -> dict:
+    doc = _v3_submission()
+    doc["intel_tdx_share"] = 1.0
+    doc["cybergym_share"] = 0.0
+    doc["uid_weights"] = {"10": 0.6, "11": 0.4}  # 100% compute; CyberGym paid nobody
+    return doc
+
+
 def test_sn39_v3_dry_run_accepts_zero_burn_split() -> None:
     assert repro._assert_current_dry_run_v3(_v3_submission()) == "0.00"
+
+
+def test_sn39_v3_dry_run_accepts_the_idle_100_0_split() -> None:
+    # The reproducer must accept the CyberGym-idle shape too, or an idle tick is
+    # (once this gate is wired to live events) reported as non-reproducible.
+    assert repro._assert_current_dry_run_v3(_v3_idle_submission()) == "0.00"
 
 
 def test_sn39_v3_dry_run_rejects_nonzero_burn() -> None:

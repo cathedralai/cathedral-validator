@@ -2394,6 +2394,15 @@ def build_signed_vector(
                 # signed below.
                 supply_policy["intel_tdx_allocation"] = 1.0
                 supply_policy["cybergym_allocation"] = 0.0
+                # policy_hash (above) was computed over the pre-redirect 0.70/0.30
+                # supply_policy -- policy_inputs["validated_supply"] IS this dict --
+                # so recompute it now that we have mutated it, or the SIGNED hash
+                # would commit to a split the SIGNED values no longer carry.
+                payload["policy_hash"] = "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        policy_inputs, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
             payload["policy_metadata"]["cybergym_lane"] = lane
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
