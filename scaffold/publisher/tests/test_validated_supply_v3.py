@@ -273,6 +273,23 @@ def test_v3_publisher_composes_an_empty_lane_when_cybergym_is_idle(monkeypatch) 
     assert set(lane) == pub.V3_CYBERGYM_LANE_FIELDS  # same wire shape as a full lane
 
 
+def test_publisher_v3_split_matches_the_validator_contract() -> None:
+    # Coherence guardrail (BOUNDARY.md fork hazard, same repo): the split the
+    # publisher emits for v3 must be exactly what the validator accepts, or every
+    # signed vector is rejected for the whole epoch. If either side is changed
+    # without the other, this fails loudly rather than in production.
+    from scaffold.publisher import weights as pub
+
+    assert (pub.V3_TDX_ALLOCATION, pub.V3_CYBERGYM_ALLOCATION) == (0.70, 0.30)
+    policy = validator_thin._validated_supply_meta(v3_payload())
+    assert policy["intel_tdx_allocation"] == pub.V3_TDX_ALLOCATION
+    assert policy["cybergym_allocation"] == pub.V3_CYBERGYM_ALLOCATION
+    # The idle redirect is the only other split the validator accepts: 100/0.
+    assert validator_thin._validated_supply_meta(_v3_idle_payload())[
+        "intel_tdx_allocation"
+    ] == 1.0
+
+
 def test_v3_lane_mass_drift_fails_closed() -> None:
     doc = v3_payload(lane_weights={50: 0.18, 51: 0.20})  # sums to 0.38 != 0.30
     with pytest.raises(validator_thin.wire.VectorError, match="cybergym_lane mass"):
