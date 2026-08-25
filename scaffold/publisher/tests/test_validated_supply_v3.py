@@ -114,8 +114,8 @@ def test_v3_metadata_accepted() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("intel_tdx_allocation", 0.69, "Intel TDX allocation must equal 0.70"),
-        ("cybergym_allocation", 0.31, "CyberGym allocation must equal 0.30"),
+        ("intel_tdx_allocation", 0.69, "allocation must be 0.70/0.30"),
+        ("cybergym_allocation", 0.31, "allocation must be 0.70/0.30"),
         ("fixed_burn_allocation", 0.10, "fixed burn allocation must equal 0.0"),
     ],
 )
@@ -191,6 +191,86 @@ def test_v3_tdx_degraded_sinks_seventy_to_burn() -> None:
     assert out[51] == pytest.approx(0.12)
     assert out[0] == pytest.approx(0.70)  # revoked TDX lane sinks to burn
     assert math.isclose(math.fsum(out.values()), 1.0, abs_tol=1e-12)
+
+
+# ---- v3 CyberGym-idle redirect (N=0 -> compute) ------------------------------
+
+
+def _v3_idle_payload() -> dict:
+    """A v3 vector for a tick where CyberGym has no winners: the honest 100/0 split
+    with an EMPTY cybergym_lane (same wire fields, all zero)."""
+    doc = v3_payload()
+    doc["policy_metadata"]["validated_supply"]["intel_tdx_allocation"] = 1.0
+    doc["policy_metadata"]["validated_supply"]["cybergym_allocation"] = 0.0
+    doc["policy_metadata"]["cybergym_lane"] = {
+        "fraction": 0.0,
+        "weights": {},
+        "contributing_fraction": 0.0,
+        "forfeited_fraction": 0.0,
+        "burn_uid": None,
+        "uid_hotkeys": {},
+        "cybergym": {"reason": "no_contribution"},
+    }
+    return doc
+
+
+def test_v3_idle_metadata_accepted() -> None:
+    policy = validator_thin._validated_supply_meta(_v3_idle_payload())
+    assert policy["intel_tdx_allocation"] == 1.0
+    assert policy["cybergym_allocation"] == 0.0
+
+
+def test_v3_idle_cybergym_redirects_the_whole_lane_to_compute() -> None:
+    out = validator_thin.vector_to_uid_weights(
+        _v3_idle_payload(), H2U, require_policy=V3_PIN
+    )
+    assert out[10] == pytest.approx(0.6)  # 0.6 * 1.0 — TDX takes the whole vector
+    assert out[11] == pytest.approx(0.4)  # 0.4 * 1.0
+    assert 50 not in out and 51 not in out  # CyberGym paid nobody
+    assert math.isclose(math.fsum(out.values()), 1.0, abs_tol=1e-12)
+
+
+def test_v3_idle_shape_rejects_a_paying_cybergym_lane() -> None:
+    # 1.0/0.0 must FORCE an empty lane: a publisher cannot claim idle while paying
+    # CyberGym miners. The full lane's fraction (0.30) no longer matches cyber_alloc.
+    doc = v3_payload()
+    doc["policy_metadata"]["validated_supply"]["intel_tdx_allocation"] = 1.0
+    doc["policy_metadata"]["validated_supply"]["cybergym_allocation"] = 0.0
+    with pytest.raises(validator_thin.wire.VectorError):
+        validator_thin.vector_to_uid_weights(doc, H2U, require_policy=V3_PIN)
+
+
+def test_v3_active_shape_rejects_an_empty_cybergym_lane() -> None:
+    # 0.70/0.30 must FORCE a full lane: the empty lane no longer matches cyber_alloc.
+    doc = _v3_idle_payload()
+    doc["policy_metadata"]["validated_supply"]["intel_tdx_allocation"] = 0.70
+    doc["policy_metadata"]["validated_supply"]["cybergym_allocation"] = 0.30
+    with pytest.raises(validator_thin.wire.VectorError):
+        validator_thin.vector_to_uid_weights(doc, H2U, require_policy=V3_PIN)
+
+
+def test_v3_publisher_composes_an_empty_lane_when_cybergym_is_idle(monkeypatch) -> None:
+    # Publisher side: no_contribution -> an EMPTY lane (fraction 0.0), same wire
+    # fields; build_signed_vector then signs the 100/0 split. It does NOT raise.
+    from scaffold.publisher import cybergym_bridge
+    from scaffold.publisher import weights as pub
+
+    monkeypatch.setenv("CATHEDRAL_CYBERGYM_MECHANISM_ENABLED", "1")
+    monkeypatch.setenv("CATHEDRAL_CYBERGYM_WEIGHT_FRACTION", "0.30")
+    monkeypatch.setattr(
+        cybergym_bridge,
+        "cybergym_allocation",
+        lambda store, **kw: {
+            "status": "no_contribution",
+            "cybergym": {"reason": "no_contribution"},
+        },
+    )
+    lane = pub._compose_cybergym_lane_v3(store=None, now=NOW)
+    assert lane["fraction"] == 0.0
+    assert lane["weights"] == {}
+    assert lane["forfeited_fraction"] == 0.0
+    assert lane["burn_uid"] is None
+    assert set(lane) == pub.V3_CYBERGYM_LANE_FIELDS  # same wire shape as a full lane
 
 
 def test_v3_lane_mass_drift_fails_closed() -> None:

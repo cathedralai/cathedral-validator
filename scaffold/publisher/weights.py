@@ -2152,9 +2152,32 @@ def _compose_cybergym_lane_v3(store: Store, *, now: datetime) -> dict[str, Any]:
         )
     lane = cybergym_bridge.cybergym_allocation(store, now=now)
     status = lane.get("status")
+    if status == "no_contribution":
+        # CyberGym idle this tick: the mechanism is enabled and configured, but no
+        # miner produced a scoreable solve, so there are no winners and nothing is
+        # forfeited. Emit an EMPTY lane (fraction 0.0); build_signed_vector then
+        # redirects the 30% to the compute lane (intel_tdx_allocation -> 1.0) rather
+        # than halting the whole vector. Wire shape is unchanged: same
+        # V3_CYBERGYM_LANE_FIELDS, all zero/empty.
+        empty = {
+            "fraction": 0.0,
+            "weights": {},
+            "contributing_fraction": 0.0,
+            "forfeited_fraction": 0.0,
+            "burn_uid": None,
+            "uid_hotkeys": {},
+            "cybergym": lane.get("cybergym") or {},
+        }
+        if set(empty) != V3_CYBERGYM_LANE_FIELDS:  # pragma: no cover - shape guard
+            raise VectorError(
+                "allocation contract v3 idle CyberGym lane shape does not match the "
+                f"wire contract; expected {sorted(V3_CYBERGYM_LANE_FIELDS)}"
+            )
+        return empty
     if status != "ok":
-        # disabled / no_contribution / burn_destination_unresolved all mean the
-        # 30% lane cannot be proven; refuse rather than emit a partial vector.
+        # burn_destination_unresolved / recipient_identity_unresolved (or a defensive
+        # disabled): the lane HAD contribution but cannot be composed safely, so
+        # refuse rather than emit a partial or ambiguous vector.
         burn_reason = (lane.get("burn") or {}).get("reason")
         cyber_reason = (lane.get("cybergym") or {}).get("reason")
         raise VectorError(
@@ -2362,9 +2385,16 @@ def build_signed_vector(
         # The CyberGym lane travels uid-keyed in policy_metadata so the validator
         # re-derives it exactly as this publisher composed it.
         if supply_policy.get("contract_version") == "v3":
-            payload["policy_metadata"]["cybergym_lane"] = _compose_cybergym_lane_v3(
-                store, now=now
-            )
+            lane = _compose_cybergym_lane_v3(store, now=now)
+            if float(lane["fraction"]) == 0.0:
+                # CyberGym idle this tick (no winners): redirect its 30% to the
+                # compute lane rather than halting. Sign the honest split — 100%
+                # Intel TDX / 0% CyberGym. supply_policy is the same dict already
+                # placed in policy_metadata above, so this mutation is what gets
+                # signed below.
+                supply_policy["intel_tdx_allocation"] = 1.0
+                supply_policy["cybergym_allocation"] = 0.0
+            payload["policy_metadata"]["cybergym_lane"] = lane
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key_hex.strip()))
     payload["signature"] = base64.b64encode(sk.sign(canonical_bytes(payload))).decode()
     return payload
