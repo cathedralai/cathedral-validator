@@ -24,9 +24,12 @@ is 0 will never pass these gates. That is the remaining blocker, not a gap
 in this module. The happy-path tests construct a synthetic ``COMPOSED`` result
 so the gate can be proven without pretending a funded Compute row is payable.
 
-The lock is claimed with ``O_EXCL`` before the transport runs. A crash after
-the claim, or a transport that raises, spends the slot: retrying a maybe-sent
-extrinsic is the failure this file exists to prevent.
+The lock is claimed with ``O_EXCL`` before the transport runs. The file and
+its parent directory are both fsynced before that call returns: fsyncing only
+the file leaves the new directory entry in the page cache, and a crash then
+looks like the slot was never spent. A crash after the claim, or a transport
+that raises, spends the slot: retrying a maybe-sent extrinsic is the failure
+this file exists to prevent.
 """
 
 from __future__ import annotations
@@ -217,6 +220,24 @@ def _serialise(record: Mapping[str, Any]) -> bytes:
     return encoded
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Persist the directory entry. File fsync alone does not."""
+    flags = os.O_RDONLY
+    for name in ("O_DIRECTORY", "O_CLOEXEC", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(str(directory), flags)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise CanaryStateError(
+            f"the canary directory could not be fsynced: {exc}"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _claim_lock(path: Path, record: Mapping[str, Any]) -> None:
     encoded = _serialise(record)
     parent = path.parent
@@ -246,6 +267,7 @@ def _claim_lock(path: Path, record: Mapping[str, Any]) -> None:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+    _fsync_directory(parent)
 
 
 def _replace_lock(path: Path, record: Mapping[str, Any]) -> None:
@@ -265,6 +287,7 @@ def _replace_lock(path: Path, record: Mapping[str, Any]) -> None:
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
         temporary = None
+        _fsync_directory(path.parent)
     except OSError as exc:
         raise CanaryStateError(f"the canary lock could not be updated: {exc}") from exc
     finally:

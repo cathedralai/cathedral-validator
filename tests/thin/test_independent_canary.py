@@ -21,7 +21,9 @@ burn-only as the first on-chain write is still forbidden.
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
 from pathlib import Path
 
 import pytest
@@ -503,6 +505,45 @@ def test_nothing_on_the_canary_path_opens_a_socket(monkeypatch, tmp_path):
     receipt, transport = run_canary(tmp_path)
     assert receipt.receipt == RECEIPT
     assert len(transport.calls) == 1
+
+
+def test_claim_and_replace_fsync_the_parent_directory(tmp_path, monkeypatch):
+    modes: list[int] = []
+    real = os.fsync
+
+    def spy(fd):
+        modes.append(os.fstat(fd).st_mode)
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    run_canary(tmp_path)
+    directory_syncs = [mode for mode in modes if stat.S_ISDIR(mode)]
+    file_syncs = [mode for mode in modes if stat.S_ISREG(mode)]
+    assert len(file_syncs) >= 2
+    assert len(directory_syncs) >= 2
+
+
+def test_a_directory_fsync_failure_on_claim_does_not_call_the_transport(
+    tmp_path, monkeypatch
+):
+    real = os.fsync
+
+    def boom(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("dirsync failed")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", boom)
+    transport = FakeTransport()
+    with pytest.raises(CanaryStateError, match="directory could not be fsynced"):
+        run_canary(tmp_path, transport=transport)
+    assert transport.calls == []
+    assert canary_path(tmp_path).exists()
+    monkeypatch.setattr(os, "fsync", real)
+    retry = FakeTransport()
+    with pytest.raises(CanarySpent, match="already spent"):
+        run_canary(tmp_path, transport=retry)
+    assert retry.calls == []
 
 
 def test_the_canary_module_names_no_writer():
