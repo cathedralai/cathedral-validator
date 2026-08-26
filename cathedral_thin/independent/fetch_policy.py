@@ -23,9 +23,11 @@ What is enforced, all fail-closed:
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import queue
 import socket
+import ssl
 import threading
 import time
 from dataclasses import dataclass
@@ -61,6 +63,13 @@ class PolicyEndpoint:
     def label(self) -> str:
         """A log-safe identity: scheme, host, port. Never the raw URL."""
         return f"https://{self.host}:{self.port}"
+
+    @property
+    def host_header(self) -> str:
+        """RFC 9110 Host: omit the port only when it is the https default."""
+        if self.port == 443:
+            return self.host
+        return f"{self.host}:{self.port}"
 
 
 def validate_policy_url(url: str) -> PolicyEndpoint:
@@ -181,12 +190,21 @@ def validated_peer_ips(infos: Sequence[tuple[Any, ...]]) -> list[str]:
     return peer_ips
 
 
-def read_bounded_response(response: Any, budget: dict[str, int]) -> bytes:
+def read_bounded_response(
+    response: Any,
+    budget: dict[str, int],
+    *,
+    refresh_timeout: Callable[[], None] | None = None,
+) -> bytes:
     """Read one response body under a shared byte budget, refusing non-200.
 
     ``budget`` is shared across every peer attempt on purpose; see the module
     docstring. Redirects are never followed, so any status other than 200 is a
     refusal rather than a hop.
+
+    ``refresh_timeout`` runs before every ``read`` so a trickle of chunks cannot
+    keep each idle wait under a stale allowance while the total deadline
+    expires. The thin feed client resets its socket timeout the same way.
     """
     status = int(getattr(response, "status", 0))
     if status != 200:
@@ -195,6 +213,8 @@ def read_bounded_response(response: Any, budget: dict[str, int]) -> bytes:
         )
     chunks: list[bytes] = []
     while True:
+        if refresh_timeout is not None:
+            refresh_timeout()
         chunk = response.read(min(_READ_CHUNK, budget["bytes"] + 1))
         if not chunk:
             break
@@ -219,9 +239,6 @@ def fetch_policy_bytes(
     hashed and checked against the on-chain commitment are the bytes that came
     off the wire.
     """
-    import http.client
-    import ssl
-
     endpoint = validate_policy_url(url)
     if (
         isinstance(timeout, bool)
@@ -266,12 +283,17 @@ def fetch_policy_bytes(
             connection.request(
                 "GET",
                 endpoint.path,
-                headers={"Host": host, "User-Agent": POLICY_USER_AGENT},
+                headers={"Host": endpoint.host_header, "User-Agent": POLICY_USER_AGENT},
             )
             connection.sock.settimeout(phase_timeout())
             response = connection.getresponse()
-            connection.sock.settimeout(phase_timeout())
-            return read_bounded_response(response, budget)
+
+            def refresh_timeout() -> None:
+                connection.sock.settimeout(phase_timeout())
+
+            return read_bounded_response(
+                response, budget, refresh_timeout=refresh_timeout
+            )
         finally:
             connection.close()
 

@@ -93,7 +93,8 @@ def write_journal(
         serialised = json.dumps(payload, sort_keys=True, allow_nan=False, indent=2)
     except (TypeError, ValueError) as exc:
         raise JournalError(f"the journal record is not serialisable: {exc}") from exc
-    if len(serialised.encode("utf-8")) > MAX_JOURNAL_BYTES:
+    encoded = (serialised + "\n").encode("utf-8")
+    if len(encoded) > MAX_JOURNAL_BYTES:
         raise JournalError(
             f"the journal record exceeds the {MAX_JOURNAL_BYTES} byte bound"
         )
@@ -108,8 +109,8 @@ def write_journal(
         descriptor, temporary = tempfile.mkstemp(
             dir=str(parent), prefix=f".{target.name}.", suffix=".tmp"
         )
-        handle = os.fdopen(descriptor, "w", encoding="utf-8")
-        handle.write(serialised + "\n")
+        handle = os.fdopen(descriptor, "wb")
+        handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
         handle.close()

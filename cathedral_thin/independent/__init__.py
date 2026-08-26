@@ -87,6 +87,7 @@ from .errors import (
     MachineIdentityConflict,
     PolicyBundleError,
     PolicyFetchError,
+    PolicyLineageError,
     RefuseListError,
 )
 from .fetch_policy import fetch_policy_bytes, validate_policy_url
@@ -113,6 +114,7 @@ from .policy import (
     load_policy_bundle,
     parse_policy_bundle,
     require_commitment,
+    require_lineage,
     signing_payload,
     verify_signatures,
 )
@@ -178,6 +180,7 @@ __all__ = [
     "PolicyBundle",
     "PolicyBundleError",
     "PolicyFetchError",
+    "PolicyLineageError",
     "PolicySignature",
     "QuoteVerdict",
     "QuoteVerifier",
@@ -209,6 +212,7 @@ __all__ = [
     "require_commitment",
     "require_compute_adapter",
     "require_last_good",
+    "require_lineage",
     "require_permitted_hotkey",
     "resolve_burn_uid",
     "signing_payload",

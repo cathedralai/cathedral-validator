@@ -111,7 +111,7 @@ def funded_compute_bundle():
         burn_amount=H - 10**11,
         allocations=[lane_row(COMPUTE_LANE_DOCUMENT, 10**11)],
     )
-    return signed_bundle(economics=economics)[0]
+    return signed_bundle(economics=economics)
 
 
 def test_the_lane_id_is_the_one_the_signed_document_names():
@@ -210,10 +210,11 @@ def test_a_verifier_that_answers_nonsense_is_infra_not_a_pass():
 
 
 def test_a_funded_compute_row_with_a_qvl_adapter_names_its_blockers(tmp_path):
-    bundle = funded_compute_bundle()
+    bundle, registry = funded_compute_bundle()
     gated, verifier = adapter(QuoteVerdict.PASS)
     result = compose_dry_run(
         bundle=bundle,
+        key_registry=registry,
         commitment=commitment_for(bundle),
         anchor=ANCHOR,
         anchor_view=burn_only_view(),
@@ -241,9 +242,10 @@ def test_a_funded_compute_row_with_a_qvl_adapter_names_its_blockers(tmp_path):
 
 
 def test_a_funded_compute_row_without_an_adapter_is_still_blocked(tmp_path):
-    bundle = funded_compute_bundle()
+    bundle, registry = funded_compute_bundle()
     result = compose_dry_run(
         bundle=bundle,
+        key_registry=registry,
         commitment=commitment_for(bundle),
         anchor=ANCHOR,
         anchor_view=burn_only_view(),
@@ -258,7 +260,7 @@ def test_a_funded_compute_row_without_an_adapter_is_still_blocked(tmp_path):
 
 def test_a_non_compute_adapter_on_the_compute_lane_gets_the_generic_reason():
     """The named reason belongs to the gated adapter, not to the lane row."""
-    bundle = funded_compute_bundle()
+    bundle, _registry = funded_compute_bundle()
     _dests, blocks = mass_map(
         bundle, burn_uid=BURN_UID, adapters={COMPUTE_LANE: object()}
     )
@@ -267,11 +269,12 @@ def test_a_non_compute_adapter_on_the_compute_lane_gets_the_generic_reason():
 
 
 def test_a_compute_adapter_never_makes_broadcast_reachable(tmp_path):
-    bundle = funded_compute_bundle()
+    bundle, registry = funded_compute_bundle()
     gated, _verifier = adapter()
     with pytest.raises(BroadcastDisabled, match="no chain writer"):
         compose_dry_run(
             bundle=bundle,
+            key_registry=registry,
             commitment=commitment_for(bundle),
             anchor=ANCHOR,
             anchor_view=burn_only_view(),
@@ -361,9 +364,10 @@ def test_nothing_on_this_path_opens_a_socket(monkeypatch, tmp_path):
     gated, _verifier = adapter()
     assert gated.collateral_endpoint.host in INTEL_PCS_HOSTS
     assert gated.probe(anchor=ANCHOR, view=burn_only_view()) == {}
-    bundle = funded_compute_bundle()
+    bundle, registry = funded_compute_bundle()
     result = compose_dry_run(
         bundle=bundle,
+        key_registry=registry,
         commitment=commitment_for(bundle),
         anchor=ANCHOR,
         anchor_view=burn_only_view(),

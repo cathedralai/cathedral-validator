@@ -62,6 +62,13 @@ def test_an_explicit_port_is_kept_and_the_label_hides_the_path():
     assert "b.json" not in endpoint.label
 
 
+def test_the_host_header_includes_a_non_default_port():
+    default = validate_policy_url(GOOD)
+    assert default.host_header == "policy.example.com"
+    explicit = validate_policy_url("https://policy.example.com:8443/b.json")
+    assert explicit.host_header == "policy.example.com:8443"
+
+
 def _info(address: str) -> tuple:
     return (2, 1, 6, "", (address, 443))
 
@@ -153,6 +160,27 @@ def test_the_body_budget_is_aggregate_across_peer_attempts():
     assert budget["bytes"] == 2
     with pytest.raises(PolicyFetchError, match="byte bound"):
         read_bounded_response(_Response(200, b"y" * 30), budget)
+
+
+def test_the_timeout_is_refreshed_before_every_chunk():
+    """A trickle of chunks must not keep a stale per-read allowance forever."""
+
+    class Chunked:
+        status = 200
+
+        def __init__(self) -> None:
+            self._chunks = [b"abcd", b"efgh", b""]
+
+        def read(self, amount: int) -> bytes:
+            del amount
+            return self._chunks.pop(0)
+
+    calls: list[int] = []
+    body = read_bounded_response(
+        Chunked(), {"bytes": 1024}, refresh_timeout=lambda: calls.append(1)
+    )
+    assert body == b"abcdefgh"
+    assert len(calls) == 3
 
 
 def test_the_user_agent_names_this_lineage():

@@ -41,10 +41,23 @@ from cathedral_thin.independent.refuse import is_refused, require_permitted_hotk
 
 PROFILE = Path("config/validator-independent-sn39.toml")
 RELAY_HOTKEY = "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"
+PERMITTED_HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 
 def profile_document() -> dict:
     return tomllib.loads(PROFILE.read_text(encoding="utf-8"))
+
+
+def cli_args(*extra: str, hotkey: str = PERMITTED_HOTKEY) -> list[str]:
+    return [
+        "--config",
+        str(PROFILE),
+        "--hotkey-ss58",
+        hotkey,
+        "--observed-genesis",
+        FINNEY_GENESIS_HASH,
+        *extra,
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -68,7 +81,7 @@ def test_the_refuse_list_is_exactly_the_relay_and_the_burn_destination():
 
 
 def test_a_permitted_hotkey_passes_through():
-    other = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+    other = PERMITTED_HOTKEY
     assert refuse_wallet(other) == other
     assert not is_refused(other)
 
@@ -187,6 +200,20 @@ def test_a_config_with_a_narrower_weight_cap_is_refused():
         parse_config(document)
 
 
+def test_a_nearby_weight_cap_is_refused():
+    """isclose would have accepted this; the chain pin is exact."""
+    document = profile_document()
+    document["weights"]["max_weight_limit"] = 0.9999999995
+    with pytest.raises(ConfigError, match="max_weight_limit must be 1.0"):
+        parse_config(document)
+
+
+def test_an_integer_one_weight_cap_is_accepted():
+    document = profile_document()
+    document["weights"]["max_weight_limit"] = 1
+    assert parse_config(document).max_weight_limit == 1.0
+
+
 def test_a_config_enabling_commit_reveal_is_refused():
     document = profile_document()
     document["weights"]["commit_reveal_enabled"] = True
@@ -244,27 +271,60 @@ def test_a_missing_config_file_is_refused(tmp_path):
 
 
 def test_main_reports_the_resolved_pins(capsys):
-    assert main(["--config", str(PROFILE)]) == 0
+    assert main(cli_args()) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["lineage"] == LINEAGE
     assert summary["broadcast"] is False
 
 
 def test_main_refuses_a_refuse_listed_hotkey(capsys):
-    code = main(["--config", str(PROFILE), "--hotkey-ss58", BURN_HOTKEY])
+    code = main(cli_args(hotkey=BURN_HOTKEY))
     assert code == 2
     assert "RefuseListError" in capsys.readouterr().err
 
 
 def test_main_refuses_the_wrong_chain(capsys):
-    code = main(["--config", str(PROFILE), "--observed-genesis", "0x" + "22" * 32])
+    code = main(
+        [
+            "--config",
+            str(PROFILE),
+            "--hotkey-ss58",
+            PERMITTED_HOTKEY,
+            "--observed-genesis",
+            "0x" + "22" * 32,
+        ]
+    )
     assert code == 2
     assert "GenesisPinError" in capsys.readouterr().err
 
 
 def test_main_refuses_a_missing_config(capsys, tmp_path):
-    assert main(["--config", str(tmp_path / "absent.toml")]) == 2
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "absent.toml"),
+                "--hotkey-ss58",
+                PERMITTED_HOTKEY,
+                "--observed-genesis",
+                FINNEY_GENESIS_HASH,
+            ]
+        )
+        == 2
+    )
     assert "ConfigError" in capsys.readouterr().err
+
+
+def test_the_cli_requires_the_observed_hotkey():
+    with pytest.raises(SystemExit) as raised:
+        main(["--config", str(PROFILE), "--observed-genesis", FINNEY_GENESIS_HASH])
+    assert raised.value.code == 2
+
+
+def test_the_cli_requires_the_observed_genesis():
+    with pytest.raises(SystemExit) as raised:
+        main(["--config", str(PROFILE), "--hotkey-ss58", PERMITTED_HOTKEY])
+    assert raised.value.code == 2
 
 
 def test_the_cli_has_no_broadcast_flag(capsys):
@@ -293,6 +353,8 @@ def test_the_module_entry_point_refuses_the_relay_hotkey():
             str(PROFILE),
             "--hotkey-ss58",
             RELAY_HOTKEY,
+            "--observed-genesis",
+            FINNEY_GENESIS_HASH,
         ],
         capture_output=True,
         text=True,

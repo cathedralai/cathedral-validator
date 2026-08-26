@@ -15,6 +15,7 @@ import json
 
 import pytest
 
+from cathedral_thin.independent import journal as journal_module
 from cathedral_thin.independent.constants import INDEPENDENT_STATE_FILE, LINEAGE
 from cathedral_thin.independent.errors import JournalError
 from cathedral_thin.independent.journal import load_journal, write_journal
@@ -126,3 +127,22 @@ def test_a_journal_on_disk_claiming_a_signed_vector_is_not_trusted(tmp_path):
 def test_a_missing_journal_reads_as_a_refusal_not_an_empty_record(tmp_path):
     with pytest.raises(JournalError, match="could not be read"):
         load_journal(tmp_path / INDEPENDENT_STATE_FILE.name)
+
+
+def test_the_on_disk_bound_includes_the_trailing_newline(tmp_path, monkeypatch):
+    """Write used to bound the JSON only; load then refused the extra newline."""
+    target = tmp_path / INDEPENDENT_STATE_FILE.name
+    payload = record()
+    serialised = json.dumps(payload, sort_keys=True, allow_nan=False, indent=2) + "\n"
+    encoded = serialised.encode("utf-8")
+    monkeypatch.setattr(journal_module, "MAX_JOURNAL_BYTES", len(encoded))
+    assert write_journal(payload, target) == target
+    assert len(target.read_bytes()) == len(encoded)
+    assert load_journal(target)["status"] == "DEGRADED"
+
+    monkeypatch.setattr(journal_module, "MAX_JOURNAL_BYTES", len(encoded) - 1)
+    with pytest.raises(JournalError, match="byte bound"):
+        write_journal(payload, target)
+    target.write_bytes(encoded)
+    with pytest.raises(JournalError, match="over the"):
+        load_journal(target)

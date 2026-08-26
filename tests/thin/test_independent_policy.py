@@ -42,7 +42,11 @@ from cathedral_thin.independent.constants import (
     MAX_POLICY_BUNDLE_BYTES,
     NETUID,
 )
-from cathedral_thin.independent.errors import CommitmentError, PolicyBundleError
+from cathedral_thin.independent.errors import (
+    CommitmentError,
+    PolicyBundleError,
+    PolicyLineageError,
+)
 from cathedral_thin.independent.policy import (
     bundle_digest,
     decode_commitment,
@@ -52,6 +56,7 @@ from cathedral_thin.independent.policy import (
     parse_economics_set,
     parse_policy_bundle,
     require_commitment,
+    require_lineage,
     signing_payload,
     successor_lineage_fields,
     verify_signatures,
@@ -120,6 +125,12 @@ def test_the_genesis_economics_set_parses():
     assert economics.explicit_burn_only is True
     assert economics.burn_only is True
     assert is_genesis(economics)
+
+
+def test_version_one_must_carry_the_genesis_digest():
+    document = economics_document(version=1, previous_digest="ab" * 32)
+    with pytest.raises(PolicyLineageError, match="genesis previous_digest"):
+        parse_economics_set(document)
 
 
 def test_a_bool_burn_amount_is_refused():
@@ -328,6 +339,47 @@ def test_a_successor_bundle_chains_to_its_predecessor():
         "version": 2,
         "previous_digest": bundle_digest(bundle.document).hex(),
     }
+
+
+def test_genesis_lineage_is_accepted_without_last_good():
+    bundle, _registry = signed_bundle()
+    require_lineage(bundle)
+
+
+def test_a_non_genesis_bundle_needs_last_good():
+    genesis, _registry = signed_bundle()
+    successor, _ = signed_bundle(
+        economics=economics_document(version=2, previous_digest=genesis.digest().hex())
+    )
+    with pytest.raises(PolicyLineageError, match="no previously accepted"):
+        require_lineage(successor)
+    require_lineage(successor, last_good=genesis)
+
+
+def test_a_skipped_version_is_refused_as_lineage():
+    genesis, _registry = signed_bundle()
+    skipped, _ = signed_bundle(
+        economics=economics_document(version=3, previous_digest=genesis.digest().hex())
+    )
+    with pytest.raises(PolicyLineageError, match="does not follow last-good"):
+        require_lineage(skipped, last_good=genesis)
+
+
+def test_an_unrelated_predecessor_is_refused_as_lineage():
+    genesis, _registry = signed_bundle()
+    fork, _ = signed_bundle(
+        economics=economics_document(version=2, previous_digest="ab" * 32)
+    )
+    with pytest.raises(PolicyLineageError, match="does not name"):
+        require_lineage(fork, last_good=genesis)
+
+
+def test_reusing_the_same_digest_as_last_good_is_not_a_fork():
+    genesis, _registry = signed_bundle()
+    successor, _ = signed_bundle(
+        economics=economics_document(version=2, previous_digest=genesis.digest().hex())
+    )
+    require_lineage(successor, last_good=successor)
 
 
 # --------------------------------------------------------------------------- #

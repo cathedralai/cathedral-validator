@@ -1,10 +1,11 @@
 """Dry-run composition: policy bundle plus two metagraph views to a u16 vector.
 
-This is the whole composer for `independent_v1` as it stands: it verifies that
-the anchor's on-chain commitment names exactly the policy document in hand,
-turns that document into an integer mass map, re-checks every destination
-against the inclusion view, apportions to u16, and journals the result. It
-never touches a chain client and it has no writer to call.
+This is the whole composer for `independent_v1` as it stands: it verifies 2-of-3
+signatures, that the economics lineage follows genesis or last-good, that the
+anchor's on-chain commitment names exactly the policy document in hand, turns
+that document into an integer mass map, re-checks every destination against the
+inclusion view, apportions to u16, and journals the result. It never touches a
+chain client and it has no writer to call.
 
 Two outcomes are deliberately NOT acceptance:
 
@@ -43,6 +44,8 @@ from .policy import (
     bundle_digest,
     decode_commitment,
     require_commitment,
+    require_lineage,
+    verify_signatures,
 )
 
 STATUS_COMPOSED = "COMPOSED"
@@ -226,11 +229,13 @@ def require_last_good(
 def compose_dry_run(
     *,
     bundle: PolicyBundle,
+    key_registry: Mapping[str, bytes],
     commitment: bytes,
     anchor: EpochAnchor,
     anchor_view: MetagraphView,
     inclusion_view: MetagraphView,
     adapters: Mapping[LaneContractId, Any] | None = None,
+    last_good: PolicyBundle | None = None,
     journal_path: Path | str | None = INDEPENDENT_STATE_FILE,
     broadcast: bool = False,
 ) -> ComposeResult:
@@ -239,6 +244,11 @@ def compose_dry_run(
     ``broadcast=True`` is refused outright. There is no writer behind this
     function, and stubbing one so the flag "works" is how a dry-run path becomes
     a live one by accident.
+
+    Signature verification and economics lineage run before the commitment
+    check. A structurally valid bundle with arbitrary 64-byte ``sig`` values is
+    not authorized, and a committed successor that does not name the previously
+    accepted digest is a fork, not a first document.
     """
     if broadcast is not False:
         raise BroadcastDisabled(
@@ -249,6 +259,10 @@ def compose_dry_run(
             f"the policy bundle is for netuid {bundle.economics.netuid}, "
             f"this composer is pinned to {NETUID}"
         )
+    verify_signatures(bundle, key_registry)
+    if last_good is not None:
+        verify_signatures(last_good, key_registry)
+    require_lineage(bundle, last_good)
     digest = require_commitment(
         commitment,
         netuid=bundle.economics.netuid,

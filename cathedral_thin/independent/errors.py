@@ -20,6 +20,10 @@ class PolicyBundleError(IndependentValidatorError):
     """The policy document is malformed, unsigned, or internally inconsistent."""
 
 
+class PolicyLineageError(PolicyBundleError):
+    """The economics version or previous_digest cannot follow genesis or last-good."""
+
+
 class CommitmentError(IndependentValidatorError):
     """The on-chain commitment is malformed or does not match the document."""
 
@@ -102,5 +106,6 @@ __all__ = [
     "MachineIdentityConflict",
     "PolicyBundleError",
     "PolicyFetchError",
+    "PolicyLineageError",
     "RefuseListError",
 ]

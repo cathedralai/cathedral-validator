@@ -45,9 +45,10 @@ ANCHOR = EpochAnchor(
 
 
 def composed(tmp_path, *, economics=None):
-    bundle, _registry = signed_bundle(economics=economics)
+    bundle, registry = signed_bundle(economics=economics)
     return compose_dry_run(
         bundle=bundle,
+        key_registry=registry,
         commitment=commitment_for(bundle),
         anchor=ANCHOR,
         anchor_view=burn_only_view(),

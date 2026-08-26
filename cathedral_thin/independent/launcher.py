@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -204,9 +203,10 @@ def parse_config(document: Mapping[str, Any]) -> IndependentConfig:
     raw_limit = weights.get("max_weight_limit")
     if isinstance(raw_limit, bool) or not isinstance(raw_limit, (int, float)):
         raise ConfigError("weights.max_weight_limit must be a number")
-    if not math.isclose(float(raw_limit), MAX_WEIGHT_LIMIT):
+    if float(raw_limit) != MAX_WEIGHT_LIMIT:
         # Anything below 1.0 makes a legal burn-heavy vector overweight, and the
-        # chain rejects the extrinsic instead of the configuration.
+        # chain rejects the extrinsic instead of the configuration. Nearby
+        # floats such as 0.9999999995 are not 1.0.
         raise ConfigError(
             f"weights.max_weight_limit must be {MAX_WEIGHT_LIMIT}, got {raw_limit}"
         )
@@ -284,14 +284,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--hotkey-ss58",
-        default=None,
+        required=True,
         help="the resolved ss58 this runtime would sign as, checked against the "
-        "refuse-list",
+        "refuse-list. The config wallet label is not a substitute",
     )
     parser.add_argument(
         "--observed-genesis",
-        default=None,
-        help="the chain genesis hash this runtime observed, checked against the pin",
+        required=True,
+        help="the chain genesis hash this runtime observed, checked against the "
+        "pin. The config constant is not a substitute",
     )
     return parser
 
@@ -310,11 +311,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     options = parser.parse_args(arguments)
     try:
-        if options.hotkey_ss58 is not None:
-            refuse_wallet(options.hotkey_ss58)
+        refuse_wallet(options.hotkey_ss58)
         config = load_config(options.config)
-        if options.observed_genesis is not None:
-            check_genesis_pin(options.observed_genesis)
+        check_genesis_pin(options.observed_genesis)
     except IndependentValidatorError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
