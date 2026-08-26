@@ -60,16 +60,46 @@ class ConfigError(IndependentValidatorError):
     """The operator configuration is missing, malformed, or unsafe."""
 
 
+class AdapterUnavailable(IndependentValidatorError):
+    """A lane adapter cannot be constructed under this lineage's evidence rules.
+
+    Raised at construction rather than at use. An adapter that could be built
+    without its verifier would leave a code path that reaches a quote nobody
+    checked, and that path is what "attestation optional" actually means.
+    """
+
+
+class CollateralSourceError(IndependentValidatorError):
+    """Attestation collateral would be fetched from somewhere other than its pin."""
+
+
+class ComputeEvidenceError(IndependentValidatorError):
+    """Compute-lane evidence is malformed, unbounded, or not bytes."""
+
+
+class MachineIdentityConflict(ComputeEvidenceError):
+    """One machine identity is claimed by two miner hotkeys.
+
+    Both claimants are ``NOT_PROVEN`` for the epoch: the machine cannot be two
+    miners' machines, and a validator that guessed which one to believe would be
+    paying a sybil half the time.
+    """
+
+
 __all__ = [
+    "AdapterUnavailable",
     "BroadcastBlocked",
     "BroadcastDisabled",
+    "CollateralSourceError",
     "CommitmentError",
+    "ComputeEvidenceError",
     "ConfigError",
     "GenesisPinError",
     "HamiltonError",
     "IndependentValidatorError",
     "InclusionHalt",
     "JournalError",
+    "MachineIdentityConflict",
     "PolicyBundleError",
     "PolicyFetchError",
     "RefuseListError",

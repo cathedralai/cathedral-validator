@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from .compute import COMPUTE_BLOCK_REASON, COMPUTE_LANE, ComputeAdapter
 from .constants import BURN_HOTKEY, H, INDEPENDENT_STATE_FILE, LINEAGE, NETUID
 from .errors import BroadcastDisabled, CommitmentError, ConfigError
 from .hamilton import Dest, HamiltonResult, apportion
@@ -152,6 +153,13 @@ def mass_map(
             continue
         if allocation.lane_contract_id not in registry:
             reason = "no adapter is registered for this funded, enabled lane"
+        elif allocation.lane_contract_id == COMPUTE_LANE and isinstance(
+            registry[allocation.lane_contract_id], ComputeAdapter
+        ):
+            # Named rather than generic: the Compute blockers are specific open
+            # work, and a reason a reviewer can check is worth more in the
+            # journal than "some lane is not fundable".
+            reason = COMPUTE_BLOCK_REASON
         else:
             # An adapter existing is not the same as a lane being fundable. Every
             # lane's evidence blockers are open, so a funded row is refused here

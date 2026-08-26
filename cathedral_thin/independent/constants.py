@@ -92,17 +92,41 @@ GENESIS_PREVIOUS_DIGEST = hashlib.sha256(b"").hexdigest()
 
 POLICY_USER_AGENT = "cathedral-independent-validator/1.0"
 
+# The Compute lane exactly as a signed policy document names it. The composer
+# stamps this pair onto whatever adapter is registered for it; an adapter never
+# names its own lane, so a compromised one cannot claim another lane's mass.
+COMPUTE_LANE_SCHEMA = "cathedral_compute_receipt_v1"
+COMPUTE_LANE_PLATFORM = "intel_tdx_cpu"
+
+# DCAP collateral and TCB info come from Intel's public PCS. Collateral served
+# by whoever also operates the lane is not evidence: nobody outside could refetch
+# it and reach the same verdict, which is the only property that makes a quote
+# verdict worth anything to a third party.
+INTEL_PCS_HOSTS = frozenset(
+    {"api.trustedservices.intel.com", "trustedservices.intel.com"}
+)
+
+# Machines one miner may advertise for one epoch. Over the cap that miner zeros
+# for the epoch; the fleet is never truncated to the first entries, because
+# letting a miner choose which of its machines get audited is cheaper than
+# actually running the fleet.
+COMPUTE_FLEET_CAP = 256
+
 __all__ = [
     "BURN_HOTKEY",
     "COMMITMENT_LENGTH",
     "COMMITMENT_MAGIC",
     "COMMIT_REVEAL_ENABLED",
+    "COMPUTE_FLEET_CAP",
+    "COMPUTE_LANE_PLATFORM",
+    "COMPUTE_LANE_SCHEMA",
     "ECONOMICS_SET_SCHEMA",
     "FINNEY_GENESIS_HASH",
     "GENESIS_PREVIOUS_DIGEST",
     "GENESIS_VERSION",
     "H",
     "INDEPENDENT_STATE_FILE",
+    "INTEL_PCS_HOSTS",
     "LINEAGE",
     "MAX_DESTS",
     "MAX_POLICY_BUNDLE_BYTES",
