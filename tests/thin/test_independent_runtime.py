@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import http.client
 import json
 import stat
 from pathlib import Path
@@ -13,7 +14,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from _independent_fixtures import ANCHOR_HASH, BOB, BURN_UID, commitment_for
+from _independent_fixtures import (
+    ANCHOR_HASH,
+    BOB,
+    BURN_UID,
+    CHARLIE,
+    commitment_for,
+)
 from cathedral_thin.independent.collect import (
     CHANNEL_BINDING_TYPE_TLS,
     ChannelBinding,
@@ -518,11 +525,16 @@ class RunnerSubtensor:
 
     ``port=0`` means no axon serves, so nothing dials. A positive port makes the
     miner collectable, which is what the SAT wiring test needs.
+
+    ``extra_miners`` are ``(uid, hotkey)`` rows appended after BOB. They are on
+    the metagraph AND serving, so inclusion maps them to a UID and the composer
+    can pay them, which is what the two-axon rounds need.
     """
 
-    def __init__(self, head: int, *, port: int = 0) -> None:
+    def __init__(self, head: int, *, port: int = 0, extra_miners=()) -> None:
         self.head = head
         self.port = port
+        self.extra_miners = tuple(extra_miners)
         self.substrate = FakeGenesisSubstrate()
         self.metagraph_blocks: list[object] = []
 
@@ -535,7 +547,9 @@ class RunnerSubtensor:
     def metagraph(self, netuid: int, block: int | None = None):
         assert netuid == 39
         self.metagraph_blocks.append(block)
-        return FakeMetagraph([BURN_UID, MINER_UID], [BURN_HOTKEY, BOB], port=self.port)
+        uids = [BURN_UID, MINER_UID, *(uid for uid, _hotkey in self.extra_miners)]
+        hotkeys = [BURN_HOTKEY, BOB, *(hotkey for _uid, hotkey in self.extra_miners)]
+        return FakeMetagraph(uids, hotkeys, port=self.port)
 
 
 class FakePinnedVerifier:
@@ -561,7 +575,12 @@ def run_options(tmp_path, **overrides) -> argparse.Namespace:
 
 
 def prepared_runner(
-    monkeypatch, head: int, *, bind_mass: bool = True, port: int = 0
+    monkeypatch,
+    head: int,
+    *,
+    bind_mass: bool = True,
+    port: int = 0,
+    extra_miners=(),
 ) -> RunnerSubtensor:
     """A ``cmd_run`` that reaches COMPOSED without a network or a wallet.
 
@@ -574,7 +593,7 @@ def prepared_runner(
     monkeypatch.delenv("CATHEDRAL_API_KEY", raising=False)
     monkeypatch.delenv("CATHEDRAL_CANARY_HOTKEY_JSON", raising=False)
     monkeypatch.setattr(run_module, "fetch_public_json", lambda path: {})
-    subtensor = RunnerSubtensor(head, port=port)
+    subtensor = RunnerSubtensor(head, port=port, extra_miners=extra_miners)
     monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
     monkeypatch.setattr(run_module, "load_verifier", lambda path: FakePinnedVerifier())
     if bind_mass:
@@ -639,13 +658,18 @@ def test_the_runner_snapshots_the_anchor_first_then_re_reads_at_the_head(
 
 SAT_UNITS = 20
 AXON_SAT_URL = "https://203.0.113.9:8443/v1/sat-work"
+ONE_SPKI = bytes(range(32, 64))
+OTHER_SPKI = bytes(range(64, 96))
+SECOND_MINER_UID = 9
 
 
-def collected_for(hotkey: str = BOB) -> CollectedEvidence:
-    """A CollectedEvidence the way ``collect_evidence`` would have returned it."""
-    binding = ChannelBinding(
-        binding_type=CHANNEL_BINDING_TYPE_TLS, digest=bytes(range(32, 64))
-    )
+def collected_for(hotkey: str = BOB, *, digest: bytes = ONE_SPKI) -> CollectedEvidence:
+    """A CollectedEvidence the way ``collect_evidence`` would have returned it.
+
+    ``digest`` is the observed TLS SPKI, which is also the machine identity, so
+    two miners can be given one machine or two.
+    """
+    binding = ChannelBinding(binding_type=CHANNEL_BINDING_TYPE_TLS, digest=digest)
     return CollectedEvidence(
         kind="tdx",
         quote=b"tdx-quote" * 16,
@@ -773,6 +797,124 @@ def test_a_refused_sat_round_admits_the_miner_and_pays_it_nothing(
     assert "SatWorkError" in row["sat_error"]
     assert "sat_units" not in row
     assert report["compose"]["status"] != STATUS_COMPOSED
+
+
+def two_axon_runner(monkeypatch, digests: dict[str, bytes]) -> None:
+    """A runner with BOB and CHARLIE both registered and both serving.
+
+    ``digests`` hands each hotkey the TLS SPKI its evidence was bound to, so a
+    round can put the two miners on one machine or on two.
+    """
+    prepared_runner(
+        monkeypatch,
+        TEMPO_BLOCKS * 17_000 + 41,
+        bind_mass=False,
+        port=8443,
+        extra_miners=((SECOND_MINER_UID, CHARLIE),),
+    )
+    evidence = {
+        hotkey: collected_for(hotkey, digest=digest)
+        for hotkey, digest in digests.items()
+    }
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": evidence[hotkey],
+        }
+
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+
+
+def collect_rows(report) -> dict[str, dict]:
+    return {row["hotkey"]: row for row in report["collect"]}
+
+
+def test_a_flaky_sat_http_exception_does_not_abort_the_epoch(
+    monkeypatch, tmp_path, capsys
+):
+    """A flaky axon costs its own miner the round, never the whole epoch.
+
+    ``http.client.HTTPException`` is not an ``OSError``, so a transport that
+    only caught the named errors let one truncated response abort ``cmd_run``
+    for every other miner on the subnet.
+    """
+    two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
+
+    def flaky_sat_work(*, url, assigned_hotkey, item, transport):
+        if assigned_hotkey == BOB:
+            raise http.client.HTTPException("incomplete read")
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", flaky_sat_work)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["qvl_pass_count"] == 2
+    assert report["verified_units"] == {CHARLIE: SAT_UNITS}
+    assert report["verified_mass"] == {CHARLIE: COMPUTE_ALLOCATION}
+    rows = collect_rows(report)
+    assert "HTTPException" in rows[BOB]["sat_error"]
+    assert "sat_units" not in rows[BOB]
+    assert rows[CHARLIE]["sat_units"] == SAT_UNITS
+    assert report["compose"]["status"] == STATUS_COMPOSED
+    assert SECOND_MINER_UID in report["compose"]["dests"]
+
+
+def test_two_hotkeys_on_one_tls_spki_are_both_unpaid(monkeypatch, tmp_path, capsys):
+    """One audited machine under two registered hotkeys pays neither.
+
+    Both quotes PASS and both work rounds return units, so this is the exact
+    shape of the duplicate-registration cheat: without the per-epoch machine
+    ledger each hotkey would collect a full Compute share off one machine.
+    """
+    two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: ONE_SPKI})
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    # Admitted, unpaid: both quotes passed, neither hotkey earned anything.
+    assert report["qvl_pass_count"] == 2
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    rows = collect_rows(report)
+    for hotkey in (BOB, CHARLIE):
+        assert "MachineIdentityConflict" in rows[hotkey]["sat_error"]
+        assert "sat_units" not in rows[hotkey]
+        assert "sat_rule" not in rows[hotkey]
+    assert any("machine-identity" in row for row in report["blockers"])
+    assert report["compose"]["status"] != STATUS_COMPOSED
+
+
+def test_two_hotkeys_on_distinct_tls_spki_are_both_paid(monkeypatch, tmp_path, capsys):
+    """Two machines are two machines. The ledger only refuses duplicates."""
+    two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["qvl_pass_count"] == 2
+    assert report["verified_units"] == {BOB: SAT_UNITS, CHARLIE: SAT_UNITS}
+    assert set(report["verified_mass"]) == {BOB, CHARLIE}
+    assert sum(report["verified_mass"].values()) == COMPUTE_ALLOCATION
+    assert report["compose"]["status"] == STATUS_COMPOSED
+    assert MINER_UID in report["compose"]["dests"]
+    assert SECOND_MINER_UID in report["compose"]["dests"]
+    assert sum(report["compose"]["weights"]) == 65535
 
 
 def test_a_failing_quote_is_never_asked_for_work(monkeypatch, tmp_path, capsys):

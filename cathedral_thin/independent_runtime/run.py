@@ -38,6 +38,7 @@ from cathedral_thin.independent.compute import (
     COMPUTE_LANE,
     ComputeAdapter,
     QuoteVerdict,
+    assert_machine_identity,
 )
 from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
@@ -54,6 +55,7 @@ from cathedral_thin.independent.errors import (
     CanaryTransportError,
     HamiltonError,
     IndependentValidatorError,
+    MachineIdentityConflict,
     RefuseListError,
     SatWorkError,
 )
@@ -348,6 +350,29 @@ def _units_after_quote(
     return units
 
 
+def _forfeit_machine_conflict(
+    *,
+    rows: list[dict[str, Any]],
+    verified_units: dict[str, int],
+    hotkeys: set[str],
+    reason: str,
+) -> None:
+    """Zero every hotkey that claimed one machine identity this epoch.
+
+    Neither claimant is picked over the other, and units already credited to
+    the first one are forfeited rather than kept: an operator who registers a
+    second UID against one audited machine has to lose the round for both, or
+    the duplicate is cheaper than the machine.
+    """
+    for hotkey in hotkeys:
+        verified_units.pop(hotkey, None)
+    for row in rows:
+        if row.get("hotkey") in hotkeys:
+            row.pop("sat_units", None)
+            row.pop("sat_rule", None)
+            row["sat_error"] = reason
+
+
 def _summarize_catalog(document: Any) -> dict[str, Any]:
     rows = document.get("profiles") if isinstance(document, dict) else document
     if not isinstance(rows, list):
@@ -529,6 +554,9 @@ def cmd_run(options: argparse.Namespace) -> int:
         )
 
     verified_units: dict[str, int] = {}
+    # Which hotkey owns which audited machine for this epoch. Two registered
+    # UIDs advertising one machine is one machine's worth of work, not two.
+    claimed: dict[str, str] = {}
     pass_count = 0
     qvl = None
     try:
@@ -572,14 +600,29 @@ def cmd_run(options: argparse.Namespace) -> int:
                         collected=collected,
                         sat_url=sat_url,
                     )
-                except (
-                    IndependentValidatorError,
-                    IndependentLiveError,
-                    OSError,
-                ) as exc:
+                except Exception as exc:
                     # Admitted, unpaid. A machine that attests but will not
                     # produce a checkable witness earns nothing this epoch.
+                    # Exception, not BaseException: one flaky axon must not
+                    # cost every other miner its round, while KeyboardInterrupt
+                    # and SystemExit still stop the process.
                     row["sat_error"] = f"{type(exc).__name__}: {exc}"
+                    continue
+                # The machine identity is the observed TLS SPKI digest, already
+                # 64 lowercase hex, so it is the ledger key as-is.
+                machine_id = collected.channel_binding.digest.hex()
+                try:
+                    assert_machine_identity(
+                        machine_id, collected.assigned_hotkey, claimed
+                    )
+                except MachineIdentityConflict as exc:
+                    _forfeit_machine_conflict(
+                        rows=collect_hits,
+                        verified_units=verified_units,
+                        hotkeys={claimed[machine_id], collected.assigned_hotkey},
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    report["blockers"].append(f"machine-identity: {exc}")
                     continue
                 row["sat_units"] = units
                 row["sat_rule"] = SAT_WORK_UNIT_RULE
