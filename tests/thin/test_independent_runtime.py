@@ -9,8 +9,14 @@ import pytest
 from _independent_fixtures import BOB, BURN_UID, commitment_for
 from cathedral_thin.independent.compose import STATUS_COMPOSED, compose_dry_run
 from cathedral_thin.independent.compute import COMPUTE_LANE, ComputeAdapter
-from cathedral_thin.independent.constants import BURN_HOTKEY, H, INDEPENDENT_STATE_FILE
+from cathedral_thin.independent.constants import (
+    BURN_HOTKEY,
+    H,
+    INDEPENDENT_STATE_FILE,
+    TEMPO_BLOCKS,
+)
 from cathedral_thin.independent.inclusion import MetagraphView
+from cathedral_thin.independent_runtime.errors import ChainClientError, QuoteVerifyError
 from cathedral_thin.independent_runtime.https import (
     axon_evidence_url,
     tls_context_for_evidence,
@@ -19,7 +25,12 @@ from cathedral_thin.independent_runtime.local_policy import (
     COMPUTE_ALLOCATION,
     funded_compute_bundle,
 )
+from cathedral_thin.independent_runtime.qvl import load_verifier
 from cathedral_thin.independent_runtime.score import mass_from_units
+from cathedral_thin.independent_runtime.tempo import (
+    closed_epoch_anchor,
+    closed_epoch_open,
+)
 from cathedral_thin.independent_runtime.workers import (
     WorkersApiError,
     WorkersClient,
@@ -219,3 +230,27 @@ def test_create_refuses_a_sub_dollar_budget():
     client = WorkersClient("cat_sk_test", transport=lambda *a: (200, b"{}"))
     with pytest.raises(WorkersApiError, match="1.00"):
         client.create_persistent_tdx(name="too-cheap", max_spend_usd=0.5)
+
+
+def test_closed_epoch_anchor_names_a_produced_block():
+    block = TEMPO_BLOCKS * 10 + 7
+    epoch_open = closed_epoch_open(block)
+    assert epoch_open == TEMPO_BLOCKS * 10
+    assert epoch_open <= block
+    anchor = closed_epoch_anchor(block, "ab" * 32)
+    assert anchor.epoch_open == epoch_open
+    assert anchor.anchor_number == epoch_open - 1
+    assert anchor.anchor_hash == "0x" + "ab" * 32
+
+
+def test_closed_epoch_anchor_refuses_a_missing_hash():
+    with pytest.raises(ChainClientError, match="missing"):
+        closed_epoch_anchor(TEMPO_BLOCKS * 2, None)
+
+
+def test_load_verifier_refuses_a_binary_that_is_not_the_launch_pin(tmp_path):
+    path = tmp_path / "fake-qvl"
+    path.write_text("#!/bin/sh\necho no\n", encoding="utf-8")
+    path.chmod(0o755)
+    with pytest.raises(QuoteVerifyError, match="launch pin"):
+        load_verifier(str(path))

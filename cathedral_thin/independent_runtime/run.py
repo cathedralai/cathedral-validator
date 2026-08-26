@@ -39,13 +39,13 @@ from cathedral_thin.independent.constants import (
     INDEPENDENT_STATE_FILE,
     NETUID,
     REFUSE_HOTKEYS,
-    TEMPO_BLOCKS,
 )
 from cathedral_thin.independent.errors import (
     CanaryIneligible,
     CanarySpent,
     CanaryStateError,
     CanaryTransportError,
+    IndependentValidatorError,
     RefuseListError,
 )
 from cathedral_thin.independent.submit import prepare_mechanism_weights
@@ -67,6 +67,7 @@ from .https import HttpsEvidenceTransport
 from .local_policy import COMPUTE_ALLOCATION, commitment_for, funded_compute_bundle
 from .qvl import load_verifier
 from .score import mass_from_units
+from .tempo import closed_epoch_anchor, closed_epoch_open
 from .workers import WorkersClient, fetch_public_json, tdx_workers
 
 INTEL_COLLATERAL = "https://api.trustedservices.intel.com/sgx/certification/v4/"
@@ -193,15 +194,8 @@ def cmd_probe_sn39(_options: argparse.Namespace) -> int:
 
 def _epoch_anchor(subtensor: Any) -> EpochAnchor:
     block = int(subtensor.get_current_block())
-    epoch_index = block // TEMPO_BLOCKS
-    epoch_open = (epoch_index + 1) * TEMPO_BLOCKS
-    anchor_number = epoch_open - 1
-    raw_hash = str(subtensor.get_block_hash(anchor_number)).lower()
-    if not raw_hash.startswith("0x"):
-        raw_hash = "0x" + raw_hash
-    return EpochAnchor(
-        epoch_open=epoch_open, anchor_number=anchor_number, anchor_hash=raw_hash
-    )
+    epoch_open = closed_epoch_open(block)
+    return closed_epoch_anchor(block, subtensor.get_block_hash(epoch_open - 1))
 
 
 def _try_collect(url: str, hotkey: str, validator_ss58: str) -> dict[str, Any]:
@@ -216,6 +210,10 @@ def _try_collect(url: str, hotkey: str, validator_ss58: str) -> dict[str, Any]:
             channel_binding=binding,
             transport=transport,
         )
+        if transport.last_spki != binding.digest:
+            raise IndependentLiveError(
+                "TLS SPKI changed between the binding handshake and the evidence POST"
+            )
     except Exception as exc:
         return {
             "url": url,
@@ -397,6 +395,11 @@ def cmd_run(options: argparse.Namespace) -> int:
             )
             row["verdict"] = verdict.value
             if verdict is QuoteVerdict.PASS:
+                if collected.assigned_hotkey == CANARY_HOTKEY:
+                    report["blockers"].append(
+                        "qvl: PASS quote is the canary identity; not mass"
+                    )
+                    continue
                 # Attestation is admission. One verified machine that answered
                 # this validator's nonce is one integer work unit of liveness
                 # until SAT work-report dispatch is wired for this guest.
@@ -561,6 +564,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if options.command == "run":
             return cmd_run(options)
     except IndependentLiveError as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    except IndependentValidatorError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     never: str = options.command

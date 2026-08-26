@@ -17,9 +17,11 @@ from bittensor_wallet import Keypair
 from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
     FINNEY_GENESIS_HASH,
+    MECID,
     NETUID,
     REFUSE_HOTKEYS,
     SN39_MORTAL_PERIOD_BLOCKS,
+    VERSION_KEY,
 )
 from cathedral_thin.independent.inclusion import MetagraphView
 from cathedral_thin.independent.refuse import require_permitted_hotkey
@@ -65,7 +67,7 @@ def serving_axons(metagraph: Any) -> tuple[ServingAxon, ...]:
         raise ChainClientError("metagraph axon rows are ragged")
     found: list[ServingAxon] = []
     for uid, hotkey, axon in zip(uids, hotkeys, axons):
-        if hotkey in REFUSE_HOTKEYS:
+        if hotkey in REFUSE_HOTKEYS or hotkey == CANARY_HOTKEY:
             continue
         port = int(getattr(axon, "port", 0) or 0)
         serving = bool(getattr(axon, "is_serving", port > 0)) and port > 0
@@ -145,6 +147,13 @@ class SubstrateCanaryTransport:
             raise ChainClientError("mechanism weight kwargs must be a mapping")
         if int(kwargs.get("netuid", -1)) != NETUID:
             raise ChainClientError("canary transport is pinned to netuid 39")
+        if int(kwargs.get("mecid", -1)) != MECID:
+            raise ChainClientError("canary transport is pinned to mecid 0")
+        if int(kwargs.get("version_key", -1)) != VERSION_KEY:
+            raise ChainClientError(
+                f"canary transport is pinned to version_key {VERSION_KEY}"
+            )
+        observed_genesis_hash(self.subtensor)
         substrate = self.subtensor.substrate
         try:
             header = substrate.get_block_header()

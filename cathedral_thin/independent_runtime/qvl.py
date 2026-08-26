@@ -19,6 +19,7 @@ from cathedral_thin.independent.compute import QuoteVerdict
 
 from .errors import QuoteVerifyError
 
+LAUNCH_QVL_DIGEST = "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 MAX_OUTPUT = 1_048_576
 TIMEOUT_SECONDS = 30
 
@@ -94,4 +95,9 @@ def load_verifier(path: str | None) -> SubprocessQuoteVerifier:
             "no QVL binary: set CATHEDRAL_TDX_VERIFY_CMD to an executable"
         )
     command = Path(raw.split()[0] if " " in raw else raw)
-    return SubprocessQuoteVerifier(command)
+    verifier = SubprocessQuoteVerifier(command)
+    if verifier.digest != LAUNCH_QVL_DIGEST:
+        raise QuoteVerifyError(
+            f"QVL digest {verifier.digest} is not the launch pin {LAUNCH_QVL_DIGEST}"
+        )
+    return verifier

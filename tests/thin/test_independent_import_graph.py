@@ -64,6 +64,7 @@ BANNED_TEXT = (
     "api.cathedral.computer",
     "neuron.validator",
     "SatLane",
+    "independent_runtime",
 )
 
 # ``numpy`` is banned alongside the writers: the u16 apportionment must be exact
