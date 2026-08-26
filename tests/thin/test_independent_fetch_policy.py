@@ -69,6 +69,16 @@ def test_the_host_header_includes_a_non_default_port():
     assert explicit.host_header == "policy.example.com:8443"
 
 
+def test_ipv6_literals_are_bracketed_in_the_host_header_and_label():
+    default = validate_policy_url("https://[2001:db8::1]/b.json")
+    assert default.host == "2001:db8::1"
+    assert default.host_header == "[2001:db8::1]"
+    assert default.label == "https://[2001:db8::1]:443"
+    explicit = validate_policy_url("https://[2001:db8::1]:8443/b.json")
+    assert explicit.host_header == "[2001:db8::1]:8443"
+    assert explicit.label == "https://[2001:db8::1]:8443"
+
+
 def _info(address: str) -> tuple:
     return (2, 1, 6, "", (address, 443))
 

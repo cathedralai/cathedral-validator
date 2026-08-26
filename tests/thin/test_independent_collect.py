@@ -287,6 +287,16 @@ def test_a_base_url_gets_the_evidence_path_and_anything_else_is_refused():
         evidence_url("https://miner.example.test:8443/v1/evidence")
         == "https://miner.example.test:8443/v1/evidence"
     )
+    ipv6 = "https://[2001:db8::1]/v1/evidence"
+    assert evidence_url(ipv6) == ipv6
+    assert evidence_url("https://[2001:db8::1]") == ipv6
+    assert (
+        evidence_url("https://[2001:db8::1]:8443/v1/evidence")
+        == "https://[2001:db8::1]:8443/v1/evidence"
+    )
+    transport = transport_for()
+    collect(transport, url=ipv6)
+    assert transport.calls[0][0] == ipv6
     for bad in (
         "https://miner.example.test/v1/sat-work",
         "https://miner.example.test/v2/evidence",

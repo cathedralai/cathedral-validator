@@ -49,6 +49,17 @@ _READ_CHUNK = 65536
 Resolver = Callable[[str, int, float], Sequence[tuple[Any, ...]]]
 
 
+def _authority_host(host: str) -> str:
+    """Host as it appears in a URL authority or Host header.
+
+    ``urlsplit`` stores IPv6 literals without brackets. Putting that value
+    back into a URL or a Host header without wrapping it produces an
+    ambiguous authority (``https://2001:db8::1:8443/path`` has no parseable
+    host/port split).
+    """
+    return f"[{host}]" if ":" in host else host
+
+
 @dataclass(frozen=True)
 class PolicyEndpoint:
     """A validated policy document endpoint."""
@@ -60,14 +71,19 @@ class PolicyEndpoint:
     @property
     def label(self) -> str:
         """A log-safe identity: scheme, host, port. Never the raw URL."""
-        return f"https://{self.host}:{self.port}"
+        return f"https://{_authority_host(self.host)}:{self.port}"
 
     @property
     def host_header(self) -> str:
-        """RFC 9110 Host: omit the port only when it is the https default."""
+        """RFC 9110 Host: omit the port only when it is the https default.
+
+        IPv6 literals are bracketed, so reconstructing a URL from this value
+        (the collect client does) remains a valid https authority.
+        """
+        host = _authority_host(self.host)
         if self.port == 443:
-            return self.host
-        return f"{self.host}:{self.port}"
+            return host
+        return f"{host}:{self.port}"
 
 
 def validate_policy_url(url: str) -> PolicyEndpoint:
