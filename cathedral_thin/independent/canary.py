@@ -13,6 +13,10 @@ The gates, all fail-closed, all before the transport is touched:
   and is not acceptance. ``BROADCAST_BLOCKED`` is not a write;
 * the signed policy bundle carries a funded Compute row. A CyberGym-only mix,
   or Compute at allocation 0, is not this canary;
+* the composition's own ``bundle_digest`` is the digest of that bundle. The
+  slot is spent for THIS composed vector from THIS signed bundle: a funded
+  Compute row proves the document in hand is payable, not that the vector came
+  from it, so a vector composed against another document is refused;
 * the destination vector still includes burn and is not burn-only;
 * every paid destination is identified by the composition's own ``uid ->
   hotkey`` bindings, and none of them is a hotkey this lineage may never pay.
@@ -177,6 +181,24 @@ def _require_composed(result: object) -> ComposeResult:
         raise CanaryIneligible("burn-only is not a canary; DEGRADED is not acceptance")
     _require_payable_dests(result, burn_uid=burn_uid)
     return result
+
+
+def _require_bundle_binding(result: ComposeResult, bundle: PolicyBundle) -> None:
+    """Refuse a vector that was composed from a different policy document.
+
+    ``_require_funded_compute`` only proves the bundle in hand is payable. It
+    says nothing about which document the vector came from, so a composition
+    journalled under one bundle could otherwise spend the slot against any
+    other funded bundle. Compose records the digest it composed against, so the
+    composition names its own document; anything else is two documents spliced
+    together.
+    """
+    observed = result.record.get("bundle_digest")
+    expected = bundle.digest().hex()
+    if not isinstance(observed, str) or observed != expected:
+        raise CanaryIneligible(
+            "the canary bundle is not the document this vector was composed from"
+        )
 
 
 def _require_payable_dests(result: ComposeResult, *, burn_uid: int) -> None:
@@ -405,6 +427,7 @@ def submit_canary_once(
     identity = require_canary_hotkey(hotkey)
     _require_funded_compute(bundle)
     composed = _require_composed(result)
+    _require_bundle_binding(composed, bundle)
     expected = _require_u16_match(composed, kwargs)
     target = _require_canary_path(Path(state_path))
 

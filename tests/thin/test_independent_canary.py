@@ -11,7 +11,10 @@ Four separate claims:
    spend the slot through the injected transport;
 4. the live relay identity, the burn destination, a permitted-but-not-canary
    hotkey, a missing transport, a u16 mismatch, and a second call are all
-   refusals, and nothing on this path opens a socket or names a chain writer.
+   refusals, and nothing on this path opens a socket or names a chain writer;
+5. the vector and the bundle must be the same document: a composition
+   journalled under one funded bundle cannot spend the slot against another,
+   and a result that names no bundle at all is refused.
 
 Treating burn-only as the first on-chain write is still forbidden.
 """
@@ -22,6 +25,7 @@ import json
 import os
 import socket
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -137,6 +141,16 @@ def funded_compute_bundle():
     return signed_bundle(economics=economics)
 
 
+def other_funded_compute_bundle():
+    """A second payable bundle. A different Compute amount, so a different digest."""
+    economics = economics_document(
+        burn_amount=H - 2 * 10**11,
+        allocations=[lane_row(COMPUTE_LANE, 2 * 10**11)],
+        explicit_burn_only=False,
+    )
+    return signed_bundle(economics=economics)
+
+
 def funded_cybergym_bundle():
     economics = economics_document(
         burn_amount=H - 10**11,
@@ -203,6 +217,23 @@ def synthetic_composed(
     )
 
 
+def stamp_bundle_digest(result, bundle):
+    """Bind a synthetic result to ``bundle`` the way compose already does.
+
+    ``compose_dry_run`` journals ``bundle_digest``, and the canary refuses a
+    vector it cannot bind to the bundle in hand. Synthetic fixtures carry no
+    digest, so stamp one here rather than in ``synthetic_composed``: the gate
+    is then still provable by calling ``submit_canary_once`` directly with an
+    unstamped result. ``ComposeResult`` is frozen and its record is shared, so
+    replace both instead of mutating.
+    """
+    if isinstance(result.record.get("bundle_digest"), str):
+        return result
+    record = dict(result.record)
+    record["bundle_digest"] = bundle.digest().hex()
+    return replace(result, record=record)
+
+
 def run_canary(
     tmp_path,
     *,
@@ -216,6 +247,7 @@ def run_canary(
         bundle, _registry = funded_compute_bundle()
     if result is None:
         result = synthetic_composed()
+    result = stamp_bundle_digest(result, bundle)
     if kwargs is None:
         kwargs = build_mechanism_weights_kwargs(
             dests=result.dests, weights=result.weights
@@ -405,6 +437,7 @@ def test_a_real_composed_compute_vector_can_be_the_canary(tmp_path):
     assert result.status == STATUS_COMPOSED
     assert miner_uid in result.dests
     assert BURN_UID in result.dests
+    assert result.record["bundle_digest"] == bundle.digest().hex()
     kwargs = prepare_mechanism_weights(
         result=result, journal_path=journal_path(tmp_path)
     )
@@ -414,6 +447,58 @@ def test_a_real_composed_compute_vector_can_be_the_canary(tmp_path):
     assert transport.calls == [dict(kwargs)]
     assert receipt.kwargs["dests"] == list(result.dests)
     assert receipt.kwargs["weights"] == list(result.weights)
+
+
+def test_a_vector_composed_from_another_bundle_cannot_spend_the_slot(tmp_path):
+    """A funded Compute row in bundle B does not authorize A's vector.
+
+    Both bundles are payable, so every other gate passes. Only the digest the
+    composition journalled separates them, and splicing one epoch's vector onto
+    another signed document is what the gate refuses.
+    """
+    bundle_a, _registry_a = funded_compute_bundle()
+    bundle_b, _registry_b = other_funded_compute_bundle()
+    assert bundle_a.digest() != bundle_b.digest()
+    composed_from_a = stamp_bundle_digest(synthetic_composed(), bundle_a)
+    kwargs = build_mechanism_weights_kwargs(
+        dests=composed_from_a.dests, weights=composed_from_a.weights
+    )
+    transport = FakeTransport()
+    with pytest.raises(
+        CanaryIneligible, match="not the document this vector was composed from"
+    ):
+        submit_canary_once(
+            result=composed_from_a,
+            kwargs=kwargs,
+            bundle=bundle_b,
+            hotkey=CANARY_HOTKEY,
+            transport=transport,
+            state_path=canary_path(tmp_path),
+        )
+    assert transport.calls == []
+    assert not canary_path(tmp_path).exists()
+
+
+def test_a_result_that_names_no_bundle_cannot_spend_the_slot(tmp_path):
+    """The unstamped fixture is refused; the helper in run_canary is the stamp."""
+    bundle, _registry = funded_compute_bundle()
+    result = synthetic_composed()
+    assert "bundle_digest" not in result.record
+    kwargs = build_mechanism_weights_kwargs(dests=result.dests, weights=result.weights)
+    transport = FakeTransport()
+    with pytest.raises(
+        CanaryIneligible, match="not the document this vector was composed from"
+    ):
+        submit_canary_once(
+            result=result,
+            kwargs=kwargs,
+            bundle=bundle,
+            hotkey=CANARY_HOTKEY,
+            transport=transport,
+            state_path=canary_path(tmp_path),
+        )
+    assert transport.calls == []
+    assert not canary_path(tmp_path).exists()
 
 
 def test_prepare_still_refuses_a_broadcast_flag_on_a_degraded_vector(tmp_path):
@@ -521,7 +606,7 @@ def test_an_object_without_the_submit_method_is_not_a_transport(tmp_path):
 
 def test_the_compose_journal_name_is_refused_as_the_canary_lock(tmp_path):
     bundle, _registry = funded_compute_bundle()
-    result = synthetic_composed()
+    result = stamp_bundle_digest(synthetic_composed(), bundle)
     kwargs = build_mechanism_weights_kwargs(dests=result.dests, weights=result.weights)
     with pytest.raises(CanaryStateError, match="must be named"):
         submit_canary_once(
@@ -537,7 +622,7 @@ def test_the_compose_journal_name_is_refused_as_the_canary_lock(tmp_path):
 
 def test_the_thin_journal_name_is_refused_as_the_canary_lock(tmp_path):
     bundle, _registry = funded_compute_bundle()
-    result = synthetic_composed()
+    result = stamp_bundle_digest(synthetic_composed(), bundle)
     kwargs = build_mechanism_weights_kwargs(dests=result.dests, weights=result.weights)
     with pytest.raises(CanaryStateError, match="must be named"):
         submit_canary_once(

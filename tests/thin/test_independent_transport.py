@@ -54,6 +54,7 @@ from test_independent_canary import (
     PAYABLE_DESTS,
     PAYABLE_WEIGHTS,
     funded_compute_bundle,
+    stamp_bundle_digest,
     synthetic_composed,
 )
 
@@ -333,7 +334,7 @@ def test_a_foreign_genesis_is_still_refused_with_a_pending_lock(tmp_path):
 def test_submit_canary_once_claims_the_lock_the_transport_then_finds(tmp_path):
     """The only shipped path: the sealed package claims, the transport signs."""
     bundle, _registry = funded_compute_bundle()
-    result = synthetic_composed()
+    result = stamp_bundle_digest(synthetic_composed(), bundle)
     subtensor = FakeSubtensor()
     transport = transport_for(tmp_path, subtensor=subtensor)
     assert not lock_path(tmp_path).exists()
