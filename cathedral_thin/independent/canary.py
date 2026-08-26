@@ -14,10 +14,12 @@ The gates, all fail-closed, all before the transport is touched:
 * the signed policy bundle carries a funded Compute row. A CyberGym-only mix,
   or Compute at allocation 0, is not this canary;
 * the destination vector still includes burn and is not burn-only;
-* every destination is identified by the composition's own ``uid -> hotkey``
-  bindings, and none of them is a hotkey this lineage may never pay. The canary
-  signs the vector, so paying the canary is the composer paying itself, which is
-  the rule the burn destination has always had;
+* every paid destination is identified by the composition's own ``uid ->
+  hotkey`` bindings, and none of them is a hotkey this lineage may never pay.
+  Bindings may name dests Hamilton later omitted as sub-u16 dust; those extra
+  names are not a mismatch. A paid dest without a binding is. The canary signs
+  the vector, so paying the canary is the composer paying itself, which is the
+  rule the burn destination has always had;
 * the prepared kwargs match the composed dests and weights exactly, on the
   pinned netuid / mecid / version_key;
 * the transport is injected;
@@ -184,14 +186,20 @@ def _require_payable_dests(result: ComposeResult, *, burn_uid: int) -> None:
     reaches here carrying one did not come from ``compose_dry_run``. That is
     exactly the case worth refusing: the gate is the last thing between a
     hand-assembled vector and a signed extrinsic.
+
+    ``uid_hotkeys`` is the inclusion snapshot, taken before Hamilton drops
+    sub-u16 dust. Paid dests must be a subset of those bindings. Extra names
+    for omitted dust are expected; a paid dest that inclusion never named is
+    not.
     """
     bindings = result.inclusion.uid_hotkeys
     if not isinstance(bindings, Mapping):
         raise CanaryIneligible("the composition carries no uid/hotkey bindings")
-    if set(bindings) != set(result.dests):
+    unidentified = set(result.dests) - set(bindings)
+    if unidentified:
         raise CanaryIneligible(
-            "the uid/hotkey bindings do not cover exactly the composed "
-            "destinations; an unidentified destination is never paid"
+            "the uid/hotkey bindings do not cover the composed destinations; "
+            "an unidentified destination is never paid"
         )
     for uid in result.dests:
         hotkey = bindings[uid]

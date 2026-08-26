@@ -27,6 +27,7 @@ import pytest
 from _independent_fixtures import (
     BOB,
     BURN_UID,
+    CHARLIE,
     COMPUTE_LANE,
     burn_only_view,
     commitment_for,
@@ -255,6 +256,43 @@ def test_the_forfeit_journal_names_why_each_destination_lost_its_mass(tmp_path):
     assert {row["uid"]: row["reason"] for row in journalled["forfeits"]} == reasons
     assert journalled["uid_hotkeys"] == {str(BURN_UID): BURN_HOTKEY}
     assert result.status == STATUS_DEGRADED
+
+
+def test_a_dust_contributor_does_not_block_the_canary(tmp_path):
+    """Hamilton omits sub-u16 mass; the payable remainder still spends the slot.
+
+    Inclusion binds both miners. Hamilton then drops the dust uid from the
+    paid dests. The canary must still fire: extra inclusion bindings are
+    omitted dests, not unidentified ones.
+    """
+    view = MetagraphView.from_uid_map(
+        {
+            BURN_UID: BURN_HOTKEY,
+            MINER_UID: BOB,
+            SECOND_MINER_UID: CHARLIE,
+        }
+    )
+    bundle, result = compose_with(
+        tmp_path,
+        view=view,
+        verified_mass={BOB: COMPUTE_AMOUNT - 1, CHARLIE: 1},
+    )
+    assert result.status == STATUS_COMPOSED
+    assert SECOND_MINER_UID not in result.dests
+    assert MINER_UID in result.dests
+    assert BURN_UID in result.dests
+    assert SECOND_MINER_UID in result.inclusion.uid_hotkeys
+    assert set(result.dests) < set(result.inclusion.uid_hotkeys)
+    assert result.record["h_map"][str(SECOND_MINER_UID)]["m"] == 1
+
+    kwargs = build_mechanism_weights_kwargs(dests=result.dests, weights=result.weights)
+    receipt, transport = run_canary(
+        tmp_path, result=result, kwargs=kwargs, bundle=bundle
+    )
+    assert len(transport.calls) == 1
+    assert SECOND_MINER_UID not in receipt.kwargs["dests"]
+    assert MINER_UID in receipt.kwargs["dests"]
+    assert BURN_UID in receipt.kwargs["dests"]
 
 
 def test_the_burn_destination_survives_both_gates(tmp_path):

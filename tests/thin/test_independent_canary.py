@@ -355,6 +355,31 @@ def test_a_real_funded_compute_compose_cannot_be_the_canary(tmp_path):
     assert not canary_path(tmp_path).exists()
 
 
+def test_hamilton_omitted_dust_bindings_do_not_block_the_canary(tmp_path):
+    """Inclusion names dests before Hamilton drops sub-u16 dust.
+
+    A payable mix with an extra dust binding must still spend the slot. The
+    gate requires every paid dest to be identified, not that the two sets
+    match exactly. Exact equality would reject every real COMPOSED vector
+    that had a contributor below one u16 step.
+    """
+    result = synthetic_composed(
+        dests=PAYABLE_DESTS,
+        weights=PAYABLE_WEIGHTS,
+        uid_hotkeys={
+            MINER_UID: BOB,
+            SECOND_MINER_UID: CHARLIE,
+            BURN_UID: BURN_HOTKEY,
+        },
+    )
+    assert SECOND_MINER_UID not in result.dests
+    assert SECOND_MINER_UID in result.inclusion.uid_hotkeys
+    receipt, transport = run_canary(tmp_path, result=result)
+    assert len(transport.calls) == 1
+    assert receipt.kwargs["dests"] == [MINER_UID, BURN_UID]
+    assert SECOND_MINER_UID not in receipt.kwargs["dests"]
+
+
 def test_a_real_composed_compute_vector_can_be_the_canary(tmp_path):
     """Pinned QVL + verified mass composes COMPOSED; the canary may fire."""
     bundle, registry = funded_compute_bundle()
