@@ -119,6 +119,7 @@ cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 # Dry-run independent composer (independent_v1). Validates config, identity,
 # and genesis pin. Ships no chain writer and has no --broadcast or --canary flag.
 cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
+cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]
