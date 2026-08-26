@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from bittensor.core.extrinsics.pallets import SubtensorModule
 from bittensor_wallet import Keypair
 
+from cathedral_thin.independent.canary import require_canary_hotkey
 from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
     FINNEY_GENESIS_HASH,
@@ -24,7 +25,6 @@ from cathedral_thin.independent.constants import (
     VERSION_KEY,
 )
 from cathedral_thin.independent.inclusion import MetagraphView
-from cathedral_thin.independent.refuse import require_permitted_hotkey
 
 from .errors import ChainClientError
 from .https import axon_evidence_url
@@ -120,12 +120,7 @@ def load_keypair(document: Mapping[str, Any] | str) -> Any:
         keypair = Keypair.create_from_seed("0x" + seed)
     except Exception as exc:
         raise ChainClientError(f"canary hotkey seed is unusable: {exc}") from exc
-    ss58 = str(keypair.ss58_address)
-    require_permitted_hotkey(ss58, label="canary hotkey")
-    if ss58 != CANARY_HOTKEY:
-        raise ChainClientError(
-            f"loaded hotkey {ss58} is not the dedicated canary {CANARY_HOTKEY}"
-        )
+    require_canary_hotkey(str(keypair.ss58_address))
     return keypair
 
 
@@ -133,12 +128,7 @@ class SubstrateCanaryTransport:
     """CanaryTransport that submits ``SubtensorModule.set_mechanism_weights``."""
 
     def __init__(self, subtensor: Any, keypair: Any) -> None:
-        ss58 = str(getattr(keypair, "ss58_address", ""))
-        require_permitted_hotkey(ss58, label="canary hotkey")
-        if ss58 != CANARY_HOTKEY:
-            raise ChainClientError(
-                f"canary transport identity {ss58} is not {CANARY_HOTKEY}"
-            )
+        require_canary_hotkey(str(getattr(keypair, "ss58_address", "")))
         self.subtensor = subtensor
         self.keypair = keypair
 

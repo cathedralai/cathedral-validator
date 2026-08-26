@@ -66,6 +66,7 @@ from cathedral_thin.independent.constants import (
     NETUID,
     REFUSE_HOTKEYS,
     W,
+    WELL_KNOWN_DEV_HOTKEYS,
 )
 from cathedral_thin.independent.errors import (
     BroadcastDisabled,
@@ -226,10 +227,18 @@ def compose_real(tmp_path, bundle, registry, **kwargs):
     return compose_dry_run(**params)
 
 
-def test_the_dedicated_canary_hotkey_is_bob_and_is_not_refused():
-    assert CANARY_HOTKEY == BOB
+def test_the_dedicated_canary_hotkey_is_unpublished_and_is_not_refused():
+    assert CANARY_HOTKEY != BOB
     assert CANARY_HOTKEY not in REFUSE_HOTKEYS
+    assert CANARY_HOTKEY not in WELL_KNOWN_DEV_HOTKEYS
     assert require_canary_hotkey(CANARY_HOTKEY) == CANARY_HOTKEY
+
+
+def test_well_known_development_keys_cannot_be_the_canary():
+    for ss58 in (ALICE, BOB, CHARLIE):
+        assert ss58 in WELL_KNOWN_DEV_HOTKEYS
+        with pytest.raises(CanaryIneligible, match="well-known Substrate"):
+            require_canary_hotkey(ss58)
 
 
 def test_a_synthetic_composed_vector_submits_once_through_the_transport(tmp_path):
@@ -379,18 +388,19 @@ def test_a_refuse_listed_hotkey_cannot_be_the_canary(tmp_path, ss58):
 
 
 def test_a_permitted_hotkey_that_is_not_the_canary_is_refused(tmp_path):
-    assert CHARLIE != CANARY_HOTKEY
-    assert CHARLIE not in REFUSE_HOTKEYS
+    other = "5Eyj9kxQF5zimWrnt1mh3dDeATDiHZ6mQHeLGhNuyCN9agG3"
+    assert other != CANARY_HOTKEY
+    assert other not in REFUSE_HOTKEYS
     transport = FakeTransport()
     with pytest.raises(CanaryIneligible, match="dedicated canary identity"):
-        run_canary(tmp_path, hotkey=CHARLIE, transport=transport)
+        run_canary(tmp_path, hotkey=other, transport=transport)
     assert transport.calls == []
     assert not canary_path(tmp_path).exists()
 
 
 def test_alice_is_also_not_the_canary(tmp_path):
     transport = FakeTransport()
-    with pytest.raises(CanaryIneligible, match="dedicated canary identity"):
+    with pytest.raises(CanaryIneligible, match="well-known Substrate"):
         run_canary(tmp_path, hotkey=ALICE, transport=transport)
     assert transport.calls == []
 

@@ -50,6 +50,7 @@ from .constants import (
     INDEPENDENT_CANARY_FILE,
     LINEAGE,
     NETUID,
+    WELL_KNOWN_DEV_HOTKEYS,
 )
 from .errors import (
     CanaryIneligible,
@@ -98,6 +99,11 @@ class CanaryReceipt:
 def require_canary_hotkey(ss58: object) -> str:
     """Return ``ss58`` if it is the dedicated canary identity, else raise."""
     permitted = require_permitted_hotkey(ss58, label="canary hotkey")
+    if permitted in WELL_KNOWN_DEV_HOTKEYS:
+        raise CanaryIneligible(
+            f"canary hotkey {permitted} is a well-known Substrate development "
+            "key; the dedicated canary cannot be derived by anyone"
+        )
     if permitted != CANARY_HOTKEY:
         raise CanaryIneligible(
             f"canary hotkey {permitted} is not the dedicated canary identity"

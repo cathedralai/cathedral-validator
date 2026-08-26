@@ -41,7 +41,7 @@ from cathedral_thin.independent.refuse import is_refused, require_permitted_hotk
 
 PROFILE = Path("config/validator-independent-sn39.toml")
 RELAY_HOTKEY = "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"
-PERMITTED_HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+PERMITTED_HOTKEY = "5Eyj9kxQF5zimWrnt1mh3dDeATDiHZ6mQHeLGhNuyCN9agG3"
 
 
 def profile_document() -> dict:

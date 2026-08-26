@@ -34,6 +34,7 @@ from cathedral_thin.independent.constants import (
     INDEPENDENT_CANARY_FILE,
     INDEPENDENT_STATE_FILE,
     REFUSE_HOTKEYS,
+    WELL_KNOWN_DEV_HOTKEYS,
 )
 
 PACKAGE_DIR = Path(independent.__file__).resolve().parent
@@ -161,6 +162,8 @@ def test_the_canary_lock_is_not_the_compose_journal():
     assert INDEPENDENT_CANARY_FILE != INDEPENDENT_STATE_FILE
     assert INDEPENDENT_CANARY_FILE.name == "independent-canary.json"
     assert CANARY_HOTKEY not in REFUSE_HOTKEYS
+    assert CANARY_HOTKEY not in WELL_KNOWN_DEV_HOTKEYS
+    assert not (WELL_KNOWN_DEV_HOTKEYS & REFUSE_HOTKEYS)
 
 
 def test_the_burn_uid_is_never_hardcoded():

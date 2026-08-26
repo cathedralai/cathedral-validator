@@ -73,11 +73,39 @@ INDEPENDENT_STATE_FILE = Path("/var/lib/cathedral-validator/independent-state.js
 # operator's.
 INDEPENDENT_CANARY_FILE = Path("/var/lib/cathedral-validator/independent-canary.json")
 
+# Well-known Substrate development keys (sr25519, stash, and ed25519 variants).
+# These are public; anyone can derive them. They may appear as opaque miner
+# identifiers in tests, but they are never a canary identity. They are NOT on
+# REFUSE_HOTKEYS: that set stays exactly the live relay plus the burn dest.
+WELL_KNOWN_DEV_HOTKEYS = frozenset(
+    {
+        "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",  # //Alice
+        "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",  # //Bob
+        "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y",  # //Charlie
+        "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy",  # //Dave
+        "5HGjWAeFDfFCWPsjFQdVV2Msvz2XtMktvgocEZcCj68kUMaw",  # //Eve
+        "5CiPPseXPECbkjWCa6MnjNokrgYjMqmKndv2rSnekmSK2DjL",  # //Ferdie
+        "5GNJqTPyNqANBkUVMN1LPPrxXnFouWXoe2wNSmmEoLctxiZY",  # //Alice//stash
+        "5HpG9w8EBLe5XCrbczpwq5TSXvedjrBGCwqxK1iQ7qUsSWFc",  # //Bob//stash
+        "5Ck5SLSHYac6WFt5UZRSsdJjwmpSZq85fd5TRNAdZQVzEAPT",  # //Charlie//stash
+        "5HKPmK9GYtE1PSLsS1qiYU9xQ9Si1NcEhdeCq9sw5bqu4ns8",  # //Dave//stash
+        "5FCfAonRZgTFrTd9HREEyeJjDpT397KMzizE6T3DvebLFE7n",  # //Eve//stash
+        "5CRmqmsiNFExV6VbdmPJViVxrWmkaXXvBrSX8oqBT8R9vmWk",  # //Ferdie//stash
+        "5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu",  # //Alice ed25519
+        "5GoNkf6WdbxCFnPdAnYYQyCjAKPJgLNxXwPjwTh6DGg6gN3E",  # //Bob ed25519
+        "5DbKjhNLpqX3zqZdNBc9BGb4fHU1cRBaDhJUskrvkwfraDi6",  # //Charlie ed25519
+        "5ECTwv6cZ5nJQPk6tWfaTrEk8YH2L7X1VT4EL5Tx2ikfFwb7",  # //Dave ed25519
+        "5Ck2miBfCe1JQ4cY3NDsXyBaD6EcsgiVmEFTWwqNSs25XDEq",  # //Eve ed25519
+        "5E2BmpVFzYGd386XRCZ76cDePMB3sfbZp5ZKGUsrG1m6gomN",  # //Ferdie ed25519
+    }
+)
+
 # The only identity submit_canary_once will even attempt to submit as. It is
-# also on neither refuse-list entry. A production canary wallet is a pin change,
-# not a CLI flag and not a second runtime signing as the live relay.
+# also on neither refuse-list entry and is not a well-known development key.
+# The seed is not in this repository. A production canary wallet is a pin
+# change, not a CLI flag and not a second runtime signing as the live relay.
 CANARY_HOTKEY = (
-    "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"  # pragma: allowlist secret
+    "5G246nVyX3W9FUSj3VgwzxnnUzvp47jmLQPxKdDukHBtetzm"  # pragma: allowlist secret
 )
 
 LINEAGE = "independent_v1"
@@ -159,4 +187,5 @@ __all__ = [
     "TEMPO_BLOCKS",
     "VERSION_KEY",
     "W",
+    "WELL_KNOWN_DEV_HOTKEYS",
 ]
