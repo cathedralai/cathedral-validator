@@ -116,6 +116,9 @@ cathedral-thin-e2e = "cathedral_thin.e2e:main"
 cathedral-thin-preflight = "cathedral_thin.preflight:main"
 cathedral-thin-score-report = "cathedral_thin.report_cli:main"
 cathedral-verified-policy = "cathedral_thin.policy_cli:main"
+# Dry-run independent composer (independent_v1). Validates config, identity,
+# and genesis pin. Ships no chain writer and has no --broadcast flag.
+cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]

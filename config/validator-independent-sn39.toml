@@ -1,0 +1,82 @@
+# Cathedral SN39 INDEPENDENT composer -- lineage `independent_v1`.
+#
+# This profile drives cathedral_thin/independent/, which composes a mechanism
+# weight vector from a signed, on-chain committed policy document and journals
+# it. It ships NO chain writer. There is no `--broadcast` flag, `broadcast` is
+# false and validating the config refuses `true`, and no code path here can set
+# weights -- tests/thin/test_independent_import_graph.py proves that structurally
+# rather than asserting it in a comment.
+#
+# It is deliberately NOT the thin relay profile and shares nothing with it:
+#
+#   * a different journal (`runtime.state_file` below), because the thin
+#     validator's durable journal is a reservation fence and must never be
+#     satisfied by another lineage's writes;
+#   * no publisher feed. This lineage does not fetch a pre-composed signed
+#     vector from anybody; it fetches a signed POLICY document and composes the
+#     vector itself, which is the whole point of it being independent.
+#
+# Never point this profile at the live relay wallet, and never run it as either
+# refuse-listed hotkey below. Both refusals are enforced in code at start-up
+# (cathedral_thin/independent/refuse.py), not just documented here.
+
+[lineage]
+# Release lineage. Distinct from the thin relay lineage so a journal, an event
+# log, or an operator cannot confuse the two runtimes.
+name = "independent_v1"
+
+[network]
+name = "finney"
+netuid = 39
+# Finney genesis pin. A composer on the wrong chain would read a metagraph that
+# has nothing to do with SN39 and resolve a burn UID out of it. Mismatch halts.
+genesis_hash = "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+# Your own wallet. Local labels; the resolved on-chain identity is checked
+# against the refuse-list at start-up.
+#
+# REFUSE-LIST -- this runtime will not start as either of these:
+#   5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw
+#     the live relay validator identity. A second runtime signing as it is
+#     indistinguishable from the relay and would race it for the same epoch.
+#   5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi
+#     the subnet owner hotkey, which is this composer's BURN DESTINATION.
+#     A runtime holding the destination it pays to can pay itself.
+wallet_name = "validator-independent"
+validator_hotkey = "default"
+
+[policy]
+# The signed policy document (`cathedral_policy_bundle_v1`): one atomic
+# EconomicsSet plus the measurement and receipt-key registries, 2-of-3 Ed25519
+# over its canonical bytes, committed on chain as one 50-byte digest at the
+# frozen anchor.
+#
+# REPLACE THIS with the document URL you are willing to be paid from. The path
+# is used exactly as given -- nothing is appended -- and the fetch refuses
+# anything that is not public HTTPS with no userinfo, query, or fragment. A
+# document whose digest does not match the anchor's commitment is refused
+# outright; there is no fall back to the last document a mirror still serves.
+url = "https://policy.example.invalid/cathedral/sn39/policy-bundle.json"
+# Burn destination pin. Resolved to a UID from the ANCHOR metagraph and
+# re-checked at inclusion; never a hardcoded UID, because the owner hotkey has
+# moved UIDs before and a pinned UID keeps paying whoever inherited the slot.
+burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi" # pragma: allowlist secret
+
+[weights]
+version_key = 10005000
+mecid = 0
+tempo = 360
+commit_reveal_enabled = false
+min_allowed_weights = 1
+# Must be exactly 1.0. Any smaller cap makes a legal burn-heavy vector
+# overweight, and the chain then rejects the extrinsic rather than the config.
+max_weight_limit = 1.0
+# Transaction mortality in blocks, measured from the SIGNED head -- not from the
+# anchor the vector was composed at.
+mortal_period_blocks = 16
+
+[runtime]
+# This lineage's own journal. Never another runtime's state file.
+state_file = "/var/lib/cathedral-validator/independent-state.json"
+# There is no writer behind this flag. Setting it true fails to load, on purpose:
+# a flag wired to a stub is how a dry-run path becomes a live one by accident.
+broadcast = false
