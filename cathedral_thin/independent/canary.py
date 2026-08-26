@@ -19,10 +19,11 @@ The gates, all fail-closed, all before the transport is touched:
 * the transport is injected;
 * the one-write lock file does not yet exist.
 
-A composition that is still ``BROADCAST_BLOCKED`` because Compute allocation
-is 0 will never pass these gates. That is the remaining blocker, not a gap
-in this module. The happy-path tests construct a synthetic ``COMPOSED`` result
-so the gate can be proven without pretending a funded Compute row is payable.
+A composition that is still ``BROADCAST_BLOCKED`` because Compute is not
+contributing will never pass these gates. A live runner that binds pinned-QVL
+verified mass can compose ``COMPOSED`` and then spend this slot. The happy-path
+unit tests also construct a synthetic ``COMPOSED`` result so the gate can be
+proven without a live machine.
 
 The lock is claimed with ``O_EXCL`` before the transport runs. The file and
 its parent directory are both fsynced before that call returns: fsyncing only

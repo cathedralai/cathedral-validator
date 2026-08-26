@@ -1,11 +1,17 @@
-"""The Compute lane: a named lane that cannot contribute SN39 mass.
+"""The Compute lane: named, QVL-gated, and payable only from pinned verified mass.
 
-This module exists so the composer can NAME Compute and refuse it for a stated
-reason, rather than leaving a funded row blocked by a generic message. Broadcast
-allocation stays 0 until `cathedralai/cathedral-validator#120` closes (collect
-from miners, discovery, the work report, and metering inside the measured image)
-and until the DCAP quote verification library has a published build digest and a
-distribution channel someone outside Cathedral can use.
+This module exists so the composer can NAME Compute and either pay it from
+integer mass a caller already verified, or refuse it for a stated reason.
+A dry-run mock verifier still cannot move SN39 mass: ``contributing`` is true
+only when the QVL build digest is pinned AND the adapter was constructed with
+non-empty ``verified_mass``. Collecting a quote and getting ``PASS`` from an
+unpinned mock does not bind mass.
+
+Broadcast stays blocked until a live runner (outside this package) collects
+from a listed machine, verifies the quote with a pinned QVL, re-derives work
+units, and constructs this adapter with that integer mass. The remaining
+`cathedralai/cathedral-validator#120` work is discovery, the work report, and
+metering inside the measured image; this module does not perform those.
 
 Two rules are enforced at construction, not at use:
 
@@ -18,10 +24,10 @@ Two rules are enforced at construction, not at use:
   reach the same answer. Collateral served by whoever also operates the lane
   cannot distinguish an honest verdict from a convenient one.
 
-``probe`` returns no mass. Not "no mass until a verifier passes": the verifier a
-dry-run adapter has is a mock, and paying from it would be paying for a mock's
-opinion. A PASS verdict here means one quote verified; it does not mean any
-miner earned anything.
+``probe`` returns the bound verified mass when the adapter is contributing, and
+nothing otherwise. A PASS verdict from ``verify_quote`` still does not bind
+mass by itself: the live runner has to put integer units into
+``verified_mass`` after a pinned QVL check.
 
 The machine identity is the digest of the in-guest bound public key, never a
 label the miner chose, so one machine cannot advertise itself as two and two
@@ -41,6 +47,7 @@ from .constants import (
     COMPUTE_FLEET_CAP,
     COMPUTE_LANE_PLATFORM,
     COMPUTE_LANE_SCHEMA,
+    H,
     INTEL_PCS_HOSTS,
 )
 from .errors import (
@@ -65,15 +72,17 @@ COMPUTE_LANE = LaneContractId(
     platform=COMPUTE_LANE_PLATFORM,
 )
 
-# The reason a funded Compute row is refused. Stated once, so the journal and
-# the composer's status carry the same sentence a reviewer can check.
+# The reason a funded Compute row is refused when the adapter cannot pay.
+# Stated once, so the journal and the composer's status carry the same
+# sentence a reviewer can check. A contributing adapter with a pinned QVL
+# digest and non-empty verified mass does not use this sentence.
 COMPUTE_BLOCK_REASON = (
-    "Compute broadcast is deferred at allocation 0 in this lineage: "
-    "cathedralai/cathedral-validator#120 (collect from miners, discovery, work "
-    "report, metering in the measured image) is open, and the DCAP QVL build "
-    "digest and distribution channel are not published. A registered adapter "
-    "with a mandatory quote verifier does not lift that, and a PASS verdict "
-    "from a dry-run verifier is not mass any miner earned"
+    "Compute broadcast is deferred at allocation 0: the adapter is not "
+    "contributing. cathedralai/cathedral-validator#120 (collect from miners, "
+    "discovery, work report, metering in the measured image) still has to be "
+    "satisfied by a live runner, and a PASS verdict from an unpinned dry-run "
+    "QVL is not mass any miner earned. Bind integer verified_mass only after a "
+    "pinned QVL digest and independently re-derived work units"
 )
 
 # TDX REPORT_DATA is 64 bytes. A binding checked against anything else is not
@@ -210,6 +219,38 @@ def require_miner_ss58(miner_ss58: str) -> str:
     return miner_ss58
 
 
+def require_verified_mass(masses: Mapping[str, int] | None) -> dict[str, int]:
+    """Return a copy of integer miner mass, or empty.
+
+    Empty is the dry-run default. Non-empty values must be positive integers
+    that sum to at most ``H``. Duplicate hotkeys are refused rather than
+    silently merged.
+    """
+    if masses is None:
+        return {}
+    if not isinstance(masses, Mapping):
+        raise ComputeEvidenceError(
+            "verified mass must be a mapping of miner ss58 to integer units"
+        )
+    result: dict[str, int] = {}
+    total = 0
+    for ss58, mass in masses.items():
+        key = require_miner_ss58(ss58)
+        if key in result:
+            raise ComputeEvidenceError(f"verified mass names {key} twice")
+        if isinstance(mass, bool) or not isinstance(mass, int) or mass <= 0:
+            raise ComputeEvidenceError(
+                f"verified mass for {key} must be a positive integer"
+            )
+        if mass > H:
+            raise ComputeEvidenceError(f"verified mass for {key} exceeds H={H}")
+        total += mass
+        if total > H:
+            raise ComputeEvidenceError("verified mass sums above H")
+        result[key] = mass
+    return result
+
+
 def assert_machine_identity(
     machine_id: str, miner_ss58: str, claimed: dict[str, str]
 ) -> None:
@@ -281,11 +322,12 @@ def canonical_seed_material(
 
 
 class ComputeAdapter:
-    """A registered Compute adapter that contributes nothing, on purpose.
+    """A registered Compute adapter.
 
-    Registering this adapter changes exactly one thing: the composer can say why
-    a funded Compute row is refused instead of reporting that no adapter exists.
-    It does not make the lane payable, and there is no flag on it that would.
+    Without a pinned QVL digest and bound ``verified_mass`` this adapter exists
+    only so the composer can name why a funded Compute row is refused. Binding
+    integer mass is how a live runner, after a pinned QVL check, makes the lane
+    contributing. There is no flag that pays from a mock.
     """
 
     def __init__(
@@ -294,10 +336,18 @@ class ComputeAdapter:
         *,
         collateral_base_url: str,
         qvl_digest: str | None = None,
+        verified_mass: Mapping[str, int] | None = None,
     ) -> None:
         self._verifier = require_compute_adapter(verifier)
         self.collateral_endpoint = validate_collateral_url(collateral_base_url)
         self.qvl_digest = validate_qvl_digest(qvl_digest)
+        mass = require_verified_mass(verified_mass)
+        if mass and self.qvl_digest is None:
+            raise AdapterUnavailable(
+                "verified Compute mass requires a pinned QVL digest; "
+                "an unpinned dry-run verifier cannot move SN39 mass"
+            )
+        self._verified_mass = mass
 
     @property
     def qvl_unpinned(self) -> bool:
@@ -306,8 +356,12 @@ class ComputeAdapter:
 
     @property
     def contributing(self) -> bool:
-        """Whether this adapter can move SN39 mass. Always false."""
-        return False
+        """Whether this adapter can move SN39 mass.
+
+        True only with a pinned QVL digest and non-empty verified integer mass.
+        A PASS quote from an unpinned mock stays false.
+        """
+        return self.qvl_digest is not None and bool(self._verified_mass)
 
     def verify_quote(
         self, quote: bytes, *, expected_report_data: bytes
@@ -340,15 +394,17 @@ class ComputeAdapter:
         return verdict
 
     def probe(self, *, anchor: EpochAnchor, view: MetagraphView) -> Mapping[str, int]:
-        """Return the miner mass this lane earned: nothing, unconditionally.
+        """Return the miner mass this lane earned.
 
         Both arguments are accepted so this satisfies the composer's adapter
-        protocol, and both are deliberately unread. Reading them is the first
-        half of dispatching work, and the collect and work-report halves of
-        `cathedralai/cathedral-validator#120` are open.
+        protocol. They are unread here: UID resolution and leftover-to-burn
+        happen in ``mass_map``, which already has the views. Returning bound
+        mass is not dispatching work.
         """
         del anchor, view
-        return {}
+        if not self.contributing:
+            return {}
+        return dict(self._verified_mass)
 
 
 __all__ = [
@@ -371,6 +427,7 @@ __all__ = [
     "require_compute_adapter",
     "require_machine_id",
     "require_miner_ss58",
+    "require_verified_mass",
     "validate_collateral_url",
     "validate_qvl_digest",
 ]

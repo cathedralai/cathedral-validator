@@ -30,9 +30,10 @@ real miner -- that is still open in `cathedralai/cathedral-validator#120`.
 Nothing here extracts a TLS SPKI from a live peer either; the caller supplies
 the ``ChannelBinding`` it observed.
 
-A PASS verdict from ``verify_collected`` is not mass. Compute broadcast
-allocation stays 0, ``ComputeAdapter.probe`` still returns nothing, and a funded
-Compute row still composes to ``BROADCAST_BLOCKED``.
+A PASS verdict from ``verify_collected`` is not mass. The live runner binds
+integer ``verified_mass`` on a pinned-QVL ``ComputeAdapter`` after it has
+re-derived work units. Until that happens, ``ComputeAdapter.probe`` returns
+nothing and a funded Compute row still composes to ``BROADCAST_BLOCKED``.
 """
 
 from __future__ import annotations

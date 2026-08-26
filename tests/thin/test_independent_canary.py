@@ -1,21 +1,19 @@
-"""The one-write canary cannot fire on a real compose result today.
+"""The one-write canary fires only on COMPOSED with a funded Compute row.
 
 Four separate claims:
 
 1. a synthetic ``COMPOSED`` vector with a funded Compute row, the dedicated
    canary hotkey, matching u16 kwargs, and an injected transport submits
    exactly once and records an opaque receipt on ``independent-canary.json``;
-2. every real outcome this lineage can currently compose -- burn-only
-   ``DEGRADED``, funded Compute ``BROADCAST_BLOCKED`` -- is ineligible, so the
-   transport is never called and the lock is never claimed;
-3. the live relay identity, the burn destination, a permitted-but-not-canary
+2. burn-only ``DEGRADED`` and a funded Compute row that is still
+   ``BROADCAST_BLOCKED`` are ineligible, so the transport is never called;
+3. a real compose that binds pinned-QVL verified mass is ``COMPOSED`` and CAN
+   spend the slot through the injected transport;
+4. the live relay identity, the burn destination, a permitted-but-not-canary
    hotkey, a missing transport, a u16 mismatch, and a second call are all
-   refusals;
-4. nothing on this path opens a socket or names a chain writer.
+   refusals, and nothing on this path opens a socket or names a chain writer.
 
-Compute allocation stays 0. A PASS collect and a registered adapter still
-compose to ``BROADCAST_BLOCKED``. This file does not close that, and treating
-burn-only as the first on-chain write is still forbidden.
+Treating burn-only as the first on-chain write is still forbidden.
 """
 
 from __future__ import annotations
@@ -58,6 +56,7 @@ from cathedral_thin.independent.compose import (
     EpochAnchor,
     compose_dry_run,
 )
+from cathedral_thin.independent.compute import ComputeAdapter
 from cathedral_thin.independent.constants import (
     BURN_HOTKEY,
     CANARY_HOTKEY,
@@ -77,12 +76,14 @@ from cathedral_thin.independent.errors import (
     RefuseListError,
 )
 from cathedral_thin.independent.hamilton import HamiltonResult
-from cathedral_thin.independent.inclusion import InclusionOutcome
+from cathedral_thin.independent.inclusion import InclusionOutcome, MetagraphView
+from cathedral_thin.independent.policy import LaneContractId
 from cathedral_thin.independent.submit import (
     MECHANISM_WEIGHTS_CALL,
     build_mechanism_weights_kwargs,
     prepare_mechanism_weights,
 )
+from test_independent_compute import MockQuoteVerifier
 
 ANCHOR = EpochAnchor(
     epoch_open=EPOCH_OPEN, anchor_number=EPOCH_OPEN - 1, anchor_hash=ANCHOR_HASH
@@ -145,8 +146,9 @@ def synthetic_composed(
 ):
     """A ComposeResult that did not come from compose_dry_run.
 
-    Real compose cannot emit COMPOSED while Compute allocation is 0. The canary
-    gate still has to be testable, so the payable mix is constructed here.
+    Real compose emits COMPOSED when a contributing Compute adapter binds
+    pinned-QVL verified mass. The gate is also testable from a synthetic
+    payable mix so the one-write lock can be proven without a live machine.
     """
     return ComposeResult(
         status=status,
@@ -318,6 +320,42 @@ def test_a_real_funded_compute_compose_cannot_be_the_canary(tmp_path):
         )
     assert transport.calls == []
     assert not canary_path(tmp_path).exists()
+
+
+def test_a_real_composed_compute_vector_can_be_the_canary(tmp_path):
+    """Pinned QVL + verified mass composes COMPOSED; the canary may fire."""
+    bundle, registry = funded_compute_bundle()
+    miner_uid = 7
+    view = MetagraphView.from_uid_map({BURN_UID: BURN_HOTKEY, miner_uid: BOB})
+    paying = ComputeAdapter(
+        MockQuoteVerifier(),
+        collateral_base_url=(
+            "https://api.trustedservices.intel.com/sgx/certification/v4/"
+        ),
+        qvl_digest="ab" * 32,
+        verified_mass={BOB: 10**11},
+    )
+    result = compose_real(
+        tmp_path,
+        bundle,
+        registry,
+        adapters={LaneContractId(**COMPUTE_LANE): paying},
+        anchor_view=view,
+        inclusion_view=view,
+        journal_path=journal_path(tmp_path),
+    )
+    assert result.status == STATUS_COMPOSED
+    assert miner_uid in result.dests
+    assert BURN_UID in result.dests
+    kwargs = prepare_mechanism_weights(
+        result=result, journal_path=journal_path(tmp_path)
+    )
+    receipt, transport = run_canary(
+        tmp_path, result=result, kwargs=kwargs, bundle=bundle
+    )
+    assert transport.calls == [dict(kwargs)]
+    assert receipt.kwargs["dests"] == list(result.dests)
+    assert receipt.kwargs["weights"] == list(result.weights)
 
 
 def test_prepare_still_refuses_a_broadcast_flag_on_a_degraded_vector(tmp_path):

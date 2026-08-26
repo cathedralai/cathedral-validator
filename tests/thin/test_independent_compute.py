@@ -1,12 +1,13 @@
-"""The Compute lane is named, gated on QVL, and still worth zero mass.
+"""The Compute lane is named, gated on QVL, and payable only from pinned mass.
 
 Three separate claims, because they fail in different ways:
 
 1. the adapter cannot be constructed without a quote verifier, and cannot be
    pointed at collateral served by anyone but Intel's public PCS;
 2. a constructed adapter with a verifier that PASSes everything still probes to
-   no mass, and a funded Compute row with that adapter registered is still
-   ``BROADCAST_BLOCKED`` -- with the #120 / QVL reason, not a generic one;
+   no mass unless a QVL digest is pinned and integer ``verified_mass`` is bound;
+   a funded Compute row with an unpinned adapter is still ``BROADCAST_BLOCKED``
+   -- with the #120 / QVL reason, not a generic one;
 3. machine identity is the bound key's digest, so two hotkeys cannot both hold
    one machine, and the audit seed is derived rather than drawn.
 
@@ -38,6 +39,7 @@ from _independent_fixtures import COMPUTE_LANE as COMPUTE_LANE_DOCUMENT
 from cathedral_thin.independent import compute as compute_module
 from cathedral_thin.independent.compose import (
     STATUS_BROADCAST_BLOCKED,
+    STATUS_COMPOSED,
     EpochAnchor,
     compose_dry_run,
     mass_map,
@@ -58,7 +60,7 @@ from cathedral_thin.independent.compute import (
     require_compute_adapter,
     validate_collateral_url,
 )
-from cathedral_thin.independent.constants import H, INDEPENDENT_STATE_FILE
+from cathedral_thin.independent.constants import BURN_HOTKEY, H, INDEPENDENT_STATE_FILE
 from cathedral_thin.independent.errors import (
     AdapterUnavailable,
     BroadcastDisabled,
@@ -67,6 +69,7 @@ from cathedral_thin.independent.errors import (
     ConfigError,
     MachineIdentityConflict,
 )
+from cathedral_thin.independent.inclusion import MetagraphView
 from cathedral_thin.independent.journal import load_journal
 
 ANCHOR = EpochAnchor(
@@ -182,6 +185,91 @@ def test_probe_returns_no_mass_even_when_the_verifier_passes():
     assert verifier.calls == [(QUOTE, REPORT_DATA)]
     assert passing.probe(anchor=ANCHOR, view=burn_only_view()) == {}
     assert passing.contributing is False
+
+
+PINNED_QVL = "ab" * 32
+MINER_UID = 7
+COMPUTE_AMOUNT = 10**11
+
+
+def payable_view():
+    return MetagraphView.from_uid_map({BURN_UID: BURN_HOTKEY, MINER_UID: BOB})
+
+
+def test_verified_mass_without_a_qvl_pin_cannot_construct_an_adapter():
+    with pytest.raises(AdapterUnavailable, match="pinned QVL digest"):
+        adapter(verified_mass={BOB: COMPUTE_AMOUNT})
+
+
+def test_verified_mass_must_be_positive_integers():
+    with pytest.raises(ComputeEvidenceError, match="positive integer"):
+        adapter(qvl_digest=PINNED_QVL, verified_mass={BOB: 0})
+    with pytest.raises(ComputeEvidenceError, match="positive integer"):
+        adapter(qvl_digest=PINNED_QVL, verified_mass={BOB: True})
+    with pytest.raises(ComputeEvidenceError, match="ASCII"):
+        adapter(qvl_digest=PINNED_QVL, verified_mass={"": 1})
+
+
+def test_a_pinned_qvl_with_verified_mass_is_contributing():
+    paying, verifier = adapter(
+        QuoteVerdict.PASS, qvl_digest=PINNED_QVL, verified_mass={BOB: COMPUTE_AMOUNT}
+    )
+    assert paying.contributing is True
+    assert paying.qvl_unpinned is False
+    assert paying.probe(anchor=ANCHOR, view=payable_view()) == {BOB: COMPUTE_AMOUNT}
+    assert verifier.calls == []
+
+
+def test_a_contributing_compute_row_composes_a_payable_mix(tmp_path):
+    bundle, registry = funded_compute_bundle()
+    paying, verifier = adapter(
+        QuoteVerdict.PASS, qvl_digest=PINNED_QVL, verified_mass={BOB: COMPUTE_AMOUNT}
+    )
+    view = payable_view()
+    result = compose_dry_run(
+        bundle=bundle,
+        key_registry=registry,
+        commitment=commitment_for(bundle),
+        anchor=ANCHOR,
+        anchor_view=view,
+        inclusion_view=view,
+        adapters={COMPUTE_LANE: paying},
+        journal_path=journal_path(tmp_path),
+    )
+    assert result.status == STATUS_COMPOSED
+    assert result.blocks == ()
+    assert result.broadcast_eligible is False
+    assert MINER_UID in result.dests
+    assert BURN_UID in result.dests
+    assert sum(result.weights) == 65535
+    assert result.dests[0] < result.dests[-1]
+    record = load_journal(journal_path(tmp_path))
+    assert record["status"] == STATUS_COMPOSED
+    assert record["broadcast"] is False
+    assert str(MINER_UID) in record["h_map"]
+    assert record["h_map"][str(MINER_UID)]["ss58"] == BOB
+    assert record["h_map"][str(MINER_UID)]["m"] == COMPUTE_AMOUNT
+    assert record["h_map"][str(BURN_UID)]["m"] == H - COMPUTE_AMOUNT
+    assert verifier.calls == []
+
+
+def test_verified_mass_for_an_unknown_hotkey_halts(tmp_path):
+    bundle, registry = funded_compute_bundle()
+    paying, _verifier = adapter(
+        qvl_digest=PINNED_QVL, verified_mass={BOB: COMPUTE_AMOUNT}
+    )
+    with pytest.raises(ComputeEvidenceError, match="not in the anchor metagraph"):
+        compose_dry_run(
+            bundle=bundle,
+            key_registry=registry,
+            commitment=commitment_for(bundle),
+            anchor=ANCHOR,
+            anchor_view=burn_only_view(),
+            inclusion_view=burn_only_view(),
+            adapters={COMPUTE_LANE: paying},
+            journal_path=journal_path(tmp_path),
+        )
+    assert not journal_path(tmp_path).exists()
 
 
 def test_evidence_is_bounded_and_typed_before_the_verifier_sees_it():

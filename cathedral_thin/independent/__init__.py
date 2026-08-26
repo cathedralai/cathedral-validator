@@ -14,17 +14,16 @@ What it does own, end to end:
 * integer-mass Hamilton apportionment to u16 destinations and weights;
 * inclusion-time UID safety, where a remapped destination forfeits its mass to
   burn instead of paying whoever now holds the slot;
-* a named Compute lane whose adapter cannot contribute mass at all: the quote
-  verifier is mandatory, its collateral source is pinned to Intel's public PCS,
-  and broadcast allocation stays 0 while the lane's blockers are open;
+* a named Compute lane whose adapter pays only from pinned-QVL verified integer
+  mass: the quote verifier is mandatory, collateral is pinned to Intel's public
+  PCS, and an unpinned dry-run mock still contributes nothing;
 * a dry-run collect client for that lane, which speaks the miner's v2
   ``POST /v1/evidence`` contract over an injected transport and derives the
-  expected ``REPORT_DATA`` from its own challenge -- and still moves no mass;
+  expected ``REPORT_DATA`` from its own challenge -- collect still binds no
+  mass by itself;
 * a one-write canary gate that will call an injected transport exactly once
   after a ``COMPOSED`` vector, a funded Compute row, a dry-run u16 match, and
-  the dedicated canary identity -- and that still ships no chain client, so a
-  composition that is ``DEGRADED`` or ``BROADCAST_BLOCKED`` cannot spend the
-  slot;
+  the dedicated canary identity -- and that still ships no chain client;
 * its own journal, separate from every other lineage's state.
 
 Importing this package has no side effects, reads no environment variable, and
@@ -80,6 +79,7 @@ from .compute import (
     fleet_over_cap,
     machine_id_from_key,
     require_compute_adapter,
+    require_verified_mass,
     validate_collateral_url,
 )
 from .constants import (
@@ -272,6 +272,7 @@ __all__ = [
     "require_last_good",
     "require_lineage",
     "require_permitted_hotkey",
+    "require_verified_mass",
     "resolve_burn_uid",
     "signing_payload",
     "submit_canary_once",
