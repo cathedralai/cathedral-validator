@@ -6,13 +6,17 @@ import argparse
 import ast
 import http.client
 import json
+import ssl
 import stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.x509.oid import NameOID
 
 from _independent_fixtures import (
     ANCHOR_HASH,
@@ -58,6 +62,8 @@ from cathedral_thin.independent_runtime.errors import (
 from cathedral_thin.independent_runtime.https import (
     axon_evidence_url,
     axon_sat_work_url,
+    require_cert_chain_matches_peer,
+    spki_sha256,
     tls_context_for_evidence,
 )
 from cathedral_thin.independent_runtime.local_policy import (
@@ -230,10 +236,68 @@ def test_local_funded_bundle_composes_when_compute_has_verified_mass(tmp_path):
 
 
 def test_tls_context_for_an_ip_skips_hostname_verification():
+    """An IP axon terminates TLS in the guest, so CERT_NONE is deliberate.
+
+    Requiring a CA here would refuse every honest self-signed TDX axon. The
+    peer is authenticated by the v2 REPORT_DATA binding of the observed SPKI,
+    not by a chain. A public hostname keeps ordinary verification.
+    """
     ip_context = tls_context_for_evidence("203.0.113.9")
     assert ip_context.check_hostname is False
+    assert ip_context.verify_mode == ssl.CERT_NONE
     host_context = tls_context_for_evidence("miner.example.test")
     assert host_context.check_hostname is True
+    assert host_context.verify_mode == ssl.CERT_REQUIRED
+
+
+def self_signed_der(common_name: str = "axon.test") -> bytes:
+    """A throwaway self-signed leaf, the way an in-guest axon presents one."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, algorithm=None)
+    )
+    return certificate.public_bytes(serialization.Encoding.DER)
+
+
+def test_a_collected_chain_whose_leaf_is_the_peer_is_accepted():
+    leaf = self_signed_der()
+    require_cert_chain_matches_peer((leaf,), spki_sha256(leaf))
+
+
+def test_a_collected_chain_naming_another_certificate_is_refused():
+    """The gap the unused ``cert_chain`` field left: an echoed foreign leaf."""
+    peer = self_signed_der("peer.test")
+    with pytest.raises(IndependentLiveError, match="not the TLS peer"):
+        require_cert_chain_matches_peer(
+            (self_signed_der("someone-else.test"),), spki_sha256(peer)
+        )
+
+
+def test_an_empty_collected_chain_is_allowed():
+    """``cert_chain_hex: []`` is in the collect contract; SPKI still binds."""
+    require_cert_chain_matches_peer((), spki_sha256(self_signed_der()))
+
+
+def test_a_collected_chain_leaf_that_is_not_x509_is_refused():
+    with pytest.raises(IndependentLiveError, match="not an X.509 certificate"):
+        require_cert_chain_matches_peer(
+            (b"x509-leaf" * 8,), spki_sha256(self_signed_der())
+        )
+
+
+@pytest.mark.parametrize("digest", [b"", b"\x01" * 31, b"\x01" * 33])
+def test_a_peer_digest_that_is_not_a_sha256_is_refused(digest):
+    with pytest.raises(IndependentLiveError, match="32 bytes"):
+        require_cert_chain_matches_peer((self_signed_der(),), digest)
 
 
 def test_list_workers_reads_connection_ip():

@@ -81,7 +81,7 @@ from .errors import (
     QuoteVerifyError,
     WorkersApiError,
 )
-from .https import HttpsEvidenceTransport
+from .https import HttpsEvidenceTransport, require_cert_chain_matches_peer
 from .local_policy import COMPUTE_ALLOCATION, commitment_for, funded_compute_bundle
 from .qvl import load_verifier
 from .score import mass_from_units
@@ -293,6 +293,12 @@ def _try_collect(
             raise IndependentLiveError(
                 "TLS SPKI changed between the binding handshake and the evidence POST"
             )
+        # The chain the body carried has to be the certificate this process
+        # watched the peer present. Collect can only parse the field; the
+        # runner is the one that ran the handshake.
+        require_cert_chain_matches_peer(
+            collected.cert_chain, collected.channel_binding.digest
+        )
     except Exception as exc:
         return {
             "url": url,

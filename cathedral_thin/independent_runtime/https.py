@@ -46,11 +46,21 @@ DEFAULT_TIMEOUT = 30.0
 def tls_context_for_evidence(host: str) -> ssl.SSLContext:
     """TLS context for one evidence POST.
 
-    Miner axons are advertised as IPs and typically present an in-guest
-    self-signed certificate. Hostname/CA verification cannot authenticate
-    that peer. v2 REPORT_DATA binds the observed TLS SPKI, so a different
-    cert cannot satisfy the quote. Public hostnames still use default
-    verification.
+    Miner axons are advertised as IPs and terminate TLS *inside* the measured
+    guest with a self-signed certificate. No public CA has ever seen that key,
+    so CA/hostname verification cannot authenticate the peer: requiring it
+    would refuse every honest TDX axon rather than catch a dishonest one.
+    ``CERT_NONE`` for IP literals is the trust model here, not a relaxation of
+    it.
+
+    What authenticates the peer is the v2 REPORT_DATA binding of the TLS SPKI
+    this connection observed, plus the guest refusing any ``channel_binding``
+    that is not its own in-guest key. A different certificate on the wire has
+    a different SPKI, so an honest guest will not quote it and the pinned QVL
+    will not match REPORT_DATA against the SPKI that was observed.
+
+    Public hostnames are authenticable the ordinary way and keep the default
+    verification of ``ssl.create_default_context``.
     """
     context = ssl.create_default_context()
     try:
@@ -71,6 +81,40 @@ def spki_sha256(certificate_der: bytes) -> bytes:
         Encoding.DER, PublicFormat.SubjectPublicKeyInfo
     )
     return hashlib.sha256(spki).digest()
+
+
+def require_cert_chain_matches_peer(
+    cert_chain: tuple[bytes, ...], peer_spki: bytes
+) -> None:
+    """Bind a collected ``cert_chain`` to the peer this connection hashed.
+
+    Collect parses the chain out of the evidence body; only the process that
+    ran the handshake knows which certificate the peer actually presented. An
+    axon that echoes somebody else's leaf is refused here instead of leaving
+    the field unread.
+
+    An empty chain is allowed: the collect contract permits an empty
+    ``cert_chain_hex``, and the SPKI binding does not depend on the miner
+    echoing its own certificate back. Intermediates are neither walked nor
+    pinned -- the leaf carries the key REPORT_DATA is bound to, and nothing
+    above it is authenticable for a self-signed in-guest cert anyway.
+    """
+    if not isinstance(peer_spki, bytes) or len(peer_spki) != 32:
+        raise IndependentLiveError("the observed peer SPKI digest must be 32 bytes")
+    if not cert_chain:
+        return
+    leaf = cert_chain[0]
+    try:
+        load_der_x509_certificate(leaf)
+    except Exception as exc:
+        raise IndependentLiveError(
+            f"the collected cert_chain leaf is not an X.509 certificate: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if spki_sha256(leaf) != peer_spki:
+        raise IndependentLiveError(
+            "the collected cert_chain is not the TLS peer this connection hashed"
+        )
 
 
 class HttpsEvidenceTransport:
