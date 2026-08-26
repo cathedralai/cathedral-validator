@@ -14,6 +14,10 @@ The gates, all fail-closed, all before the transport is touched:
 * the signed policy bundle carries a funded Compute row. A CyberGym-only mix,
   or Compute at allocation 0, is not this canary;
 * the destination vector still includes burn and is not burn-only;
+* every destination is identified by the composition's own ``uid -> hotkey``
+  bindings, and none of them is a hotkey this lineage may never pay. The canary
+  signs the vector, so paying the canary is the composer paying itself, which is
+  the rule the burn destination has always had;
 * the prepared kwargs match the composed dests and weights exactly, on the
   pinned netuid / mecid / version_key;
 * the transport is injected;
@@ -46,6 +50,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from .compose import STATUS_COMPOSED, ComposeResult
 from .compute import COMPUTE_LANE
 from .constants import (
+    BURN_HOTKEY,
     CANARY_HOTKEY,
     INDEPENDENT_CANARY_FILE,
     LINEAGE,
@@ -60,7 +65,7 @@ from .errors import (
     HamiltonError,
 )
 from .policy import PolicyBundle, funded_lanes
-from .refuse import require_permitted_hotkey
+from .refuse import is_refused_destination, require_permitted_hotkey
 from .submit import MECHANISM_WEIGHTS_CALL, build_mechanism_weights_kwargs
 
 # Fields a canary record may never carry. This path still signs nothing; a
@@ -168,7 +173,39 @@ def _require_composed(result: object) -> ComposeResult:
         raise CanaryIneligible("the canary vector dropped the burn destination")
     if result.dests == (burn_uid,):
         raise CanaryIneligible("burn-only is not a canary; DEGRADED is not acceptance")
+    _require_payable_dests(result, burn_uid=burn_uid)
     return result
+
+
+def _require_payable_dests(result: ComposeResult, *, burn_uid: int) -> None:
+    """Refuse a vector that pays a hotkey this lineage may never pay.
+
+    Compose already forfeits such a destination to burn, so a vector that
+    reaches here carrying one did not come from ``compose_dry_run``. That is
+    exactly the case worth refusing: the gate is the last thing between a
+    hand-assembled vector and a signed extrinsic.
+    """
+    bindings = result.inclusion.uid_hotkeys
+    if not isinstance(bindings, Mapping):
+        raise CanaryIneligible("the composition carries no uid/hotkey bindings")
+    if set(bindings) != set(result.dests):
+        raise CanaryIneligible(
+            "the uid/hotkey bindings do not cover exactly the composed "
+            "destinations; an unidentified destination is never paid"
+        )
+    for uid in result.dests:
+        hotkey = bindings[uid]
+        if uid == burn_uid:
+            if hotkey != BURN_HOTKEY:
+                raise CanaryIneligible(
+                    f"burn uid {uid} is bound to {hotkey}, not the pinned burn hotkey"
+                )
+            continue
+        if is_refused_destination(hotkey):
+            raise CanaryIneligible(
+                f"destination uid {uid} is {hotkey}, which this lineage never "
+                "pays; the canary does not pay itself"
+            )
 
 
 def _require_u16_match(result: ComposeResult, kwargs: object) -> dict[str, Any]:

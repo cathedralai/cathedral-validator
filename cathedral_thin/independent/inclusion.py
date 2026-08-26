@@ -16,8 +16,17 @@ pay everyone else more because someone swapped a key, which is a reward for an
 event no miner did any work for. Forfeited mass goes to burn, in integer ``H``,
 and only then is the vector apportioned.
 
+A destination this lineage may never pay forfeits the same way. The canary
+hotkey signs the vector, so paying it is a self-payment under another name, and
+the live relay identity is not a miner. Those destinations are dropped and their
+mass folds to burn, exactly like a remap: refusing the whole epoch would let any
+hotkey that lands on the refuse-list stop the subnet from paying anybody.
+
 If the burn destination itself is remapped, or cannot be proven, the whole
 epoch halts. There is no fallback destination for burn mass.
+
+``InclusionOutcome`` carries the surviving ``uid -> hotkey`` bindings so a later
+gate can ask what a UID it is about to pay actually is, without reading a chain.
 """
 
 from __future__ import annotations
@@ -29,6 +38,10 @@ from typing import Mapping, Sequence
 from .constants import BURN_HOTKEY, H
 from .errors import InclusionHalt
 from .hamilton import Dest
+from .refuse import is_refused_destination
+
+FORFEIT_REMAPPED = "the inclusion hotkey is not the anchor hotkey"
+FORFEIT_REFUSED = "this lineage never pays this hotkey"
 
 
 @dataclass(frozen=True)
@@ -72,6 +85,7 @@ class Forfeit:
     anchor_hotkey: str
     inclusion_hotkey: str | None
     m: int
+    reason: str
 
     def as_journal(self) -> dict[str, object]:
         return {
@@ -79,6 +93,7 @@ class Forfeit:
             "anchor_hotkey": self.anchor_hotkey,
             "inclusion_hotkey": self.inclusion_hotkey,
             "m": self.m,
+            "reason": self.reason,
         }
 
 
@@ -90,12 +105,16 @@ class InclusionOutcome:
     burn_mass: int
     degraded: bool
     reason: str
+    uid_hotkeys: Mapping[int, str]
 
     def as_journal(self) -> dict[str, object]:
         return {
             "burn_uid": self.burn_uid,
             "burn_mass": self.burn_mass,
             "forfeits": [forfeit.as_journal() for forfeit in self.forfeits],
+            "uid_hotkeys": {
+                str(uid): self.uid_hotkeys[uid] for uid in sorted(self.uid_hotkeys)
+            },
             "degraded": self.degraded,
             "reason": self.reason,
         }
@@ -165,7 +184,11 @@ def apply_inclusion_forfeit(
                 "the mass map does not match the view it was composed from"
             )
         inclusion_hotkey = inclusion.uid_to_hotkey.get(dest.uid)
-        if inclusion_hotkey == dest.ss58:
+        if is_refused_destination(dest.ss58):
+            reason = FORFEIT_REFUSED
+        elif inclusion_hotkey != dest.ss58:
+            reason = FORFEIT_REMAPPED
+        else:
             kept.append(dest)
             continue
         burn_mass += dest.m
@@ -175,6 +198,7 @@ def apply_inclusion_forfeit(
                 anchor_hotkey=dest.ss58,
                 inclusion_hotkey=inclusion_hotkey,
                 m=dest.m,
+                reason=reason,
             )
         )
 
@@ -200,10 +224,13 @@ def apply_inclusion_forfeit(
         burn_mass=burn_mass,
         degraded=degraded,
         reason=reason,
+        uid_hotkeys=MappingProxyType({dest.uid: dest.ss58 for dest in dests}),
     )
 
 
 __all__ = [
+    "FORFEIT_REFUSED",
+    "FORFEIT_REMAPPED",
     "Forfeit",
     "InclusionOutcome",
     "MetagraphView",

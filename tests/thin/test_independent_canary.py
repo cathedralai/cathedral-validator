@@ -76,7 +76,7 @@ from cathedral_thin.independent.errors import (
     CanaryTransportError,
     RefuseListError,
 )
-from cathedral_thin.independent.hamilton import HamiltonResult
+from cathedral_thin.independent.hamilton import Dest, HamiltonResult
 from cathedral_thin.independent.inclusion import InclusionOutcome, MetagraphView
 from cathedral_thin.independent.policy import LaneContractId
 from cathedral_thin.independent.submit import (
@@ -91,9 +91,18 @@ ANCHOR = EpochAnchor(
 )
 
 MINER_UID = 7
+SECOND_MINER_UID = 9
 PAYABLE_WEIGHTS = (32767, 32768)
 PAYABLE_DESTS = (MINER_UID, BURN_UID)
 RECEIPT = "0x" + "ab" * 16
+
+# The uid -> hotkey bindings a synthetic composition carries. A vector whose
+# destinations cannot be named is refused, so the fixture names them.
+SYNTHETIC_HOTKEYS = {
+    BURN_UID: BURN_HOTKEY,
+    MINER_UID: BOB,
+    SECOND_MINER_UID: CHARLIE,
+}
 
 
 class FakeTransport:
@@ -144,6 +153,7 @@ def synthetic_composed(
     status=STATUS_COMPOSED,
     blocks=(),
     burn_uid=BURN_UID,
+    uid_hotkeys=None,
 ):
     """A ComposeResult that did not come from compose_dry_run.
 
@@ -151,6 +161,19 @@ def synthetic_composed(
     pinned-QVL verified mass. The gate is also testable from a synthetic
     payable mix so the one-write lock can be proven without a live machine.
     """
+    bindings = (
+        {uid: SYNTHETIC_HOTKEYS[uid] for uid in dests}
+        if uid_hotkeys is None
+        else dict(uid_hotkeys)
+    )
+    inclusion_dests = tuple(
+        Dest(
+            uid=uid,
+            ss58=bindings[uid],
+            m=H - len(bindings) + 1 if uid == burn_uid else 1,
+        )
+        for uid in sorted(bindings)
+    )
     return ComposeResult(
         status=status,
         dests=dests,
@@ -159,12 +182,13 @@ def synthetic_composed(
         broadcast_eligible=False,
         blocks=blocks,
         inclusion=InclusionOutcome(
-            dests=(),
+            dests=inclusion_dests,
             forfeits=(),
             burn_uid=burn_uid,
             burn_mass=H // 2,
             degraded=False,
             reason="",
+            uid_hotkeys=bindings,
         ),
         hamilton=HamiltonResult(
             dests=dests,

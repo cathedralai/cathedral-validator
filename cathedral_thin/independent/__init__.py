@@ -129,6 +129,8 @@ from .errors import (
 from .fetch_policy import fetch_policy_bytes, validate_policy_url
 from .hamilton import Dest, HamiltonResult, apportion
 from .inclusion import (
+    FORFEIT_REFUSED,
+    FORFEIT_REMAPPED,
     Forfeit,
     InclusionOutcome,
     MetagraphView,
@@ -154,7 +156,7 @@ from .policy import (
     signing_payload,
     verify_signatures,
 )
-from .refuse import is_refused, require_permitted_hotkey
+from .refuse import is_refused, is_refused_destination, require_permitted_hotkey
 from .submit import (
     MECHANISM_WEIGHTS_CALL,
     build_mechanism_weights_kwargs,
@@ -172,6 +174,8 @@ __all__ = [
     "EVIDENCE_V2_REQUEST_KEYS",
     "EVIDENCE_V2_RESPONSE_KEYS",
     "FINNEY_GENESIS_HASH",
+    "FORFEIT_REFUSED",
+    "FORFEIT_REMAPPED",
     "H",
     "INDEPENDENT_CANARY_FILE",
     "INDEPENDENT_STATE_FILE",
@@ -253,6 +257,7 @@ __all__ = [
     "fetch_policy_bytes",
     "fleet_over_cap",
     "is_refused",
+    "is_refused_destination",
     "last_good_is_usable",
     "load_canary_state",
     "load_config",
