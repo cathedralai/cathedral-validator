@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import stat
+from pathlib import Path
 
 import pytest
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from _independent_fixtures import BOB, BURN_UID, commitment_for
 from cathedral_thin.independent.compose import STATUS_COMPOSED, compose_dry_run
@@ -16,7 +21,12 @@ from cathedral_thin.independent.constants import (
     TEMPO_BLOCKS,
 )
 from cathedral_thin.independent.inclusion import MetagraphView
-from cathedral_thin.independent_runtime.errors import ChainClientError, QuoteVerifyError
+from cathedral_thin.independent_runtime import run as run_module
+from cathedral_thin.independent_runtime.errors import (
+    ChainClientError,
+    IndependentLiveError,
+    QuoteVerifyError,
+)
 from cathedral_thin.independent_runtime.https import (
     axon_evidence_url,
     tls_context_for_evidence,
@@ -25,7 +35,8 @@ from cathedral_thin.independent_runtime.local_policy import (
     COMPUTE_ALLOCATION,
     funded_compute_bundle,
 )
-from cathedral_thin.independent_runtime.qvl import load_verifier
+from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST, load_verifier
+from cathedral_thin.independent_runtime.run import DEFAULT_STATE_DIR, prepare_state_dir
 from cathedral_thin.independent_runtime.score import mass_from_units
 from cathedral_thin.independent_runtime.tempo import (
     closed_epoch_anchor,
@@ -34,6 +45,7 @@ from cathedral_thin.independent_runtime.tempo import (
 from cathedral_thin.independent_runtime.workers import (
     WorkersApiError,
     WorkersClient,
+    tdx_create_enabled,
     tdx_workers,
 )
 from test_independent_compute import (
@@ -254,3 +266,113 @@ def test_load_verifier_refuses_a_binary_that_is_not_the_launch_pin(tmp_path):
     path.chmod(0o755)
     with pytest.raises(QuoteVerifyError, match="launch pin"):
         load_verifier(str(path))
+
+
+def test_launch_qvl_digest_is_the_binary_blob_pin():
+    assert LAUNCH_QVL_DIGEST == (
+        "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+    )
+    assert LAUNCH_QVL_DIGEST != (
+        "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+    )
+
+
+def test_live_runner_does_not_bind_mass_from_a_quote_pass():
+    source = Path(run_module.__file__).read_text(encoding="utf-8")
+    assert "verified_units.get" not in source
+    assert "verified_units[" not in source
+    assert "Attestation is admission" in source
+    assert DEFAULT_STATE_DIR == "/var/lib/cathedral-validator"
+    assert "/tmp" not in DEFAULT_STATE_DIR
+
+
+def test_run_parser_defaults_are_fail_closed():
+    parser = run_module._build_parser()
+    options = parser.parse_args(["run"])
+    assert options.state_dir == DEFAULT_STATE_DIR
+    assert options.confirm_canary is False
+
+
+def test_prepare_state_dir_is_owner_only_and_refuses_symlinks(tmp_path):
+    path = prepare_state_dir(tmp_path / "state")
+    assert path.is_dir()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(IndependentLiveError, match="symlink"):
+        prepare_state_dir(link)
+
+
+def test_tdx_create_enabled_requires_custom_v1_tdx_not_fast_cpu():
+    enabled = {
+        "profiles": [
+            {
+                "id": "custom.v1",
+                "hardware_classes": [
+                    {"id": "tdx_cpu", "availability": "live_testing"},
+                    {
+                        "id": "standard_cpu",
+                        "availability": "available",
+                        "customer_enabled": True,
+                    },
+                ],
+            }
+        ]
+    }
+    unavailable = {
+        "profiles": [
+            {
+                "id": "custom.v1",
+                "hardware_classes": [
+                    {"id": "tdx_cpu", "availability": "unavailable"},
+                ],
+            }
+        ]
+    }
+    fast_only = {
+        "profiles": [
+            {
+                "id": "custom.v1",
+                "hardware_classes": [
+                    {
+                        "id": "standard_cpu",
+                        "availability": "available",
+                        "customer_enabled": True,
+                    },
+                ],
+            }
+        ]
+    }
+    disabled = {
+        "profiles": [
+            {
+                "id": "custom.v1",
+                "hardware_classes": [
+                    {
+                        "id": "tdx_cpu",
+                        "availability": "live_testing",
+                        "customer_enabled": False,
+                    },
+                ],
+            }
+        ]
+    }
+    assert tdx_create_enabled(enabled) is True
+    assert tdx_create_enabled(unavailable) is False
+    assert tdx_create_enabled(fast_only) is False
+    assert tdx_create_enabled(disabled) is False
+    assert tdx_create_enabled({}) is False
+
+
+def test_local_policy_keys_are_ephemeral_and_not_repeating_bytes():
+    _bundle_a, registry_a = funded_compute_bundle()
+    _bundle_b, registry_b = funded_compute_bundle()
+    assert registry_a["economics-a"] != registry_b["economics-a"]
+    known = ed25519.Ed25519PrivateKey.from_private_bytes(bytes([1]) * 32)
+    public = known.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    assert public not in registry_a.values()

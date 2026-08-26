@@ -27,6 +27,9 @@ USER_AGENT = "cathedral-independent-live/1.0"
 READY_STATUSES = frozenset(
     {"ready", "running", "active", "available", "up", "workload_ready"}
 )
+SEALED_TDX_PROFILE = "custom.v1"
+SEALED_TDX_CLASSES = frozenset({"tdx_cpu", "intel_tdx_cpu"})
+TDX_CREATE_AVAILABILITIES = frozenset({"live_testing", "available"})
 PROVISIONING_STATUSES = frozenset(
     {"queued", "provisioning", "attesting", "starting", "pending", "created"}
 )
@@ -393,3 +396,39 @@ class WorkersClient:
 def tdx_workers(records: tuple[WorkerRecord, ...]) -> tuple[WorkerRecord, ...]:
     """The listed machines that claim Intel TDX."""
     return tuple(record for record in records if record.is_tdx)
+
+
+def tdx_create_enabled(catalog: Any) -> bool:
+    """Whether the live catalog allows ``custom.v1`` Intel TDX create.
+
+    Fast CPU (``standard_cpu``) can be customer-enabled at the same time.
+    That row is not this path.
+    """
+    if not isinstance(catalog, Mapping):
+        return False
+    rows = catalog.get("profiles")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("id") != SEALED_TDX_PROFILE:
+            continue
+        classes = row.get("hardware_classes")
+        if not isinstance(classes, list):
+            continue
+        for item in classes:
+            if not isinstance(item, Mapping):
+                continue
+            class_id = item.get("id") or item.get("hardware_class")
+            if class_id is None:
+                class_id = item.get("execution_class")
+            if class_id not in SEALED_TDX_CLASSES:
+                continue
+            if item.get("availability") not in TDX_CREATE_AVAILABILITIES:
+                return False
+            if item.get("customer_enabled") is False:
+                return False
+            operations = item.get("operations")
+            if isinstance(operations, Mapping) and operations.get("create") is False:
+                return False
+            return True
+    return False

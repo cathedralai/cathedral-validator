@@ -19,7 +19,12 @@ from cathedral_thin.independent.compute import QuoteVerdict
 
 from .errors import QuoteVerifyError
 
-LAUNCH_QVL_DIGEST = "8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+# SHA-256 of the on-disk verifier *binary blob* published for SN39
+# (``EXPECTED_VERIFIER_BINARY`` in ``scripts/build_sn39_release_manifest.py``).
+# ``8292b085…`` is the verifier *implementation* pin used by thin relay
+# configs; hashing a real QVL file never yields that digest. Pinning the
+# implementation hash here would make every real binary unloadable.
+LAUNCH_QVL_DIGEST = "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
 MAX_OUTPUT = 1_048_576
 TIMEOUT_SECONDS = 30
 

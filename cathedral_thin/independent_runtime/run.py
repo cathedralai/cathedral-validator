@@ -68,8 +68,9 @@ from .local_policy import COMPUTE_ALLOCATION, commitment_for, funded_compute_bun
 from .qvl import load_verifier
 from .score import mass_from_units
 from .tempo import closed_epoch_anchor, closed_epoch_open
-from .workers import WorkersClient, fetch_public_json, tdx_workers
+from .workers import WorkersClient, fetch_public_json, tdx_create_enabled, tdx_workers
 
+DEFAULT_STATE_DIR = str(INDEPENDENT_STATE_FILE.parent)
 INTEL_COLLATERAL = "https://api.trustedservices.intel.com/sgx/certification/v4/"
 GUEST_PROBE = (
     "echo HOST:$(hostname); "
@@ -132,6 +133,9 @@ def cmd_list_workers(_options: argparse.Namespace) -> int:
 
 
 def cmd_rent(options: argparse.Namespace) -> int:
+    catalog = fetch_public_json("/v1/profiles")
+    if not tdx_create_enabled(catalog):
+        raise WorkersApiError("live catalog does not enable custom.v1 Intel TDX create")
     client = _workers()
     record = client.create_persistent_tdx(
         name=options.name,
@@ -259,6 +263,29 @@ def _summarize_catalog(document: Any) -> dict[str, Any]:
     return {"count": len(summarized), "profiles": summarized}
 
 
+def prepare_state_dir(path: Path | str) -> Path:
+    """Create a 0o700 journal directory. Symlinks are refused.
+
+    The default is ``/var/lib/cathedral-validator``, the same parent as the
+    independent journal pin. ``/tmp`` is not the default: a world-writable
+    parent lets another user own the one-write canary lock.
+    """
+    raw = Path(path)
+    if raw.is_symlink():
+        raise IndependentLiveError(f"state dir {raw} is a symlink")
+    parent = raw.parent
+    if parent.exists() and parent.is_symlink():
+        raise IndependentLiveError(f"state dir parent {parent} is a symlink")
+    try:
+        raw.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(raw, 0o700)
+    except OSError as exc:
+        raise IndependentLiveError(f"state dir {raw} is unusable: {exc}") from exc
+    if raw.is_symlink() or not raw.is_dir():
+        raise IndependentLiveError(f"state dir {raw} is not a usable directory")
+    return raw
+
+
 def cmd_run(options: argparse.Namespace) -> int:
     report: dict[str, Any] = {
         "lineage": "independent_v1",
@@ -270,9 +297,14 @@ def cmd_run(options: argparse.Namespace) -> int:
         "compose": None,
         "canary": None,
         "blockers": [],
+        "tdx_create_enabled": False,
+        "qvl_pass_count": 0,
     }
+    catalog: Any = None
     try:
-        report["catalog"] = _summarize_catalog(fetch_public_json("/v1/profiles"))
+        catalog = fetch_public_json("/v1/profiles")
+        report["catalog"] = _summarize_catalog(catalog)
+        report["tdx_create_enabled"] = tdx_create_enabled(catalog)
     except WorkersApiError as exc:
         report["blockers"].append(f"catalog: {exc}")
 
@@ -282,8 +314,13 @@ def cmd_run(options: argparse.Namespace) -> int:
         existing = client.list_workers()
         listed = list(tdx_workers(existing))
         if options.rent and not listed:
-            created = client.create_persistent_tdx(name=options.name)
-            listed = [created]
+            if not tdx_create_enabled(catalog or {}):
+                report["blockers"].append(
+                    "catalog: custom.v1 Intel TDX create is not enabled; not renting"
+                )
+            else:
+                created = client.create_persistent_tdx(name=options.name)
+                listed = [created]
         if options.wait:
             listed = [
                 client.wait_until_ready(record.worker_id, timeout_seconds=options.wait)
@@ -338,10 +375,10 @@ def cmd_run(options: argparse.Namespace) -> int:
         subtensor = _connect_subtensor()
         report["genesis"] = observed_genesis_hash(subtensor)
         metagraph = subtensor.metagraph(NETUID)
-        view = metagraph_view(metagraph)
+        anchor_view = metagraph_view(metagraph)
         axons = serving_axons(metagraph)
         report["sn39"] = {
-            "uids": len(view.uid_to_hotkey),
+            "uids": len(anchor_view.uid_to_hotkey),
             "serving_axons": [
                 {
                     "uid": axon.uid,
@@ -367,12 +404,9 @@ def cmd_run(options: argparse.Namespace) -> int:
         collect_hits.append(
             _try_collect(axon.evidence_url(), axon.hotkey, validator_ss58)
         )
-    report["collect"] = [
-        {key: value for key, value in row.items() if key != "collected"}
-        for row in collect_hits
-    ]
 
     verified_units: dict[str, int] = {}
+    pass_count = 0
     qvl = None
     try:
         qvl = load_verifier(options.qvl)
@@ -400,12 +434,10 @@ def cmd_run(options: argparse.Namespace) -> int:
                         "qvl: PASS quote is the canary identity; not mass"
                     )
                     continue
-                # Attestation is admission. One verified machine that answered
-                # this validator's nonce is one integer work unit of liveness
-                # until SAT work-report dispatch is wired for this guest.
-                verified_units[collected.assigned_hotkey] = (
-                    verified_units.get(collected.assigned_hotkey, 0) + 1
-                )
+                # Attestation is admission, not payment. Record the PASS so
+                # operators can see liveness; do not bind Compute mass until
+                # SAT work units are independently re-derived.
+                pass_count += 1
             elif verdict is QuoteVerdict.FAIL:
                 continue
             elif verdict is QuoteVerdict.INFRA:
@@ -414,15 +446,28 @@ def cmd_run(options: argparse.Namespace) -> int:
                 never: QuoteVerdict = verdict
                 raise IndependentLiveError(f"unhandled quote verdict {never}")
 
-    # Product truth: attestation is not payment. Only bind mass when the QVL
-    # is pinned AND at least one quote PASSed. CyberGym/Voice stay at 0.
+    report["collect"] = [
+        {key: value for key, value in row.items() if key != "collected"}
+        for row in collect_hits
+    ]
+    report["qvl_pass_count"] = pass_count
+    # Product truth: attestation is not payment. verified_units stays empty
+    # until a SAT work-report path fills it. CyberGym/Voice stay at 0.
     verified_mass = mass_from_units(COMPUTE_ALLOCATION, verified_units)
     report["verified_units"] = dict(verified_units)
     report["verified_mass"] = dict(verified_mass)
     if not verified_mass:
         report["blockers"].append(
-            "no pinned-QVL PASS collect; Compute stays non-contributing"
+            "no independently re-derived work units; Compute stays non-contributing"
         )
+
+    try:
+        inclusion_metagraph = subtensor.metagraph(NETUID)
+        inclusion_view = metagraph_view(inclusion_metagraph)
+    except Exception as exc:
+        report["blockers"].append(f"inclusion snapshot: {type(exc).__name__}: {exc}")
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
 
     bundle, registry = funded_compute_bundle()
     anchor = _epoch_anchor(subtensor)
@@ -432,16 +477,20 @@ def cmd_run(options: argparse.Namespace) -> int:
         qvl_digest=None if qvl is None else qvl.digest,
         verified_mass=verified_mass or None,
     )
-    state_dir = Path(options.state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        state_dir = prepare_state_dir(options.state_dir)
+    except IndependentLiveError as exc:
+        report["blockers"].append(f"state-dir: {exc}")
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
     journal = state_dir / INDEPENDENT_STATE_FILE.name
     result = compose_dry_run(
         bundle=bundle,
         key_registry=registry,
         commitment=commitment_for(bundle, anchor.epoch_open),
         anchor=anchor,
-        anchor_view=view,
-        inclusion_view=view,
+        anchor_view=anchor_view,
+        inclusion_view=inclusion_view,
         adapters={COMPUTE_LANE: paying},
         journal_path=journal,
     )
@@ -460,6 +509,13 @@ def cmd_run(options: argparse.Namespace) -> int:
         return 2
 
     kwargs = prepare_mechanism_weights(result=result, journal_path=journal)
+    if not getattr(options, "confirm_canary", False):
+        report["blockers"].append(
+            "--confirm-canary is required to spend the one-write canary; "
+            "wallet JSON alone is not a write"
+        )
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
     wallet_json = os.environ.get("CATHEDRAL_CANARY_HOTKEY_JSON", "")
     if not wallet_json:
         report["blockers"].append(
@@ -543,8 +599,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--state-dir",
-        default="/tmp/cathedral-independent",
-        help="directory for independent-state.json and independent-canary.json",
+        default=DEFAULT_STATE_DIR,
+        help=(
+            "directory for independent-state.json and independent-canary.json "
+            f"(default {DEFAULT_STATE_DIR})"
+        ),
+    )
+    run.add_argument(
+        "--confirm-canary",
+        action="store_true",
+        help=(
+            "required to spend the one-write canary; a wallet in the "
+            "environment is not enough by itself"
+        ),
     )
     return parser
 

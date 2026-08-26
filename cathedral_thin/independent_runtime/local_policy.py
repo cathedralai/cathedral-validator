@@ -21,6 +21,8 @@ from cathedral_thin.independent.constants import (
     H,
     NETUID,
     POLICY_BUNDLE_SCHEMA,
+    POLICY_KEY_IDS,
+    POLICY_SIGNATURE_THRESHOLD,
 )
 from cathedral_thin.independent.policy import (
     PolicyBundle,
@@ -28,6 +30,8 @@ from cathedral_thin.independent.policy import (
     parse_policy_bundle,
     signing_payload,
 )
+
+from .errors import IndependentLiveError
 
 COMPUTE_LANE = {"schema": "cathedral_compute_receipt_v1", "platform": "intel_tdx_cpu"}
 CYBERGYM_LANE = {"schema": "cathedral_cybergym_report_v1", "platform": "cybergym"}
@@ -37,10 +41,26 @@ COMPUTE_ALLOCATION = 10**11
 
 
 def _economics_keys() -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Process-local Ed25519 keys. Never repeating-byte or well-known seeds.
+
+    SN39 still has no on-chain ``CATHPOL1`` this runner can fetch. The live
+    canary therefore signs its own genesis EconomicsSet. Hardcoded
+    ``bytes([1])*32`` seeds would let anyone reproduce the signatures; these
+    keys exist only in this process and are discarded when it exits.
+    """
     private: dict[str, Any] = {}
     registry: dict[str, bytes] = {}
-    for index, key_id in enumerate(("economics-a", "economics-b", "economics-c")):
-        key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes([index + 1]) * 32)
+    for key_id in POLICY_KEY_IDS:
+        key = ed25519.Ed25519PrivateKey.generate()
+        raw = key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        if len(set(raw)) == 1:
+            raise IndependentLiveError(
+                "economics private key is a repeating byte; refusing to sign"
+            )
         private[key_id] = key
         registry[key_id] = key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -86,7 +106,7 @@ def funded_compute_bundle() -> tuple[PolicyBundle, dict[str, bytes]]:
     payload = signing_payload(document)
     document["signatures"] = [
         {"key_id": key_id, "sig": private[key_id].sign(payload).hex()}
-        for key_id in ("economics-a", "economics-b")
+        for key_id in POLICY_KEY_IDS[:POLICY_SIGNATURE_THRESHOLD]
     ]
     return parse_policy_bundle(document), registry
 
