@@ -17,6 +17,9 @@ What it does own, end to end:
 * a named Compute lane whose adapter cannot contribute mass at all: the quote
   verifier is mandatory, its collateral source is pinned to Intel's public PCS,
   and broadcast allocation stays 0 while the lane's blockers are open;
+* a dry-run collect client for that lane, which speaks the miner's v2
+  ``POST /v1/evidence`` contract over an injected transport and derives the
+  expected ``REPORT_DATA`` from its own challenge -- and still moves no mass;
 * its own journal, separate from every other lineage's state.
 
 Importing this package has no side effects, reads no environment variable, and
@@ -26,6 +29,20 @@ opens no socket.
 from __future__ import annotations
 
 from .canonical import canonical_bytes, parse_strict_json
+from .collect import (
+    EVIDENCE_V2_REQUEST_KEYS,
+    EVIDENCE_V2_RESPONSE_KEYS,
+    ChannelBinding,
+    CollectedEvidence,
+    EvidenceTransport,
+    FleetTarget,
+    collect_evidence,
+    collect_miner_fleet,
+    evidence_url,
+    mint_nonce,
+    report_data_v2,
+    verify_collected,
+)
 from .compose import (
     STATUS_BROADCAST_BLOCKED,
     STATUS_COMPOSED,
@@ -76,6 +93,7 @@ from .errors import (
     BroadcastBlocked,
     BroadcastDisabled,
     CollateralSourceError,
+    CollectError,
     CommitmentError,
     ComputeEvidenceError,
     ConfigError,
@@ -132,6 +150,8 @@ __all__ = [
     "COMPUTE_BLOCK_REASON",
     "COMPUTE_FLEET_CAP",
     "COMPUTE_LANE",
+    "EVIDENCE_V2_REQUEST_KEYS",
+    "EVIDENCE_V2_RESPONSE_KEYS",
     "FINNEY_GENESIS_HASH",
     "H",
     "INDEPENDENT_STATE_FILE",
@@ -154,7 +174,10 @@ __all__ = [
     "BroadcastBlocked",
     "BroadcastDisabled",
     "BurnTarget",
+    "ChannelBinding",
     "CollateralSourceError",
+    "CollectError",
+    "CollectedEvidence",
     "CommitmentError",
     "ComposeResult",
     "ComputeAdapter",
@@ -163,6 +186,8 @@ __all__ = [
     "Dest",
     "EconomicsSet",
     "EpochAnchor",
+    "EvidenceTransport",
+    "FleetTarget",
     "Forfeit",
     "GenesisPinError",
     "HamiltonError",
@@ -193,9 +218,12 @@ __all__ = [
     "canonical_bytes",
     "canonical_seed_material",
     "check_genesis_pin",
+    "collect_evidence",
+    "collect_miner_fleet",
     "compose_dry_run",
     "decode_commitment",
     "encode_commitment",
+    "evidence_url",
     "fetch_policy_bytes",
     "fleet_over_cap",
     "is_refused",
@@ -205,10 +233,12 @@ __all__ = [
     "load_policy_bundle",
     "machine_id_from_key",
     "mass_map",
+    "mint_nonce",
     "parse_policy_bundle",
     "parse_strict_json",
     "prepare_mechanism_weights",
     "refuse_wallet",
+    "report_data_v2",
     "require_commitment",
     "require_compute_adapter",
     "require_last_good",
@@ -218,6 +248,7 @@ __all__ = [
     "signing_payload",
     "validate_collateral_url",
     "validate_policy_url",
+    "verify_collected",
     "verify_signatures",
     "write_journal",
 ]

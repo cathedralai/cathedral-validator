@@ -81,6 +81,10 @@ class ComputeEvidenceError(IndependentValidatorError):
     """Compute-lane evidence is malformed, unbounded, or not bytes."""
 
 
+class CollectError(IndependentValidatorError):
+    """The miner evidence POST failed under the hardened collect rules."""
+
+
 class MachineIdentityConflict(ComputeEvidenceError):
     """One machine identity is claimed by two miner hotkeys.
 
@@ -95,6 +99,7 @@ __all__ = [
     "BroadcastBlocked",
     "BroadcastDisabled",
     "CollateralSourceError",
+    "CollectError",
     "CommitmentError",
     "ComputeEvidenceError",
     "ConfigError",
