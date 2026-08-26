@@ -73,7 +73,7 @@ from .chain import (
     load_keypair,
     metagraph_view,
     observed_genesis_hash,
-    serving_axons,
+    scan_axons,
 )
 from .errors import (
     ChainClientError,
@@ -189,13 +189,14 @@ def cmd_probe_sn39(_options: argparse.Namespace) -> int:
     genesis = observed_genesis_hash(subtensor)
     metagraph = subtensor.metagraph(NETUID)
     view = metagraph_view(metagraph)
-    axons = serving_axons(metagraph)
+    scan = scan_axons(metagraph)
     print(
         json.dumps(
             {
                 "genesis": genesis,
                 "netuid": NETUID,
                 "uids": len(view.uid_to_hotkey),
+                "axon_skip": scan.skipped,
                 "serving_axons": [
                     {
                         "uid": axon.uid,
@@ -204,7 +205,7 @@ def cmd_probe_sn39(_options: argparse.Namespace) -> int:
                         "port": axon.port,
                         "evidence_url": axon.evidence_url(),
                     }
-                    for axon in axons
+                    for axon in scan.serving
                 ],
             },
             indent=2,
@@ -227,6 +228,7 @@ class EpochSnapshot:
     anchor: EpochAnchor
     anchor_view: MetagraphView
     axons: tuple[ServingAxon, ...]
+    skipped: dict[str, int]
     at_anchor: bool
     note: str
 
@@ -266,10 +268,12 @@ def snapshot_epoch(subtensor: Any) -> EpochSnapshot:
             "taken at the head immediately after the anchor was frozen"
         )
         metagraph = subtensor.metagraph(NETUID)
+    scan = scan_axons(metagraph)
     return EpochSnapshot(
         anchor=anchor,
         anchor_view=metagraph_view(metagraph),
-        axons=serving_axons(metagraph),
+        axons=scan.serving,
+        skipped=dict(scan.skipped),
         at_anchor=at_anchor,
         note=note,
     )
@@ -527,6 +531,7 @@ def cmd_run(options: argparse.Namespace) -> int:
         report["anchor"] = snapshot.as_report()
         report["sn39"] = {
             "uids": len(anchor_view.uid_to_hotkey),
+            "axon_skip": snapshot.skipped,
             "serving_axons": [
                 {
                     "uid": axon.uid,

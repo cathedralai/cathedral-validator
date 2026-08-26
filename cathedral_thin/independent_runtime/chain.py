@@ -62,6 +62,18 @@ def _pinned_scalar(kwargs: Mapping[str, Any], name: str, pin: int) -> int:
     return value
 
 
+# Probe and the live runner both need to say WHY serving_axons is empty.
+# Counts only: never list a refused hotkey as dialable.
+AXON_SKIP_REASONS = (
+    "refuse_or_canary",
+    "port_zero",
+    "not_serving",
+    "unroutable",
+    "unusable_ip",
+)
+_UNROUTABLE_IPS = frozenset({"0.0.0.0", "::", "127.0.0.1", "::1"})
+
+
 @dataclass(frozen=True)
 class ServingAxon:
     uid: int
@@ -74,6 +86,18 @@ class ServingAxon:
 
     def sat_work_url(self) -> str:
         return axon_sat_work_url(self.ip, self.port)
+
+
+@dataclass(frozen=True)
+class AxonScan:
+    """Serving axons plus the skip-reason census of every other row."""
+
+    serving: tuple[ServingAxon, ...]
+    skipped: dict[str, int]
+
+
+def _empty_skips() -> dict[str, int]:
+    return {reason: 0 for reason in AXON_SKIP_REASONS}
 
 
 def _ip_to_str(raw: Any) -> str:
@@ -93,29 +117,42 @@ def metagraph_view(metagraph: Any) -> MetagraphView:
     return MetagraphView.from_uid_map(dict(zip(uids, hotkeys)))
 
 
-def serving_axons(metagraph: Any) -> tuple[ServingAxon, ...]:
-    """Miners that advertise a serving axon. The burn dest is omitted."""
+def scan_axons(metagraph: Any) -> AxonScan:
+    """Classify every metagraph axon row. Serving is the only dialable set."""
     uids = [int(uid) for uid in list(metagraph.uids)]
     hotkeys = [str(hotkey) for hotkey in list(metagraph.hotkeys)]
     axons = list(metagraph.axons)
     if not (len(uids) == len(hotkeys) == len(axons)):
         raise ChainClientError("metagraph axon rows are ragged")
     found: list[ServingAxon] = []
+    skipped = _empty_skips()
     for uid, hotkey, axon in zip(uids, hotkeys, axons):
         if hotkey in REFUSE_HOTKEYS or hotkey == CANARY_HOTKEY:
+            skipped["refuse_or_canary"] += 1
             continue
         port = int(getattr(axon, "port", 0) or 0)
-        serving = bool(getattr(axon, "is_serving", port > 0)) and port > 0
+        if port <= 0:
+            skipped["port_zero"] += 1
+            continue
+        serving = bool(getattr(axon, "is_serving", True))
         if not serving:
+            skipped["not_serving"] += 1
             continue
         try:
             ip = _ip_to_str(getattr(axon, "ip", ""))
         except ChainClientError:
+            skipped["unusable_ip"] += 1
             continue
-        if ip in {"0.0.0.0", "::", "127.0.0.1", "::1"}:
+        if ip in _UNROUTABLE_IPS:
+            skipped["unroutable"] += 1
             continue
         found.append(ServingAxon(uid=uid, hotkey=hotkey, ip=ip, port=port))
-    return tuple(found)
+    return AxonScan(serving=tuple(found), skipped=skipped)
+
+
+def serving_axons(metagraph: Any) -> tuple[ServingAxon, ...]:
+    """Miners that advertise a serving axon. The burn dest is omitted."""
+    return scan_axons(metagraph).serving
 
 
 def observed_genesis_hash(subtensor: Any) -> str:

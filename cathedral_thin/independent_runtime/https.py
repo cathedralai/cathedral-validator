@@ -7,7 +7,9 @@ certificate so collect can bind v2 REPORT_DATA to this connection.
 The same transport carries the audit-work POST: the request path comes from the
 validated URL, so a ``/v1/sat-work`` endpoint is dialed as itself. No
 ``Authorization`` header is sent, because this validator holds no miner bearer
-token; an axon that answers 401 yields zero units rather than a guess.
+token. A protocol-compliant axon serves the canonical audit instance
+credential-free, the same way it serves ``/v1/evidence``. An axon that still
+answers 401 yields zero units rather than a guess.
 """
 
 from __future__ import annotations

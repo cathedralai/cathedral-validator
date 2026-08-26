@@ -38,10 +38,12 @@ from cathedral_thin.independent.compute import (
 )
 from cathedral_thin.independent.constants import (
     BURN_HOTKEY,
+    CANARY_HOTKEY,
     FINNEY_GENESIS_HASH,
     H,
     INDEPENDENT_CANARY_FILE,
     INDEPENDENT_STATE_FILE,
+    REFUSE_HOTKEYS,
     TEMPO_BLOCKS,
 )
 from cathedral_thin.independent.errors import SatWorkError
@@ -53,7 +55,11 @@ from cathedral_thin.independent.sat import (
     sat_work_url,
 )
 from cathedral_thin.independent_runtime import run as run_module
-from cathedral_thin.independent_runtime.chain import ServingAxon
+from cathedral_thin.independent_runtime.chain import (
+    AXON_SKIP_REASONS,
+    ServingAxon,
+    scan_axons,
+)
 from cathedral_thin.independent_runtime.errors import (
     ChainClientError,
     IndependentLiveError,
@@ -512,6 +518,71 @@ class FakeMetagraph:
         self.axons = [FakeAxon("203.0.113.9", port) for _ in self.uids]
 
 
+class RowMetagraph:
+    """One axon row per UID so skip reasons can be tested independently."""
+
+    def __init__(self, rows: list[tuple[int, str, FakeAxon]]) -> None:
+        self.uids = [uid for uid, _hotkey, _axon in rows]
+        self.hotkeys = [hotkey for _uid, hotkey, _axon in rows]
+        self.axons = [axon for _uid, _hotkey, axon in rows]
+
+
+RELAY_HOTKEY = sorted(REFUSE_HOTKEYS - {BURN_HOTKEY})[0]
+
+
+def test_scan_axons_counts_every_skip_reason_and_keeps_only_dialable_rows():
+    """Empty serving_axons must still say why. Counts, never a refused URL."""
+    silent = FakeAxon("203.0.113.9", 0)
+    advertised_but_down = FakeAxon("203.0.113.9", 8443)
+    advertised_but_down.is_serving = False
+    loopback = FakeAxon("127.0.0.1", 8443)
+    unspecified = FakeAxon("0.0.0.0", 8091)
+    bad_ip = FakeAxon("", 8443)
+    bad_ip.ip = None
+    live = FakeAxon("203.0.113.9", 8443)
+    refuse_even_if_serving = FakeAxon("198.51.100.7", 8443)
+    canary_even_if_serving = FakeAxon("198.51.100.8", 8443)
+    scan = scan_axons(
+        RowMetagraph(
+            [
+                (0, BOB, silent),
+                (1, CHARLIE, advertised_but_down),
+                (2, "5FakeLoopbackHotkeyAAAAAAAAAAAAAAAAAAAAAAAAAAA", loopback),
+                (3, "5FakeUnspecifiedHotkeyAAAAAAAAAAAAAAAAAAAAAAAA", unspecified),
+                (4, "5FakeUnusableIpHotkeyAAAAAAAAAAAAAAAAAAAAAAAAA", bad_ip),
+                (MINER_UID, "5DialableMinerHotkeyAAAAAAAAAAAAAAAAAAAAAAAAAA", live),
+                (30, RELAY_HOTKEY, refuse_even_if_serving),
+                (136, BURN_HOTKEY, refuse_even_if_serving),
+                (200, CANARY_HOTKEY, canary_even_if_serving),
+            ]
+        )
+    )
+    assert AXON_SKIP_REASONS == (
+        "refuse_or_canary",
+        "port_zero",
+        "not_serving",
+        "unroutable",
+        "unusable_ip",
+    )
+    assert scan.skipped == {
+        "refuse_or_canary": 3,
+        "port_zero": 1,
+        "not_serving": 1,
+        "unroutable": 2,
+        "unusable_ip": 1,
+    }
+    assert [axon.uid for axon in scan.serving] == [MINER_UID]
+    assert scan.serving[0].ip == "203.0.113.9"
+    assert scan.serving[0].port == 8443
+
+
+def test_scan_axons_does_not_treat_the_live_relay_as_dialable():
+    serving_relay = FakeAxon("203.0.113.50", 8443)
+    scan = scan_axons(RowMetagraph([(30, RELAY_HOTKEY, serving_relay)]))
+    assert scan.serving == ()
+    assert scan.skipped["refuse_or_canary"] == 1
+
+
 class OrderRecordingSubtensor:
     """Records the order of the RPCs the epoch snapshot makes.
 
@@ -559,6 +630,8 @@ def test_the_anchor_is_frozen_before_the_metagraph_is_snapshotted():
     assert snapshot.note == ""
     assert snapshot.anchor_view.uid_to_hotkey[BURN_UID] == BURN_HOTKEY
     assert [axon.uid for axon in snapshot.axons] == [MINER_UID]
+    assert snapshot.skipped["refuse_or_canary"] == 1
+    assert snapshot.skipped["port_zero"] == 0
 
 
 def test_a_pruning_node_snapshots_the_head_and_says_so():
