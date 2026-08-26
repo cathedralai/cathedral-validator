@@ -85,6 +85,22 @@ class CollectError(IndependentValidatorError):
     """The miner evidence POST failed under the hardened collect rules."""
 
 
+class CanaryIneligible(IndependentValidatorError):
+    """The one-write canary was asked to submit a vector it must not send."""
+
+
+class CanarySpent(IndependentValidatorError):
+    """The one-write canary slot is already claimed; a second write is refused."""
+
+
+class CanaryTransportError(IndependentValidatorError):
+    """The canary transport is missing, returned a bad receipt, or failed."""
+
+
+class CanaryStateError(IndependentValidatorError):
+    """The one-write canary lock file could not be claimed or was refused."""
+
+
 class MachineIdentityConflict(ComputeEvidenceError):
     """One machine identity is claimed by two miner hotkeys.
 
@@ -98,6 +114,10 @@ __all__ = [
     "AdapterUnavailable",
     "BroadcastBlocked",
     "BroadcastDisabled",
+    "CanaryIneligible",
+    "CanarySpent",
+    "CanaryStateError",
+    "CanaryTransportError",
     "CollateralSourceError",
     "CollectError",
     "CommitmentError",

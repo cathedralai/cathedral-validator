@@ -80,3 +80,6 @@ state_file = "/var/lib/cathedral-validator/independent-state.json"
 # There is no writer behind this flag. Setting it true fails to load, on purpose:
 # a flag wired to a stub is how a dry-run path becomes a live one by accident.
 broadcast = false
+# There is no --canary flag either. The one-write canary is a library call with
+# an injected transport, gated on COMPOSED + a funded Compute row, and it still
+# ships no chain client.

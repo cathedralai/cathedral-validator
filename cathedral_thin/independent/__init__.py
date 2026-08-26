@@ -1,9 +1,9 @@
-"""`independent_v1`: an independent SN39 composer with no chain writer.
+"""`independent_v1`: an independent SN39 composer with no chain client.
 
 This package composes a mechanism weight vector from a signed, on-chain
-committed policy document and journals it. It has no writer, no substrate
-client, and no path to one: there is nothing here that can set weights, and the
-import-graph tests in ``tests/thin`` prove it rather than asserting it.
+committed policy document and journals it. It has no substrate client and no
+default dialer: import-graph tests in ``tests/thin`` prove there is no import
+path from this lineage to a writer in this repo.
 
 What it does own, end to end:
 
@@ -20,6 +20,11 @@ What it does own, end to end:
 * a dry-run collect client for that lane, which speaks the miner's v2
   ``POST /v1/evidence`` contract over an injected transport and derives the
   expected ``REPORT_DATA`` from its own challenge -- and still moves no mass;
+* a one-write canary gate that will call an injected transport exactly once
+  after a ``COMPOSED`` vector, a funded Compute row, a dry-run u16 match, and
+  the dedicated canary identity -- and that still ships no chain client, so a
+  composition that is ``DEGRADED`` or ``BROADCAST_BLOCKED`` cannot spend the
+  slot;
 * its own journal, separate from every other lineage's state.
 
 Importing this package has no side effects, reads no environment variable, and
@@ -29,6 +34,13 @@ opens no socket.
 from __future__ import annotations
 
 from .canonical import canonical_bytes, parse_strict_json
+from .canary import (
+    CanaryReceipt,
+    CanaryTransport,
+    load_canary_state,
+    require_canary_hotkey,
+    submit_canary_once,
+)
 from .collect import (
     EVIDENCE_V2_REQUEST_KEYS,
     EVIDENCE_V2_RESPONSE_KEYS,
@@ -72,11 +84,13 @@ from .compute import (
 )
 from .constants import (
     BURN_HOTKEY,
+    CANARY_HOTKEY,
     COMPUTE_FLEET_CAP,
     COMMITMENT_LENGTH,
     COMMITMENT_MAGIC,
     FINNEY_GENESIS_HASH,
     H,
+    INDEPENDENT_CANARY_FILE,
     INDEPENDENT_STATE_FILE,
     LINEAGE,
     MAX_POLICY_BUNDLE_BYTES,
@@ -92,6 +106,10 @@ from .errors import (
     AdapterUnavailable,
     BroadcastBlocked,
     BroadcastDisabled,
+    CanaryIneligible,
+    CanarySpent,
+    CanaryStateError,
+    CanaryTransportError,
     CollateralSourceError,
     CollectError,
     CommitmentError,
@@ -145,6 +163,7 @@ from .submit import (
 
 __all__ = [
     "BURN_HOTKEY",
+    "CANARY_HOTKEY",
     "COMMITMENT_LENGTH",
     "COMMITMENT_MAGIC",
     "COMPUTE_BLOCK_REASON",
@@ -154,6 +173,7 @@ __all__ = [
     "EVIDENCE_V2_RESPONSE_KEYS",
     "FINNEY_GENESIS_HASH",
     "H",
+    "INDEPENDENT_CANARY_FILE",
     "INDEPENDENT_STATE_FILE",
     "INTEL_PCS_HOSTS",
     "LINEAGE",
@@ -174,6 +194,12 @@ __all__ = [
     "BroadcastBlocked",
     "BroadcastDisabled",
     "BurnTarget",
+    "CanaryIneligible",
+    "CanaryReceipt",
+    "CanarySpent",
+    "CanaryStateError",
+    "CanaryTransport",
+    "CanaryTransportError",
     "ChannelBinding",
     "CollateralSourceError",
     "CollectError",
@@ -228,6 +254,7 @@ __all__ = [
     "fleet_over_cap",
     "is_refused",
     "last_good_is_usable",
+    "load_canary_state",
     "load_config",
     "load_journal",
     "load_policy_bundle",
@@ -239,6 +266,7 @@ __all__ = [
     "prepare_mechanism_weights",
     "refuse_wallet",
     "report_data_v2",
+    "require_canary_hotkey",
     "require_commitment",
     "require_compute_adapter",
     "require_last_good",
@@ -246,6 +274,7 @@ __all__ = [
     "require_permitted_hotkey",
     "resolve_burn_uid",
     "signing_payload",
+    "submit_canary_once",
     "validate_collateral_url",
     "validate_policy_url",
     "verify_collected",

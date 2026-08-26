@@ -5,9 +5,10 @@ process is allowed to exist at all: the identity it would run as, the chain it
 believes it is on, the file it would journal to, and whether the configuration
 is asking for a broadcast this lineage cannot perform.
 
-There is no ``--broadcast`` flag, and adding one is not an oversight to fix
-later: the flag would have to be wired to a writer, and the writer does not
-exist. A configuration that sets ``broadcast = true`` fails to load.
+There is no ``--broadcast`` flag and no ``--canary`` flag, and adding either
+is not an oversight to fix later: the flag would have to be wired to a writer,
+and the writer does not exist. A configuration that sets ``broadcast = true``
+fails to load.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from .refuse import require_permitted_hotkey
 MAX_CONFIG_BYTES = 65_536
 
 _REQUIRED_SECTIONS = ("network", "lineage", "policy", "weights", "runtime")
+_REFUSED_CLI_FLAGS = ("--broadcast", "--canary", "--canary-once")
 
 
 @dataclass(frozen=True)
@@ -297,17 +299,23 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_refused_writer_flag(argument: str) -> bool:
+    for flag in _REFUSED_CLI_FLAGS:
+        if argument == flag or argument.startswith(f"{flag}="):
+            return True
+    return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate start-up gates and print the resolved pins. Never broadcasts."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    for argument in arguments:
-        if argument == "--broadcast" or argument.startswith("--broadcast="):
-            print(
-                "independent_v1 has no --broadcast flag: this lineage ships no "
-                "chain writer",
-                file=sys.stderr,
-            )
-            return 2
+    if any(_is_refused_writer_flag(argument) for argument in arguments):
+        print(
+            "independent_v1 has no --broadcast flag and no --canary flag: "
+            "this lineage ships no chain writer",
+            file=sys.stderr,
+        )
+        return 2
     parser = _build_parser()
     options = parser.parse_args(arguments)
     try:

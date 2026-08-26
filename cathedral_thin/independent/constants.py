@@ -67,6 +67,19 @@ REFUSE_HOTKEYS = frozenset(
 # other's reservations, and a shared path would let one clobber the other.
 INDEPENDENT_STATE_FILE = Path("/var/lib/cathedral-validator/independent-state.json")
 
+# One-write canary lock. A different file from the compose journal on purpose:
+# a spent canary must not look like an epoch composition, and a composed epoch
+# must not look like a spent canary. The name is the pin; the directory is the
+# operator's.
+INDEPENDENT_CANARY_FILE = Path("/var/lib/cathedral-validator/independent-canary.json")
+
+# The only identity submit_canary_once will even attempt to submit as. It is
+# also on neither refuse-list entry. A production canary wallet is a pin change,
+# not a CLI flag and not a second runtime signing as the live relay.
+CANARY_HOTKEY = (
+    "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"  # pragma: allowlist secret
+)
+
 LINEAGE = "independent_v1"
 
 COMMITMENT_MAGIC = b"CATHPOL1"
@@ -114,6 +127,7 @@ COMPUTE_FLEET_CAP = 256
 
 __all__ = [
     "BURN_HOTKEY",
+    "CANARY_HOTKEY",
     "COMMITMENT_LENGTH",
     "COMMITMENT_MAGIC",
     "COMMIT_REVEAL_ENABLED",
@@ -125,6 +139,7 @@ __all__ = [
     "GENESIS_PREVIOUS_DIGEST",
     "GENESIS_VERSION",
     "H",
+    "INDEPENDENT_CANARY_FILE",
     "INDEPENDENT_STATE_FILE",
     "INTEL_PCS_HOSTS",
     "LINEAGE",

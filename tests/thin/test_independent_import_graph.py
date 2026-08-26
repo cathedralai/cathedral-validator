@@ -29,7 +29,12 @@ from pathlib import Path
 import pytest
 
 import cathedral_thin.independent as independent
-from cathedral_thin.independent.constants import INDEPENDENT_STATE_FILE
+from cathedral_thin.independent.constants import (
+    CANARY_HOTKEY,
+    INDEPENDENT_CANARY_FILE,
+    INDEPENDENT_STATE_FILE,
+    REFUSE_HOTKEYS,
+)
 
 PACKAGE_DIR = Path(independent.__file__).resolve().parent
 
@@ -149,6 +154,12 @@ def test_the_journal_is_not_the_thin_validator_journal():
         "/var/lib/cathedral-validator/thin-state.json"
     )
     assert INDEPENDENT_STATE_FILE.name == "independent-state.json"
+
+
+def test_the_canary_lock_is_not_the_compose_journal():
+    assert INDEPENDENT_CANARY_FILE != INDEPENDENT_STATE_FILE
+    assert INDEPENDENT_CANARY_FILE.name == "independent-canary.json"
+    assert CANARY_HOTKEY not in REFUSE_HOTKEYS
 
 
 def test_the_burn_uid_is_never_hardcoded():

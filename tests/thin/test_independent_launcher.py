@@ -332,6 +332,14 @@ def test_the_cli_has_no_broadcast_flag(capsys):
     assert "no --broadcast flag" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag", ["--canary", "--canary-once", "--canary=1"])
+def test_the_cli_has_no_canary_flag(capsys, flag):
+    assert main(["--config", str(PROFILE), flag]) == 2
+    err = capsys.readouterr().err
+    assert "no --canary flag" in err
+    assert "no --broadcast flag" in err
+
+
 def test_the_cli_help_mentions_no_broadcast():
     proc = subprocess.run(
         [sys.executable, "-m", "cathedral_thin.independent", "--help"],
@@ -340,6 +348,7 @@ def test_the_cli_help_mentions_no_broadcast():
         check=True,
     )
     assert "--broadcast" not in proc.stdout
+    assert "--canary" not in proc.stdout
     assert "broadcasts nothing" in proc.stdout
 
 
