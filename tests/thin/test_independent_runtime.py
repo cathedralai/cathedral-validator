@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import stat
 from pathlib import Path
@@ -13,14 +14,21 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from _independent_fixtures import BOB, BURN_UID, commitment_for
 from cathedral_thin.independent.compose import STATUS_COMPOSED, compose_dry_run
-from cathedral_thin.independent.compute import COMPUTE_LANE, ComputeAdapter
+from cathedral_thin.independent.compute import (
+    COMPUTE_LANE,
+    ComputeAdapter,
+    QuoteVerdict,
+)
 from cathedral_thin.independent.constants import (
     BURN_HOTKEY,
+    FINNEY_GENESIS_HASH,
     H,
+    INDEPENDENT_CANARY_FILE,
     INDEPENDENT_STATE_FILE,
     TEMPO_BLOCKS,
 )
 from cathedral_thin.independent.inclusion import MetagraphView
+from cathedral_thin.independent.journal import load_journal
 from cathedral_thin.independent_runtime import run as run_module
 from cathedral_thin.independent_runtime.errors import (
     ChainClientError,
@@ -364,6 +372,206 @@ def test_tdx_create_enabled_requires_custom_v1_tdx_not_fast_cpu():
     assert tdx_create_enabled(fast_only) is False
     assert tdx_create_enabled(disabled) is False
     assert tdx_create_enabled({}) is False
+
+
+class FakeAxon:
+    def __init__(self, ip: str, port: int) -> None:
+        self.ip = ip
+        self.port = port
+        self.is_serving = port > 0
+
+
+class FakeMetagraph:
+    def __init__(self, uids, hotkeys, *, port: int = 8443) -> None:
+        self.uids = list(uids)
+        self.hotkeys = list(hotkeys)
+        self.axons = [FakeAxon("203.0.113.9", port) for _ in self.uids]
+
+
+class OrderRecordingSubtensor:
+    """Records the order of the RPCs the epoch snapshot makes.
+
+    ``metagraph`` raises for a historical block when ``archive`` is false, which
+    is what a pruning Finney endpoint does.
+    """
+
+    def __init__(self, head: int, *, archive: bool = True) -> None:
+        self.head = head
+        self.archive = archive
+        self.calls: list[str] = []
+        self.metagraph_blocks: list[object] = []
+
+    def get_current_block(self) -> int:
+        self.calls.append("get_current_block")
+        return self.head
+
+    def get_block_hash(self, number: int) -> str:
+        self.calls.append(f"get_block_hash:{number}")
+        return "0x" + "cd" * 32
+
+    def metagraph(self, netuid: int, block: int | None = None):
+        assert netuid == 39
+        self.calls.append("metagraph" if block is None else f"metagraph:{block}")
+        self.metagraph_blocks.append(block)
+        if block is not None and not self.archive:
+            raise RuntimeError("state already discarded for block")
+        return FakeMetagraph([BURN_UID, MINER_UID], [BURN_HOTKEY, BOB])
+
+
+def test_the_anchor_is_frozen_before_the_metagraph_is_snapshotted():
+    """Order is the claim: a view read first belongs to the wrong tempo."""
+    head = TEMPO_BLOCKS * 17_000 + 41
+    subtensor = OrderRecordingSubtensor(head)
+    snapshot = run_module.snapshot_epoch(subtensor)
+    epoch_open = TEMPO_BLOCKS * 17_000
+    assert subtensor.calls == [
+        "get_current_block",
+        f"get_block_hash:{epoch_open - 1}",
+        f"metagraph:{epoch_open - 1}",
+    ]
+    assert snapshot.anchor.epoch_open == epoch_open
+    assert snapshot.anchor.anchor_number == epoch_open - 1
+    assert snapshot.at_anchor is True
+    assert snapshot.note == ""
+    assert snapshot.anchor_view.uid_to_hotkey[BURN_UID] == BURN_HOTKEY
+    assert [axon.uid for axon in snapshot.axons] == [MINER_UID]
+
+
+def test_a_pruning_node_snapshots_the_head_and_says_so():
+    head = TEMPO_BLOCKS * 17_000 + 41
+    subtensor = OrderRecordingSubtensor(head, archive=False)
+    snapshot = run_module.snapshot_epoch(subtensor)
+    epoch_open = TEMPO_BLOCKS * 17_000
+    assert subtensor.calls == [
+        "get_current_block",
+        f"get_block_hash:{epoch_open - 1}",
+        f"metagraph:{epoch_open - 1}",
+        "metagraph",
+    ]
+    assert snapshot.at_anchor is False
+    assert "could not serve the metagraph at anchor block" in snapshot.note
+    assert snapshot.anchor.epoch_open == epoch_open
+    assert snapshot.as_report()["at_anchor"] is False
+
+
+class FakeGenesisSubstrate:
+    def get_block_hash(self, number: int) -> str:
+        assert number == 0
+        return FINNEY_GENESIS_HASH
+
+
+class RunnerSubtensor:
+    """Enough of a Subtensor for ``cmd_run``. No axon serves, so nothing dials."""
+
+    def __init__(self, head: int) -> None:
+        self.head = head
+        self.substrate = FakeGenesisSubstrate()
+        self.metagraph_blocks: list[object] = []
+
+    def get_current_block(self) -> int:
+        return self.head
+
+    def get_block_hash(self, number: int) -> str:
+        return "0x" + "cd" * 32
+
+    def metagraph(self, netuid: int, block: int | None = None):
+        assert netuid == 39
+        self.metagraph_blocks.append(block)
+        return FakeMetagraph([BURN_UID, MINER_UID], [BURN_HOTKEY, BOB], port=0)
+
+
+class FakePinnedVerifier:
+    digest = PINNED_QVL
+
+    def verify(self, quote: bytes, *, expected_report_data: bytes) -> QuoteVerdict:
+        del quote, expected_report_data
+        return QuoteVerdict.PASS
+
+
+def run_options(tmp_path, **overrides) -> argparse.Namespace:
+    values = {
+        "command": "run",
+        "name": "independent-canary-miner",
+        "rent": False,
+        "qvl": None,
+        "wait": 0,
+        "state_dir": str(tmp_path / "state"),
+        "confirm_canary": False,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def prepared_runner(monkeypatch, head: int) -> RunnerSubtensor:
+    """A ``cmd_run`` that reaches COMPOSED without a network or a wallet.
+
+    ``mass_from_units`` stands in for the SAT work-report path that will one day
+    fill ``verified_units``. The runner still derives no mass from a quote: this
+    fixture is what makes the gates AFTER compose reachable at all.
+    """
+    monkeypatch.delenv("CATHEDRAL_API_KEY", raising=False)
+    monkeypatch.delenv("CATHEDRAL_CANARY_HOTKEY_JSON", raising=False)
+    monkeypatch.setattr(run_module, "fetch_public_json", lambda path: {})
+    subtensor = RunnerSubtensor(head)
+    monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
+    monkeypatch.setattr(run_module, "load_verifier", lambda path: FakePinnedVerifier())
+    monkeypatch.setattr(
+        run_module, "mass_from_units", lambda amount, units: {BOB: amount}
+    )
+    return subtensor
+
+
+def composed_run(monkeypatch, tmp_path, capsys, **overrides):
+    head = TEMPO_BLOCKS * 17_000 + 41
+    subtensor = prepared_runner(monkeypatch, head)
+    code = run_module.cmd_run(run_options(tmp_path, **overrides))
+    report = json.loads(capsys.readouterr().out)
+    return code, report, subtensor
+
+
+def state_files(tmp_path) -> tuple[Path, Path]:
+    state = tmp_path / "state"
+    return state / INDEPENDENT_STATE_FILE.name, state / INDEPENDENT_CANARY_FILE.name
+
+
+def test_an_unconfirmed_epoch_journals_a_compose_but_never_a_submission(
+    monkeypatch, tmp_path, capsys
+):
+    code, report, _subtensor = composed_run(monkeypatch, tmp_path, capsys)
+    assert code == 2
+    assert report["compose"]["status"] == STATUS_COMPOSED
+    assert any("--confirm-canary is required" in row for row in report["blockers"])
+    journal, canary = state_files(tmp_path)
+    record = load_journal(journal)
+    assert record["status"] == STATUS_COMPOSED
+    assert "submission" not in record
+    assert not canary.exists()
+
+
+def test_a_confirmed_epoch_without_a_wallet_journals_no_submission_either(
+    monkeypatch, tmp_path, capsys
+):
+    code, report, _subtensor = composed_run(
+        monkeypatch, tmp_path, capsys, confirm_canary=True
+    )
+    assert code == 2
+    assert any("CATHEDRAL_CANARY_HOTKEY_JSON" in row for row in report["blockers"])
+    journal, canary = state_files(tmp_path)
+    assert "submission" not in load_journal(journal)
+    assert not canary.exists()
+
+
+def test_the_runner_snapshots_the_anchor_first_then_re_reads_at_the_head(
+    monkeypatch, tmp_path, capsys
+):
+    code, report, subtensor = composed_run(monkeypatch, tmp_path, capsys)
+    assert code == 2
+    epoch_open = TEMPO_BLOCKS * 17_000
+    assert subtensor.metagraph_blocks == [epoch_open - 1, None]
+    assert report["anchor"]["epoch_open"] == epoch_open
+    assert report["anchor"]["anchor_number"] == epoch_open - 1
+    assert report["anchor"]["at_anchor"] is True
+    assert report["compose"]["epoch_open"] == epoch_open
 
 
 def test_local_policy_keys_are_ephemeral_and_not_repeating_bytes():

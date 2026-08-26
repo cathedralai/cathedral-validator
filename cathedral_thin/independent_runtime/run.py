@@ -20,6 +20,7 @@ import json
 import os
 import secrets
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -41,16 +42,20 @@ from cathedral_thin.independent.constants import (
     REFUSE_HOTKEYS,
 )
 from cathedral_thin.independent.errors import (
+    BroadcastBlocked,
     CanaryIneligible,
     CanarySpent,
     CanaryStateError,
     CanaryTransportError,
+    HamiltonError,
     IndependentValidatorError,
     RefuseListError,
 )
+from cathedral_thin.independent.inclusion import MetagraphView
 from cathedral_thin.independent.submit import prepare_mechanism_weights
 
 from .chain import (
+    ServingAxon,
     SubstrateCanaryTransport,
     load_keypair,
     metagraph_view,
@@ -200,6 +205,61 @@ def _epoch_anchor(subtensor: Any) -> EpochAnchor:
     block = int(subtensor.get_current_block())
     epoch_open = closed_epoch_open(block)
     return closed_epoch_anchor(block, subtensor.get_block_hash(epoch_open - 1))
+
+
+@dataclass(frozen=True)
+class EpochSnapshot:
+    """The frozen anchor and the metagraph view taken against it."""
+
+    anchor: EpochAnchor
+    anchor_view: MetagraphView
+    axons: tuple[ServingAxon, ...]
+    at_anchor: bool
+    note: str
+
+    def as_report(self) -> dict[str, Any]:
+        return {
+            "epoch_open": self.anchor.epoch_open,
+            "anchor_number": self.anchor.anchor_number,
+            "anchor_hash": self.anchor.anchor_hash,
+            "at_anchor": self.at_anchor,
+            "note": self.note,
+        }
+
+
+def snapshot_epoch(subtensor: Any) -> EpochSnapshot:
+    """Freeze the closed-tempo anchor FIRST, then snapshot the metagraph.
+
+    The order is the whole point. A view read before the anchor block is chosen
+    belongs to whatever tempo the head happened to be in when it was read, and
+    the composer would then check destinations against a view that predates the
+    epoch it is paying for.
+
+    Finney's public endpoints prune historical state, so a node that cannot
+    answer at ``anchor_number`` answers at the head instead. That is a weaker
+    view, not a silent one: ``at_anchor`` is false and ``note`` says why, and
+    the inclusion re-check still runs against a second, later snapshot.
+    """
+    anchor = _epoch_anchor(subtensor)
+    at_anchor = True
+    note = ""
+    try:
+        metagraph = subtensor.metagraph(NETUID, block=anchor.anchor_number)
+    except Exception as exc:
+        at_anchor = False
+        note = (
+            f"the node could not serve the metagraph at anchor block "
+            f"{anchor.anchor_number} ({type(exc).__name__}: {exc}); the view was "
+            "taken at the head immediately after the anchor was frozen"
+        )
+        metagraph = subtensor.metagraph(NETUID)
+    return EpochSnapshot(
+        anchor=anchor,
+        anchor_view=metagraph_view(metagraph),
+        axons=serving_axons(metagraph),
+        at_anchor=at_anchor,
+        note=note,
+    )
 
 
 def _try_collect(url: str, hotkey: str, validator_ss58: str) -> dict[str, Any]:
@@ -374,9 +434,13 @@ def cmd_run(options: argparse.Namespace) -> int:
     try:
         subtensor = _connect_subtensor()
         report["genesis"] = observed_genesis_hash(subtensor)
-        metagraph = subtensor.metagraph(NETUID)
-        anchor_view = metagraph_view(metagraph)
-        axons = serving_axons(metagraph)
+        # The closed-tempo anchor is chosen before any metagraph is read, so
+        # the anchor view belongs to the epoch this vector pays for.
+        snapshot = snapshot_epoch(subtensor)
+        anchor = snapshot.anchor
+        anchor_view = snapshot.anchor_view
+        axons = snapshot.axons
+        report["anchor"] = snapshot.as_report()
         report["sn39"] = {
             "uids": len(anchor_view.uid_to_hotkey),
             "serving_axons": [
@@ -470,7 +534,6 @@ def cmd_run(options: argparse.Namespace) -> int:
         return 2
 
     bundle, registry = funded_compute_bundle()
-    anchor = _epoch_anchor(subtensor)
     paying = ComputeAdapter(
         qvl or _RejectingVerifier(),
         collateral_base_url=INTEL_COLLATERAL,
@@ -508,7 +571,10 @@ def cmd_run(options: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         return 2
 
-    kwargs = prepare_mechanism_weights(result=result, journal_path=journal)
+    # Every refusal that stops this epoch from submitting runs BEFORE the
+    # submission is built. prepare_mechanism_weights journals a `submission`
+    # block, and an epoch nobody confirmed must not leave one on disk for a
+    # future runtime to read and send.
     if not getattr(options, "confirm_canary", False):
         report["blockers"].append(
             "--confirm-canary is required to spend the one-write canary; "
@@ -525,19 +591,23 @@ def cmd_run(options: argparse.Namespace) -> int:
         return 2
     if Path(wallet_json).is_file():
         wallet_json = Path(wallet_json).read_text(encoding="utf-8")
+    canary_lock = state_dir / INDEPENDENT_CANARY_FILE.name
     try:
         keypair = load_keypair(wallet_json)
-        transport = SubstrateCanaryTransport(subtensor, keypair)
+        transport = SubstrateCanaryTransport(subtensor, keypair, state_path=canary_lock)
+        kwargs = prepare_mechanism_weights(result=result, journal_path=journal)
         receipt = submit_canary_once(
             result=result,
             kwargs=kwargs,
             bundle=bundle,
             hotkey=str(keypair.ss58_address),
             transport=transport,
-            state_path=state_dir / INDEPENDENT_CANARY_FILE.name,
+            state_path=canary_lock,
         )
     except (
+        BroadcastBlocked,
         ChainClientError,
+        HamiltonError,
         IndependentLiveError,
         CanaryIneligible,
         CanarySpent,
