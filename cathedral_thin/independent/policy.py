@@ -24,9 +24,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric import ed25519
-
 from .canonical import (
     canonical_bytes,
     exact_keys,
@@ -371,6 +368,12 @@ def verify_signatures(
 def _ed25519_verify(
     public_bytes: bytes, signature: bytes, payload: bytes, index: int
 ) -> bool:
+    # Imported here on purpose: `cryptography` pulls in `ssl` at import time,
+    # and `ssl` subclasses `socket.socket`. Importing this package must not
+    # load that stack; the import-graph test stubs `socket.socket` first.
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
     if not isinstance(public_bytes, (bytes, bytearray)) or len(public_bytes) != 32:
         raise PolicyBundleError(
             f"signatures[{index}] names a key id whose pinned public key is not "

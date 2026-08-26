@@ -23,11 +23,9 @@ What is enforced, all fail-closed:
 
 from __future__ import annotations
 
-import http.client
 import ipaddress
 import queue
 import socket
-import ssl
 import threading
 import time
 from dataclasses import dataclass
@@ -239,6 +237,12 @@ def fetch_policy_bytes(
     hashed and checked against the on-chain commitment are the bytes that came
     off the wire.
     """
+    # Imported here on purpose: `ssl` subclasses `socket.socket` at import time,
+    # and importing this package must not load it. The import-graph test stubs
+    # `socket.socket` before any module in this package is imported.
+    import http.client
+    import ssl
+
     endpoint = validate_policy_url(url)
     if (
         isinstance(timeout, bool)
