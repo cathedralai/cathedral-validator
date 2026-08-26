@@ -85,6 +85,15 @@ class CollectError(IndependentValidatorError):
     """The miner evidence POST failed under the hardened collect rules."""
 
 
+class SatWorkError(IndependentValidatorError):
+    """The audit work unit could not be independently re-derived.
+
+    Raised for every refusal on the work-unit path: a non-canonical instance, a
+    miner answer that is not a checkable witness, or a claimed number this
+    validator did not derive itself. It means zero mass, never a smaller one.
+    """
+
+
 class CanaryIneligible(IndependentValidatorError):
     """The one-write canary was asked to submit a vector it must not send."""
 
@@ -133,4 +142,5 @@ __all__ = [
     "PolicyFetchError",
     "PolicyLineageError",
     "RefuseListError",
+    "SatWorkError",
 ]

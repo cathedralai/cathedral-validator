@@ -21,6 +21,11 @@ What it does own, end to end:
   ``POST /v1/evidence`` contract over an injected transport and derives the
   expected ``REPORT_DATA`` from its own challenge -- collect still binds no
   mass by itself;
+* the audit-work half of that lane: a ``POST /v1/sat-work`` client, also over
+  an injected transport, which commits to an instance derived from material
+  already pinned for the epoch, re-checks the returned witness clause by
+  clause, and returns the integer units it derived itself. Attestation is
+  admission; only these units bind mass;
 * a one-write canary gate that will call an injected transport exactly once
   after a ``COMPOSED`` vector, a funded Compute row, a dry-run u16 match, and
   the dedicated canary identity -- and that still ships no chain client;
@@ -125,6 +130,7 @@ from .errors import (
     PolicyFetchError,
     PolicyLineageError,
     RefuseListError,
+    SatWorkError,
 )
 from .fetch_policy import fetch_policy_bytes, validate_policy_url
 from .hamilton import Dest, HamiltonResult, apportion
@@ -157,6 +163,23 @@ from .policy import (
     verify_signatures,
 )
 from .refuse import is_refused, is_refused_destination, require_permitted_hotkey
+from .sat import (
+    MAX_SAT_RESPONSE_BYTES,
+    SAT_REQUEST_KEYS,
+    SAT_RESPONSE_KEYS,
+    SAT_WORK_PATH,
+    SAT_WORK_UNIT_RULE,
+    SatInstance,
+    SatWorkItem,
+    canonical_instance,
+    canonical_work_item,
+    collect_sat_work,
+    compute_challenge_id,
+    derived_work_units,
+    instance_equals_canonical,
+    sat_work_url,
+    seed_from_material,
+)
 from .submit import (
     MECHANISM_WEIGHTS_CALL,
     build_mechanism_weights_kwargs,
@@ -182,10 +205,15 @@ __all__ = [
     "INTEL_PCS_HOSTS",
     "LINEAGE",
     "MAX_POLICY_BUNDLE_BYTES",
+    "MAX_SAT_RESPONSE_BYTES",
     "MECHANISM_WEIGHTS_CALL",
     "MECID",
     "NETUID",
     "REFUSE_HOTKEYS",
+    "SAT_REQUEST_KEYS",
+    "SAT_RESPONSE_KEYS",
+    "SAT_WORK_PATH",
+    "SAT_WORK_UNIT_RULE",
     "SN39_MORTAL_PERIOD_BLOCKS",
     "STATUS_BROADCAST_BLOCKED",
     "STATUS_COMPOSED",
@@ -240,22 +268,31 @@ __all__ = [
     "QuoteVerdict",
     "QuoteVerifier",
     "RefuseListError",
+    "SatInstance",
+    "SatWorkError",
+    "SatWorkItem",
     "apply_inclusion_forfeit",
     "apportion",
     "assert_machine_identity",
     "build_mechanism_weights_kwargs",
     "bundle_digest",
     "canonical_bytes",
+    "canonical_instance",
     "canonical_seed_material",
+    "canonical_work_item",
     "check_genesis_pin",
     "collect_evidence",
     "collect_miner_fleet",
+    "collect_sat_work",
     "compose_dry_run",
+    "compute_challenge_id",
     "decode_commitment",
+    "derived_work_units",
     "encode_commitment",
     "evidence_url",
     "fetch_policy_bytes",
     "fleet_over_cap",
+    "instance_equals_canonical",
     "is_refused",
     "is_refused_destination",
     "last_good_is_usable",
@@ -279,6 +316,8 @@ __all__ = [
     "require_permitted_hotkey",
     "require_verified_mass",
     "resolve_burn_uid",
+    "sat_work_url",
+    "seed_from_material",
     "signing_payload",
     "submit_canary_once",
     "validate_collateral_url",

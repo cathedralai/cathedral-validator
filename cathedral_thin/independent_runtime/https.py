@@ -1,8 +1,13 @@
-"""Public-HTTPS EvidenceTransport for miner ``POST /v1/evidence``.
+"""Public-HTTPS transport for miner ``POST /v1/evidence`` and ``/v1/sat-work``.
 
 Pinned TCP to a globally-routable address, TLS SNI for the original host,
 no redirects, bounded body. The TLS SPKI digest is observed from the peer
 certificate so collect can bind v2 REPORT_DATA to this connection.
+
+The same transport carries the audit-work POST: the request path comes from the
+validated URL, so a ``/v1/sat-work`` endpoint is dialed as itself. No
+``Authorization`` header is sent, because this validator holds no miner bearer
+token; an axon that answers 401 yields zero units rather than a guess.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from cryptography.x509 import load_der_x509_certificate
 
 from cathedral_thin.independent.collect import (
     CHANNEL_BINDING_TYPE_TLS,
+    EVIDENCE_PATH,
     MAX_EVIDENCE_RESPONSE_BYTES,
     ChannelBinding,
 )
@@ -30,6 +36,7 @@ from cathedral_thin.independent.fetch_policy import (
     validate_policy_url,
     validated_peer_ips,
 )
+from cathedral_thin.independent.sat import SAT_WORK_PATH
 
 from .errors import IndependentLiveError
 
@@ -155,7 +162,7 @@ class HttpsEvidenceTransport:
                 "Accept": "application/json",
             }
             connection.sock.settimeout(remaining())
-            path = endpoint.path if endpoint.path else "/v1/evidence"
+            path = endpoint.path if endpoint.path else EVIDENCE_PATH
             connection.request("POST", path, body=body, headers=headers)
             response = connection.getresponse()
             chunks: list[bytes] = []
@@ -176,11 +183,24 @@ class HttpsEvidenceTransport:
             connection.close()
 
 
-def axon_evidence_url(ip: str, port: int) -> str:
-    """Build a collect URL from a serving axon. IPv6 is bracketed."""
+def _axon_origin(ip: str, port: int) -> str:
     if not isinstance(ip, str) or not ip:
         raise IndependentLiveError("axon ip must be a non-empty string")
     if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
         raise IndependentLiveError("axon port must be in 1..65535")
     host = f"[{ip}]" if ":" in ip else ip
-    return f"https://{host}:{port}/v1/evidence"
+    return f"https://{host}:{port}"
+
+
+def axon_evidence_url(ip: str, port: int) -> str:
+    """Build a collect URL from a serving axon. IPv6 is bracketed."""
+    return f"{_axon_origin(ip, port)}{EVIDENCE_PATH}"
+
+
+def axon_sat_work_url(ip: str, port: int) -> str:
+    """Build the audit-work URL from a serving axon. IPv6 is bracketed.
+
+    Built from the axon, not by rewriting the evidence URL, so a config that
+    named one resource never silently becomes a POST to the other.
+    """
+    return f"{_axon_origin(ip, port)}{SAT_WORK_PATH}"

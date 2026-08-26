@@ -6,9 +6,10 @@ Subcommands:
 * ``list-workers`` -- ``GET /v1/workers``
 * ``rent`` -- ``POST`` a sealed Intel TDX Worker (``bounded_service``)
 * ``probe-sn39`` -- snapshot the live metagraph and serving axons
-* ``run`` -- list or rent a TDX Worker, collect from SN39 axons, compose,
-  and submit ``set_mechanism_weights`` through the one-write canary if a
-  dedicated canary wallet and a pinned QVL are present
+* ``run`` -- list or rent a TDX Worker, collect from SN39 axons, re-derive
+  audit work units over ``POST /v1/sat-work`` for every quote a pinned QVL
+  passed, compose, and submit ``set_mechanism_weights`` through the one-write
+  canary if a dedicated canary wallet and a pinned QVL are present
 
 Never uses the live relay wallet. Never touches the thin journal.
 """
@@ -27,7 +28,11 @@ from typing import Any, Sequence
 import bittensor as bt
 
 from cathedral_thin.independent.canary import submit_canary_once
-from cathedral_thin.independent.collect import collect_evidence, mint_nonce
+from cathedral_thin.independent.collect import (
+    CollectedEvidence,
+    collect_evidence,
+    mint_nonce,
+)
 from cathedral_thin.independent.compose import EpochAnchor, compose_dry_run
 from cathedral_thin.independent.compute import (
     COMPUTE_LANE,
@@ -50,8 +55,14 @@ from cathedral_thin.independent.errors import (
     HamiltonError,
     IndependentValidatorError,
     RefuseListError,
+    SatWorkError,
 )
 from cathedral_thin.independent.inclusion import MetagraphView
+from cathedral_thin.independent.sat import (
+    SAT_WORK_UNIT_RULE,
+    canonical_work_item,
+    collect_sat_work,
+)
 from cathedral_thin.independent.submit import prepare_mechanism_weights
 
 from .chain import (
@@ -262,7 +273,9 @@ def snapshot_epoch(subtensor: Any) -> EpochSnapshot:
     )
 
 
-def _try_collect(url: str, hotkey: str, validator_ss58: str) -> dict[str, Any]:
+def _try_collect(
+    url: str, hotkey: str, validator_ss58: str, sat_work_url: str
+) -> dict[str, Any]:
     transport = HttpsEvidenceTransport()
     try:
         binding = transport.observe_binding(url)
@@ -281,18 +294,58 @@ def _try_collect(url: str, hotkey: str, validator_ss58: str) -> dict[str, Any]:
     except Exception as exc:
         return {
             "url": url,
+            "sat_url": sat_work_url,
             "hotkey": hotkey,
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
     return {
         "url": url,
+        # Carried from the axon, so the PASS branch can ask this machine for
+        # work without rewriting a reviewed evidence URL into another resource.
+        "sat_url": sat_work_url,
         "ok": True,
         "hotkey": collected.assigned_hotkey,
         "quote_bytes": len(collected.quote),
         "kind": collected.kind,
         "collected": collected,
     }
+
+
+def _units_after_quote(
+    *, anchor_hash: str, collected: CollectedEvidence, sat_url: str
+) -> int:
+    """Re-derive integer audit units from a machine whose quote just passed.
+
+    The machine identity is the observed TLS SPKI digest, which v2 REPORT_DATA
+    already bound and the verifier already checked, so the seed is tied to the
+    connection the quote arrived over. It is used as-is rather than re-hashed:
+    it is already a sha256 digest. Until quote-bound key extraction exists, that
+    observed channel identity IS the machine identity for the audit seed.
+
+    A SPKI change between the evidence POST and this one is a refusal, not a
+    retry: the two exchanges have to have reached the same machine.
+    """
+    item = canonical_work_item(
+        anchor_hash=anchor_hash,
+        miner_ss58=collected.assigned_hotkey,
+        machine_id=collected.channel_binding.digest.hex(),
+    )
+    transport = HttpsEvidenceTransport()
+    units = collect_sat_work(
+        url=sat_url,
+        assigned_hotkey=collected.assigned_hotkey,
+        item=item,
+        transport=transport,
+    )
+    if (
+        transport.last_spki is not None
+        and transport.last_spki != collected.channel_binding.digest
+    ):
+        raise SatWorkError(
+            "the TLS SPKI on the work POST is not the attested channel binding"
+        )
+    return units
 
 
 def _summarize_catalog(document: Any) -> dict[str, Any]:
@@ -450,6 +503,7 @@ def cmd_run(options: argparse.Namespace) -> int:
                     "ip": axon.ip,
                     "port": axon.port,
                     "evidence_url": axon.evidence_url(),
+                    "sat_work_url": axon.sat_work_url(),
                 }
                 for axon in axons
             ],
@@ -466,7 +520,12 @@ def cmd_run(options: argparse.Namespace) -> int:
     # from serving axons with those hotkeys, never with the canary identity.
     for axon in axons:
         collect_hits.append(
-            _try_collect(axon.evidence_url(), axon.hotkey, validator_ss58)
+            _try_collect(
+                axon.evidence_url(),
+                axon.hotkey,
+                validator_ss58,
+                axon.sat_work_url(),
+            )
         )
 
     verified_units: dict[str, int] = {}
@@ -498,10 +557,33 @@ def cmd_run(options: argparse.Namespace) -> int:
                         "qvl: PASS quote is the canary identity; not mass"
                     )
                     continue
-                # Attestation is admission, not payment. Record the PASS so
-                # operators can see liveness; do not bind Compute mass until
-                # SAT work units are independently re-derived.
+                # Attestation is admission, not payment. The PASS admits this
+                # machine to the audit and is recorded so operators can see
+                # liveness; the only thing that binds mass is the integer unit
+                # count re-derived from the challenge below.
                 pass_count += 1
+                sat_url = row.get("sat_url")
+                if not isinstance(sat_url, str) or not sat_url:
+                    row["sat_error"] = "the axon carried no work URL"
+                    continue
+                try:
+                    units = _units_after_quote(
+                        anchor_hash=anchor.anchor_hash,
+                        collected=collected,
+                        sat_url=sat_url,
+                    )
+                except (
+                    IndependentValidatorError,
+                    IndependentLiveError,
+                    OSError,
+                ) as exc:
+                    # Admitted, unpaid. A machine that attests but will not
+                    # produce a checkable witness earns nothing this epoch.
+                    row["sat_error"] = f"{type(exc).__name__}: {exc}"
+                    continue
+                row["sat_units"] = units
+                row["sat_rule"] = SAT_WORK_UNIT_RULE
+                verified_units[collected.assigned_hotkey] = units
             elif verdict is QuoteVerdict.FAIL:
                 continue
             elif verdict is QuoteVerdict.INFRA:
@@ -515,8 +597,11 @@ def cmd_run(options: argparse.Namespace) -> int:
         for row in collect_hits
     ]
     report["qvl_pass_count"] = pass_count
-    # Product truth: attestation is not payment. verified_units stays empty
-    # until a SAT work-report path fills it. CyberGym/Voice stay at 0.
+    # Product truth: attestation is not payment. The only entries here are
+    # integer units re-derived from POST /v1/sat-work under
+    # sat_work_units_v1 -- never a pass count, never quote bytes, never a
+    # miner's own claim. CyberGym/Voice stay at 0.
+    report["sat_work_rule"] = SAT_WORK_UNIT_RULE
     verified_mass = mass_from_units(COMPUTE_ALLOCATION, verified_units)
     report["verified_units"] = dict(verified_units)
     report["verified_mass"] = dict(verified_mass)

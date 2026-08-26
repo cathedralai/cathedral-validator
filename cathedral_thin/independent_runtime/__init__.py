@@ -10,6 +10,11 @@ What this package is allowed to do:
   and list Intel TDX Workers;
 * dial a miner ``POST /v1/evidence`` over public HTTPS and observe the TLS
   SPKI so collect can bind the channel;
+* after a pinned-QVL ``PASS`` on that quote, dial the same axon's
+  ``POST /v1/sat-work`` with an audit challenge derived from the frozen anchor,
+  the miner hotkey and the observed channel identity, and bind Compute mass
+  ONLY from the integer units the sealed package re-derived itself. A PASS
+  quote is admission to the audit; it is never payment;
 * read the SN39 metagraph and, through an injected canary transport, submit
   ``set_mechanism_weights`` as the dedicated canary hotkey.
 

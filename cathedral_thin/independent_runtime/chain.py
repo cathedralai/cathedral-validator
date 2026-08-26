@@ -43,7 +43,7 @@ from cathedral_thin.independent.submit import (
 )
 
 from .errors import ChainClientError
-from .https import axon_evidence_url
+from .https import axon_evidence_url, axon_sat_work_url
 
 CANARY_LOCK_PENDING = "pending"
 
@@ -71,6 +71,9 @@ class ServingAxon:
 
     def evidence_url(self) -> str:
         return axon_evidence_url(self.ip, self.port)
+
+    def sat_work_url(self) -> str:
+        return axon_sat_work_url(self.ip, self.port)
 
 
 def _ip_to_str(raw: Any) -> str:

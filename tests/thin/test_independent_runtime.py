@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import stat
 from pathlib import Path
@@ -12,7 +13,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from _independent_fixtures import BOB, BURN_UID, commitment_for
+from _independent_fixtures import ANCHOR_HASH, BOB, BURN_UID, commitment_for
+from cathedral_thin.independent.collect import (
+    CHANNEL_BINDING_TYPE_TLS,
+    ChannelBinding,
+    CollectedEvidence,
+)
 from cathedral_thin.independent.compose import STATUS_COMPOSED, compose_dry_run
 from cathedral_thin.independent.compute import (
     COMPUTE_LANE,
@@ -27,9 +33,16 @@ from cathedral_thin.independent.constants import (
     INDEPENDENT_STATE_FILE,
     TEMPO_BLOCKS,
 )
+from cathedral_thin.independent.errors import SatWorkError
 from cathedral_thin.independent.inclusion import MetagraphView
 from cathedral_thin.independent.journal import load_journal
+from cathedral_thin.independent.sat import (
+    SAT_WORK_UNIT_RULE,
+    canonical_work_item,
+    sat_work_url,
+)
 from cathedral_thin.independent_runtime import run as run_module
+from cathedral_thin.independent_runtime.chain import ServingAxon
 from cathedral_thin.independent_runtime.errors import (
     ChainClientError,
     IndependentLiveError,
@@ -37,6 +50,7 @@ from cathedral_thin.independent_runtime.errors import (
 )
 from cathedral_thin.independent_runtime.https import (
     axon_evidence_url,
+    axon_sat_work_url,
     tls_context_for_evidence,
 )
 from cathedral_thin.independent_runtime.local_policy import (
@@ -164,6 +178,24 @@ def test_axon_evidence_url_brackets_ipv6():
     )
 
 
+def test_axon_sat_work_url_is_built_from_the_axon_not_the_evidence_url():
+    assert (
+        axon_sat_work_url("2001:db8::1", 8443)
+        == "https://[2001:db8::1]:8443/v1/sat-work"
+    )
+    assert (
+        axon_sat_work_url("203.0.113.9", 443) == "https://203.0.113.9:443/v1/sat-work"
+    )
+    axon = ServingAxon(uid=MINER_UID, hotkey=BOB, ip="203.0.113.9", port=8443)
+    assert axon.evidence_url() == "https://203.0.113.9:8443/v1/evidence"
+    assert axon.sat_work_url() == "https://203.0.113.9:8443/v1/sat-work"
+    # The work URL is validated as itself, and an evidence URL is never
+    # rewritten into one.
+    assert sat_work_url(axon.sat_work_url()) == axon.sat_work_url()
+    with pytest.raises(SatWorkError):
+        sat_work_url(axon.evidence_url())
+
+
 def test_local_funded_bundle_composes_when_compute_has_verified_mass(tmp_path):
     bundle, registry = funded_compute_bundle()
     paying = ComputeAdapter(
@@ -286,12 +318,33 @@ def test_launch_qvl_digest_is_the_binary_blob_pin():
 
 
 def test_live_runner_does_not_bind_mass_from_a_quote_pass():
+    """The SAT path assigns units; nothing else in the runner may.
+
+    ``verified_units[...] = ...`` is now a legal statement -- the audit
+    re-derivation is exactly what fills it -- so the claim is checked by AST
+    rather than by banning the subscript: every value assigned into
+    ``verified_units`` must be the local the SAT helper returned, never a pass
+    count, a quote length, or a verdict.
+    """
     source = Path(run_module.__file__).read_text(encoding="utf-8")
     assert "verified_units.get" not in source
-    assert "verified_units[" not in source
     assert "Attestation is admission" in source
     assert DEFAULT_STATE_DIR == "/var/lib/cathedral-validator"
     assert "/tmp" not in DEFAULT_STATE_DIR
+
+    assigned: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "verified_units"
+            ):
+                assert isinstance(node.value, ast.Name), ast.dump(node.value)
+                assigned.append(node.value.id)
+    assert assigned == ["units"]
 
 
 def test_run_parser_defaults_are_fail_closed():
@@ -461,10 +514,15 @@ class FakeGenesisSubstrate:
 
 
 class RunnerSubtensor:
-    """Enough of a Subtensor for ``cmd_run``. No axon serves, so nothing dials."""
+    """Enough of a Subtensor for ``cmd_run``.
 
-    def __init__(self, head: int) -> None:
+    ``port=0`` means no axon serves, so nothing dials. A positive port makes the
+    miner collectable, which is what the SAT wiring test needs.
+    """
+
+    def __init__(self, head: int, *, port: int = 0) -> None:
         self.head = head
+        self.port = port
         self.substrate = FakeGenesisSubstrate()
         self.metagraph_blocks: list[object] = []
 
@@ -477,7 +535,7 @@ class RunnerSubtensor:
     def metagraph(self, netuid: int, block: int | None = None):
         assert netuid == 39
         self.metagraph_blocks.append(block)
-        return FakeMetagraph([BURN_UID, MINER_UID], [BURN_HOTKEY, BOB], port=0)
+        return FakeMetagraph([BURN_UID, MINER_UID], [BURN_HOTKEY, BOB], port=self.port)
 
 
 class FakePinnedVerifier:
@@ -502,22 +560,27 @@ def run_options(tmp_path, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def prepared_runner(monkeypatch, head: int) -> RunnerSubtensor:
+def prepared_runner(
+    monkeypatch, head: int, *, bind_mass: bool = True, port: int = 0
+) -> RunnerSubtensor:
     """A ``cmd_run`` that reaches COMPOSED without a network or a wallet.
 
-    ``mass_from_units`` stands in for the SAT work-report path that will one day
-    fill ``verified_units``. The runner still derives no mass from a quote: this
-    fixture is what makes the gates AFTER compose reachable at all.
+    ``RunnerSubtensor`` serves no axon by default, so nothing collects and
+    nothing re-derives units. With ``bind_mass`` the ``mass_from_units`` stub
+    stands in for that missing audit round, which is what makes the gates AFTER
+    compose reachable at all. With ``bind_mass=False`` the runner is left
+    exactly as production is: a pinned QVL that would PASS, and no units.
     """
     monkeypatch.delenv("CATHEDRAL_API_KEY", raising=False)
     monkeypatch.delenv("CATHEDRAL_CANARY_HOTKEY_JSON", raising=False)
     monkeypatch.setattr(run_module, "fetch_public_json", lambda path: {})
-    subtensor = RunnerSubtensor(head)
+    subtensor = RunnerSubtensor(head, port=port)
     monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
     monkeypatch.setattr(run_module, "load_verifier", lambda path: FakePinnedVerifier())
-    monkeypatch.setattr(
-        run_module, "mass_from_units", lambda amount, units: {BOB: amount}
-    )
+    if bind_mass:
+        monkeypatch.setattr(
+            run_module, "mass_from_units", lambda amount, units: {BOB: amount}
+        )
     return subtensor
 
 
@@ -572,6 +635,228 @@ def test_the_runner_snapshots_the_anchor_first_then_re_reads_at_the_head(
     assert report["anchor"]["anchor_number"] == epoch_open - 1
     assert report["anchor"]["at_anchor"] is True
     assert report["compose"]["epoch_open"] == epoch_open
+
+
+SAT_UNITS = 20
+AXON_SAT_URL = "https://203.0.113.9:8443/v1/sat-work"
+
+
+def collected_for(hotkey: str = BOB) -> CollectedEvidence:
+    """A CollectedEvidence the way ``collect_evidence`` would have returned it."""
+    binding = ChannelBinding(
+        binding_type=CHANNEL_BINDING_TYPE_TLS, digest=bytes(range(32, 64))
+    )
+    return CollectedEvidence(
+        kind="tdx",
+        quote=b"tdx-quote" * 16,
+        nonce=bytes(range(32)),
+        assigned_hotkey=hotkey,
+        cert_chain=(),
+        channel_binding=binding,
+        report_data=bytes(64),
+    )
+
+
+def test_a_qvl_pass_without_re_derived_units_binds_no_compute_mass(
+    monkeypatch, tmp_path, capsys
+):
+    """The behavioural half of "attestation is admission".
+
+    Nothing is monkeypatched into ``mass_from_units`` here, and no axon serves,
+    so the epoch has a pinned QVL that would PASS and still no units. The
+    funded Compute row must stay unpayable.
+    """
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False)
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    assert report["sat_work_rule"] == SAT_WORK_UNIT_RULE
+    assert report["compose"]["status"] != STATUS_COMPOSED
+    assert any(
+        "no independently re-derived work units" in row for row in report["blockers"]
+    )
+
+
+def test_re_derived_sat_units_are_what_makes_the_runner_compose(
+    monkeypatch, tmp_path, capsys
+):
+    """A serving axon, a PASS quote, and 20 re-derived units compose COMPOSED.
+
+    ``mass_from_units`` is NOT stubbed: the integer mass under the funded
+    allocation comes from the units the audit returned. ``collect_sat_work`` is
+    stubbed only so no socket opens, and the URL it is handed proves the runner
+    POSTs to the axon's own work endpoint rather than to the evidence URL.
+    """
+    subtensor = prepared_runner(
+        monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443
+    )
+    collected = collected_for()
+    seen: dict = {}
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        seen["evidence_url"] = url
+        seen["sat_url"] = sat_work_url_value
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "quote_bytes": len(collected.quote),
+            "kind": collected.kind,
+            "collected": collected,
+        }
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        seen["asked"] = (url, assigned_hotkey, item.challenge_id)
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+
+    assert seen["evidence_url"] == "https://203.0.113.9:8443/v1/evidence"
+    assert seen["sat_url"] == AXON_SAT_URL
+    assert seen["asked"][0] == AXON_SAT_URL
+    assert seen["asked"][1] == BOB
+    assert report["qvl_pass_count"] == 1
+    assert report["verified_units"] == {BOB: SAT_UNITS}
+    assert report["verified_mass"] == {BOB: COMPUTE_ALLOCATION}
+    ((row,),) = (report["collect"],)
+    assert row["sat_units"] == SAT_UNITS
+    assert row["sat_rule"] == SAT_WORK_UNIT_RULE
+    assert row["verdict"] == "PASS"
+    assert report["compose"]["status"] == STATUS_COMPOSED
+    assert MINER_UID in report["compose"]["dests"]
+    assert sum(report["compose"]["weights"]) == 65535
+    # Composed, but nothing was submitted: the canary still needs confirmation.
+    assert code == 2
+    assert any("--confirm-canary is required" in row for row in report["blockers"])
+    assert subtensor.metagraph_blocks == [TEMPO_BLOCKS * 17_000 - 1, None]
+
+
+def test_a_refused_sat_round_admits_the_miner_and_pays_it_nothing(
+    monkeypatch, tmp_path, capsys
+):
+    """A machine that attests but produces no witness is admitted, unpaid."""
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443)
+    collected = collected_for()
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "quote_bytes": len(collected.quote),
+            "kind": collected.kind,
+            "collected": collected,
+        }
+
+    def refusing_sat_work(*, url, assigned_hotkey, item, transport):
+        raise SatWorkError("the assignment leaves a clause unsatisfied")
+
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    monkeypatch.setattr(run_module, "collect_sat_work", refusing_sat_work)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["qvl_pass_count"] == 1
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    ((row,),) = (report["collect"],)
+    assert row["verdict"] == "PASS"
+    assert "SatWorkError" in row["sat_error"]
+    assert "sat_units" not in row
+    assert report["compose"]["status"] != STATUS_COMPOSED
+
+
+def test_a_failing_quote_is_never_asked_for_work(monkeypatch, tmp_path, capsys):
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443)
+    collected = collected_for()
+
+    class FailingVerifier:
+        digest = PINNED_QVL
+
+        def verify(self, quote: bytes, *, expected_report_data: bytes):
+            del quote, expected_report_data
+            return QuoteVerdict.FAIL
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": collected,
+        }
+
+    def deny(**kwargs):
+        raise AssertionError("a FAIL quote must never be asked for work")
+
+    monkeypatch.setattr(run_module, "load_verifier", lambda path: FailingVerifier())
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    monkeypatch.setattr(run_module, "collect_sat_work", deny)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert report["qvl_pass_count"] == 0
+    assert report["verified_units"] == {}
+    ((row,),) = (report["collect"],)
+    assert row["verdict"] == "FAIL"
+    assert "sat_error" not in row
+
+
+def test_the_runner_asks_for_the_anchor_bound_challenge(monkeypatch, tmp_path, capsys):
+    """The challenge is derived from the frozen anchor and the observed channel.
+
+    The seed material is the anchor hash, the miner hotkey and the TLS SPKI
+    digest as observed -- not re-hashed -- so this asserts the exact item the
+    runner committed to.
+    """
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443)
+    collected = collected_for()
+    expected = canonical_work_item(
+        anchor_hash="0x" + "cd" * 32,
+        miner_ss58=BOB,
+        machine_id=collected.channel_binding.digest.hex(),
+    )
+    asked: list = []
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": collected,
+        }
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        asked.append(item)
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+    run_module.cmd_run(run_options(tmp_path))
+    capsys.readouterr()
+    ((item,),) = (asked,)
+    assert item == expected
+    assert item.challenge_id == expected.challenge_id
+    assert item.seed == expected.seed
+    assert (
+        expected.challenge_id
+        != canonical_work_item(
+            anchor_hash=ANCHOR_HASH,
+            miner_ss58=BOB,
+            machine_id=collected.channel_binding.digest.hex(),
+        ).challenge_id
+    )
 
 
 def test_local_policy_keys_are_ephemeral_and_not_repeating_bytes():
