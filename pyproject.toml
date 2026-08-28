@@ -120,6 +120,7 @@ cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 # and genesis pin. Ships no chain writer and has no --broadcast or --canary flag.
 cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
 cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
+cathedral-independent-miner-announce = "cathedral_thin.independent_runtime.miner_axon_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]
