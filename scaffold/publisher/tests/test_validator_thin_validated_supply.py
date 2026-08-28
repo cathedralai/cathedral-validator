@@ -1435,6 +1435,428 @@ def test_exact_sn39_signer_pins_era_and_journals_hash_before_submit(
     assert intents[0]["era_reference_block"] == 900
 
 
+def _reviewed_uid30_descendant_identity(
+    *, block: int, block_hash: str, target_uid: int
+) -> dict[str, object]:
+    preview_digest = "sha256:" + "1" * 64
+    return {
+        "network": "finney",
+        "netuid": 39,
+        "mapping_block": block,
+        "validator_hotkey": validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        "validator_uid": validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID,
+        "source_epoch": block,
+        "uid_weights": [[target_uid, 1.0]],
+        "uid_hotkeys": [[target_uid, validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY]],
+        "allocation_contract": validator_thin.SN39_UID30_LAUNCH_POLICY,
+        "burn_destination": None,
+        "burn_share": 0.0,
+        "subnet_owner_hotkey": validator_thin.SN39_BURN_HOTKEY,
+        "uid_safety": {
+            "schema": "cathedral_sn39_uid_safety_v2",
+            "stability_basis": "operator_controlled_coldkeys",
+            "registration": {
+                "replacement_safe_hotkeys": [
+                    validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY
+                ]
+            },
+            "rotation": {
+                "status": validator_thin.PASS,
+                "mapping_block": block,
+                "mapping_block_hash": block_hash,
+                "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+                "era_last_block": (
+                    block + validator_thin.SN39_MORTAL_PERIOD_BLOCKS - 1
+                ),
+                "targets": [
+                    {
+                        "uid": target_uid,
+                        "hotkey": validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY,
+                        "coldkey": "5G6mgvL59o6AM8rFRYbbUpbzjjGwcVLUidpQ1vsz5UkZyw2o",
+                        "pending_coldkey_swap": None,
+                        "registration_replacement_safe": True,
+                    }
+                ],
+            },
+            "excluded_hotkeys": [],
+        },
+        "next_epoch_start_block": block + 200,
+        "inclusion_policy": {
+            "valid_from_block": block,
+            "valid_until_block": block + 100,
+            "valid_from_time": "2020-01-01T00:00:00.000Z",
+            "valid_until_time": "2100-01-01T00:00:00.000Z",
+            "require_commit_reveal_disabled": True,
+            "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            "expected_next_epoch_start_block": block + 200,
+        },
+        "uid30_launch_schema": validator_thin.SN39_UID30_LAUNCH_SCHEMA,
+        "uid30_launch_preview_sha256": preview_digest,
+        "uid30_launch_policy": validator_thin.SN39_UID30_LAUNCH_POLICY,
+        "report_id": preview_digest,
+        "exclusive_writer_assertion": {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        },
+        "reviewed_preview": {
+            "valid_from_block": block,
+            "valid_until_block": block + 100,
+            "miner": {
+                "uid": target_uid,
+                "hotkey": validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY,
+            },
+            "vector": {
+                "dests": [target_uid],
+                "weights_u16": [65535],
+                "burn_destination": None,
+                "burn_weight_u16": 0,
+                "sum_u16": 65535,
+            },
+        },
+        "fresh_miner_evidence": {
+            "uid": target_uid,
+            "hotkey": validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY,
+        },
+    }
+
+
+@pytest.mark.parametrize("drift", [1, 2])
+def test_reviewed_uid30_signer_accepts_only_bounded_canonical_descendants(
+    monkeypatch: pytest.MonkeyPatch, drift: int
+) -> None:
+    block = 900
+    target_uid = 124
+    mapping_hash = "0x" + "d" * 64
+    latest_hash = "0x" + "e" * 64
+    exact_hash = "0x" + "a" * 64
+    intermediate_hash = "0x" + "c" * 64
+    attempt_id = "sha256:" + "1" * 64
+    signed = SimpleNamespace(extrinsic_hash=bytes.fromhex("a" * 64))
+    receipt = SimpleNamespace(extrinsic_hash=exact_hash, is_success=True)
+    sequence: list[str] = []
+    signed_calls: list[dict[str, object]] = []
+    intents: list[dict[str, object]] = []
+
+    def block_hash(number: int) -> str:
+        return mapping_hash if number == block else latest_hash
+
+    storage_reads: list[tuple[str, list[object], str]] = []
+
+    def query(
+        *, storage_function: str, params: list[object], block_hash: str, **_kwargs
+    ):
+        storage_reads.append((storage_function, params, block_hash))
+        if storage_function == "Uids":
+            return (
+                validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID
+                if params[1] == validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                else target_uid
+            )
+        if storage_function == "Keys":
+            return (
+                validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                if params[1] == validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID
+                else validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY
+            )
+        raise AssertionError("unexpected storage query")
+
+    parents = {
+        latest_hash: mapping_hash if drift == 1 else intermediate_hash,
+        intermediate_hash: mapping_hash,
+    }
+
+    substrate = SimpleNamespace(
+        get_chain_finalised_head=lambda: latest_hash,
+        get_block_number=lambda _hash: block + drift,
+        get_block_hash=block_hash,
+        get_block_header=lambda *, block_hash: {
+            "header": {"parentHash": parents[block_hash]}
+        },
+        query=query,
+        get_account_next_index=lambda _hotkey: 17,
+        create_signed_extrinsic=lambda **kwargs: (
+            sequence.append("sign") or signed_calls.append(kwargs) or signed
+        ),
+        submit_extrinsic=lambda *_args, **_kwargs: sequence.append("submit") or receipt,
+    )
+    preflight = validator_thin.ChainPreflight(
+        wallet=SimpleNamespace(
+            hotkey=SimpleNamespace(
+                ss58_address=validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+            )
+        ),
+        subtensor=SimpleNamespace(substrate=substrate),
+        hotkey_to_uid={
+            validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY: 30,
+            validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY: target_uid,
+        },
+        validator_hotkey=validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        validator_uid=30,
+        block=block,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        commit_reveal_enabled=False,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey=validator_thin.SN39_BURN_HOTKEY,
+        next_epoch_start_block=block + 200,
+        replacement_safe_hotkeys=frozenset(
+            {validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY}
+        ),
+        finalized_hash=mapping_hash,
+    )
+    identity = _reviewed_uid30_descendant_identity(
+        block=block, block_hash=mapping_hash, target_uid=target_uid
+    )
+    journal = {
+        "submission_genesis_hash": validator_thin.FINNEY_GENESIS_HASH,
+        "provenance_netuid": 39,
+        "submission_validator_hotkey": (
+            validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        ),
+        "submission_pending_id": attempt_id,
+        "submission_pending_phase": "unsigned_reserved",
+        "submission_pending_lane": "authority",
+        "submission_pending_identity": identity,
+        "submission_pending_launch_attempt": True,
+        "submission_pending_launch_budget_limit": 1,
+        "submission_pending_budget_scope": "launch_full_gate",
+        "submission_pending_budget_limit": 1,
+        # Legitimate generic history must not make the launch-only capability
+        # require a virgin shared journal.
+        "submission_attempt_ids": ["sha256:" + "9" * 64],
+        "submission_finalized_id": "sha256:" + "9" * 64,
+    }
+    monkeypatch.setattr(validator_thin, "_read_state", lambda _path: journal)
+    monkeypatch.setattr(
+        validator_thin,
+        "_submission_state_path",
+        lambda _args: Path("/not-read/journal.json"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.types.ExtrinsicResponse.unlock_wallet",
+        lambda *_args, **_kwargs: SimpleNamespace(success=True),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: SimpleNamespace(
+            set_mechanism_weights=lambda **_kwargs: "call"
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **kwargs: sequence.append("intent") or intents.append(kwargs),
+    )
+
+    runtime_contract = SimpleNamespace(
+        require_full_provenance_for_broadcast=True,
+        max_submissions=1,
+        _continuous_submission_authorization=None,
+        _uid30_reviewed_preview_sha256="1" * 64,
+    )
+    assert (
+        validator_thin._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime_contract,
+            attempt_id=attempt_id,
+            netuid=39,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=[target_uid],
+            wire_weights=[65535],
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+        is receipt
+    )
+    assert sequence == ["sign", "intent", "submit"]
+    assert signed_calls == [
+        {
+            "call": "call",
+            "keypair": preflight.wallet.hotkey,
+            "nonce": 17,
+            "era": {
+                "period": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+                "current": block,
+            },
+        }
+    ]
+    assert intents[0]["era_reference_block"] == block
+    assert intents[0]["wire_uids"] == [target_uid]
+    assert intents[0]["wire_weights"] == [65535]
+    assert storage_reads == [
+        (
+            "Uids",
+            [39, validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY],
+            latest_hash,
+        ),
+        (
+            "Keys",
+            [39, validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID],
+            latest_hash,
+        ),
+        (
+            "Uids",
+            [39, validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY],
+            latest_hash,
+        ),
+        ("Keys", [39, target_uid], latest_hash),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("too_far", "outside the reviewed UID30 launch window"),
+        ("canonical_hash", "mapping block is no longer canonical"),
+        ("safety", "exact reviewed launch contract"),
+        ("ancestry", "not a child of the review"),
+        ("validator_uids", "live UID mappings differ"),
+        ("validator_keys", "live UID mappings differ"),
+        ("miner_uids", "live UID mappings differ"),
+        ("miner_keys", "live UID mappings differ"),
+        ("launch_history", "no pristine exact reservation"),
+    ],
+)
+def test_reviewed_uid30_descendant_refuses_before_composing_or_signing(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    expected: str,
+) -> None:
+    block = 900
+    drift = 3 if case == "too_far" else 1
+    target_uid = 124
+    mapping_hash = "0x" + "d" * 64
+    latest_hash = "0x" + "e" * 64
+    unrelated_hash = "0x" + "c" * 64
+    attempt_id = "sha256:" + "1" * 64
+    identity = _reviewed_uid30_descendant_identity(
+        block=block, block_hash=mapping_hash, target_uid=target_uid
+    )
+    if case == "safety":
+        identity["uid_safety"] = {}
+    journal = {
+        "submission_genesis_hash": validator_thin.FINNEY_GENESIS_HASH,
+        "provenance_netuid": 39,
+        "submission_validator_hotkey": (
+            validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        ),
+        "submission_pending_id": attempt_id,
+        "submission_pending_phase": "unsigned_reserved",
+        "submission_pending_lane": "authority",
+        "submission_pending_identity": identity,
+        "submission_pending_launch_attempt": True,
+        "submission_pending_launch_budget_limit": 1,
+        "submission_pending_budget_scope": "launch_full_gate",
+        "submission_pending_budget_limit": 1,
+    }
+    if case == "launch_history":
+        journal["submission_launch_attempt_ids"] = ["sha256:" + "8" * 64]
+
+    def query(
+        *, storage_function: str, params: list[object], block_hash: str, **_kwargs
+    ):
+        assert block_hash == latest_hash
+        if storage_function == "Uids":
+            if params[1] == validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY:
+                return 31 if case == "validator_uids" else 30
+            return 125 if case == "miner_uids" else target_uid
+        if storage_function == "Keys":
+            if params[1] == validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID:
+                return (
+                    validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY
+                    if case == "validator_keys"
+                    else validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                )
+            return (
+                validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                if case == "miner_keys"
+                else validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY
+            )
+        raise AssertionError("unexpected storage query")
+
+    substrate = SimpleNamespace(
+        get_chain_finalised_head=lambda: latest_hash,
+        get_block_number=lambda _hash: block + drift,
+        get_block_hash=lambda number: (
+            mapping_hash
+            if number == block and case != "canonical_hash"
+            else latest_hash
+        ),
+        get_block_header=lambda *, block_hash: {
+            "header": {
+                "parentHash": unrelated_hash if case == "ancestry" else mapping_hash
+            }
+        },
+        query=query,
+        get_account_next_index=lambda _hotkey: (_ for _ in ()).throw(
+            AssertionError("refusal must precede nonce access")
+        ),
+    )
+    preflight = validator_thin.ChainPreflight(
+        wallet=SimpleNamespace(
+            hotkey=SimpleNamespace(
+                ss58_address=validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+            )
+        ),
+        subtensor=SimpleNamespace(substrate=substrate),
+        hotkey_to_uid={
+            validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY: 30,
+            validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY: target_uid,
+        },
+        validator_hotkey=validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        validator_uid=30,
+        block=block,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        commit_reveal_enabled=False,
+        genesis_hash=validator_thin.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey=validator_thin.SN39_BURN_HOTKEY,
+        next_epoch_start_block=block + 200,
+        replacement_safe_hotkeys=frozenset(
+            {validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY}
+        ),
+        finalized_hash=mapping_hash,
+    )
+    monkeypatch.setattr(validator_thin, "_read_state", lambda _path: journal)
+    monkeypatch.setattr(
+        validator_thin,
+        "_submission_state_path",
+        lambda _args: Path("/not-read/journal.json"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: (_ for _ in ()).throw(
+            AssertionError("refusal must precede call composition")
+        ),
+    )
+    monkeypatch.setattr(
+        validator_thin,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("refusal must precede signed-intent journaling")
+        ),
+    )
+    runtime_contract = SimpleNamespace(
+        require_full_provenance_for_broadcast=True,
+        max_submissions=1,
+        _continuous_submission_authorization=None,
+        _uid30_reviewed_preview_sha256="1" * 64,
+    )
+
+    with pytest.raises(validator_thin.wire.VectorError, match=expected):
+        validator_thin._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime_contract,
+            attempt_id=attempt_id,
+            netuid=39,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=[target_uid],
+            wire_weights=[65535],
+            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+
 def test_exact_sn39_signer_refuses_head_drift_before_signing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

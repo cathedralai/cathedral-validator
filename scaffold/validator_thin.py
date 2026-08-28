@@ -127,6 +127,15 @@ SN39_UID30_LAUNCH_VALIDATOR_HOTKEY = (
 SN39_UID30_LAUNCH_MINER_HOTKEY = (
     "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G"  # pragma: allowlist secret
 )
+SN39_UID30_LAUNCH_VERSION_KEY = 10005000
+# The one reviewed UID30 launch performs a complete finalized-state and TDX
+# revalidation immediately before signing.  That read is slightly longer than
+# one Finney block, so requiring the finalized head to remain byte-for-byte
+# unchanged makes the safe signer lose a deterministic race.  The launch-only
+# path may advance by at most two finalized blocks, leaving fourteen blocks of
+# its pinned 16-block mortal era.  Every recurring and generic writer retains
+# the exact-head rule.
+SN39_UID30_LAUNCH_MAX_FINALIZED_DRIFT_BLOCKS = 2
 
 
 class _RetryablePreSignHeadDrift(wire.VectorError):
@@ -3655,9 +3664,7 @@ class RecoveredSubmission:
             if self.burn_uid is None
             else f"burn_uid={self.burn_uid} burn_share={self.burn_share:.6f} "
         )
-        return (
-            f"authority=thin uids={len(self.uid_weights)} {burn}vector={vector}"
-        )
+        return f"authority=thin uids={len(self.uid_weights)} {burn}vector={vector}"
 
 
 @dataclass(frozen=True)
@@ -3725,9 +3732,7 @@ def _strict_zero_burn_uid30_owner(
     reviewed_miner = reviewed.get("miner")
     reviewed_vector = reviewed.get("vector")
     if not isinstance(reviewed_miner, dict) or not isinstance(reviewed_vector, dict):
-        raise wire.VectorError(
-            "zero-burn UID30 reviewed identity is malformed"
-        )
+        raise wire.VectorError("zero-burn UID30 reviewed identity is malformed")
     exact_rows = bool(
         isinstance(raw_uid_weights, list)
         and len(raw_uid_weights) == 1
@@ -3739,9 +3744,7 @@ def _strict_zero_burn_uid30_owner(
         and len(raw_uid_hotkeys[0]) == 2
     )
     if not exact_rows:
-        raise wire.VectorError(
-            "zero-burn UID30 identity is not one exact target row"
-        )
+        raise wire.VectorError("zero-burn UID30 identity is not one exact target row")
     uid = raw_uid_weights[0][0]
     weight = raw_uid_weights[0][1]
     hotkey_uid = raw_uid_hotkeys[0][0]
@@ -3756,8 +3759,7 @@ def _strict_zero_burn_uid30_owner(
         or identity.get("netuid") != 39
         or type(identity.get("validator_uid")) is not int
         or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
-        or identity.get("validator_hotkey")
-        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or identity.get("validator_hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         or identity.get("uid30_launch_schema") != SN39_UID30_LAUNCH_SCHEMA
         or identity.get("uid30_launch_policy") != SN39_UID30_LAUNCH_POLICY
         or identity.get("allocation_contract") != SN39_UID30_LAUNCH_POLICY
@@ -5527,7 +5529,6 @@ def _classify_finalized_receipt_awaiting_finality(
         sleep(min(max(0.0, poll_secs), remaining))
 
 
-
 def _receipt_verdict(
     reason_out: list[str] | None,
     verdict: str,
@@ -6362,6 +6363,273 @@ def _authorize_sn39_chain_submission(
         )
 
 
+def _require_reviewed_uid30_finalized_descendant(
+    preflight: ChainPreflight,
+    *,
+    runtime_contract: Any,
+    attempt_id: str,
+    latest_finalized_block: int,
+    latest_finalized_hash: str,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    version_key: int,
+    mortal_period_blocks: int,
+) -> None:
+    """Permit the one reviewed UID30 launch to sign from a fresh descendant.
+
+    This is not a generic head-drift relaxation.  It re-proves the exact
+    zero-burn launch reservation, the target's complete-era replacement proof,
+    the original finalized block's canonical hash, and both live UID mappings
+    at the descendant.  A drift beyond the measured two-block read window
+    remains a pre-sign retry.
+    """
+
+    if preflight.block is None:
+        raise wire.VectorError("UID30 descendant signing has no mapping block")
+    drift = latest_finalized_block - preflight.block
+    if (
+        drift <= 0
+        or drift > SN39_UID30_LAUNCH_MAX_FINALIZED_DRIFT_BLOCKS
+        or latest_finalized_block >= preflight.block + mortal_period_blocks
+    ):
+        raise _RetryablePreSignHeadDrift(
+            "SN39 finalized head moved outside the reviewed UID30 launch window; "
+            "refusing before signing"
+        )
+
+    state = _read_state(_submission_state_path(runtime_contract))
+    lane = state.get("submission_pending_lane")
+    identity = state.get("submission_pending_identity")
+    if (
+        state.get("submission_pending_id") != attempt_id
+        or state.get("submission_pending_phase") != "unsigned_reserved"
+        or state.get("submission_pending_broadcast_intent") is not None
+        or state.get("submission_pending_receipt_candidate") is not None
+        or state.get("submission_pending_proof_status") is not None
+        # Prior generic writes are legitimate global-journal history.  The
+        # launch-specific one-shot budget, not a virgin journal, proves this
+        # reviewed launch has never signed before.
+        or state.get("submission_launch_attempt_ids") not in (None, [])
+        or lane != "authority"
+        or not isinstance(identity, dict)
+    ):
+        raise wire.VectorError(
+            "UID30 descendant signing has no pristine exact reservation"
+        )
+    zero_burn_owner = _strict_zero_burn_uid30_owner(identity, lane=lane)
+
+    raw_uid_safety = identity.get("uid_safety")
+    uid_safety = raw_uid_safety if isinstance(raw_uid_safety, dict) else {}
+    raw_registration = uid_safety.get("registration")
+    registration = raw_registration if isinstance(raw_registration, dict) else {}
+    raw_rotation = uid_safety.get("rotation")
+    rotation = raw_rotation if isinstance(raw_rotation, dict) else {}
+    targets = rotation.get("targets")
+    target_uid = wire_uids[0] if len(wire_uids) == 1 else None
+    target_rows = (
+        [
+            target
+            for target in targets
+            if isinstance(target, dict)
+            and target.get("uid") == target_uid
+            and target.get("hotkey") == SN39_UID30_LAUNCH_MINER_HOTKEY
+            and target.get("registration_replacement_safe") is True
+            and target.get("pending_coldkey_swap") is None
+        ]
+        if isinstance(targets, list)
+        else []
+    )
+    safe_hotkeys = registration.get("replacement_safe_hotkeys")
+    expected_hash = str(preflight.finalized_hash).lower()
+    raw_policy = identity.get("inclusion_policy")
+    policy = raw_policy if isinstance(raw_policy, dict) else {}
+    policy_from = policy.get("valid_from_block")
+    policy_until = policy.get("valid_until_block")
+    runtime_preview_digest = getattr(
+        runtime_contract, "_uid30_reviewed_preview_sha256", None
+    )
+    if (
+        state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
+        or state.get("provenance_netuid") != 39
+        or state.get("submission_validator_hotkey")
+        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or state.get("submission_pending_launch_attempt") is not True
+        or state.get("submission_pending_launch_budget_limit") != 1
+        or state.get("submission_pending_budget_scope") != "launch_full_gate"
+        or state.get("submission_pending_budget_limit") != 1
+        or bool(
+            getattr(runtime_contract, "require_full_provenance_for_broadcast", False)
+        )
+        is not True
+        or getattr(runtime_contract, "max_submissions", None) != 1
+        or getattr(runtime_contract, "_continuous_submission_authorization", None)
+        is not None
+        or not isinstance(runtime_preview_digest, str)
+        or identity.get("uid30_launch_preview_sha256")
+        != "sha256:" + runtime_preview_digest
+        or identity.get("continuous_authorization") is not None
+        or preflight.genesis_hash != FINNEY_GENESIS_HASH
+        or preflight.validator_hotkey != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or preflight.validator_uid != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or getattr(preflight.wallet.hotkey, "ss58_address", None)
+        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or zero_burn_owner != preflight.subnet_owner_hotkey
+        or preflight.hotkey_to_uid.get(SN39_UID30_LAUNCH_VALIDATOR_HOTKEY)
+        != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or type(target_uid) is not int
+        or target_uid < 0
+        or preflight.hotkey_to_uid.get(SN39_UID30_LAUNCH_MINER_HOTKEY) != target_uid
+        or not isinstance(preflight.replacement_safe_hotkeys, frozenset)
+        or SN39_UID30_LAUNCH_MINER_HOTKEY not in preflight.replacement_safe_hotkeys
+        or wire_weights != [65535]
+        or version_key != SN39_UID30_LAUNCH_VERSION_KEY
+        or identity.get("mapping_block") != preflight.block
+        or identity.get("source_epoch") != preflight.block
+        or identity.get("uid_weights") != [[target_uid, 1.0]]
+        or identity.get("uid_hotkeys") != [[target_uid, SN39_UID30_LAUNCH_MINER_HOTKEY]]
+        or uid_safety.get("schema") != "cathedral_sn39_uid_safety_v2"
+        or uid_safety.get("stability_basis") != "operator_controlled_coldkeys"
+        or uid_safety.get("excluded_hotkeys") != []
+        or not isinstance(safe_hotkeys, list)
+        or SN39_UID30_LAUNCH_MINER_HOTKEY not in safe_hotkeys
+        or rotation.get("status") != PASS
+        or rotation.get("mapping_block") != preflight.block
+        or str(rotation.get("mapping_block_hash", "")).lower() != expected_hash
+        or rotation.get("mortal_period_blocks") != mortal_period_blocks
+        or rotation.get("era_last_block") != preflight.block + mortal_period_blocks - 1
+        or not isinstance(targets, list)
+        or len(targets) != 1
+        or len(target_rows) != 1
+        or type(policy_from) is not int
+        or policy_from > preflight.block
+        or type(policy_until) is not int
+        or policy_until < preflight.block + mortal_period_blocks
+        or policy.get("mortal_period_blocks") != mortal_period_blocks
+        or identity.get("next_epoch_start_block") != preflight.next_epoch_start_block
+    ):
+        raise wire.VectorError(
+            "UID30 descendant signing differs from its reviewed mapping or era proof"
+        )
+
+    inclusion_policy = _policy_from_submission_identity(identity)
+    moment = datetime.now(UTC)
+    if (
+        inclusion_policy.valid_from_block > preflight.block
+        or latest_finalized_block < preflight.block
+        or inclusion_policy.valid_until_block - latest_finalized_block
+        < mortal_period_blocks
+        or inclusion_policy.expected_next_epoch_start_block - latest_finalized_block
+        < mortal_period_blocks * 3
+        or inclusion_policy.require_commit_reveal_disabled is not True
+        or preflight.commit_reveal_enabled is not False
+        or not (
+            inclusion_policy.valid_from_time
+            <= moment
+            < inclusion_policy.valid_until_time
+        )
+        or (inclusion_policy.valid_until_time - moment).total_seconds()
+        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+    ):
+        raise wire.VectorError(
+            "UID30 descendant signing lacks the reviewed time, block, or epoch room"
+        )
+
+    substrate = getattr(preflight.subtensor, "substrate", None)
+    if substrate is None:
+        raise wire.VectorError("UID30 descendant signing has no substrate interface")
+    try:
+        canonical_preflight_hash = str(
+            substrate.get_block_hash(preflight.block)
+        ).lower()
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 descendant signing cannot re-resolve its mapping block"
+        ) from exc
+    if (
+        _CHAIN_HASH_RE.fullmatch(expected_hash) is None
+        or canonical_preflight_hash != expected_hash
+        or _CHAIN_HASH_RE.fullmatch(latest_finalized_hash) is None
+    ):
+        raise wire.VectorError(
+            "UID30 descendant signing mapping block is no longer canonical"
+        )
+
+    # Heights alone do not prove ancestry.  The exception is capped at two
+    # blocks, so walking the finalized parent links is both bounded and exact.
+    cursor_hash = latest_finalized_hash
+    try:
+        for _ in range(drift):
+            observed_header = substrate.get_block_header(block_hash=cursor_hash)
+            if not isinstance(observed_header, dict):
+                raise ValueError("finalized header is unavailable")
+            header = observed_header.get("header", observed_header)
+            if not isinstance(header, dict):
+                raise ValueError("finalized header is malformed")
+            parent_hash = str(
+                header.get("parentHash", header.get("parent_hash", ""))
+            ).lower()
+            if _CHAIN_HASH_RE.fullmatch(parent_hash) is None:
+                raise ValueError("finalized parent hash is malformed")
+            cursor_hash = parent_hash
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 descendant signing cannot prove finalized ancestry"
+        ) from exc
+    if cursor_hash != expected_hash:
+        raise wire.VectorError(
+            "UID30 descendant signing finalized head is not a child of the review"
+        )
+
+    try:
+        validator_uid_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="Uids",
+            params=[39, SN39_UID30_LAUNCH_VALIDATOR_HOTKEY],
+            block_hash=latest_finalized_hash,
+        )
+        validator_uid = getattr(validator_uid_raw, "value", validator_uid_raw)
+        validator_hotkey_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="Keys",
+            params=[39, SN39_UID30_LAUNCH_VALIDATOR_UID],
+            block_hash=latest_finalized_hash,
+        )
+        live_validator_hotkey = getattr(
+            validator_hotkey_raw, "value", validator_hotkey_raw
+        )
+        target_uid_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="Uids",
+            params=[39, SN39_UID30_LAUNCH_MINER_HOTKEY],
+            block_hash=latest_finalized_hash,
+        )
+        live_target_uid = getattr(target_uid_raw, "value", target_uid_raw)
+        target_hotkey_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="Keys",
+            params=[39, target_uid],
+            block_hash=latest_finalized_hash,
+        )
+        target_hotkey = getattr(target_hotkey_raw, "value", target_hotkey_raw)
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 descendant signing cannot re-read the live UID mappings"
+        ) from exc
+    if (
+        isinstance(validator_uid, bool)
+        or not isinstance(validator_uid, int)
+        or validator_uid != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or str(live_validator_hotkey) != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or isinstance(live_target_uid, bool)
+        or not isinstance(live_target_uid, int)
+        or live_target_uid != target_uid
+        or str(target_hotkey) != SN39_UID30_LAUNCH_MINER_HOTKEY
+    ):
+        raise wire.VectorError(
+            "UID30 descendant signing live UID mappings differ from the review"
+        )
+
+
 def _submit_exact_sn39_extrinsic(
     preflight: ChainPreflight,
     *,
@@ -6372,6 +6640,7 @@ def _submit_exact_sn39_extrinsic(
     wire_uids: list[int],
     wire_weights: list[int],
     mortal_period_blocks: int,
+    allow_reviewed_uid30_finalized_descendant: bool = False,
 ) -> Any:
     """Sign one pinned-era SN39 call and journal its hash before broadcast.
 
@@ -6401,12 +6670,25 @@ def _submit_exact_sn39_extrinsic(
     latest_finalized_block, latest_finalized_hash = _finalized_chain_head(
         preflight.subtensor
     )
-    if (
-        latest_finalized_block != preflight.block
-        or latest_finalized_hash != str(preflight.finalized_hash).lower()
-    ):
-        raise _RetryablePreSignHeadDrift(
-            "SN39 finalized head advanced after preflight; refusing before signing"
+    exact_finalized_head = bool(
+        latest_finalized_block == preflight.block
+        and latest_finalized_hash == str(preflight.finalized_hash).lower()
+    )
+    if not exact_finalized_head:
+        if allow_reviewed_uid30_finalized_descendant is not True:
+            raise _RetryablePreSignHeadDrift(
+                "SN39 finalized head advanced after preflight; refusing before signing"
+            )
+        _require_reviewed_uid30_finalized_descendant(
+            preflight,
+            runtime_contract=runtime_contract,
+            attempt_id=attempt_id,
+            latest_finalized_block=latest_finalized_block,
+            latest_finalized_hash=latest_finalized_hash,
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+            version_key=version_key,
+            mortal_period_blocks=mortal_period_blocks,
         )
     nonce = substrate.get_account_next_index(preflight.wallet.hotkey.ss58_address)
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
@@ -9145,8 +9427,7 @@ def _recover_pending_launch_receipt(
             assert zero_burn_owner_hotkey is not None
             if (
                 preflight.validator_uid != SN39_UID30_LAUNCH_VALIDATOR_UID
-                or preflight.validator_hotkey
-                != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                or preflight.validator_hotkey != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
                 or preflight.validator_uid in uid_weights
                 or preflight.validator_hotkey in uid_hotkeys.values()
             ):

@@ -58,7 +58,7 @@ from cathedral_thin.independent.constants import (
     W,
 )
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
-from cathedral_thin.independent_runtime.chain import ServingAxon, scan_axons
+from cathedral_thin.independent_runtime.chain import ServingAxon
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST, load_verifier
 from cathedral_thin.independent_runtime.run import (
     INTEL_COLLATERAL,
@@ -120,6 +120,7 @@ class UID30ChainState:
     commit_reveal_enabled: bool
     miner_hotkey: str
     miner_uid: int
+    serving_axon: ServingAxon
     next_epoch_start_block: int
     blocks_until_next_epoch: int
     uid_safety: Mapping[str, Any]
@@ -446,13 +447,20 @@ def read_uid30_chain_state() -> UID30ChainState:
         if info_block != block:
             raise UID30LaunchError("SN39 metagraph info is not at the finalized head")
         hotkeys = [str(value) for value in list(info.hotkeys)]
+        axons = list(info.axons)
         permits = list(info.validator_permit)
         total_stakes = list(info.total_stake)
         last_updates = [
             _strict_nonnegative_int(value, label="last update")
             for value in list(info.last_update)
         ]
-        if not (len(hotkeys) == len(permits) == len(total_stakes) == len(last_updates)):
+        if not (
+            len(hotkeys)
+            == len(axons)
+            == len(permits)
+            == len(total_stakes)
+            == len(last_updates)
+        ):
             raise UID30LaunchError("SN39 metagraph eligibility arrays are inconsistent")
         if preflight.validator_uid < 0 or preflight.validator_uid >= len(hotkeys):
             raise UID30LaunchError("UID30 index is outside the metagraph")
@@ -493,6 +501,9 @@ def read_uid30_chain_state() -> UID30ChainState:
             {miner_uid: MINER_HOTKEY},
             mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
         )
+        serving_axon = _serving_axon_from_info_row(
+            axons[miner_uid], uid=miner_uid, hotkey=MINER_HOTKEY
+        )
         last_update = last_updates[preflight.validator_uid]
         state = UID30ChainState(
             preflight=preflight,
@@ -520,6 +531,7 @@ def read_uid30_chain_state() -> UID30ChainState:
             commit_reveal_enabled=preflight.commit_reveal_enabled,
             miner_hotkey=MINER_HOTKEY,
             miner_uid=miner_uid,
+            serving_axon=serving_axon,
             next_epoch_start_block=_strict_nonnegative_int(
                 preflight.next_epoch_start_block, label="next epoch start"
             ),
@@ -535,36 +547,38 @@ def read_uid30_chain_state() -> UID30ChainState:
     return validate_chain_state(state)
 
 
+def _serving_axon_from_info_row(raw: Any, *, uid: int, hotkey: str) -> ServingAxon:
+    """Decode the axon row already bound to the finalized metagraph info.
+
+    Bittensor's ``MetagraphInfo.axons`` rows are dictionaries whose IPv4
+    address is stored as a u32.  Capturing this row alongside the hotkey and
+    policy arrays avoids a second metagraph RPC after the final preflight.
+    """
+
+    if not isinstance(raw, Mapping):
+        raise UID30LaunchError("serving-axon metagraph row is not a mapping")
+    ip_type = _strict_nonnegative_int(raw.get("ip_type"), label="serving-axon IP type")
+    ip_value = _strict_nonnegative_int(raw.get("ip"), label="serving-axon IP")
+    port = _strict_nonnegative_int(raw.get("port"), label="serving-axon port")
+    if ip_type != 4 or ip_value > 0xFFFFFFFF:
+        raise UID30LaunchError("serving-axon metagraph row is not canonical IPv4")
+    try:
+        ip = str(ipaddress.IPv4Address(ip_value))
+    except ipaddress.AddressValueError as exc:
+        raise UID30LaunchError(
+            "serving-axon metagraph row is not canonical IPv4"
+        ) from exc
+    return ServingAxon(uid=uid, hotkey=hotkey, ip=ip, port=port)
+
+
 def _finalized_serving_axon(state: UID30ChainState) -> ServingAxon:
     """Resolve the one launch endpoint at the exact validated finalized head."""
 
-    try:
-        metagraph = state.preflight.subtensor.metagraph(
-            NETUID, block=state.block_number
-        )
-        metagraph_block = _strict_nonnegative_int(
-            getattr(metagraph, "block", None), label="serving-axon metagraph block"
-        )
-        if metagraph_block != state.block_number:
-            raise UID30LaunchError(
-                "serving-axon metagraph is not at the validated finalized head"
-            )
-        targets = [
-            axon
-            for axon in scan_axons(metagraph).serving
-            if axon.hotkey == MINER_HOTKEY
-        ]
-    except UID30LaunchError:
-        raise
-    except Exception as exc:
-        raise UID30LaunchError(f"finalized serving-axon census failed: {exc}") from exc
-    if len(targets) != 1:
+    axon = state.serving_axon
+    if axon.uid != state.miner_uid or axon.hotkey != state.miner_hotkey:
         raise UID30LaunchError(
-            f"expected one serving axon for the pinned miner, found {len(targets)}"
+            "serving miner identity differs from the finalized mapping"
         )
-    axon = targets[0]
-    if axon.uid != state.miner_uid:
-        raise UID30LaunchError("serving miner UID differs from the finalized mapping")
     _require_public_ip(axon.ip)
     if axon.port != 8081:
         raise UID30LaunchError("verified miner is not serving the pinned TLS port 8081")
@@ -976,12 +990,17 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(targets, list)
         else []
     )
+    rotation_mapping_hash = _canonical_hash(
+        rotation.get("mapping_block_hash"),
+        label="preview UID-safety mapping block hash",
+    )
     if (
         uid_safety.get("schema") != "cathedral_sn39_uid_safety_v2"
         or uid_safety.get("stability_basis") != "operator_controlled_coldkeys"
         or uid_safety.get("excluded_hotkeys") != []
         or rotation.get("status") != canonical_validator.PASS
         or rotation.get("mapping_block") != finalized_block
+        or rotation_mapping_hash != network.get("finalized_hash")
         or rotation.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
         or rotation.get("era_last_block")
         != finalized_block + SN39_MORTAL_PERIOD_BLOCKS - 1
@@ -994,6 +1013,10 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         raise UID30LaunchError(
             "preview does not prove the miner UID stable for its era"
         )
+    _require_ss58(
+        matching_targets[0].get("coldkey"),
+        label="preview UID-safety target coldkey",
+    )
     if policy != {
         "id": POLICY_ID,
         "verified_miner_allocation": "1.0",
@@ -1590,16 +1613,25 @@ def submit_reviewed_preview(
             wire_uids = [fresh_state.miner_uid]
             wire_weights = [W]
             call = submit_call or canonical_validator._submit_exact_sn39_extrinsic
+            submit_kwargs = {
+                "runtime_contract": args,
+                "attempt_id": attempt_id,
+                "netuid": NETUID,
+                "version_key": VERSION_KEY,
+                "wire_uids": wire_uids,
+                "wire_weights": wire_weights,
+                "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            }
+            if submit_call is None:
+                # Only this digest-reviewed, zero-burn launch receives the
+                # bounded canonical-descendant allowance.  Test doubles and
+                # every generic/recurring canonical caller retain the original
+                # exact-head contract unless they invoke this production seam.
+                submit_kwargs["allow_reviewed_uid30_finalized_descendant"] = True
             try:
                 receipt = call(
                     fresh_state.preflight,
-                    runtime_contract=args,
-                    attempt_id=attempt_id,
-                    netuid=NETUID,
-                    version_key=VERSION_KEY,
-                    wire_uids=wire_uids,
-                    wire_weights=wire_weights,
-                    mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+                    **submit_kwargs,
                 )
                 submission = _receipt_submission(receipt, state=fresh_state)
                 canonical_validator._record_pending_submission_receipt(
