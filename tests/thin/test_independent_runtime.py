@@ -969,6 +969,65 @@ def collected_for(hotkey: str = BOB, *, digest: bytes = ONE_SPKI) -> CollectedEv
     )
 
 
+class FakeWorkTransport:
+    """A work transport for the SAT round that never opens a socket.
+
+    ``_units_after_quote`` builds its own transport, so a ``cmd_run`` test that
+    stubs ``collect_sat_work`` gets one of these instead. ``last_spki`` starts
+    unobserved, exactly as it does before a real POST, and the stub records
+    whatever SPKI the round is meant to have seen on the wire.
+    """
+
+    def __init__(self, *, timeout: float = 30.0) -> None:
+        del timeout
+        self.last_spki: bytes | None = None
+
+    def observe_binding(self, url: str) -> ChannelBinding:
+        raise AssertionError(f"the fake work transport must not dial {url}")
+
+    def post(self, url: str, body) -> tuple[int, bytes]:
+        del body
+        raise AssertionError(f"the fake work transport must not dial {url}")
+
+
+def install_work_transport(monkeypatch) -> None:
+    monkeypatch.setattr(run_module, "HttpsEvidenceTransport", FakeWorkTransport)
+
+
+def paying_sat_work(monkeypatch, spki: dict[str, bytes | None]) -> None:
+    """Stub a successful SAT round that observed ``spki`` per miner.
+
+    A miner mapped to ``None`` is one whose work POST left no SPKI behind.
+    """
+    install_work_transport(monkeypatch)
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        del url, item
+        transport.last_spki = spki[assigned_hotkey]
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+
+
+def one_axon_runner(monkeypatch, *, digest: bytes = ONE_SPKI) -> CollectedEvidence:
+    """A runner with BOB alone registered and serving, bound to ``digest``."""
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443)
+    collected = collected_for(digest=digest)
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        del validator_ss58
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": collected,
+        }
+
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    return collected
+
+
 def test_a_qvl_pass_without_re_derived_units_binds_no_compute_mass(
     monkeypatch, tmp_path, capsys
 ):
@@ -999,11 +1058,13 @@ def test_re_derived_sat_units_are_what_makes_the_runner_compose(
     ``mass_from_units`` is NOT stubbed: the integer mass under the funded
     allocation comes from the units the audit returned. ``collect_sat_work`` is
     stubbed only so no socket opens, and the URL it is handed proves the runner
-    POSTs to the axon's own work endpoint rather than to the evidence URL.
+    POSTs to the axon's own work endpoint rather than to the evidence URL. The
+    stubbed POST records the attested SPKI, which is what the round is paid on.
     """
     subtensor = prepared_runner(
         monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443
     )
+    install_work_transport(monkeypatch)
     collected = collected_for()
     seen: dict = {}
 
@@ -1022,6 +1083,7 @@ def test_re_derived_sat_units_are_what_makes_the_runner_compose(
 
     def fake_sat_work(*, url, assigned_hotkey, item, transport):
         seen["asked"] = (url, assigned_hotkey, item.challenge_id)
+        transport.last_spki = collected.channel_binding.digest
         return SAT_UNITS
 
     monkeypatch.setattr(run_module, "_try_collect", fake_collect)
@@ -1131,10 +1193,12 @@ def test_a_flaky_sat_http_exception_does_not_abort_the_epoch(
     for every other miner on the subnet.
     """
     two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
+    install_work_transport(monkeypatch)
 
     def flaky_sat_work(*, url, assigned_hotkey, item, transport):
         if assigned_hotkey == BOB:
             raise http.client.HTTPException("incomplete read")
+        transport.last_spki = OTHER_SPKI
         return SAT_UNITS
 
     monkeypatch.setattr(run_module, "collect_sat_work", flaky_sat_work)
@@ -1161,11 +1225,7 @@ def test_two_hotkeys_on_one_tls_spki_are_both_unpaid(monkeypatch, tmp_path, caps
     ledger each hotkey would collect a full Compute share off one machine.
     """
     two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: ONE_SPKI})
-
-    def fake_sat_work(*, url, assigned_hotkey, item, transport):
-        return SAT_UNITS
-
-    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+    paying_sat_work(monkeypatch, {BOB: ONE_SPKI, CHARLIE: ONE_SPKI})
 
     code = run_module.cmd_run(run_options(tmp_path))
     report = json.loads(capsys.readouterr().out)
@@ -1188,13 +1248,15 @@ def test_duplicate_machine_cannot_hide_behind_a_failing_sat(
 ):
     """A duplicate quote forfeits both identities before either SAT outcome matters."""
     two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: ONE_SPKI})
+    install_work_transport(monkeypatch)
     sat_calls: list[str] = []
 
     def second_sat_would_fail(*, url, assigned_hotkey, item, transport):
-        del url, item, transport
+        del url, item
         sat_calls.append(assigned_hotkey)
         if assigned_hotkey == CHARLIE:
             raise SatWorkError("deliberate duplicate-side failure")
+        transport.last_spki = ONE_SPKI
         return SAT_UNITS
 
     monkeypatch.setattr(run_module, "collect_sat_work", second_sat_would_fail)
@@ -1219,11 +1281,7 @@ def test_duplicate_machine_cannot_hide_behind_a_failing_sat(
 def test_two_hotkeys_on_distinct_tls_spki_are_both_paid(monkeypatch, tmp_path, capsys):
     """Two machines are two machines. The ledger only refuses duplicates."""
     two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
-
-    def fake_sat_work(*, url, assigned_hotkey, item, transport):
-        return SAT_UNITS
-
-    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+    paying_sat_work(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
 
     code = run_module.cmd_run(run_options(tmp_path))
     report = json.loads(capsys.readouterr().out)
@@ -1236,6 +1294,95 @@ def test_two_hotkeys_on_distinct_tls_spki_are_both_paid(monkeypatch, tmp_path, c
     assert MINER_UID in report["compose"]["dests"]
     assert SECOND_MINER_UID in report["compose"]["dests"]
     assert sum(report["compose"]["weights"]) == 65535
+
+
+def test_a_work_post_with_no_observed_tls_spki_is_unpaid(monkeypatch, tmp_path, capsys):
+    """Fail-closed: an unobserved SPKI is not a match, it is a refusal.
+
+    A stubbed audit round can return units without the runner ever having
+    watched a handshake -- which is also what a transport that answered from
+    somewhere other than the attested channel would look like. Units nobody
+    saw arrive over the quoted channel are not payable.
+    """
+    one_axon_runner(monkeypatch)
+    paying_sat_work(monkeypatch, {BOB: None})
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert report["qvl_pass_count"] == 1
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    ((row,),) = (report["collect"],)
+    assert row["verdict"] == "PASS"
+    assert "SatWorkError" in row["sat_error"]
+    assert "not the attested channel binding" in row["sat_error"]
+    assert "sat_units" not in row
+    assert "sat_rule" not in row
+    assert report["compose"]["status"] != STATUS_COMPOSED
+
+
+def test_a_work_post_on_another_tls_spki_is_unpaid(monkeypatch, tmp_path, capsys):
+    """The work POST has to have reached the machine the quote was bound to."""
+    one_axon_runner(monkeypatch, digest=ONE_SPKI)
+    paying_sat_work(monkeypatch, {BOB: OTHER_SPKI})
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert report["qvl_pass_count"] == 1
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    ((row,),) = (report["collect"],)
+    assert row["verdict"] == "PASS"
+    assert "SatWorkError" in row["sat_error"]
+    assert "not the attested channel binding" in row["sat_error"]
+    assert "sat_units" not in row
+    assert report["compose"]["status"] != STATUS_COMPOSED
+
+
+@pytest.mark.parametrize("observed", [None, OTHER_SPKI])
+def test_units_after_quote_refuses_a_work_spki_that_is_not_the_binding(
+    monkeypatch, observed
+):
+    """The helper itself refuses, so every caller of it inherits the refusal."""
+    install_work_transport(monkeypatch)
+    collected = collected_for(digest=ONE_SPKI)
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        del url, assigned_hotkey, item
+        transport.last_spki = observed
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+    with pytest.raises(SatWorkError, match="not the attested channel binding"):
+        run_module._units_after_quote(
+            anchor_hash=ANCHOR_HASH,
+            collected=collected,
+            sat_url=AXON_SAT_URL,
+        )
+
+
+def test_units_after_quote_pays_when_the_work_spki_is_the_binding(monkeypatch):
+    install_work_transport(monkeypatch)
+    collected = collected_for(digest=ONE_SPKI)
+
+    def fake_sat_work(*, url, assigned_hotkey, item, transport):
+        del url, assigned_hotkey, item
+        transport.last_spki = ONE_SPKI
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
+    assert (
+        run_module._units_after_quote(
+            anchor_hash=ANCHOR_HASH,
+            collected=collected,
+            sat_url=AXON_SAT_URL,
+        )
+        == SAT_UNITS
+    )
 
 
 def test_a_failing_quote_is_never_asked_for_work(monkeypatch, tmp_path, capsys):
@@ -1308,7 +1455,7 @@ def test_one_qvl_infra_result_blocks_mass_for_the_whole_epoch(
 
     monkeypatch.setattr(run_module, "load_verifier", lambda path: MixedVerifier())
     monkeypatch.setattr(run_module, "_try_collect", fake_collect)
-    monkeypatch.setattr(run_module, "collect_sat_work", lambda **kwargs: SAT_UNITS)
+    paying_sat_work(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
 
     code = run_module.cmd_run(run_options(tmp_path, confirm_canary=True))
     report = json.loads(capsys.readouterr().out)
@@ -1349,8 +1496,10 @@ def test_the_runner_asks_for_the_anchor_bound_challenge(monkeypatch, tmp_path, c
 
     def fake_sat_work(*, url, assigned_hotkey, item, transport):
         asked.append(item)
+        transport.last_spki = collected.channel_binding.digest
         return SAT_UNITS
 
+    install_work_transport(monkeypatch)
     monkeypatch.setattr(run_module, "_try_collect", fake_collect)
     monkeypatch.setattr(run_module, "collect_sat_work", fake_sat_work)
     run_module.cmd_run(run_options(tmp_path))

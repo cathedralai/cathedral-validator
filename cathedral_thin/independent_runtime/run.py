@@ -336,7 +336,10 @@ def _units_after_quote(
     observed channel identity IS the machine identity for the audit seed.
 
     A SPKI change between the evidence POST and this one is a refusal, not a
-    retry: the two exchanges have to have reached the same machine.
+    retry: the two exchanges have to have reached the same machine. An absent
+    SPKI is the same refusal. Units whose work POST this process never watched
+    reach the attested channel are units nobody observed being earned, so a
+    missing observation cannot be read as agreement.
     """
     item = canonical_work_item(
         anchor_hash=anchor_hash,
@@ -350,10 +353,7 @@ def _units_after_quote(
         item=item,
         transport=transport,
     )
-    if (
-        transport.last_spki is not None
-        and transport.last_spki != collected.channel_binding.digest
-    ):
+    if transport.last_spki != collected.channel_binding.digest:
         raise SatWorkError(
             "the TLS SPKI on the work POST is not the attested channel binding"
         )
