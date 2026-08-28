@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import fcntl
+import ipaddress
 import os
 import stat
 from datetime import UTC, datetime
@@ -114,6 +115,12 @@ def _state(**changes) -> launch.UID30ChainState:
         "commit_reveal_enabled": COMMIT_REVEAL_ENABLED,
         "miner_hotkey": launch.MINER_HOTKEY,
         "miner_uid": 61,
+        "serving_axon": launch.ServingAxon(
+            uid=61,
+            hotkey=launch.MINER_HOTKEY,
+            ip="8.8.8.8",
+            port=8081,
+        ),
         "next_epoch_start_block": 1_200,
         "blocks_until_next_epoch": 200,
         "uid_safety": {
@@ -125,12 +132,14 @@ def _state(**changes) -> launch.UID30ChainState:
             "rotation": {
                 "status": canonical_validator.PASS,
                 "mapping_block": 1_000,
+                "mapping_block_hash": "0x" + "1" * 64,
                 "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
                 "era_last_block": 1_015,
                 "targets": [
                     {
                         "uid": 61,
                         "hotkey": launch.MINER_HOTKEY,
+                        "coldkey": "5G6mgvL59o6AM8rFRYbbUpbzjjGwcVLUidpQ1vsz5UkZyw2o",
                         "pending_coldkey_swap": None,
                         "registration_replacement_safe": True,
                     }
@@ -598,6 +607,38 @@ def test_exact_u16_vector_is_signed_read_back_and_finalized_once(
     assert SN39_MORTAL_PERIOD_BLOCKS == 16
 
 
+def test_production_uid30_seam_requests_the_launch_only_descendant_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, _runtime_root = _preview_files(tmp_path)
+    observed: dict[str, object] = {}
+
+    def canonical_submit(*args, **kwargs):
+        observed["allow_descendant"] = kwargs.pop(
+            "allow_reviewed_uid30_finalized_descendant"
+        )
+        return _intent_then_receipt(*args, **kwargs)
+
+    monkeypatch.setattr(
+        canonical_validator, "_submit_exact_sn39_extrinsic", canonical_submit
+    )
+    launch.submit_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        qvl_path="/pinned/qvl",
+        now=TEST_NOW,
+        confirm=True,
+        exclusive_writer_asserted=True,
+        chain_loader=_state,
+        miner_loader=lambda *_args, **_kwargs: _proof(),
+        readback_call=lambda **_kwargs: {
+            "dests": [61],
+            "weights_u16": [W],
+        },
+    )
+    assert observed == {"allow_descendant": True}
+
+
 def test_submit_refuses_regressed_or_unrelated_finalized_head(tmp_path: Path) -> None:
     path, digest, _runtime_root = _preview_files(tmp_path)
     preview, _observed = launch.load_reviewed_preview(path, reviewed_sha256=digest)
@@ -622,15 +663,6 @@ def test_private_or_wrong_port_axon_is_refused_before_dial(
         ("10.0.0.2", 8081, "not canonical public IP"),
         ("8.8.8.8", 443, "port 8081"),
     ):
-        preflight = _preflight(1_000, "0x" + "1" * 64, 1_200)
-        preflight.subtensor.metagraph = lambda _netuid, *, block, ip=ip, port=port: (
-            SimpleNamespace(
-                block=block,
-                uids=[61],
-                hotkeys=[launch.MINER_HOTKEY],
-                axons=[SimpleNamespace(ip=ip, port=port, is_serving=True)],
-            )
-        )
         dialed: list[str] = []
 
         def dial(url, *_args, _dialed=dialed, **_kwargs):
@@ -640,7 +672,15 @@ def test_private_or_wrong_port_axon_is_refused_before_dial(
         monkeypatch.setattr(launch, "_try_collect", dial)
         with pytest.raises(launch.UID30LaunchError, match=message):
             launch.collect_verified_miner(
-                _state(preflight=preflight), qvl_path="/not/read"
+                _state(
+                    serving_axon=launch.ServingAxon(
+                        uid=61,
+                        hotkey=launch.MINER_HOTKEY,
+                        ip=ip,
+                        port=port,
+                    )
+                ),
+                qvl_path="/not/read",
             )
         assert dialed == []
 
@@ -648,17 +688,42 @@ def test_private_or_wrong_port_axon_is_refused_before_dial(
 def test_fresh_miner_requires_same_current_finalized_axon(tmp_path: Path) -> None:
     path, digest, _runtime_root = _preview_files(tmp_path)
     preview, _observed = launch.load_reviewed_preview(path, reviewed_sha256=digest)
-    preflight = _preflight(1_000, "0x" + "1" * 64, 1_200)
-    preflight.subtensor.metagraph = lambda _netuid, *, block: SimpleNamespace(
-        block=block,
-        uids=[61],
-        hotkeys=[launch.MINER_HOTKEY],
-        axons=[SimpleNamespace(ip="1.1.1.1", port=8081, is_serving=True)],
-    )
     with pytest.raises(launch.UID30LaunchError, match="no longer the same"):
         launch._fresh_miner_matches_preview(
-            _proof(), state=_state(preflight=preflight), preview=preview
+            _proof(),
+            state=_state(
+                serving_axon=launch.ServingAxon(
+                    uid=61,
+                    hotkey=launch.MINER_HOTKEY,
+                    ip="1.1.1.1",
+                    port=8081,
+                )
+            ),
+            preview=preview,
         )
+
+
+def test_metagraph_info_axon_row_is_decoded_without_a_second_rpc() -> None:
+    axon = launch._serving_axon_from_info_row(
+        {
+            "block": 900,
+            "version": 10_005_000,
+            "ip": int(ipaddress.IPv4Address("34.67.178.53")),
+            "port": 8081,
+            "ip_type": 4,
+            "protocol": 4,
+            "placeholder1": 0,
+            "placeholder2": 0,
+        },
+        uid=61,
+        hotkey=launch.MINER_HOTKEY,
+    )
+    assert axon == launch.ServingAxon(
+        uid=61,
+        hotkey=launch.MINER_HOTKEY,
+        ip="34.67.178.53",
+        port=8081,
+    )
 
 
 def test_finalized_readback_requires_exact_signed_call_proof(
