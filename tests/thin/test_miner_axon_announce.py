@@ -538,6 +538,7 @@ def test_incompatible_sdk_signature_refuses_before_no_retry_journal(
 
 def test_installed_bittensor_serve_axon_accepts_the_exact_launch_contract():
     import bittensor as bt
+    from bittensor.core.types import ExtrinsicResponse
 
     bound = bt.Subtensor.serve_axon.__get__(object(), bt.Subtensor)
     advertisement = object()
@@ -555,6 +556,10 @@ def test_installed_bittensor_serve_axon_accepts_the_exact_launch_contract():
         "wait_for_inclusion": True,
         "wait_for_finalization": True,
     }
+    assert bt.__version__ == "10.5.0"
+    response = ExtrinsicResponse(success=True)
+    assert response.success is True
+    assert response.extrinsic_receipt is None
 
 
 def test_local_duplicate_writer_lock_refuses_before_chain_call(tmp_path, monkeypatch):
@@ -642,6 +647,59 @@ def test_sdk_exception_with_exact_finalized_readback_recovers_without_retry(
     )
     assert result["status"] == "finalized_recovered"
     assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("unreadable_field", ("extrinsic_receipt", "success"))
+def test_sdk_response_inspection_failure_is_ambiguous_and_never_retried(
+    tmp_path, monkeypatch, unreadable_field
+):
+    path, digest, _ = write_review(tmp_path)
+    unserved = miner_state()
+    calls = []
+
+    class UnreadableResponse:
+        @property
+        def extrinsic_receipt(self):
+            if unreadable_field == "extrinsic_receipt":
+                raise ValueError("malformed SDK receipt")
+            return FakeReceipt()
+
+        @property
+        def success(self):
+            if unreadable_field == "success":
+                raise ValueError("malformed SDK success flag")
+            return True
+
+    def serve_call(**kwargs):
+        calls.append(kwargs)
+        return UnreadableResponse()
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=path,
+            digest=digest,
+            state_loader=StateSequence(unserved, unserved, unserved),
+            serve_call=serve_call,
+        )
+
+    journal = json.loads((tmp_path / axon.JOURNAL_NAME).read_text())
+    assert journal["status"] == "submission_ambiguous"
+    assert journal["serve_axon_outcome"] == "SDK_RESPONSE_UNPROVEN"
+    assert journal["receipt"] is None
+    assert journal["retry_allowed"] is False
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=path,
+            digest=digest,
+            state_loader=StateSequence(unserved),
+            serve_call=serve_call,
+        )
     assert len(calls) == 1
 
 

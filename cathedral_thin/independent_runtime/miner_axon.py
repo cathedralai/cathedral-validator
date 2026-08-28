@@ -1428,8 +1428,23 @@ def announce_reviewed_preview(
                 receipt=None,
                 failure_kind="SDK_EXCEPTION",
             )
-        receipt = _receipt_fields(response)
-        if getattr(response, "success", None) is not True:
+        # The SDK call has returned, but receipt decoding is still post-call:
+        # the extrinsic might already be finalized even when an SDK property or
+        # SCALE value is malformed. Keep every response-inspection failure
+        # behind the same durable no-retry fence as a transport exception.
+        try:
+            receipt = _receipt_fields(response)
+        except Exception:
+            return _resolve_after_call(
+                journal=journal,
+                journal_path=journal_path,
+                preview=preview,
+                subtensor=subtensor,
+                state_loader=state_loader,
+                receipt=None,
+                failure_kind="SDK_RESPONSE_UNPROVEN",
+            )
+        if receipt["success"] is not True:
             return _resolve_after_call(
                 journal=journal,
                 journal_path=journal_path,
