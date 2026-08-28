@@ -174,9 +174,11 @@ def test_status_loads_toml_with_retired_feed_fallback(
     monkeypatch.delenv("CATHEDRAL_VALIDATOR_JSONL", raising=False)
     assert cli.main(["status", "--config", str(config)]) == 0
     assert seen == [(str(journal), 60.0)]
-    out = capsys.readouterr().out
-    assert "healthy" in out
-    assert str(journal) in out
+    captured = capsys.readouterr()
+    assert "healthy" in captured.out
+    assert str(journal) in captured.out
+    assert "warning: [provenance].feed_down_fallback was removed" in captured.err
+    assert "serve and launch commands refuse this config" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -188,11 +190,13 @@ def test_status_loads_toml_with_retired_feed_fallback(
     ],
 )
 def test_serve_and_launch_still_reject_retired_feed_fallback(
-    argv: list[str], tmp_path: pathlib.Path
+    argv: list[str], tmp_path: pathlib.Path, capsys
 ) -> None:
     config = _retired_feed_fallback_config(tmp_path)
-    with pytest.raises(ValueError, match="feed_down_fallback was removed"):
-        cli.main([part.format(config=config) for part in argv])
+    assert cli.main([part.format(config=config) for part in argv]) == 2
+    err = capsys.readouterr().err
+    assert "error: [provenance].feed_down_fallback was removed" in err
+    assert "Traceback" not in err
 
 
 def test_feed_fallback_has_no_runtime_plumbing() -> None:
