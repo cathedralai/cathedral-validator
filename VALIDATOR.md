@@ -46,9 +46,9 @@ exact intended UID row and burn allocation. Any mismatch fails the launch gate.
 
 Current agreement between the deployed vector and independent verifier is not
 proven. Dated records disagree across different deployments. Shadow mode
-reports a mismatch but does not veto an otherwise valid thin vector. Treat the
-unknown state as a launch blocker and remain in non-writing preview until a
-fresh reproduction against the live signed vector passes.
+reports mismatches when they occur but does not veto an otherwise valid thin
+vector. Treat the unknown state as a launch blocker and remain in non-writing
+preview until a fresh reproduction against the live signed vector passes.
 
 ## What happens on each tick
 
