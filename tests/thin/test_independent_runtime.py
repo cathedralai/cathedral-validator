@@ -29,6 +29,8 @@ from _independent_fixtures import (
 )
 from cathedral_thin.independent.collect import (
     CHANNEL_BINDING_TYPE_TLS,
+    EVIDENCE_PATH,
+    MAX_EVIDENCE_RESPONSE_BYTES,
     ChannelBinding,
     CollectedEvidence,
 )
@@ -52,6 +54,8 @@ from cathedral_thin.independent.errors import SatWorkError
 from cathedral_thin.independent.inclusion import MetagraphView
 from cathedral_thin.independent.journal import load_journal
 from cathedral_thin.independent.sat import (
+    MAX_SAT_RESPONSE_BYTES,
+    SAT_WORK_PATH,
     SAT_WORK_UNIT_RULE,
     canonical_work_item,
     sat_work_url,
@@ -284,6 +288,39 @@ def self_signed_der(common_name: str = "axon.test") -> bytes:
     return certificate.public_bytes(serialization.Encoding.DER)
 
 
+class BoundedTlsPeer:
+    """The live-side handle on the TLS fixture: port, log, and served body."""
+
+    def __init__(self, port: int, requests: list[tuple[str, bytes, str | None]]):
+        self.port = port
+        self.requests = requests
+        self.response_body = b'{"bounded":true}'
+
+    def serve_bytes(self, length: int) -> None:
+        """Answer the next POST with exactly ``length`` bytes."""
+        self.response_body = b"x" * length
+
+    def post(self, path: str, body: object = None, *, timeout: float = 10.0):
+        """Drive ``_post_peer`` against this peer on ``path``."""
+        endpoint = type(
+            "Endpoint",
+            (),
+            {
+                "host": "127.0.0.1",
+                "port": self.port,
+                "path": path,
+                "host_header": f"127.0.0.1:{self.port}",
+            },
+        )()
+        encoded = json.dumps(
+            {"route": path} if body is None else body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        transport = HttpsEvidenceTransport(timeout=timeout)
+        return transport._post_peer(endpoint, "127.0.0.1", encoded, lambda: timeout)
+
+
 @pytest.fixture
 def content_length_close_tls_server(tmp_path):
     """One real TLS/http.client peer that closes after a bounded response."""
@@ -313,7 +350,7 @@ def content_length_close_tls_server(tmp_path):
     )
 
     requests: list[tuple[str, bytes, str | None]] = []
-    response_body = b'{"bounded":true}'
+    peer: list[BoundedTlsPeer] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -323,68 +360,126 @@ def content_length_close_tls_server(tmp_path):
             requests.append(
                 (self.path, self.rfile.read(length), self.headers.get("Authorization"))
             )
+            response_body = peer[0].response_body
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(response_body)))
             self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(response_body)
-            self.wfile.flush()
+            # A client that refuses an oversize body hangs up mid-write; that
+            # is the behaviour under test, not a server fault.
+            try:
+                self.wfile.write(response_body)
+                self.wfile.flush()
+            except OSError:
+                pass
             self.close_connection = True
 
         def log_message(self, _format: str, *args: object) -> None:
             del args
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    class Server(http.server.HTTPServer):
+        def handle_error(self, request, client_address) -> None:
+            del request, client_address
+
+    server = Server(("127.0.0.1", 0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate_path, private_key_path)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    peer.append(BoundedTlsPeer(server.server_port, requests))
     try:
-        yield server.server_port, requests, response_body
+        yield peer[0]
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("path", ["/v1/evidence", "/v1/sat-work"])
+@pytest.mark.parametrize("path", [EVIDENCE_PATH, SAT_WORK_PATH])
 def test_https_transport_reads_content_length_before_connection_close(
     content_length_close_tls_server, path
 ):
     """A complete short body must not dereference http.client's cleared socket."""
 
-    port, requests, expected_response = content_length_close_tls_server
-    endpoint = type(
-        "Endpoint",
-        (),
-        {
-            "host": "127.0.0.1",
-            "port": port,
-            "path": path,
-            "host_header": f"127.0.0.1:{port}",
-        },
-    )()
-    transport = HttpsEvidenceTransport(timeout=2)
-    request_body = {"route": path}
+    peer = content_length_close_tls_server
+    expected_response = peer.response_body
 
-    status, response_body = transport._post_peer(
-        endpoint,
-        "127.0.0.1",
-        json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode(),
-        lambda: 2.0,
-    )
+    status, response_body = peer.post(path, timeout=2.0)
 
     assert status == 200
     assert response_body == expected_response
-    assert requests == [
+    assert peer.requests == [
         (
             path,
-            json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode(),
+            json.dumps({"route": path}, sort_keys=True, separators=(",", ":")).encode(),
             None,
         )
     ]
+
+
+def test_https_transport_refuses_a_sat_work_body_over_the_sat_bound(
+    content_length_close_tls_server,
+):
+    """64 KiB + 1 on ``/v1/sat-work`` never reaches the SAT parser.
+
+    The sealed contract refuses a work body over ``MAX_SAT_RESPONSE_BYTES``
+    rather than truncating it, so the live transport must not deliver those
+    bytes just because they fit under the larger collect bound.
+    """
+
+    peer = content_length_close_tls_server
+    peer.serve_bytes(MAX_SAT_RESPONSE_BYTES + 1)
+
+    with pytest.raises(IndependentLiveError) as raised:
+        peer.post(SAT_WORK_PATH)
+
+    assert "exceeded the sat-work body bound" in str(raised.value)
+    assert "evidence" not in str(raised.value)
+    assert "collect" not in str(raised.value)
+
+
+def test_https_transport_accepts_a_sat_work_body_at_the_sat_bound(
+    content_length_close_tls_server,
+):
+    """Exactly 64 KiB is inside the contract and must still be delivered."""
+
+    peer = content_length_close_tls_server
+    peer.serve_bytes(MAX_SAT_RESPONSE_BYTES)
+
+    status, response_body = peer.post(SAT_WORK_PATH)
+
+    assert status == 200
+    assert len(response_body) == MAX_SAT_RESPONSE_BYTES
+
+
+def test_https_transport_keeps_the_collect_bound_for_evidence(
+    content_length_close_tls_server,
+):
+    """The SAT cap must not silently tighten ``/v1/evidence`` to 64 KiB."""
+
+    peer = content_length_close_tls_server
+    peer.serve_bytes(MAX_SAT_RESPONSE_BYTES + 1)
+
+    status, response_body = peer.post(EVIDENCE_PATH)
+
+    assert status == 200
+    assert len(response_body) == MAX_SAT_RESPONSE_BYTES + 1
+
+
+def test_https_transport_refuses_an_evidence_body_over_the_collect_bound(
+    content_length_close_tls_server,
+):
+    """128 KiB + 1 on ``/v1/evidence`` keeps the #151 refusal and wording."""
+
+    peer = content_length_close_tls_server
+    peer.serve_bytes(MAX_EVIDENCE_RESPONSE_BYTES + 1)
+
+    with pytest.raises(
+        IndependentLiveError, match="evidence response exceeded the collect body bound"
+    ):
+        peer.post(EVIDENCE_PATH)
 
 
 def test_a_collected_chain_whose_leaf_is_the_peer_is_accepted():
