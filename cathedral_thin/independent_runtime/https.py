@@ -164,7 +164,12 @@ class HttpsEvidenceTransport:
         for peer_ip in peer_ips:
             try:
                 return self._post_peer(endpoint, peer_ip, body, remaining)
-            except (OSError, IndependentLiveError) as exc:
+            except OSError as exc:
+                # Connectivity only. IndependentLiveError is a contract
+                # refusal from the peer we already reached (oversize SAT
+                # body, missing SPKI, deadline). Failover would let another
+                # A-record answer 200 and get paid. fetch_policy retries
+                # OSError the same way and does not retry PolicyFetchError.
                 last_error = exc
         raise IndependentLiveError(
             f"evidence host unreachable: {type(last_error).__name__}: {last_error}"

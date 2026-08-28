@@ -71,6 +71,7 @@ from cathedral_thin.independent_runtime.errors import (
     IndependentLiveError,
     QuoteVerifyError,
 )
+from cathedral_thin.independent_runtime import https as https_mod
 from cathedral_thin.independent_runtime.https import (
     HttpsEvidenceTransport,
     axon_evidence_url,
@@ -480,6 +481,127 @@ def test_https_transport_refuses_an_evidence_body_over_the_collect_bound(
         IndependentLiveError, match="evidence response exceeded the collect body bound"
     ):
         peer.post(EVIDENCE_PATH)
+
+
+def _public_sat_endpoint():
+    return type(
+        "Endpoint",
+        (),
+        {
+            "host": "203.0.113.9",
+            "port": 8443,
+            "path": SAT_WORK_PATH,
+            "host_header": "203.0.113.9:8443",
+        },
+    )()
+
+
+def _stub_round_trip_peers(monkeypatch, peer_ips: list[str]) -> None:
+    """Let ``_round_trip`` run without DNS or the public-IP check."""
+
+    monkeypatch.setattr(
+        https_mod, "validate_policy_url", lambda url: _public_sat_endpoint()
+    )
+    monkeypatch.setattr(https_mod, "getaddrinfo_bounded", lambda *args, **kwargs: [])
+    monkeypatch.setattr(https_mod, "validated_peer_ips", lambda infos: list(peer_ips))
+
+
+def test_round_trip_does_not_failover_a_sat_oversize_refusal(monkeypatch):
+    """A SAT bound refusal is terminal. The next A-record must not be tried.
+
+    ``collect_sat_work`` calls ``transport.post``, which goes through
+    ``_round_trip``. #154 tested ``_post_peer`` only, so a second IP that
+    answered 200 after an oversize refusal would have been paid.
+    """
+
+    _stub_round_trip_peers(monkeypatch, ["203.0.113.9", "198.51.100.10"])
+    transport = HttpsEvidenceTransport(timeout=2.0)
+    calls: list[str] = []
+
+    def fake_post_peer(endpoint, peer_ip, body, remaining):
+        del endpoint, body, remaining
+        calls.append(peer_ip)
+        raise IndependentLiveError("work response exceeded the sat-work body bound")
+
+    monkeypatch.setattr(transport, "_post_peer", fake_post_peer)
+
+    with pytest.raises(IndependentLiveError) as raised:
+        transport.post("https://203.0.113.9:8443/v1/sat-work", {"k": "v"})
+
+    assert "sat-work body bound" in str(raised.value)
+    assert "evidence host unreachable" not in str(raised.value)
+    assert calls == ["203.0.113.9"]
+
+
+def test_round_trip_does_not_return_a_second_peer_200_after_sat_oversize(
+    monkeypatch,
+):
+    """Failover after a SAT refusal is the payment fail-open #154 missed."""
+
+    _stub_round_trip_peers(monkeypatch, ["203.0.113.9", "198.51.100.10"])
+    transport = HttpsEvidenceTransport(timeout=2.0)
+    calls: list[str] = []
+
+    def fake_post_peer(endpoint, peer_ip, body, remaining):
+        del endpoint, body, remaining
+        calls.append(peer_ip)
+        if peer_ip == "203.0.113.9":
+            raise IndependentLiveError("work response exceeded the sat-work body bound")
+        return 200, b'{"satisfiable":true}'
+
+    monkeypatch.setattr(transport, "_post_peer", fake_post_peer)
+
+    with pytest.raises(IndependentLiveError) as raised:
+        transport.post("https://203.0.113.9:8443/v1/sat-work", {"k": "v"})
+
+    assert "sat-work body bound" in str(raised.value)
+    assert "evidence host unreachable" not in str(raised.value)
+    assert calls == ["203.0.113.9"]
+
+
+def test_round_trip_failovers_oserror_to_the_next_peer(monkeypatch):
+    """Connect/reset still tries the next validated address."""
+
+    _stub_round_trip_peers(monkeypatch, ["203.0.113.9", "198.51.100.10"])
+    transport = HttpsEvidenceTransport(timeout=2.0)
+    calls: list[str] = []
+
+    def fake_post_peer(endpoint, peer_ip, body, remaining):
+        del endpoint, body, remaining
+        calls.append(peer_ip)
+        if peer_ip == "203.0.113.9":
+            raise OSError("connection reset")
+        return 200, b"ok"
+
+    monkeypatch.setattr(transport, "_post_peer", fake_post_peer)
+
+    status, response_body = transport.post(
+        "https://203.0.113.9:8443/v1/sat-work", {"k": "v"}
+    )
+
+    assert status == 200
+    assert response_body == b"ok"
+    assert calls == ["203.0.113.9", "198.51.100.10"]
+
+
+def test_round_trip_wraps_exhausted_oserror_as_unreachable(monkeypatch):
+    """All addresses refusing to connect is still connectivity, not a SAT parse."""
+
+    _stub_round_trip_peers(monkeypatch, ["203.0.113.9"])
+    transport = HttpsEvidenceTransport(timeout=2.0)
+
+    def fake_post_peer(endpoint, peer_ip, body, remaining):
+        del endpoint, peer_ip, body, remaining
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(transport, "_post_peer", fake_post_peer)
+
+    with pytest.raises(
+        IndependentLiveError, match="evidence host unreachable"
+    ) as raised:
+        transport.post("https://203.0.113.9:8443/v1/sat-work", {"k": "v"})
+
+    assert "OSError" in str(raised.value)
 
 
 def test_a_collected_chain_whose_leaf_is_the_peer_is_accepted():
