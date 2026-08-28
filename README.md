@@ -35,6 +35,13 @@ policy is not the consumed UID30 100/0 launch vector. Before any future
 and burn allocation. A different preview is a stop condition, not permission to
 overwrite the finalized launch vector.
 
+A dedicated second miner is a separate future chain change, not an extension of
+the existing UID124 machine. The read-only
+[second-miner plan](docs/SN39_SECOND_MINER_PLAN.md) pins the intended hotkey,
+checks one finalized snapshot, and derives the exact equal-score row without
+loading a wallet or exposing a write path. Its output never authorizes
+registration, axon announcement, or replacement of UID30's complete row.
+
 ## Quickstart
 
 **This section is the canonical operator path.** Follow it top to bottom and
