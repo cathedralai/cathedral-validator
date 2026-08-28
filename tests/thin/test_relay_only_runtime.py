@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import inspect
+import json
 import pathlib
 import runpy
 import sys
 import tomllib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -107,14 +109,90 @@ def test_environment_mode_override_is_explicitly_refused(monkeypatch, capsys) ->
     assert "supports only the shadow relay runtime" in capsys.readouterr().err
 
 
-def test_retired_feed_fallback_config_is_rejected(tmp_path: pathlib.Path) -> None:
+def _retired_feed_fallback_config(
+    tmp_path: pathlib.Path,
+    *,
+    journal: pathlib.Path | None = None,
+    interval_secs: float = 1500,
+) -> pathlib.Path:
+    """Operator TOML that still carries the key retired in #157."""
+    if journal is None:
+        journal = tmp_path / "events.jsonl"
     config = tmp_path / "validator.toml"
     config.write_text(
-        "[provenance]\nfeed_down_fallback = true\n",
+        "[provenance]\n"
+        'feed_down_fallback = "authority"\n'
+        "\n"
+        "[weights]\n"
+        f"interval_secs = {interval_secs}\n"
+        "\n"
+        "[logs]\n"
+        f'jsonl = "{journal}"\n',
         encoding="utf-8",
     )
+    return config
+
+
+def test_retired_feed_fallback_config_is_rejected(tmp_path: pathlib.Path) -> None:
+    config = _retired_feed_fallback_config(tmp_path)
     with pytest.raises(ValueError, match="feed_down_fallback was removed"):
         cli._load_config_file(str(config))
+    loaded = cli._load_config_file(str(config), reject_retired_feed_fallback=False)
+    assert "feed_down_fallback" not in loaded
+    assert loaded["interval_secs"] == 1500
+    assert loaded["jsonl"] == str(tmp_path / "events.jsonl")
+
+
+def test_status_loads_toml_with_retired_feed_fallback(
+    tmp_path: pathlib.Path, capsys, monkeypatch
+) -> None:
+    journal = tmp_path / "events.jsonl"
+    journal.write_text(
+        json.dumps(
+            {
+                "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "event": "WEIGHTS_SUBMITTED",
+                "stage": "result",
+                "mode": "shadow",
+                "status": "PASS",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = _retired_feed_fallback_config(tmp_path, journal=journal, interval_secs=60)
+    seen: list[tuple[object, object]] = []
+    import scaffold.health as health
+
+    real_evaluate = health.evaluate
+
+    def _spy(path, *, interval_secs=None):
+        seen.append((path, interval_secs))
+        return real_evaluate(path, interval_secs=interval_secs)
+
+    monkeypatch.setattr(health, "evaluate", _spy)
+    monkeypatch.delenv("CATHEDRAL_VALIDATOR_JSONL", raising=False)
+    assert cli.main(["status", "--config", str(config)]) == 0
+    assert seen == [(str(journal), 60.0)]
+    out = capsys.readouterr().out
+    assert "healthy" in out
+    assert str(journal) in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["serve", "--config", "{config}"],
+        ["preflight-launch", "--config", "{config}"],
+        ["reconcile-launch", "--config", "{config}"],
+    ],
+)
+def test_serve_and_launch_still_reject_retired_feed_fallback(
+    argv: list[str], tmp_path: pathlib.Path
+) -> None:
+    config = _retired_feed_fallback_config(tmp_path)
+    with pytest.raises(ValueError, match="feed_down_fallback was removed"):
+        cli.main([part.format(config=config) for part in argv])
 
 
 def test_feed_fallback_has_no_runtime_plumbing() -> None:
