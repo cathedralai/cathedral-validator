@@ -537,7 +537,12 @@ def test_incompatible_sdk_signature_refuses_before_no_retry_journal(
 
 
 def test_installed_bittensor_serve_axon_accepts_the_exact_launch_contract():
+    import inspect
+    from dataclasses import fields
+    from typing import get_type_hints
+
     import bittensor as bt
+    from async_substrate_interface import ExtrinsicReceipt
     from bittensor.core.types import ExtrinsicResponse
 
     bound = bt.Subtensor.serve_axon.__get__(object(), bt.Subtensor)
@@ -557,6 +562,13 @@ def test_installed_bittensor_serve_axon_accepts_the_exact_launch_contract():
         "wait_for_finalization": True,
     }
     assert bt.__version__ == "10.5.0"
+    assert get_type_hints(bt.Subtensor.serve_axon)["return"] is ExtrinsicResponse
+    assert {"success", "extrinsic_receipt"} <= {
+        field.name for field in fields(ExtrinsicResponse)
+    }
+    assert {"extrinsic_hash", "block_hash", "block_number"} <= set(
+        inspect.signature(ExtrinsicReceipt).parameters
+    )
     response = ExtrinsicResponse(success=True)
     assert response.success is True
     assert response.extrinsic_receipt is None
