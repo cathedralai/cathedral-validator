@@ -547,7 +547,7 @@ def test_v3_pin_with_authority_provenance_is_refused_at_startup() -> None:
         require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
         provenance="authority")
     with pytest.raises(validator_thin.wire.VectorError,
-                       match="incompatible with provenance=authority"):
+                       match="incompatible with the bounded full-replay"):
         validator_thin._validate_runtime_contract(args)
 
 
@@ -562,4 +562,4 @@ def test_v3_pin_with_shadow_provenance_does_not_trip_the_guard() -> None:
     try:
         validator_thin._validate_runtime_contract(args)
     except validator_thin.wire.VectorError as exc:
-        assert "incompatible with provenance=authority" not in str(exc)
+        assert "incompatible with the bounded full-replay" not in str(exc)

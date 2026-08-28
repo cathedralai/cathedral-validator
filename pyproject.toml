@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Self-composing publisher role (compose + publish). Pinned to the exact
+# Origin publisher runtime (compose + publish). Pinned to the exact
 # versions in deploy/publisher/requirements.txt so `pip install .[publisher]`
 # reproduces the serving lock the compose/publish gates pass under. Keep the two
 # lists in lockstep; bump only with a green re-run of the compose-role suite.
@@ -104,7 +104,7 @@ integration = [
 # its worker-side score publisher and must not claim `cathedral-validator`.
 [project.scripts]
 cathedral-validator = "scaffold.cli:main"
-# Self-composing publisher role: serves scaffold.publisher.server:app (needs the
+# Origin publisher service: serves scaffold.publisher.server:app (needs the
 # '.[publisher]' extra). A thin uvicorn.run wrapper; the deploy image and the
 # deploy/publisher/*.service units may also invoke uvicorn directly.
 cathedral-publisher-serve = "scaffold.publisher.server:_serve_cli"

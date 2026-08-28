@@ -905,7 +905,9 @@ if config:
         cfg = cli._resolve_serve_config(ns)
         out["configured_require_policy"] = getattr(cfg, "require_policy", None)
         mode = (getattr(cfg, "provenance", "shadow") or "shadow").strip().lower()
-        cfg.provenance = cli._MODE_ALIASES.get(mode, mode)
+        if mode != "shadow":
+            raise RuntimeError("recurring validator config must use shadow relay mode")
+        cfg.provenance = "shadow"
         out["provenance_mode"] = cfg.provenance
         # The re-pin, evaluated without performing it: same config, v3 pin.
         cfg.require_policy = v3

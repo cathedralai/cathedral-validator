@@ -1,4 +1,4 @@
-# Self-composing publisher runtime deps — the reproducible serving lock the
+# Origin publisher runtime deps — the reproducible serving lock the
 # validator's range-only [publisher] extra (pyproject.toml) lacks. Ported from
 # the hub's deploy/requirements.txt (cathedral repo): the exact versions proven
 # by the compose/publish gates (rc_verify / wire_compat / publisher_verify).

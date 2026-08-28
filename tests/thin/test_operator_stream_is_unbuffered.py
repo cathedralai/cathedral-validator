@@ -184,3 +184,30 @@ def test_the_release_launcher_passes_dash_u_for_every_mode(
     # -u is an interpreter flag: it only counts ahead of the script (or of the
     # -m that names the module), never after it.
     assert command.index("-u") < target
+
+
+def test_verify_checks_the_install_without_execing_the_validator(monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location(
+        "_sn39_release_launcher_verify", _LAUNCHER_PATH
+    )
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+
+    verified_modes: list[str] = []
+    monkeypatch.setattr(
+        launcher,
+        "_verify",
+        lambda mode: (
+            verified_modes.append(mode)
+            or (pathlib.Path("a" * 40), pathlib.Path("/unused"), "sha256:" + "0" * 64)
+        ),
+    )
+    monkeypatch.setattr(
+        launcher.os,
+        "execve",
+        lambda *_args: pytest.fail("verify mode must not exec the validator"),
+    )
+
+    assert launcher.main(["verify"]) == 0
+    assert verified_modes == ["continuous"]
+    assert "immutable-install verification PASS" in capsys.readouterr().out

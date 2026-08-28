@@ -2,15 +2,9 @@
 
 Cathedral Validator is the canonical operator repository for Cathedral SN39.
 
-It runs in one of two modes, and the difference is what happens when the
-evidence disagrees with the numbers.
-
-| | **shadow** (default) | **authority** |
-|---|---|---|
-| What it submits | Cathedral's signed vector | its own recomputation |
-| Where the numbers come from | the signed feed | replayed TDX evidence |
-| What it enforces before writing | signature, freshness, rollback fence, UID-replacement safety, burn pin | all of that, plus the evidence itself |
-| If the audit disagrees | the write already happened; the disagreement is logged | it refuses, and submits what it proved |
+It has one supported recurring runtime: the shadow relay. It verifies and
+submits Cathedral's signed vector while a full-provenance audit checks the
+published evidence concurrently.
 
 **Shadow verifies authenticity, not arithmetic.** It proves Cathedral's key
 signed exactly these numbers. It does not prove the numbers are right, because
@@ -19,13 +13,27 @@ submission. That is a deliberate trade for a relay that must keep writing, and
 it is the honest description of what a shadow validator is: an authenticated
 relay.
 
-**Authority proves the arithmetic.** It replays the raw TDX evidence, derives
-the vector itself, and submits that. A failed audit stops the write rather than
-annotating it. See [Authority mode](#authority-mode).
+There is no recurring authority/full operator mode. The old profiles and
+`--mode`/`--provenance` switches were removed. Authority-labelled internals
+remain only to recover bounded launch journals, including the finalized UID30
+launch, without submitting a replacement transaction.
 
 Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
 path, and broadcast gates.
+
+## Launch truth, 2026-08-28
+
+The bounded UID30 launch tool finalized the exact wire vector
+`[[124, 65535]]`: all weight to miner UID124 and zero burn. This proves one
+finalized UID30 launch transaction. It does not activate the recurring relay,
+and SN39 subnet emission was `0`, so it does not prove TAO earnings.
+
+Do not start the shipped recurring relay blindly. Its configured signed-vector
+policy is not the consumed UID30 100/0 launch vector. Before any future
+`--broadcast`, produce a no-write preview and require the exact intended UID row
+and burn allocation. A different preview is a stop condition, not permission to
+overwrite the finalized launch vector.
 
 ## Quickstart
 
@@ -169,10 +177,12 @@ checklist that must be true before anyone adds `--broadcast` is in
 > immutable trust profile: state_file`, naming no cause. Use the flags above
 > for a preview and the shipped config for a service.
 
-A validator that will broadcast must start from a **clean journal**: never
-hand-edit live submission state. To migrate a host that ran an older release,
-archive the previous state file and start fresh
-(`deploy/publisher/init-clean-journal.sh` provisions a clean runtime root, see `deploy/publisher/README.md`).
+A fresh host that has never signed or submitted an SN39 attempt starts with an
+absent journal. The systemd `StateDirectory` creates its fixed owner-only
+runtime root. No journal initialization or migration helper ships. On an
+existing host, keep the canonical journal in place and run the documented
+status and recovery checks. Never hand-edit, move, archive, replace, or reset
+live submission state.
 
 ### Is it working right now?
 
@@ -248,7 +258,7 @@ they are not interchangeable:
 | Setting | Who it is for | What happens without it |
 |---|---|---|
 | `require_completed_launch_for_broadcast = false` | Every third-party relay. | Defaults to `true`, so broadcast is refused pending a completed launch this validator can never have. |
-| `beta_skip_launch_ceremony = true` | A runtime that **does** owe a launch: `provenance = "authority"`, or a host holding the controlled launch material at the release-pinned paths. | The line above is ignored for such a runtime and the ceremony is still required. |
+| `beta_skip_launch_ceremony = true` | A host holding controlled launch material at the release-pinned paths. | The line above is ignored for such a runtime and the ceremony is still required. |
 
 For a pure relay the second setting changes nothing, the obligation it waives
 is one the relay does not have. The shipped profile sets it anyway so the
@@ -431,21 +441,21 @@ it binds.
 
 ### Verify before enabling
 
-`cathedral-sn39-release` runs the whole verification and only then `execve`s.
-It exits non-zero, writing `SN39 immutable-install check failed:` and a cause,
-if anything above is wrong:
+The dedicated `verify` mode checks the complete immutable install and exits. It
+does not load a wallet, fetch a vector, start the recurring process, or submit a
+chain transaction. It exits non-zero, writing
+`SN39 immutable-install check failed:` and a cause, if anything above is wrong:
 
 ```bash
-systemctl start cathedral-validator-sn39-relay.service
-systemctl status cathedral-validator-sn39-relay.service
-journalctl -u cathedral-validator-sn39-relay.service -n 50
+sudo /usr/local/libexec/cathedral-sn39-release verify
 ```
 
-Read the journal, not the exit status of `systemctl start`. Confirm the unit
-reached `ExecStart` at all, that is the failure the relay unit exists to
-remove, and the only proof is a log line from the validator itself. When the
-launch notice permits a write, `systemctl enable --now
-cathedral-validator-sn39-relay.service` makes it durable.
+The success line names the installed release and manifest digest. Do not use
+`systemctl start cathedral-validator-sn39-relay.service` as a verification
+command. That unit invokes `continuous --broadcast` after verification and is a
+live chain writer. Start or enable it only after the no-write preview, exact
+weight target, launch authorization, and chain-writing approval are all
+current.
 
 That proof is only readable because the validator's operator stream is
 line-buffered: every line reaches the journal as it happens, so a quiet
@@ -497,17 +507,9 @@ and its recomputed shares, and reports this event instead. A vector that
 cannot be re-verified that way is never reclassified: it stays
 `PROVENANCE_VECTOR_MISMATCH`.
 
-## Self-composing (advanced)
-
-The profile above follows the remote Cathedral publisher feed. A self-composing
-validator runs the publisher role on the same host and follows its own local
-feed instead: use `config/validator-selfcompose-sn39.toml` (its `[publisher]`
-url points at the local `cathedral-publisher.service`) and the units in
-`deploy/publisher/`. Everything else, verification, fences, broadcast gates, is identical.
-
-For a pinned production install (immutable reviewed release, systemd, single
-writer) the relay path is [above](#supported-systemd-install-relay);
-[VALIDATOR.md](VALIDATOR.md) covers what each gate proves once it is running.
+The validator always fetches the public HTTPS feed. Publisher services may run
+on the same host, but a loopback publisher URL is not a supported validator
+profile and is refused by the immutable SN39 trust contract.
 
 ## How it verifies
 
@@ -524,67 +526,11 @@ index) against what was submitted. It labels each epoch `PASS`, `FAIL`, or
 
 Read that carefully, because it is the limit of what shadow proves: the verifier
 does not delay the write, so its verdict describes a submission that has already
-happened. A `FAIL` is a record, not a refusal. If you need the audit to be able
-to stop a bad write, run [authority mode](#authority-mode).
+happened. A `FAIL` is a record, not a refusal. No operator flag changes the
+recurring writer into an independent recomputation path.
 
 Compute workers need Intel TDX when their policy requires TDX evidence; the
 validator host itself does not.
-
-## Authority mode
-
-Authority mode derives the vector from evidence instead of accepting one. It
-replays the raw TDX evidence for the epoch, recomputes each miner's units,
-composes the vector itself, and submits that. If the audit does not pass, it
-writes nothing.
-
-It needs three things beyond the relay profile:
-
-| | |
-|---|---|
-| `--provenance authority` | select the mode |
-| `--provenance-controlled-dir` | the controlled evidence for the epoch |
-| `--provenance-verifier-binary` | the pinned TDX verifier |
-
-The controlled evidence rotates every epoch, so point at the `current` symlink
-rather than a fixed epoch directory:
-
-```bash
-cathedral-validator serve \
-  --config my-validator.toml \
-  --provenance authority \
-  --provenance-controlled-dir /var/lib/cathedral-validator-controlled-sn39/current \
-  --provenance-verifier-binary /opt/cathedral/bin/cathedral-tdx-verifier-<rev> \
-  --once --dry-run
-```
-
-A healthy tick prints what it derived rather than what it received:
-
-```
-authority  full · independent recomputation is what gets submitted
-chain      block 8844537 · epoch in 2m · 169 uids replacement-safe
-evidence   independently derived vector (1 verified miners)
-```
-
-And when the feed has not caught up with the evidence yet, it says so instead of
-following it:
-
-```
-✗ independent recomputation DISAGREES with the signed vector · discrepancies=1
-  signed vector is bound to ingested source epoch 1786730876, not the verified
-  evidence epoch 1786731188; same proportions never prove the same epoch
-```
-
-That disagreement is usually benign. The signed feed refreshes on a shorter
-cycle than epochs export, so there is a window where verified evidence is newer
-than the vector being served. Identical proportions are not the same claim as
-identical epochs, and authority mode will not sign one while meaning the other.
-
-**Who can run it.** Authority requires the controlled evidence package. Cathedral
-publishes a validator-readable mirror on its own host, so Cathedral's validator
-can run authority today. A third-party validator cannot, because that package is
-not published externally. Until it is, an independent operator runs shadow, and
-shadow is an authenticated relay. Saying otherwise would be claiming a property
-the evidence distribution does not support.
 
 ## Operator documents
 

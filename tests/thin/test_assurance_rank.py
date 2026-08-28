@@ -1,4 +1,4 @@
-"""Full mode submits on the claim it can actually establish.
+"""The audit assurance ladder reports only the claim it establishes.
 
 The old gate demanded the whole epoch be proven. On SN39 that is not strict,
 it is unsatisfiable: the 255 registered hotkeys that never submitted work have
@@ -8,8 +8,9 @@ and the byte budget range over different sets and cannot both be met.
 
 The rank asks the answerable question instead. Everything that receives weight
 must have been independently replayed from raw evidence, and everything not
-replayed must carry exactly zero. That is what a weight vector rests on, and it
-holds whether one miner participated or none did.
+replayed must carry exactly zero. This labels shadow health and bounded launch
+readiness. The recurring writer follows the independently signed vector and does
+not use this rank as its write gate.
 """
 
 from __future__ import annotations
@@ -100,7 +101,7 @@ def test_a_replay_the_report_never_claimed_is_refused():
 
 def test_an_epoch_with_nothing_replayed_stays_at_receipts_only():
     # No miners running is fine and must not crash, but it is also not a
-    # proof of anything, so it cannot back a submission.
+    # rewarded-set-proven audit or launch-readiness claim.
     level, scope = _rank(receipt_hotkeys=[], raw_replayed=[], recomputed={})
     assert level == "receipts_only"
     assert any("no positive raw replay" in f for f in scope["failures"])
@@ -127,8 +128,8 @@ def test_the_library_whole_epoch_claim_still_outranks():
     assert pa.assurance_rank(level) == 2
 
 
-def test_whole_epoch_is_not_granted_on_our_own_authority():
-    # Rank 1 is this validator's claim to make. Rank 2 is the library's.
+def test_whole_epoch_is_not_granted_by_the_local_ranker():
+    # Rank 1 is the local ranker's claim. Rank 2 belongs to the audit library.
     level, _ = _rank(candidate_count=1, not_proven_reasons=[])
     assert level == "rewarded_set_proven"
 

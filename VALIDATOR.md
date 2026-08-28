@@ -28,10 +28,21 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 |---|---|
 | Signed vector, JWKS, and public evidence index | Deployed |
 | Validator thin-path checks | Implemented |
-| Concurrent shadow provenance audit | Implemented; default mode |
-| Full-provenance authority mode | Deprecated; no shipped config profile selects it (removal tracked in #40) |
+| Concurrent shadow provenance audit | Implemented; the only recurring runtime |
+| Authority/full operator mode | Removed from profiles and command-line entrypoints |
 | Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
 | General validator launch | Pending a scoreable corpus and final acceptance |
+
+### Launch truth, 2026-08-28
+
+The bounded UID30 tool finalized `[[124, 65535]]`, all weight to miner UID124
+and zero burn. This is evidence for one finalized launch transaction only. It
+does not activate the recurring relay. SN39 subnet emission was `0`, so it does
+not prove TAO earnings.
+
+The shipped recurring relay policy is not the consumed UID30 100/0 launch
+vector. Do not start it with `--broadcast` until a no-write preview proves the
+exact intended UID row and burn allocation. Any mismatch fails the launch gate.
 
 The current public contract mismatch is a launch blocker. Shadow mode reports
 it but does not veto an otherwise valid thin vector, which is why operators
@@ -62,7 +73,7 @@ The validator checks:
 - expiry and a durable monotonic rollback fence;
 - burn contract and complete finite, non-negative weights;
 - current hotkey-to-UID mapping immediately before a write; and
-- the configured provenance mode's acceptance requirements.
+- the shadow provenance audit's acceptance requirements.
 
 A failed gate belonging to the active submission authority fails closed.
 Default shadow provenance is observational: its `FAIL` or `NOT_PROVEN` result
@@ -70,18 +81,20 @@ does not block a thin submission whose own signed-vector gates pass.
 Registration, uptime, attestation, and self-reported work never create positive
 weight by themselves.
 
-## Provenance modes
+## Recurring runtime
 
 | Mode | Submission authority | Behavior |
 |---|---|---|
-| `shadow` | Thin path | The mode. Independently audits evidence in the background without delaying the thin tick. |
-| `authority` | Full-provenance recomputation | **Deprecated.** Loses the chain-finality race; no shipped config profile selects it. The code path remains until the excision tracked in #40. |
+| `shadow` | Signed-vector thin path | The only supported recurring runtime. It audits evidence in the background without delaying or changing the thin submission. |
 
 `receipts_only` is reported as `NOT_PROVEN`; it is not accepted as `FULL`.
-Authority mode requires controlled raw evidence, a pinned static verifier,
-independently pinned keys and digests, an immutable source revision, and an
-independently queried historical candidate set. Read
-[the full provenance contract](docs/PROVENANCE.md) before selecting it.
+There is no `--mode` or `--provenance` selector. A signed-feed failure writes
+nothing and leaves the process in shadow. Authority-labelled internal types and
+journal lanes remain only for bounded launch and read-only recovery of historical
+launch attempts. They are not a recurring operator path.
+
+Read [the full provenance contract](docs/PROVENANCE.md) for the audit's evidence
+and assurance boundaries.
 
 ## Prerequisites
 
@@ -291,7 +304,6 @@ on the routine ones and muting the serious ones.
 | --- | --- | --- | --- |
 | `WEIGHT_COOLDOWN_SKIPPED` | `INFO` | No | The subnet's own `weights_rate_limit` has not elapsed. The detail names the block at which the next write becomes possible. |
 | `EPOCH_ROOM_SKIPPED` | `NOT_PROVEN` | No | Too few blocks were left in the epoch to prove mortal inclusion. Nothing was reserved or signed; the detail names the block at which it clears. |
-| `WAITING_FOR_JOB` | `NOT_PROVEN` | No | Nothing was independently proven this epoch, so there is nothing to score. |
 | `PRE_SIGN_HEAD_DRIFT_RETRY` | `NOT_PROVEN` | No | The chain moved while the tick was preparing; it rebuilds from a fresh head. |
 | `PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED` | `FAIL` | Only if it repeats | The retry budget ran out. Nothing was signed and the loop re-arms on a short delay. |
 | `CONTINUOUS_LAUNCH_LOCKED` | `FAIL` | **Yes** | Recurring writes are locked. This unit is up, ticking, and writing nothing, and will not start on its own: run `cathedral-validator reconcile-launch`, then restart the loop. |
@@ -309,7 +321,7 @@ more codes are worth recognizing precisely because they are not that:
 
 - `VECTOR_REJECTED` (`FAIL`) and `PROVENANCE_RESERVATION_REFUSED` (`FAIL`)
   **accompany** a `TICK_FAILED` rather than replacing it. They name the cause —
-  a signed vector that failed UID mapping, an authority reservation that a
+  a signed vector that failed UID mapping, a historical launch reservation that a
   newer one or an unwritable state file refused — and both say "nothing was
   submitted". If you page on `TICK_FAILED`, these are what you read next.
 - `UNSAFE_TARGETS_EXCLUDED` (`NOT_PROVEN`) is emitted by a tick that **did**
@@ -408,11 +420,10 @@ is no separate notification channel:
 2. the newest record is older than 3 tick intervals — the validator is
    stopped, wedged, or writing to a different path;
 3. no tick has COMPLETED in the last 4 tick intervals — no
-   `WEIGHTS_SUBMITTED`, `WEIGHTS_DRY_RUN`, `WEIGHT_COOLDOWN_SKIPPED` or
-   `WAITING_FOR_JOB`. That is what a validator which has silently stopped
-   writing weights looks like. A tick declined by the subnet's
-   `weights_rate_limit`, and a tick that found nothing to score, both count as
-   alive. A process that restarted inside the window is given until the end of
+   `WEIGHTS_SUBMITTED`, `WEIGHTS_DRY_RUN`, or `WEIGHT_COOLDOWN_SKIPPED`. That is
+   what a validator which has silently stopped writing weights looks like. A
+   tick declined by the subnet's `weights_rate_limit` still counts as alive. A
+   process that restarted inside the window is given until the end of
    it to finish its first tick — dated from the **first** restart since the
    last completed tick, not the newest, so a crash-restart loop cannot renew
    its own grace. It used to: every crash wrote a `STARTUP` and kept the

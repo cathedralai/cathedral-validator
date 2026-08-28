@@ -46,15 +46,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-# The four events that mean "a tick ran to completion". A submission, a
-# submission the subnet's rate limit declined this tick, a dry-run write, and
-# the calm passive-listener state are all evidence the loop is alive; only the
-# absence of every one of them is evidence it is not.
+# The three events that mean "a tick ran to completion". A submission, a
+# submission the subnet's rate limit declined this tick, and a dry-run write are
+# evidence the loop is alive; only the absence of every one is evidence it is not.
 LIVENESS_EVENTS: tuple[str, ...] = (
     "WEIGHTS_SUBMITTED",
     "WEIGHTS_DRY_RUN",
     "WEIGHT_COOLDOWN_SKIPPED",
-    "WAITING_FOR_JOB",
 )
 # The subset that means weight values actually reached (or would have reached)
 # the chain.

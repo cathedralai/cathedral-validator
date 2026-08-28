@@ -100,10 +100,7 @@ def test_compute_release_pin_is_coherent_across_every_authority_site() -> None:
         == lock_digest
     )
 
-    for relative in (
-        "config/validator-thin-sn39-relay.toml",
-        "config/validator-selfcompose-sn39.toml",
-    ):
+    for relative in ("config/validator-thin-sn39-relay.toml",):
         config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
         assert config["provenance"]["source_revision"] == COMPUTE_REVISION
 

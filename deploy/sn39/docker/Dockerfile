@@ -13,7 +13,7 @@ COPY . /opt/cathedral-validator
 # the image is a coherent release set, not a floating checkout. Distill (the CyberGym
 # verifier) is deliberately NOT bundled: it requires the PRIVATE sealed holdout to run
 # (require_admitted_private_manifest), which a third-party validator does not — and must
-# not — have, so the CyberGym lane is scored centrally and relayed, not self-composed.
+# not — have, so the CyberGym lane is scored centrally and relayed, not locally recomputed.
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir '.[provenance]'
 

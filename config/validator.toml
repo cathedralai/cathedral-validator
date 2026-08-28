@@ -36,7 +36,8 @@ require_policy = "validated_supply_v1"
 # state_file = "/home/you/.cathedral/thin_validator.json"
 
 [runtime]
-# Shared single-flight lock and ambiguity journal for thin and FULL authority.
+# Shared single-flight lock and ambiguity journal for recurring submissions and
+# bounded launch-journal recovery.
 # Create this absolute directory as the validator service account, mode 0700.
 root = "/var/lib/cathedral-validator"
 
@@ -48,14 +49,11 @@ interval_secs = 1500
 # the weight-policy signature + freshness + rollback fence, while the
 # full-provenance verifier independently re-verifies the published evidence
 # chain every tick in the background and reports any divergence without ever
-# delaying the write. This wins the chain-finality race. ("authority" — the
-# validator submitting its own recomputation — is deprecated, ships no config
-# profile, and is scheduled for removal; see issue #40.)
-mode = "shadow"
+# delaying the write. The recurring CLI accepts no mode selector.
 # min_assurance (default rewarded_set_proven) gates the concurrent shadow
-# verifier's PROVEN labeling and the opt-in authority submission path — NOT the
-# thin write path, which submits the signed vector after signature verification
-# regardless. Opt down to receipts_only or up to full_over_epoch deliberately.
+# verifier's PROVEN labeling, not the thin write path, which submits the signed
+# vector after signature verification regardless. Opt down to receipts_only or
+# up to full_over_epoch deliberately.
 # min_assurance = "rewarded_set_proven"
 # evidence_url = "https://api.cathedral.computer/v1/evidence"   # default: publisher + /v1/evidence
 # Trusted public-key pins (JSON files mapping key_id -> base64 32-byte key).
@@ -71,10 +69,9 @@ mode = "shadow"
 # verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 # The versioned reward mechanism this validator recomputes:
 mechanism = "validated_supply_v1"
-# FULL assurance (authority mode requires all of these): the controlled
-# envelope package, the pinned verifier binary, the expected source
-# revision, and the configured burn destination (never taken from the
-# signed vector):
+# A controlled shadow audit may additionally pin the envelope package, verifier
+# binary, expected source revision, and burn destination. These strengthen the
+# audit and never replace the signed vector submitted by the recurring runtime:
 # controlled_dir = "/var/lib/cathedral-controlled/epoch-latest"
 # verifier_binary = "/opt/cathedral/bin/cathedral-tdx-verifier"
 # source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f"

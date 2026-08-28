@@ -10,8 +10,8 @@
 #   2. its newest record is older than 3 tick intervals (the validator is
 #      stopped, wedged, or writing somewhere else);
 #   3. no tick has COMPLETED in the last 4 tick intervals — no
-#      WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED or
-#      WAITING_FOR_JOB — which is what a validator that has silently stopped
+#      WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, or WEIGHT_COOLDOWN_SKIPPED — which a
+#      validator that has silently stopped
 #      writing weights looks like. A restart is given one grace window, dated
 #      from the FIRST restart since the last completed tick, so a crash loop
 #      cannot keep renewing it;
@@ -126,10 +126,10 @@ if older_than "$NEWEST" "$STALE_CUTOFF"; then
   alert "event journal has not grown since $NEWEST, more than 3 tick intervals ($((STALE_SECS / 60))m) — the validator is stopped, wedged, or writing to a different path. Check: systemctl status the active validator unit"
 fi
 
-# Rule 3 — liveness. A tick that submitted, dry-ran, was declined by the
-# subnet's weight rate limit, or found nothing to score has all COMPLETED; only
-# the absence of every one of them means the loop is not running.
-LIVENESS_EVENTS='WEIGHTS_SUBMITTED|WEIGHTS_DRY_RUN|WEIGHT_COOLDOWN_SKIPPED|WAITING_FOR_JOB'
+# Rule 3 — liveness. A tick that submitted, dry-ran, or was declined by the
+# subnet's weight rate limit has completed; only the absence of every one means
+# the loop is not running.
+LIVENESS_EVENTS='WEIGHTS_SUBMITTED|WEIGHTS_DRY_RUN|WEIGHT_COOLDOWN_SKIPPED'
 LIVE_TS=$(latest "$LIVENESS_EVENTS")
 LIVE_CUTOFF=$(cutoff "$LIVENESS_SECS")
 # A process that (re)started inside the window has not been given a full window
@@ -153,7 +153,7 @@ if [ "$WARMING" -eq 0 ] && { [ -z "$LIVE_TS" ] || older_than "$LIVE_TS" "$LIVE_C
   else
     SEEN="the last one was at $LIVE_TS"
   fi
-  alert "no completed tick (WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED, WAITING_FOR_JOB) in the last $((LIVENESS_SECS / 60))m — $SEEN. The validator is not writing weights."
+  alert "no completed tick (WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED) in the last $((LIVENESS_SECS / 60))m — $SEEN. The validator is not writing weights."
 fi
 
 # Rule 4 — any PROVENANCE_VECTOR_MISMATCH in the last 30 minutes.

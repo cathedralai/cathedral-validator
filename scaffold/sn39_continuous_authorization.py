@@ -692,7 +692,6 @@ def build_from_journal(
     max_attempts: int,
     valid_for_blocks: int,
     valid_for_seconds: int,
-    allow_authority_lane: bool,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     moment = (now or datetime.now(UTC)).astimezone(UTC)
@@ -763,7 +762,7 @@ def build_from_journal(
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "mecid": 0,
-        "lanes": ["authority", "thin"] if allow_authority_lane else ["thin"],
+        "lanes": ["thin"],
         "launch_attempt_id": state.get("submission_launch_attempt_id"),
         "release_sha256": state.get("submission_continuous_release_sha256"),
         "reproducer_revision": state.get("submission_continuous_reproducer_revision"),
@@ -784,7 +783,7 @@ def verify_journal_public_release(state: Mapping[str, Any]) -> dict[str, Any]:
     """Independently bind a service journal to the signed public launch seal.
 
     The validator service owns its journal, so a root operator must not create
-    recurring authority from those mutable fields alone.  Reproduce the
+    recurring approval from those mutable fields alone. Reproduce the
     separately signed public release and require it to name this exact launch
     before the private release key is read.
     """
@@ -897,7 +896,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-attempts", type=int, required=True)
     parser.add_argument("--valid-for-blocks", type=int, required=True)
     parser.add_argument("--valid-for-seconds", type=int, required=True)
-    parser.add_argument("--allow-full-authority-writes", action="store_true")
     parser.add_argument("--replace-existing", action="store_true")
     parser.add_argument(
         "--i-authorize-recurring-mainnet-writes",
@@ -933,7 +931,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_attempts=args.max_attempts,
             valid_for_blocks=args.valid_for_blocks,
             valid_for_seconds=args.valid_for_seconds,
-            allow_authority_lane=args.allow_full_authority_writes,
             now=moment,
         )
         authorization_bytes = canonical_json(document) + b"\n"

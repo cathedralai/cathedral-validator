@@ -1234,6 +1234,13 @@ def test_canonical_startup_recovers_zero_burn_uid30_without_resubmitting(
     monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
     monkeypatch.setattr(
         canonical_validator,
+        "set_weights_on_chain",
+        lambda *_args, **_kwargs: pytest.fail(
+            "finalized UID30 journal recovery attempted a replacement submission"
+        ),
+    )
+    monkeypatch.setattr(
+        canonical_validator,
         "_locate_pending_broadcast_receipt",
         lambda *_args, **_kwargs: (
             canonical_validator.PASS,

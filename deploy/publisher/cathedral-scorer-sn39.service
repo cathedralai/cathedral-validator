@@ -1,13 +1,12 @@
 [Unit]
-# Self-composing publisher role 1/3: the SN39 scorer surface. Serves
-# scaffold.publisher.server:app from VALIDATOR-sourced code (the same module
-# path the hub image served) so the cathedral hub can leave the live loop.
-Description=Cathedral SN39 scorer (self-composing publisher role)
+# The one supported SN39 origin composer. It serves
+# scaffold.publisher.server:app from validator-sourced code.
+Description=Cathedral SN39 origin scorer
 After=network-online.target
 Wants=network-online.target
-# Belt-and-braces single-writer guard: refuse to start while any peer publisher
-# role that would bind the same port/DB is active. Conflicts= only acts on
-# units systemd is asked to start; this ExecStartPre refuses a hand-launched one.
+# Refuse to start while either legacy origin unit is active on an older host.
+# They share this database and signing identity. Conflicts= only acts on units
+# systemd is asked to start, so ExecStartPre also checks current process state.
 Conflicts=cathedral-publisher.service cathedral-weight-feed-publish.service
 
 [Service]
@@ -25,7 +24,7 @@ Environment=PORT=8012
 ExecStartPre=/bin/sh -c '! systemctl is-active --quiet cathedral-publisher.service cathedral-weight-feed-publish.service'
 ExecStart=/opt/cathedral-publisher/venv/bin/uvicorn scaffold.publisher.server:app \
     --host 127.0.0.1 --port ${PORT} \
-    --workers ${WEB_CONCURRENCY:-2} --no-access-log
+    --workers 1 --no-access-log
 Restart=on-failure
 RestartSec=15s
 TimeoutStopSec=30s

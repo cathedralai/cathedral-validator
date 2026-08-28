@@ -1,4 +1,8 @@
-"""Full-provenance audit for the two-mode validator.
+"""Full-provenance audit for the recurring shadow relay and bounded launch tools.
+
+The internal ``mode="authority"`` value means a strict synchronous audit for a
+bounded launch or historical journal. It is not a recurring submission mode and
+is not exposed by ``cathedral-validator serve``.
 
 Wraps the ``cathedral`` package (installed via the ``provenance`` extra) to:
 
@@ -14,8 +18,8 @@ Anti-equivocation state lives in the validator's state file: a report that
 re-signs the same source epoch with different contents, or moves the source
 epoch backwards, fails the audit outright.
 
-If the ``cathedral`` package is not installed the audit reports NOT_PROVEN
-(shadow mode warns loudly; authority mode refuses to submit).
+If the ``cathedral`` package is not installed the audit reports NOT_PROVEN.
+Shadow records the result. A bounded strict-replay caller refuses its launch.
 """
 
 from __future__ import annotations
@@ -102,7 +106,7 @@ class ProvenanceUnavailable(Exception):
     """Provenance cannot run here (package missing or pins not configured).
 
     Reported as NOT_PROVEN: nothing is known to be wrong, but nothing was
-    independently proven either. Authority mode refuses to submit on it.
+    independently proven either. A strict bounded replay caller refuses launch.
     """
 
     def __init__(self, message: str, remediation: str) -> None:
@@ -127,10 +131,10 @@ class ProvenanceSettings:
     index_keys_digest: str | None = None
     verifier_digest: str | None = None
     mechanism: str = MECHANISM_DEFAULT
-    # FULL assurance inputs: the controlled-disclosure envelope directory and
+    # Strict replay inputs: the controlled-disclosure envelope directory and
     # a local verifier binary whose bytes must match the manifest's blob pin
     # AND reproduce the operator-pinned implementation digest. Without them
-    # the audit is receipts-only (NOT_PROVEN for authority purposes).
+    # the shadow audit is receipts-only.
     controlled_dir: str | None = None
     verifier_binary: str | None = None
     source_revision: str | None = None
@@ -150,7 +154,7 @@ class ProvenanceSettings:
     # a moment the producer selected. Pinning the block to before a miner
     # registered puts that miner outside the audited universe entirely, where
     # no set-equality check can see the omission. None disables the ceiling and
-    # is refused in authority mode by validate_for_audit.
+    # is refused when internal strict replay is selected by validate_for_audit.
     max_anchor_lag_blocks: int | None = None
 
     def validate_for_audit(self) -> None:
@@ -174,15 +178,16 @@ class ProvenanceSettings:
             raise ProvenanceUnavailable(
                 "provenance pins are not configured: missing " + ", ".join(missing),
                 "Configure the trusted key files and verifier digest from "
-                "VALIDATOR.md (or set --provenance off to silence this).",
+                "VALIDATOR.md. The recurring validator has no unaudited or "
+                "off submission mode.",
             )
         if self.mode == "authority":
             if self.allow_private_hosts:
                 raise ProvenanceAuditError(
                     "allow_private_hosts is testing-only and is refused in "
-                    "authority mode (SSRF policy)"
+                    "strict bounded replay (SSRF policy)"
                 )
-            # Authority has NO optional security pins: every immutable pin
+            # Strict replay has no optional security pins: every immutable pin
             # and the raw-evidence source are mandatory.
             required = [
                 ("registry_keys_digest", "--provenance-registry-keys-digest"),
@@ -195,10 +200,10 @@ class ProvenanceSettings:
             absent = [flag for name, flag in required if not getattr(self, name)]
             if absent:
                 raise ProvenanceAuditError(
-                    "full mode requires immutable pins and a raw-evidence "
+                    "strict bounded replay requires immutable pins and a raw-evidence "
                     "source: missing " + ", ".join(absent) + ". Running "
                     "without evidence access? Follow the signed feed instead "
-                    "with --mode thin."
+                    "with the recurring relay."
                 )
             lag = self.max_anchor_lag_blocks
             if (
@@ -208,7 +213,8 @@ class ProvenanceSettings:
                 or lag <= 0
             ):
                 raise ProvenanceAuditError(
-                    "authority mode requires --provenance-max-anchor-lag-blocks: "
+                    "strict bounded replay requires "
+                    "--provenance-max-anchor-lag-blocks: "
                     "without a ceiling the producer chooses the block every "
                     "independent chain check is evaluated at"
                 )
@@ -480,7 +486,7 @@ def _chain_lookup_bounded(callback, block: int, deadline: float, label: str):
     one wall-clock deadline.
 
     Some substrate clients do not expose a reliable request timeout. A daemon
-    thread keeps thin authority non-blocking, while a process-wide bounded
+    thread keeps the recurring shadow relay nonblocking, while a process-wide bounded
     slot pool prevents an unavailable archive node from creating unbounded
     abandoned clients across repeated shadow audits.
     """
@@ -868,14 +874,12 @@ def _verify_recent_chain_bridge(
         ),
         key=lambda row: int(row["source_epoch"]),
     )
-    # Name a procedure that exists. This used to point at an "archived
-    # cathedral_provenance_catchup_v1 procedure" that was never written down
-    # anywhere in this repository or on the validator host, so the one message
-    # an operator reads mid-incident sent them looking for a document that did
-    # not exist. The recovery is also not guessable: the tip is monotonic and
-    # the anchor cannot be rewound, so clearing two state keys off-line is the
-    # only exit.
-    catchup = "operator catch-up required (see docs/PROVENANCE_CATCHUP.md)"
+    # A continuity gap is not permission to edit the shared submission journal.
+    # No safe re-anchoring command ships today, so name that limit directly.
+    recovery = (
+        "manual journal mutation is forbidden; recovery requires a reviewed "
+        "reconciliation command, and none is shipped"
+    )
     if recent_rows:
         window_floor = min(int(row["source_epoch"]) for row in recent_rows)
         if last_epoch < window_floor:
@@ -886,7 +890,7 @@ def _verify_recent_chain_bridge(
                 f"recorded chain tip (epoch {last_epoch}) has aged out of "
                 f"the signed index's recent window (oldest retained epoch "
                 f"{window_floor}); the export chain back to the tip can no "
-                f"longer be walked — {catchup}"
+                f"longer be walked — {recovery}"
             )
     if not rows:
         raise ProvenanceAuditError(
@@ -907,7 +911,7 @@ def _verify_recent_chain_bridge(
                 f"links behind the signed index window, but the audit's "
                 f"remaining artifact budget ({artifacts_remaining} artifacts "
                 f"at {RECENT_WALK_BLOBS_PER_LINK} per link) affords only "
-                f"{affordable} links — {catchup}"
+                f"{affordable} links — {recovery}"
             )
     running_report_id = last_report_id
     fence_release = state.get("provenance_policy_release")
@@ -1142,7 +1146,7 @@ def run_audit(
     historical_hotkeys_lookup=None,
     block_hash_lookup=None,
 ) -> ProvenanceAudit:
-    """Run one full-provenance audit. Never raises; the status carries the verdict."""
+    """Run one provenance audit. Never raises; the status carries the verdict."""
     started = time.monotonic()
     audit_deadline = started + settings.audit_deadline_secs
     try:
@@ -1153,9 +1157,9 @@ def run_audit(
             or current_block <= 0
         ):
             # A missing/malformed chain block silently SKIPPED the report
-            # block-validity check; authority must refuse instead.
+            # block-validity check; strict replay must refuse instead.
             raise ProvenanceAuditError(
-                "authority audit requires a finalized integer chain block to "
+                "strict replay requires a finalized integer chain block to "
                 "anchor the report validity window; refusing to audit without one"
             )
         try:
@@ -1350,14 +1354,14 @@ def run_audit(
                 )
             if not verifier_info.get("binary_blob") or not verifier_info.get("command"):
                 raise ProvenanceAuditError(
-                    "manifest lacks verifier binary/command bindings for full mode"
+                    "manifest lacks verifier binary/command bindings for strict replay"
                 )
             candidates = manifest["candidate_set"]["candidates"]
             candidate_outcomes = {
                 str(row["hotkey"]): str(row["outcome"]) for row in candidates
             }
             candidate_snapshot = manifest["candidate_set"]
-            # Independent HISTORICAL chain cross-checks (defect 1): full
+            # Independent HISTORICAL chain cross-checks: strict replay
             # assurance requires the manifest's candidate set to EXACTLY
             # equal the SN39 metagraph AT candidate_set.block, and the
             # anchored hash to equal get_block_hash(block). The current
@@ -1597,8 +1601,8 @@ def run_audit(
                     )
                 else:
                     audit.remediation = (
-                        "Escalate to Cathedral operators. Shadow mode keeps submitting "
-                        "the signed vector; authority mode submits the recomputed one."
+                        "Escalate to Cathedral operators. The recurring relay keeps "
+                        "following the signed vector; bounded strict replay refuses."
                     )
         audit.duration_ms = (time.monotonic() - started) * 1000
         return audit
@@ -1615,7 +1619,7 @@ def run_audit(
             error=f"{type(exc).__name__}: {exc}"[:512],
             remediation=(
                 "Check the evidence endpoint, pinned keys, and digests. "
-                "Authority mode will not submit until the audit passes."
+                "A bounded strict-replay launch remains refused until the audit passes."
             ),
             duration_ms=(time.monotonic() - started) * 1000,
         )

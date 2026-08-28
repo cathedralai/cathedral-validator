@@ -43,7 +43,6 @@ EXPECTED_CATHEDRAL_ARCHIVE_SHA256 = (
     "559dd8e347dcf635a76d4f930f251184fa09948ad3173ba36211a967c1f5d46e"
 )
 RELEASE_FILES = (
-    "config/validator-selfcompose-sn39.toml",
     "config/validator-thin-sn39-relay.toml",
     "config/provenance/registry-keys.json",
     "config/provenance/report-keys.json",
@@ -109,8 +108,8 @@ class InstallProfile(NamedTuple):
     publisher. A third-party RELAY holds neither: the raw evidence package is
     Cathedral's, its shadow audit is receipts-only by design
     (`config/validator-thin-sn39-relay.toml` omits `controlled_dir` and
-    `verifier_binary`, and `scaffold/provenance_audit.py` requires both only in
-    authority mode), and the public status publisher writes the producer's
+    `verifier_binary`, and `scaffold/provenance_audit.py` requires both only for
+    strict full replay), and the public status publisher writes the producer's
     evidence tree as the producer's account. Pinning files a relay cannot
     obtain made the manifest builder — and therefore the launcher's whole
     verification — buildable by Cathedral only.

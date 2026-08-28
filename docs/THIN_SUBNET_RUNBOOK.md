@@ -294,12 +294,11 @@ hyperparameter at the canonical finalized head and fails closed when it is
 enabled. Submission calls the explicit `set_mechanism_weights` extrinsic path,
 not the SDK entry point that can auto-route to commit-reveal after preflight.
 
-Thin and FULL-authority services must also share one absolute owner-only
+Recurring submissions and bounded launch recovery share one absolute owner-only
 `runtime_root` (mode `0700`, `/var/lib/cathedral-validator` in the launch
-config). That directory contains the cross-mode single-flight lock and common
-pending-attempt journal. It is deliberately independent of `HOME` and the
-lane-specific state files: an ambiguous call in either mode blocks both modes
-until an operator reconciles the named extrinsic.
+config). That directory contains the single-flight lock and common
+pending-attempt journal. It is deliberately independent of `HOME`: an ambiguous
+call blocks every writer until an operator reconciles the named extrinsic.
 
 Commit-reveal may be enabled only after a later release persists and publicly
 verifies the complete commitment, reveal round, applied-vector block, and
@@ -434,7 +433,6 @@ watched during cutover (cathedral-validator#35):
   wrong account; it only costs the tick. Do not "fix" it by relaxing the UID
   match — that would trade fund-safety for liveness.
 
-Also refused at **startup**, loudly, rather than per-tick: `require_policy =
-validated_supply_v3` together with `provenance = authority`. A v3 pin relays the
-signed vector; authority mode recomputes independently and never applies it, so
-the combination would go dark every tick. Run a v3 pin with `provenance = shadow`.
+The recurring validator has no provenance-mode selector. It remains a shadow
+relay when pinned to v3. A signed-feed failure writes nothing and never changes
+submission authority.

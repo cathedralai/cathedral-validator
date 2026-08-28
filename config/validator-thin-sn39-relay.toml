@@ -1,10 +1,9 @@
 # Cathedral SN39 mainnet configuration for a THIRD-PARTY thin validator.
 #
-# This is the third-party ATTESTATION-VERIFIED profile: it relays Cathedral's
-# signed weight vector from the REMOTE origin (api.cathedral.computer). For the
-# consolidated single-host validator that composes/publishes the vector LOCALLY,
-# use config/validator-selfcompose-sn39.toml instead (identical except its
-# [publisher] url points at the local publisher).
+# This is the only recurring operator profile. It relays Cathedral's signed
+# weight vector from the public HTTPS origin (api.cathedral.computer). An origin
+# host may compose the vector locally, but the validator still fetches the
+# published HTTPS feed through this same profile.
 #
 # This profile relays Cathedral's signed weight vector: fetch it, verify it
 # against the pinned weight-policy key, and submit exactly those numbers. It
@@ -13,9 +12,8 @@
 # Every trust-bearing value below is re-checked against the release constants
 # in scaffold/validator_thin.py before any broadcast. Changing any of them is
 # refused, not silently honored. Only wallet identity, log path, and the launch
-# section differ from the Cathedral operator profile. (The operator profile,
-# config/validator-mainnet-sn39.toml, was removed in PR #39 with the rest of
-# the authority/launch ceremony; the release constants remain the authority.)
+# section are the only operator-specific values. Removed authority and local
+# loopback profiles are not alternative production modes.
 #
 # The operator-facing path for this profile is README's quickstart. A non-root
 # preview redirects the three service-owned paths below — [runtime].root,
@@ -52,10 +50,9 @@ max_submissions = 0
 root = "/var/lib/cathedral-validator"
 
 [provenance]
-# Relays MUST stay in shadow. "authority" submits an independent recomputation
-# instead of Cathedral's signed vector; that originates weights and therefore
-# requires the root-signed launch and recurring-write authorization.
-mode = "shadow"
+# The recurring CLI accepts shadow only. There is no mode key to select. The
+# full-provenance audit runs in the background and never changes the submitted
+# signed vector.
 evidence_url = "https://api.cathedral.computer/v1/evidence"
 registry_keys = "config/provenance/registry-keys.json"
 registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
@@ -76,8 +73,8 @@ burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi" # pragma: allow
 require_full_provenance_for_broadcast = false
 # The SN39 launch is a subnet-level event that happened once. A relay cannot
 # perform its own, so requiring a per-validator completed launch would make
-# this profile unrunnable. Setting this false is refused for any runtime that
-# runs provenance = "authority" or holds the controlled launch material.
+# this profile unrunnable. Setting this false is refused for a host holding the
+# controlled launch material.
 require_completed_launch_for_broadcast = false
 # Weight-originating hosts (holding launch material) additionally need the
 # documented waiver below or the runtime contract refuses the relay opt-out;
@@ -86,3 +83,6 @@ beta_skip_launch_ceremony = true
 
 [logs]
 jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+# Sanitized allowlisted projection read by the public status service. The raw
+# journal above remains owner-only.
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"

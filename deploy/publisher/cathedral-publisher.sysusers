@@ -1,6 +1,6 @@
 # Installed as /etc/sysusers.d/cathedral-publisher.conf.
 #
-# The self-composing publisher role runs under its own system account, distinct
+# The origin publisher role runs under its own system account, distinct
 # from cathedral-validator (deploy/sn39/cathedral-sn39-validator.sysusers). The
 # publisher serves signed vectors; the validator fetches + broadcasts them. They
 # are separate trust domains on a consolidated host, so they get separate
@@ -10,4 +10,4 @@
 # deletes accounts, so this filename is publisher-specific to avoid clobbering
 # any generic cathedral-*.conf the evidence producer installs.
 g cathedral-publisher -
-u cathedral-publisher - "Cathedral SN39 self-composing publisher" /var/lib/cathedral-publisher /usr/sbin/nologin
+u cathedral-publisher - "Cathedral SN39 origin publisher" /var/lib/cathedral-publisher /usr/sbin/nologin

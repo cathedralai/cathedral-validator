@@ -166,13 +166,12 @@ def test_a_fresh_journal_with_no_completed_tick_is_an_alert(tmp_path):
         "WEIGHTS_SUBMITTED",
         "WEIGHTS_DRY_RUN",
         "WEIGHT_COOLDOWN_SKIPPED",
-        "WAITING_FOR_JOB",
     ],
 )
 def test_every_tick_completing_event_counts_as_alive(tmp_path, event):
-    """A rate-limited tick and a nothing-to-score tick are both healthy.
+    """A submitted, dry-run, or rate-limited tick is healthy.
 
-    Treating either as dead would page an operator every night on a subnet
+    Treating a cooldown as dead would page an operator every night on a subnet
     whose `weights_rate_limit` is independent of the tick interval.
     """
     records = [

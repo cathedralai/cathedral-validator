@@ -76,23 +76,16 @@ separation and activation order are documented in
 
 ## Execution boundary
 
-Thin mode verifies the signed candidate and reads the live metagraph. It does
+The recurring shadow relay verifies the signed candidate and reads the live metagraph. It does
 not need Intel TDX on the validator host. It verifies that Cathedral signed the
 numbers; it does not verify the numbers. The provenance audit runs concurrently
 and its verdict arrives after the submission, so in thin mode a failed audit
 records a bad write rather than preventing one.
 
-Authority mode independently replays controlled evidence and submits its own
-recomputation. A failed audit stops the write. It requires a Linux x86-64 host,
-the pinned verifier binary, the controlled evidence tree, and all configured key
-and digest pins.
-
-**The controlled evidence tree is the constraint that decides who can run
-authority.** Cathedral publishes a validator-readable mirror on its own host, so
-Cathedral's validator can run authority. That mirror is not published externally,
-so a third-party validator cannot, and runs thin. Independent verification by
-outside operators is therefore a property this stack does not have yet, and no
-amount of validator code changes that: it is an evidence-distribution decision.
+There is no recurring authority/full operator mode or loopback self-compose
+profile. Losing the signed feed produces no write and no mode change. Internal
+authority-labelled journal types remain only for bounded launch and read-only
+recovery of historical launch attempts.
 
 Workers provide hardware evidence. They never receive the validator wallet.
 The validator host stores only the registered validator hotkey needed for a

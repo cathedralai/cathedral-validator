@@ -339,7 +339,6 @@ def _submission_contract(
         require_policy=None,
         beta_skip_launch_ceremony=False,
         provenance="authority",
-        _feed_down_fallback_active=False,
         _submission_validator_hotkey=UID30_HOTKEY,
         _submission_genesis_hash=genesis_hash,
         _uid30_reviewed_preview_sha256=digest,
