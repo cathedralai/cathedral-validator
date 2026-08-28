@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import inspect
 import ipaddress
 import json
 import os
@@ -1150,6 +1151,37 @@ def _journal_for_attempt(
     }
 
 
+def _validated_serve_axon_call(
+    call: Callable[..., Any], *, advertisement: Any
+) -> dict[str, Any]:
+    """Bind the exact SDK call before creating the no-retry journal.
+
+    Once the journal exists, any exception from ``serve_axon`` is ambiguous
+    because the SDK might have signed or broadcast before transport failed.
+    An incompatible Python call signature is different: it is provably a local
+    pre-call failure. Binding here keeps that failure before the durable intent
+    while preserving the one-attempt fence for every exception after entry.
+    """
+
+    kwargs = {
+        "netuid": NETUID,
+        "axon": advertisement,
+        "mev_protection": False,
+        "period": ANNOUNCEMENT_PERIOD_BLOCKS,
+        "raise_error": True,
+        "wait_for_inclusion": True,
+        "wait_for_finalization": True,
+    }
+    try:
+        inspect.signature(call).bind(**kwargs)
+    except (TypeError, ValueError) as exc:
+        raise MinerAxonError(
+            "serve_axon SDK contract is incompatible before submission; "
+            "no announcement journal was created"
+        ) from exc
+    return kwargs
+
+
 def _journal_matches(
     journal: Mapping[str, Any], *, preview: Mapping[str, Any], digest: str
 ) -> None:
@@ -1372,6 +1404,11 @@ def announce_reviewed_preview(
             external_port=port,
             max_workers=2,
         )
+        call = serve_call or subtensor.serve_axon
+        call_kwargs = _validated_serve_axon_call(
+            call,
+            advertisement=advertisement,
+        )
         journal = _journal_for_attempt(
             preview=preview,
             preview_sha256=digest,
@@ -1379,17 +1416,8 @@ def announce_reviewed_preview(
             state=after,
         )
         _write_state(journal_path, journal, exclusive=True)
-        call = serve_call or subtensor.serve_axon
         try:
-            response = call(
-                netuid=NETUID,
-                axon=advertisement,
-                mev_protection=False,
-                period=ANNOUNCEMENT_PERIOD_BLOCKS,
-                raise_error=True,
-                wait_for_inclusion=True,
-                wait_for_finalization=True,
-            )
+            response = call(**call_kwargs)
         except Exception:
             return _resolve_after_call(
                 journal=journal,

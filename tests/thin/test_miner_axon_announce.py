@@ -511,6 +511,52 @@ def test_exact_endpoint_before_submission_is_a_no_write_result(tmp_path, monkeyp
     assert not (tmp_path / axon.JOURNAL_NAME).exists()
 
 
+def test_incompatible_sdk_signature_refuses_before_no_retry_journal(
+    tmp_path, monkeypatch
+):
+    path, digest, _ = write_review(tmp_path)
+    calls = []
+
+    def incompatible_serve_call(
+        *, netuid, axon, wait_for_inclusion, wait_for_finalization
+    ):
+        calls.append((netuid, axon, wait_for_inclusion, wait_for_finalization))
+
+    with pytest.raises(axon.MinerAxonError, match="incompatible before submission"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=path,
+            digest=digest,
+            state_loader=StateSequence(miner_state(), miner_state(block=101)),
+            serve_call=incompatible_serve_call,
+        )
+
+    assert calls == []
+    assert not (tmp_path / axon.JOURNAL_NAME).exists()
+
+
+def test_installed_bittensor_serve_axon_accepts_the_exact_launch_contract():
+    import bittensor as bt
+
+    bound = bt.Subtensor.serve_axon.__get__(object(), bt.Subtensor)
+    advertisement = object()
+    kwargs = axon._validated_serve_axon_call(
+        bound,
+        advertisement=advertisement,
+    )
+
+    assert kwargs == {
+        "netuid": axon.NETUID,
+        "axon": advertisement,
+        "mev_protection": False,
+        "period": axon.ANNOUNCEMENT_PERIOD_BLOCKS,
+        "raise_error": True,
+        "wait_for_inclusion": True,
+        "wait_for_finalization": True,
+    }
+
+
 def test_local_duplicate_writer_lock_refuses_before_chain_call(tmp_path, monkeypatch):
     path, digest, _ = write_review(tmp_path)
     monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
