@@ -34,11 +34,12 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from bittensor.utils import get_mechid_storage_index
 from bittensor_wallet import Keypair
@@ -56,32 +57,28 @@ from cathedral_thin.independent.constants import (
     W,
 )
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
+from cathedral_thin.independent_runtime.chain import ServingAxon, scan_axons
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST, load_verifier
 from cathedral_thin.independent_runtime.run import (
     INTEL_COLLATERAL,
     _try_collect,
     _units_after_quote,
-    snapshot_epoch,
 )
 from scaffold import validator_thin as canonical_validator
 
-
-PREVIEW_SCHEMA = "cathedral_sn39_uid30_launch_preview_v1"
+PREVIEW_SCHEMA = canonical_validator.SN39_UID30_LAUNCH_SCHEMA
 PREVIEW_STATUS = "READY_FOR_OPERATOR_REVIEW"
-POLICY_ID = "uid30_single_verified_miner_100_v1"
+POLICY_ID = canonical_validator.SN39_UID30_LAUNCH_POLICY
 NETWORK = "finney"
 WALLET_NAME = "cathedral"
 WALLET_HOTKEY = "default"
-UID30 = 30
-UID30_HOTKEY = (
-    "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"  # pragma: allowlist secret
-)
-MINER_HOTKEY = (
-    "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G"  # pragma: allowlist secret
-)
+UID30 = canonical_validator.SN39_UID30_LAUNCH_VALIDATOR_UID
+UID30_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+MINER_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_MINER_HOTKEY
 DEFAULT_RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
 DEFAULT_PREVIEW = DEFAULT_RUNTIME_ROOT / "uid30-launch-preview.json"
 MAX_PREVIEW_BYTES = 1_048_576
+PREVIEW_VALIDITY_SECONDS = 15 * 60
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _CHAIN_HASH_RE = re.compile(r"0x[0-9a-f]{64}")
 
@@ -94,6 +91,10 @@ class UID30LaunchAmbiguous(UID30LaunchError):
     """A signed intent or receipt exists and no replacement is authorized."""
 
 
+class UID30LaunchContradiction(UID30LaunchAmbiguous):
+    """The exact signed attempt has a positive historical mismatch."""
+
+
 @dataclass(frozen=True)
 class UID30ChainState:
     """Finalized chain facts used by both preview and sign-time revalidation."""
@@ -102,6 +103,7 @@ class UID30ChainState:
     block_number: int
     block_hash: str
     genesis_hash: str
+    subnet_owner_hotkey: str
     validator_hotkey: str
     validator_uid: int
     validator_permit: bool
@@ -186,6 +188,18 @@ class UID30SubmissionResult:
     stored_weight: int
 
 
+@dataclass(frozen=True)
+class UID30RecoveryResult:
+    status: str
+    preview_sha256: str
+    attempt_id: str
+    extrinsic_hash: str | None
+    block_hash: str | None
+    block_number: int | None
+    miner_uid: int
+    stored_weight: int | None
+
+
 def _raw_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
@@ -206,6 +220,26 @@ def _canonical_hash(value: Any, *, label: str) -> str:
     if _CHAIN_HASH_RE.fullmatch(text) is None:
         raise UID30LaunchError(f"{label} is not a canonical chain hash")
     return text
+
+
+def _parse_utc(value: object, *, label: str) -> datetime:
+    text = str(value or "")
+    if not text.endswith("Z"):
+        raise UID30LaunchError(f"{label} is not canonical UTC")
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise UID30LaunchError(f"{label} is not canonical UTC") from exc
+    if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+        raise UID30LaunchError(f"{label} is not canonical UTC")
+    return moment.astimezone(UTC)
+
+
+def _canonical_utc(moment: datetime) -> str:
+    if moment.tzinfo is None:
+        raise UID30LaunchError("launch time must be timezone-aware")
+    value = moment.astimezone(UTC)
+    return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
 
 
 def _canonical_json_bytes(document: Mapping[str, Any]) -> bytes:
@@ -321,6 +355,7 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
     _require_ss58(MINER_HOTKEY, label="pinned miner hotkey")
     _require_ss58(state.validator_hotkey, label="resolved validator hotkey")
     _require_ss58(state.miner_hotkey, label="resolved miner hotkey")
+    _require_ss58(state.subnet_owner_hotkey, label="resolved subnet owner hotkey")
     if state.genesis_hash != FINNEY_GENESIS_HASH:
         raise UID30LaunchError("chain state is not the pinned Finney genesis")
     if state.validator_hotkey != UID30_HOTKEY:
@@ -353,6 +388,10 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
         raise UID30LaunchError("the pinned weight version is not accepted by SN39")
     if state.miner_hotkey != MINER_HOTKEY:
         raise UID30LaunchError("the launch target is not the pinned Cathedral miner")
+    if state.subnet_owner_hotkey in {UID30_HOTKEY, MINER_HOTKEY}:
+        raise UID30LaunchError(
+            "the subnet owner must remain distinct from UID30 and the verified miner"
+        )
     if state.miner_uid == UID30:
         raise UID30LaunchError("UID30 cannot pay itself as the verified miner")
     if state.miner_uid < 0 or state.miner_uid > W:
@@ -449,6 +488,7 @@ def read_uid30_chain_state() -> UID30ChainState:
             block_number=block,
             block_hash=block_hash,
             genesis_hash=preflight.genesis_hash,
+            subnet_owner_hotkey=str(preflight.subnet_owner_hotkey),
             validator_hotkey=preflight.validator_hotkey,
             validator_uid=preflight.validator_uid,
             validator_permit=permits[preflight.validator_uid] is True,
@@ -484,24 +524,51 @@ def read_uid30_chain_state() -> UID30ChainState:
     return validate_chain_state(state)
 
 
+def _finalized_serving_axon(state: UID30ChainState) -> ServingAxon:
+    """Resolve the one launch endpoint at the exact validated finalized head."""
+
+    try:
+        metagraph = state.preflight.subtensor.metagraph(
+            NETUID, block=state.block_number
+        )
+        metagraph_block = _strict_nonnegative_int(
+            getattr(metagraph, "block", None), label="serving-axon metagraph block"
+        )
+        if metagraph_block != state.block_number:
+            raise UID30LaunchError(
+                "serving-axon metagraph is not at the validated finalized head"
+            )
+        targets = [
+            axon
+            for axon in scan_axons(metagraph).serving
+            if axon.hotkey == MINER_HOTKEY
+        ]
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchError(f"finalized serving-axon census failed: {exc}") from exc
+    if len(targets) != 1:
+        raise UID30LaunchError(
+            f"expected one serving axon for the pinned miner, found {len(targets)}"
+        )
+    axon = targets[0]
+    if axon.uid != state.miner_uid:
+        raise UID30LaunchError("serving miner UID differs from the finalized mapping")
+    _require_public_ip(axon.ip)
+    if axon.port != 8081:
+        raise UID30LaunchError("verified miner is not serving the pinned TLS port 8081")
+    return axon
+
+
 def collect_verified_miner(
     state: UID30ChainState, *, qvl_path: str
 ) -> VerifiedMinerProof:
-    """Collect one fresh quote and canonical SAT result from the pinned miner."""
+    """Collect fresh QVL and SAT from the exact finalized serving endpoint."""
 
     validate_chain_state(state)
     try:
-        snapshot = snapshot_epoch(state.preflight.subtensor)
-        targets = [axon for axon in snapshot.axons if axon.hotkey == MINER_HOTKEY]
-        if len(targets) != 1:
-            raise UID30LaunchError(
-                f"expected one serving axon for the pinned miner, found {len(targets)}"
-            )
-        axon = targets[0]
-        if axon.uid != state.miner_uid:
-            raise UID30LaunchError(
-                "serving miner UID differs from the finalized mapping"
-            )
+        # Apply public-address and port gates before any network contact.
+        axon = _finalized_serving_axon(state)
         row = _try_collect(
             axon.evidence_url(),
             MINER_HOTKEY,
@@ -522,7 +589,7 @@ def collect_verified_miner(
         if verdict is not QuoteVerdict.PASS:
             raise UID30LaunchError(f"miner quote verdict is {verdict.value}, not PASS")
         units = _units_after_quote(
-            anchor_hash=snapshot.anchor.anchor_hash,
+            anchor_hash=state.block_hash,
             collected=collected,
             sat_url=axon.sat_work_url(),
         )
@@ -541,8 +608,8 @@ def collect_verified_miner(
             tls_spki_sha256=collected.channel_binding.digest.hex(),
             sat_units=units,
             sat_rule=SAT_WORK_UNIT_RULE,
-            anchor_number=snapshot.anchor.anchor_number,
-            anchor_hash=snapshot.anchor.anchor_hash,
+            anchor_number=state.block_number,
+            anchor_hash=state.block_hash,
         )
     except UID30LaunchError:
         raise
@@ -627,8 +694,14 @@ def build_preview(
     )
     _assert_writer_available(provisional)
     valid_until_block = state.next_epoch_start_block - SN39_MORTAL_PERIOD_BLOCKS
-    timestamp = created_at or datetime.now(UTC).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    created = (
+        _parse_utc(created_at, label="preview creation time")
+        if created_at is not None
+        else datetime.now(UTC)
+    )
+    timestamp = _canonical_utc(created)
+    valid_until_time = _canonical_utc(
+        created + timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
     )
     document: dict[str, Any] = {
         "schema": PREVIEW_SCHEMA,
@@ -641,10 +714,20 @@ def build_preview(
             "netuid": NETUID,
             "mecid": MECID,
             "genesis_hash": state.genesis_hash,
+            "subnet_owner_hotkey": state.subnet_owner_hotkey,
             "finalized_block": state.block_number,
             "finalized_hash": state.block_hash,
             "next_epoch_start_block": state.next_epoch_start_block,
             "blocks_until_next_epoch": state.blocks_until_next_epoch,
+        },
+        "inclusion_policy": {
+            "valid_from_block": state.block_number,
+            "valid_until_block": valid_until_block,
+            "valid_from_time": timestamp,
+            "valid_until_time": valid_until_time,
+            "require_commit_reveal_disabled": True,
+            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "expected_next_epoch_start_block": state.next_epoch_start_block,
         },
         "validator": state.artifact(),
         "miner": miner.artifact(),
@@ -700,6 +783,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
             "preview schema or status is not the UID30 launch contract"
         )
     network = preview.get("network")
+    inclusion = preview.get("inclusion_policy")
     validator = preview.get("validator")
     miner = preview.get("miner")
     policy = preview.get("policy")
@@ -712,6 +796,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         isinstance(value, Mapping)
         for value in (
             network,
+            inclusion,
             validator,
             miner,
             policy,
@@ -724,6 +809,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise UID30LaunchError("preview is missing a required object")
     assert isinstance(network, Mapping)
+    assert isinstance(inclusion, Mapping)
     assert isinstance(validator, Mapping)
     assert isinstance(miner, Mapping)
     assert isinstance(policy, Mapping)
@@ -737,6 +823,10 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         or network.get("netuid") != NETUID
         or network.get("mecid") != MECID
         or network.get("genesis_hash") != FINNEY_GENESIS_HASH
+        or _require_ss58(
+            network.get("subnet_owner_hotkey"), label="preview subnet owner hotkey"
+        )
+        in {UID30_HOTKEY, MINER_HOTKEY}
         or _CHAIN_HASH_RE.fullmatch(str(network.get("finalized_hash", ""))) is None
     ):
         raise UID30LaunchError("preview network identity is not pinned Finney SN39")
@@ -763,6 +853,26 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         or valid_until != next_epoch - SN39_MORTAL_PERIOD_BLOCKS
     ):
         raise UID30LaunchError("preview block validity is inconsistent")
+    created = _parse_utc(preview.get("created_at"), label="preview creation time")
+    policy_from_time = _parse_utc(
+        inclusion.get("valid_from_time"), label="preview valid-from time"
+    )
+    policy_until_time = _parse_utc(
+        inclusion.get("valid_until_time"), label="preview valid-until time"
+    )
+    if (
+        inclusion.get("valid_from_block") != finalized_block
+        or inclusion.get("valid_until_block") != valid_until
+        or policy_from_time != created
+        or policy_until_time - policy_from_time
+        != timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
+        or inclusion.get("require_commit_reveal_disabled") is not True
+        or inclusion.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or inclusion.get("expected_next_epoch_start_block") != next_epoch
+    ):
+        raise UID30LaunchError(
+            "preview inclusion policy is not the bounded launch window"
+        )
     if (
         validator.get("wallet_name") != WALLET_NAME
         or validator.get("wallet_hotkey") != WALLET_HOTKEY
@@ -1074,8 +1184,35 @@ def load_reviewed_preview(
     return validated, supplied
 
 
+def _preview_inclusion_policy(
+    preview: Mapping[str, Any],
+) -> canonical_validator.InclusionPolicy:
+    raw = preview.get("inclusion_policy")
+    if not isinstance(raw, Mapping):
+        raise UID30LaunchError("reviewed preview has no inclusion policy")
+    try:
+        return canonical_validator.InclusionPolicy(
+            valid_from_block=int(raw["valid_from_block"]),
+            valid_until_block=int(raw["valid_until_block"]),
+            valid_from_time=_parse_utc(
+                raw["valid_from_time"], label="reviewed valid-from time"
+            ),
+            valid_until_time=_parse_utc(
+                raw["valid_until_time"], label="reviewed valid-until time"
+            ),
+            require_commit_reveal_disabled=raw["require_commit_reveal_disabled"],
+            mortal_period_blocks=int(raw["mortal_period_blocks"]),
+            expected_next_epoch_start_block=int(raw["expected_next_epoch_start_block"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UID30LaunchError("reviewed inclusion policy is malformed") from exc
+
+
 def _fresh_state_matches_preview(
-    fresh: UID30ChainState, preview: Mapping[str, Any]
+    fresh: UID30ChainState,
+    preview: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
 ) -> None:
     validate_chain_state(fresh)
     validator = preview["validator"]
@@ -1089,6 +1226,12 @@ def _fresh_state_matches_preview(
         raise UID30LaunchError("reviewed preview identity is malformed")
     if fresh.block_number > int(preview["valid_until_block"]):
         raise UID30LaunchError("reviewed preview expired before submission")
+    reviewed_block = int(network["finalized_block"])
+    reviewed_hash = _canonical_hash(
+        network["finalized_hash"], label="reviewed finalized hash"
+    )
+    if fresh.block_number < reviewed_block:
+        raise UID30LaunchError("finalized head regressed behind the reviewed preview")
     if (
         fresh.validator_hotkey != validator.get("hotkey")
         or fresh.validator_uid != validator.get("uid")
@@ -1096,10 +1239,43 @@ def _fresh_state_matches_preview(
         or fresh.miner_hotkey != miner.get("hotkey")
         or fresh.miner_uid != miner.get("uid")
         or fresh.genesis_hash != network.get("genesis_hash")
+        or fresh.subnet_owner_hotkey != network.get("subnet_owner_hotkey")
     ):
         raise UID30LaunchError(
             "UID30 last_update, signer, or miner mapping changed after review"
         )
+    if fresh.block_number == reviewed_block:
+        canonical_reviewed_hash = fresh.block_hash
+    else:
+        substrate = getattr(fresh.preflight.subtensor, "substrate", None)
+        if substrate is None:
+            raise UID30LaunchError(
+                "fresh chain state cannot re-resolve the reviewed finalized hash"
+            )
+        try:
+            canonical_reviewed_hash = _canonical_hash(
+                substrate.get_block_hash(reviewed_block),
+                label="canonical reviewed block hash",
+            )
+        except UID30LaunchError:
+            raise
+        except Exception as exc:
+            raise UID30LaunchError(
+                "fresh chain state cannot re-resolve the reviewed finalized hash"
+            ) from exc
+    if canonical_reviewed_hash != reviewed_hash:
+        raise UID30LaunchError(
+            "reviewed finalized hash is not canonical on the fresh chain head"
+        )
+    policy = _preview_inclusion_policy(preview)
+    try:
+        canonical_validator._require_inclusion_policy_ready(
+            policy, fresh.preflight, now=now
+        )
+    except Exception as exc:
+        raise UID30LaunchError(
+            f"reviewed inclusion policy is no longer ready: {exc}"
+        ) from exc
 
 
 def _fresh_miner_matches_preview(
@@ -1124,6 +1300,39 @@ def _fresh_miner_matches_preview(
             raise UID30LaunchError(
                 f"fresh miner {key} differs from the reviewed endpoint"
             )
+    _require_miner_on_finalized_head(fresh, state=state)
+
+
+def _require_miner_on_finalized_head(
+    fresh: VerifiedMinerProof, *, state: UID30ChainState
+) -> None:
+    """Re-resolve the proof anchor and endpoint at the latest finalized head."""
+
+    current = _finalized_serving_axon(state)
+    if (
+        current.uid != fresh.uid
+        or current.hotkey != fresh.hotkey
+        or current.ip != fresh.ip
+        or current.port != fresh.port
+    ):
+        raise UID30LaunchError(
+            "the miner is no longer the same serving endpoint at the fresh finalized head"
+        )
+    if fresh.anchor_number > state.block_number:
+        raise UID30LaunchError("fresh miner evidence anchor is ahead of finality")
+    try:
+        canonical_anchor = _canonical_hash(
+            state.preflight.subtensor.substrate.get_block_hash(fresh.anchor_number),
+            label="fresh miner evidence anchor hash",
+        )
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchError(
+            "fresh chain state cannot re-resolve the miner evidence anchor"
+        ) from exc
+    if canonical_anchor != fresh.anchor_hash:
+        raise UID30LaunchError("fresh miner evidence anchor is not canonical")
 
 
 def _attempt_identity(
@@ -1142,17 +1351,17 @@ def _attempt_identity(
         "source_epoch": state.block_number,
         "uid_weights": [[state.miner_uid, 1.0]],
         "uid_hotkeys": [[state.miner_uid, MINER_HOTKEY]],
+        "allocation_contract": POLICY_ID,
+        "burn_destination": None,
+        "burn_share": 0.0,
+        "subnet_owner_hotkey": state.subnet_owner_hotkey,
         "uid_safety": dict(state.uid_safety),
         "next_epoch_start_block": state.next_epoch_start_block,
-        "inclusion_policy": {
-            "valid_from_block": state.block_number,
-            "valid_until_block": state.block_number + SN39_MORTAL_PERIOD_BLOCKS,
-            "expected_next_epoch_start_block": state.next_epoch_start_block,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
-        },
+        "inclusion_policy": dict(preview["inclusion_policy"]),
         "uid30_launch_schema": PREVIEW_SCHEMA,
         "uid30_launch_preview_sha256": "sha256:" + preview_sha256,
         "uid30_launch_policy": POLICY_ID,
+        "report_id": "sha256:" + preview_sha256,
         "exclusive_writer_assertion": {
             "asserted": True,
             "scope": "all_other_uid30_processes_and_hosts_stopped",
@@ -1206,8 +1415,15 @@ def _receipt_submission(receipt: Any, *, state: UID30ChainState) -> Any:
 
 
 def _finalized_readback(
-    *, state: UID30ChainState, submission: Any
+    *,
+    state: UID30ChainState,
+    submission: Any,
+    receipt: Any,
+    identity: Mapping[str, Any],
+    require_receipt: bool = True,
 ) -> Mapping[str, Any]:
+    """Prove the exact signed call, its execution, finality, and stored vector."""
+
     substrate = state.preflight.subtensor.substrate
     block_hash = _canonical_hash(submission.block_hash, label="readback block hash")
     canonical = _canonical_hash(
@@ -1222,6 +1438,46 @@ def _finalized_readback(
     )
     if canonical != block_hash or submission.block_number > finalized_number:
         raise UID30LaunchAmbiguous("submission block is not on the finalized chain")
+    policy = _preview_inclusion_policy(
+        {"inclusion_policy": identity.get("inclusion_policy")}
+    )
+    owner = _require_ss58(
+        identity.get("subnet_owner_hotkey"),
+        label="submission subnet owner hotkey",
+    )
+    proof_reason: list[str] = []
+    classifier = (
+        canonical_validator._classify_finalized_receipt_awaiting_finality
+        if require_receipt
+        else canonical_validator._classify_finalized_receipt
+    )
+    proof = classifier(
+        state.preflight.subtensor,
+        receipt=receipt,
+        extrinsic_hash=_canonical_hash(
+            submission.extrinsic_hash, label="readback extrinsic hash"
+        ),
+        block_hash=block_hash,
+        block_number=submission.block_number,
+        validator_hotkey=UID30_HOTKEY,
+        netuid=NETUID,
+        version_key=VERSION_KEY,
+        wire_uids=[state.miner_uid],
+        wire_weights=[W],
+        uid_hotkeys={state.miner_uid: MINER_HOTKEY},
+        expected_subnet_owner_hotkey=owner,
+        inclusion_policy=policy,
+        require_receipt=require_receipt,
+        reason_out=proof_reason,
+    )
+    if proof != canonical_validator.PASS:
+        reason = f": {proof_reason[-1]}" if proof_reason else ""
+        error = (
+            UID30LaunchContradiction
+            if proof == canonical_validator.FAIL
+            else UID30LaunchAmbiguous
+        )
+        raise error(f"exact finalized signed-call proof is {proof}{reason}")
     stored = substrate.query(
         module="SubtensorModule",
         storage_function="Weights",
@@ -1230,7 +1486,7 @@ def _finalized_readback(
     )
     rows = _raw_value(stored)
     if rows != [[state.miner_uid, W]] and rows != [(state.miner_uid, W)]:
-        raise UID30LaunchAmbiguous(
+        raise UID30LaunchContradiction(
             "finalized UID30 mechanism weights differ from the reviewed 100/0 vector"
         )
     return {
@@ -1239,6 +1495,7 @@ def _finalized_readback(
         "validator_uid": UID30,
         "dests": [state.miner_uid],
         "weights_u16": [W],
+        "exact_signed_call_proof": canonical_validator.PASS,
     }
 
 
@@ -1253,6 +1510,7 @@ def submit_reviewed_preview(
     miner_loader: Callable[..., VerifiedMinerProof] = collect_verified_miner,
     submit_call: Callable[..., Any] | None = None,
     readback_call: Callable[..., Mapping[str, Any]] | None = None,
+    now: datetime | None = None,
 ) -> UID30SubmissionResult:
     """Submit once after digest review, or leave a durable ambiguity fence."""
 
@@ -1284,13 +1542,13 @@ def submit_reviewed_preview(
         lock = canonical_validator._submission_tick_lock(args, lane="authority")
         with lock:
             evidence_state = chain_loader()
-            _fresh_state_matches_preview(evidence_state, preview)
+            _fresh_state_matches_preview(evidence_state, preview, now=now)
             fresh_miner = miner_loader(evidence_state, qvl_path=qvl_path)
             # QVL collateral and SAT replay can span a block. Re-read every
             # mutable chain gate after evidence collection so the canonical
             # exact signer receives the latest finalized head immediately.
             fresh_state = chain_loader()
-            _fresh_state_matches_preview(fresh_state, preview)
+            _fresh_state_matches_preview(fresh_state, preview, now=now)
             _fresh_miner_matches_preview(
                 fresh_miner, state=fresh_state, preview=preview
             )
@@ -1335,8 +1593,15 @@ def submit_reviewed_preview(
                     wire_uids=wire_uids,
                     wire_weights=wire_weights,
                 )
-                reader = readback_call or _finalized_readback
-                readback = reader(state=fresh_state, submission=submission)
+                if readback_call is None:
+                    readback = _finalized_readback(
+                        state=fresh_state,
+                        submission=submission,
+                        receipt=receipt,
+                        identity=identity,
+                    )
+                else:
+                    readback = readback_call(state=fresh_state, submission=submission)
                 if (
                     readback.get("dests") != wire_uids
                     or readback.get("weights_u16") != wire_weights
@@ -1360,6 +1625,17 @@ def submit_reviewed_preview(
                     submission=finalized_submission,
                     version_key=VERSION_KEY,
                 )
+            except UID30LaunchContradiction as exc:
+                try:
+                    canonical_validator._record_pending_proof_status(
+                        args, attempt_id=attempt_id, status=canonical_validator.FAIL
+                    )
+                except Exception as persist_exc:
+                    raise UID30LaunchContradiction(
+                        f"{exc}; the positive mismatch could not be recorded, "
+                        "so every writer must remain stopped"
+                    ) from persist_exc
+                raise
             except UID30LaunchAmbiguous:
                 raise
             except Exception as exc:
@@ -1395,6 +1671,428 @@ def submit_reviewed_preview(
     )
 
 
+def _validate_attempt_identity(
+    identity: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    preview_sha256: str,
+) -> int:
+    miner = preview["miner"]
+    network = preview["network"]
+    assert isinstance(miner, Mapping)
+    assert isinstance(network, Mapping)
+    miner_uid = int(miner["uid"])
+    try:
+        strict_owner = canonical_validator._strict_zero_burn_uid30_owner(
+            dict(identity), lane="authority"
+        )
+    except canonical_validator.wire.VectorError as exc:
+        raise UID30LaunchError(
+            f"journaled zero-burn launch identity is invalid: {exc}"
+        ) from exc
+    if (
+        strict_owner != network.get("subnet_owner_hotkey")
+        or identity.get("network") != NETWORK
+        or identity.get("netuid") != NETUID
+        or identity.get("validator_hotkey") != UID30_HOTKEY
+        or identity.get("validator_uid") != UID30
+        or identity.get("uid_weights") != [[miner_uid, 1.0]]
+        or identity.get("uid_hotkeys") != [[miner_uid, MINER_HOTKEY]]
+        or identity.get("allocation_contract") != POLICY_ID
+        or identity.get("burn_destination") is not None
+        or identity.get("burn_share") != 0.0
+        or identity.get("subnet_owner_hotkey") != network.get("subnet_owner_hotkey")
+        or identity.get("next_epoch_start_block")
+        != network.get("next_epoch_start_block")
+        or identity.get("inclusion_policy") != preview.get("inclusion_policy")
+        or identity.get("uid30_launch_schema") != PREVIEW_SCHEMA
+        or identity.get("uid30_launch_preview_sha256") != "sha256:" + preview_sha256
+        or identity.get("uid30_launch_policy") != POLICY_ID
+        or identity.get("report_id") != "sha256:" + preview_sha256
+        or identity.get("exclusive_writer_assertion")
+        != {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        }
+    ):
+        raise UID30LaunchError(
+            "journaled submission identity differs from the reviewed zero-burn launch"
+        )
+    mapping_block = _strict_nonnegative_int(
+        identity.get("mapping_block"), label="journaled mapping block"
+    )
+    policy = _preview_inclusion_policy(preview)
+    if not policy.valid_from_block <= mapping_block < policy.valid_until_block:
+        raise UID30LaunchError(
+            "journaled mapping block is outside the reviewed inclusion policy"
+        )
+    return miner_uid
+
+
+def _recovery_preflight() -> Any:
+    try:
+        preflight = canonical_validator.chain_preflight(
+            network=NETWORK,
+            netuid=NETUID,
+            wallet_name=WALLET_NAME,
+            wallet_hotkey=WALLET_HOTKEY,
+        )
+    except Exception as exc:
+        raise UID30LaunchAmbiguous(
+            f"read-only recovery chain preflight failed: {exc}"
+        ) from exc
+    if (
+        preflight.genesis_hash != FINNEY_GENESIS_HASH
+        or preflight.validator_hotkey != UID30_HOTKEY
+        or preflight.validator_uid != UID30
+    ):
+        raise UID30LaunchAmbiguous(
+            "read-only recovery resolved the wrong chain or validator identity"
+        )
+    return preflight
+
+
+def recover_reviewed_preview(
+    *,
+    preview_path: Path | str,
+    reviewed_sha256: str,
+    exclusive_writer_asserted: bool = False,
+    preflight_loader: Callable[[], Any] = _recovery_preflight,
+    locate_call: Callable[
+        ..., Any
+    ] = canonical_validator._locate_pending_broadcast_receipt,
+) -> UID30RecoveryResult:
+    """Recover one exact signed UID30 attempt by finalized reads only."""
+
+    if exclusive_writer_asserted is not True:
+        raise UID30LaunchError(
+            "--assert-exclusive-writer is required; stop every other UID30 writer"
+        )
+    preview, digest = load_reviewed_preview(
+        preview_path, reviewed_sha256=reviewed_sha256
+    )
+    exclusivity = preview["exclusivity"]
+    network = preview["network"]
+    assert isinstance(exclusivity, Mapping)
+    assert isinstance(network, Mapping)
+    runtime_root = Path(str(exclusivity["runtime_root"]))
+    if runtime_root != DEFAULT_RUNTIME_ROOT:
+        raise UID30LaunchError(
+            f"live UID30 recovery requires canonical runtime root {DEFAULT_RUNTIME_ROOT}"
+        )
+    args = _submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=str(network["genesis_hash"]),
+        preview_sha256=digest,
+        authorized=True,
+    )
+    try:
+        with canonical_validator._submission_tick_lock(args, lane="authority"):
+            journal = canonical_validator._read_state(
+                canonical_validator._submission_state_path(args)
+            )
+            if journal.get("submission_pending_id") is None:
+                identity = journal.get("submission_finalized_identity")
+                intent = journal.get("submission_finalized_broadcast_intent")
+                receipt = journal.get("submission_finalized_receipt")
+                attempt_id = str(journal.get("submission_finalized_id") or "")
+                if (
+                    journal.get("submission_finalized_lane") != "authority"
+                    or not isinstance(identity, Mapping)
+                    or not isinstance(intent, Mapping)
+                    or not isinstance(receipt, Mapping)
+                    or _DIGEST_RE.fullmatch(attempt_id.removeprefix("sha256:")) is None
+                ):
+                    raise UID30LaunchError(
+                        "canonical journal has no exact finalized UID30 attempt"
+                    )
+                miner_uid = _validate_attempt_identity(
+                    identity, preview=preview, preview_sha256=digest
+                )
+                if _attempt_id(identity) != attempt_id:
+                    raise UID30LaunchContradiction(
+                        "finalized UID30 attempt id differs from its exact identity"
+                    )
+                try:
+                    extrinsic_hash = _canonical_hash(
+                        receipt["extrinsic_hash"],
+                        label="finalized receipt extrinsic hash",
+                    )
+                    block_hash = _canonical_hash(
+                        receipt["block_hash"], label="finalized receipt block hash"
+                    )
+                    block_number = int(receipt["block_number"])
+                    version_key = int(receipt["version_key"])
+                    wire_uids = [int(value) for value in receipt["wire_uids"]]
+                    wire_weights = [int(value) for value in receipt["wire_weights"]]
+                    intent_hash = _canonical_hash(
+                        intent["extrinsic_hash"], label="finalized intent hash"
+                    )
+                    intent_reference = int(intent["era_reference_block"])
+                    intent_mortal = int(intent["mortal_period_blocks"])
+                    intent_version = int(intent["version_key"])
+                    intent_uids = [int(value) for value in intent["wire_uids"]]
+                    intent_weights = [int(value) for value in intent["wire_weights"]]
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise UID30LaunchContradiction(
+                        "finalized UID30 intent or receipt is malformed"
+                    ) from exc
+                if (
+                    block_number <= 0
+                    or extrinsic_hash != intent_hash
+                    or version_key != VERSION_KEY
+                    or intent_version != VERSION_KEY
+                    or intent_reference != identity.get("mapping_block")
+                    or intent_mortal != SN39_MORTAL_PERIOD_BLOCKS
+                    or wire_uids != [miner_uid]
+                    or wire_weights != [W]
+                    or intent_uids != wire_uids
+                    or intent_weights != wire_weights
+                    or journal.get("submission_pending_proof_status")
+                    != canonical_validator.PASS
+                ):
+                    raise UID30LaunchContradiction(
+                        "finalized UID30 journal differs from the reviewed signed vector"
+                    )
+                preflight = preflight_loader()
+                if (
+                    preflight.genesis_hash != FINNEY_GENESIS_HASH
+                    or preflight.validator_hotkey != UID30_HOTKEY
+                    or preflight.validator_uid != UID30
+                ):
+                    raise UID30LaunchAmbiguous(
+                        "recovery preflight resolved the wrong chain or validator"
+                    )
+                submission = canonical_validator.ChainSubmission(
+                    success=True,
+                    extrinsic_hash=extrinsic_hash,
+                    block_hash=block_hash,
+                    block_number=block_number,
+                    finalized=True,
+                )
+                readback = _finalized_readback(
+                    state=SimpleNamespace(preflight=preflight, miner_uid=miner_uid),
+                    submission=submission,
+                    receipt=None,
+                    identity=identity,
+                    require_receipt=False,
+                )
+                if readback.get("dests") != [miner_uid] or readback.get(
+                    "weights_u16"
+                ) != [W]:
+                    raise UID30LaunchContradiction(
+                        "finalized UID30 chain readback differs from the reviewed vector"
+                    )
+                return UID30RecoveryResult(
+                    status="ALREADY_FINALIZED",
+                    preview_sha256=digest,
+                    attempt_id=attempt_id,
+                    extrinsic_hash=extrinsic_hash,
+                    block_hash=block_hash,
+                    block_number=block_number,
+                    miner_uid=miner_uid,
+                    stored_weight=W,
+                )
+            attempt_id = str(journal.get("submission_pending_id") or "")
+            identity = journal.get("submission_pending_identity")
+            intent = journal.get("submission_pending_broadcast_intent")
+            if (
+                journal.get("submission_pending_lane") != "authority"
+                or journal.get("submission_pending_phase") != "signed_intent"
+                or not isinstance(identity, Mapping)
+                or not isinstance(intent, Mapping)
+                or _DIGEST_RE.fullmatch(attempt_id.removeprefix("sha256:")) is None
+            ):
+                raise UID30LaunchAmbiguous(
+                    "canonical journal does not contain one recoverable signed UID30 intent"
+                )
+            if (
+                journal.get("submission_pending_proof_status")
+                == canonical_validator.FAIL
+            ):
+                raise UID30LaunchContradiction(
+                    "canonical journal contains a positive historical proof mismatch; "
+                    "read-only recovery is forbidden"
+                )
+            miner_uid = _validate_attempt_identity(
+                identity, preview=preview, preview_sha256=digest
+            )
+            if _attempt_id(identity) != attempt_id:
+                raise UID30LaunchAmbiguous(
+                    "journaled UID30 attempt id differs from its exact identity"
+                )
+            try:
+                extrinsic_hash = _canonical_hash(
+                    intent["extrinsic_hash"], label="journaled extrinsic hash"
+                )
+                era_reference_block = int(intent["era_reference_block"])
+                mortal_period = int(intent["mortal_period_blocks"])
+                version_key = int(intent["version_key"])
+                wire_uids = [int(value) for value in intent["wire_uids"]]
+                wire_weights = [int(value) for value in intent["wire_weights"]]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise UID30LaunchAmbiguous(
+                    "journaled UID30 broadcast intent is malformed"
+                ) from exc
+            if (
+                era_reference_block != identity.get("mapping_block")
+                or mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+                or version_key != VERSION_KEY
+                or wire_uids != [miner_uid]
+                or wire_weights != [W]
+            ):
+                raise UID30LaunchAmbiguous(
+                    "journaled broadcast intent differs from the reviewed vector"
+                )
+            preflight = preflight_loader()
+            if (
+                preflight.genesis_hash != FINNEY_GENESIS_HASH
+                or preflight.validator_hotkey != UID30_HOTKEY
+                or preflight.validator_uid != UID30
+            ):
+                raise UID30LaunchAmbiguous(
+                    "recovery preflight resolved the wrong chain or validator"
+                )
+            policy = _preview_inclusion_policy(preview)
+            candidate = journal.get("submission_pending_receipt_candidate")
+            if isinstance(candidate, Mapping):
+                try:
+                    submission = canonical_validator.ChainSubmission(
+                        success=True,
+                        extrinsic_hash=_canonical_hash(
+                            candidate["extrinsic_hash"],
+                            label="candidate extrinsic hash",
+                        ),
+                        block_hash=_canonical_hash(
+                            candidate["block_hash"], label="candidate block hash"
+                        ),
+                        block_number=int(candidate["block_number"]),
+                        finalized=True,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise UID30LaunchAmbiguous(
+                        "journaled receipt candidate is malformed"
+                    ) from exc
+                if (
+                    submission.extrinsic_hash != extrinsic_hash
+                    or candidate.get("wire_uids") != [miner_uid]
+                    or candidate.get("wire_weights") != [W]
+                ):
+                    raise UID30LaunchAmbiguous(
+                        "journaled receipt candidate differs from the signed intent"
+                    )
+            else:
+                locate_status, submission = locate_call(
+                    preflight.subtensor,
+                    extrinsic_hash=extrinsic_hash,
+                    era_reference_block=era_reference_block,
+                    mortal_period_blocks=mortal_period,
+                    validator_hotkey=UID30_HOTKEY,
+                    netuid=NETUID,
+                    version_key=VERSION_KEY,
+                    wire_uids=[miner_uid],
+                    wire_weights=[W],
+                    inclusion_policy=policy,
+                )
+                if (
+                    locate_status == canonical_validator.EXPIRED_WITHOUT_INCLUSION
+                    and submission is None
+                ):
+                    canonical_validator._expire_pending_common_submission(
+                        args, attempt_id=attempt_id
+                    )
+                    return UID30RecoveryResult(
+                        status=canonical_validator.EXPIRED_WITHOUT_INCLUSION,
+                        preview_sha256=digest,
+                        attempt_id=attempt_id,
+                        extrinsic_hash=extrinsic_hash,
+                        block_hash=None,
+                        block_number=None,
+                        miner_uid=miner_uid,
+                        stored_weight=None,
+                    )
+                if locate_status in {
+                    canonical_validator.PASS,
+                    canonical_validator.FAIL,
+                    canonical_validator.NOT_PROVEN,
+                }:
+                    canonical_validator._record_pending_proof_status(
+                        args, attempt_id=attempt_id, status=locate_status
+                    )
+                if locate_status != canonical_validator.PASS or submission is None:
+                    error = (
+                        UID30LaunchContradiction
+                        if locate_status == canonical_validator.FAIL
+                        else UID30LaunchAmbiguous
+                    )
+                    raise error(
+                        "exact signed UID30 transaction is not uniquely proven on "
+                        "the finalized chain"
+                    )
+                canonical_validator._record_pending_submission_receipt(
+                    args,
+                    attempt_id=attempt_id,
+                    submission=submission,
+                    version_key=VERSION_KEY,
+                    wire_uids=[miner_uid],
+                    wire_weights=[W],
+                )
+            recovery_state = SimpleNamespace(
+                preflight=preflight,
+                miner_uid=miner_uid,
+            )
+            try:
+                readback = _finalized_readback(
+                    state=recovery_state,
+                    submission=submission,
+                    receipt=None,
+                    identity=identity,
+                    require_receipt=False,
+                )
+            except UID30LaunchContradiction:
+                canonical_validator._record_pending_proof_status(
+                    args, attempt_id=attempt_id, status=canonical_validator.FAIL
+                )
+                raise
+            if readback.get("dests") != [miner_uid] or readback.get("weights_u16") != [
+                W
+            ]:
+                raise UID30LaunchAmbiguous(
+                    "recovered finalized readback differs from the reviewed vector"
+                )
+            canonical_validator._record_pending_proof_status(
+                args, attempt_id=attempt_id, status=canonical_validator.PASS
+            )
+            canonical_validator._finalize_common_submission(
+                args,
+                attempt_id=attempt_id,
+                submission=canonical_validator.ChainSubmission(
+                    success=True,
+                    extrinsic_hash=submission.extrinsic_hash,
+                    block_hash=submission.block_hash,
+                    block_number=submission.block_number,
+                    finalized=True,
+                ),
+                version_key=VERSION_KEY,
+            )
+            return UID30RecoveryResult(
+                status="RECOVERED_FINALIZED",
+                preview_sha256=digest,
+                attempt_id=attempt_id,
+                extrinsic_hash=str(submission.extrinsic_hash),
+                block_hash=str(submission.block_hash),
+                block_number=int(submission.block_number),
+                miner_uid=miner_uid,
+                stored_weight=W,
+            )
+    except (UID30LaunchError, UID30LaunchAmbiguous):
+        raise
+    except Exception as exc:
+        raise UID30LaunchAmbiguous(
+            f"read-only UID30 recovery remains fenced: {exc}"
+        ) from exc
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-uid30-launch")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1411,6 +2109,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="assert every other process or host able to write UID30 is stopped",
     )
+    recover = sub.add_parser(
+        "recover", help="read-only recovery of one journaled signed attempt"
+    )
+    recover.add_argument("--preview", required=True)
+    recover.add_argument("--reviewed-sha256", required=True)
+    recover.add_argument(
+        "--assert-exclusive-writer",
+        action="store_true",
+        help="assert every other process or host able to write UID30 is stopped",
+    )
     return parser
 
 
@@ -1422,6 +2130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             miner = collect_verified_miner(evidence_state, qvl_path=options.qvl)
             state = read_uid30_chain_state()
             validate_miner_proof(miner, state=state)
+            _require_miner_on_finalized_head(miner, state=state)
             document = build_preview(
                 state=state,
                 miner=miner,
@@ -1449,6 +2158,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reviewed_sha256=options.reviewed_sha256,
                 qvl_path=options.qvl,
                 confirm=options.confirm_uid30_launch,
+                exclusive_writer_asserted=options.assert_exclusive_writer,
+            )
+            print(json.dumps(result.__dict__, indent=2, sort_keys=True))
+            return 0
+        if options.command == "recover":
+            result = recover_reviewed_preview(
+                preview_path=Path(options.preview),
+                reviewed_sha256=options.reviewed_sha256,
                 exclusive_writer_asserted=options.assert_exclusive_writer,
             )
             print(json.dumps(result.__dict__, indent=2, sort_keys=True))

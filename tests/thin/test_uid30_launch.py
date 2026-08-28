@@ -4,6 +4,7 @@ import copy
 import fcntl
 import os
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,67 @@ from cathedral_thin.independent.constants import (
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST
 from scaffold import validator_thin as canonical_validator
+from scripts import publish_sn39_validator_status as status_publisher
+
+TEST_NOW = datetime(2026, 8, 28, 12, 1, tzinfo=UTC)
+
+
+class _Substrate:
+    def __init__(self, block: int, block_hash: str) -> None:
+        self.block = block
+        self.block_hash = block_hash
+
+    def get_block_hash(self, block: int) -> str:
+        if block == self.block:
+            return self.block_hash
+        if block == 1_002:
+            return "0x" + "b" * 64
+        if block == 1_000:
+            return "0x" + "1" * 64
+        if block == 999:
+            return "0x" + "5" * 64
+        return "0x" + "6" * 64
+
+    def get_chain_finalised_head(self) -> str:
+        return self.block_hash
+
+    def get_block_number(self, block_hash: str) -> int:
+        assert block_hash == self.block_hash
+        return self.block
+
+    def query(self, **_kwargs):
+        return [[61, W]]
+
+
+class _Subtensor:
+    def __init__(self, block: int, block_hash: str) -> None:
+        self.substrate = _Substrate(block, block_hash)
+        self.block = block
+
+    def metagraph(self, _netuid: int, *, block: int):
+        return SimpleNamespace(
+            block=block,
+            uids=[61],
+            hotkeys=[launch.MINER_HOTKEY],
+            axons=[SimpleNamespace(ip="8.8.8.8", port=8081, is_serving=True)],
+        )
+
+
+def _preflight(block: int, block_hash: str, next_epoch: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        block=block,
+        finalized_hash=block_hash,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        validator_hotkey=launch.UID30_HOTKEY,
+        validator_uid=launch.UID30,
+        subnet_owner_hotkey=canonical_validator.SN39_BURN_HOTKEY,
+        commit_reveal_enabled=False,
+        weights_rate_limit=100,
+        validator_blocks_since_last_update=200,
+        next_epoch_start_block=next_epoch,
+        blocks_until_next_epoch=next_epoch - block,
+        subtensor=_Subtensor(block, block_hash),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -31,10 +93,11 @@ def _canonical_test_runtime_root(tmp_path: Path, monkeypatch) -> None:
 
 def _state(**changes) -> launch.UID30ChainState:
     values = {
-        "preflight": SimpleNamespace(),
+        "preflight": None,
         "block_number": 1_000,
         "block_hash": "0x" + "1" * 64,
         "genesis_hash": FINNEY_GENESIS_HASH,
+        "subnet_owner_hotkey": canonical_validator.SN39_BURN_HOTKEY,
         "validator_hotkey": launch.UID30_HOTKEY,
         "validator_uid": launch.UID30,
         "validator_permit": True,
@@ -76,6 +139,12 @@ def _state(**changes) -> launch.UID30ChainState:
         },
     }
     values.update(changes)
+    if "preflight" not in changes:
+        values["preflight"] = _preflight(
+            int(values["block_number"]),
+            str(values["block_hash"]),
+            int(values["next_epoch_start_block"]),
+        )
     return launch.UID30ChainState(**values)
 
 
@@ -238,6 +307,7 @@ def test_confirmation_is_required_before_loading_chain(tmp_path: Path) -> None:
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/not/read",
+            now=TEST_NOW,
             confirm=False,
             chain_loader=chain_loader,
         )
@@ -260,6 +330,7 @@ def test_remote_writer_assertion_is_required_before_loading_chain(
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/not/read",
+            now=TEST_NOW,
             confirm=True,
             chain_loader=chain_loader,
         )
@@ -289,6 +360,7 @@ def test_live_submit_refuses_a_noncanonical_runtime_root(tmp_path: Path) -> None
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/not/read",
+            now=TEST_NOW,
             confirm=True,
             exclusive_writer_asserted=True,
             chain_loader=chain_loader,
@@ -317,6 +389,7 @@ def test_stale_last_update_is_refused_before_signing(tmp_path: Path) -> None:
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/not/read",
+            now=TEST_NOW,
             confirm=True,
             exclusive_writer_asserted=True,
             chain_loader=lambda: fresh,
@@ -350,6 +423,7 @@ def test_duplicate_writer_lock_is_refused_before_chain_read(tmp_path: Path) -> N
                 preview_path=path,
                 reviewed_sha256=digest,
                 qvl_path="/not/read",
+                now=TEST_NOW,
                 confirm=True,
                 exclusive_writer_asserted=True,
                 chain_loader=chain_loader,
@@ -367,6 +441,7 @@ def test_pre_sign_failure_clears_only_the_unsigned_reservation(tmp_path: Path) -
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/pinned/qvl",
+            now=TEST_NOW,
             confirm=True,
             exclusive_writer_asserted=True,
             chain_loader=_state,
@@ -401,6 +476,7 @@ def test_signed_broadcast_ambiguity_is_durable_and_never_retried(
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/pinned/qvl",
+            now=TEST_NOW,
             confirm=True,
             exclusive_writer_asserted=True,
             chain_loader=_state,
@@ -423,6 +499,7 @@ def test_signed_broadcast_ambiguity_is_durable_and_never_retried(
             preview_path=path,
             reviewed_sha256=digest,
             qvl_path="/pinned/qvl",
+            now=TEST_NOW,
             confirm=True,
             exclusive_writer_asserted=True,
             chain_loader=_state,
@@ -462,6 +539,7 @@ def test_exact_u16_vector_is_signed_read_back_and_finalized_once(
         preview_path=path,
         reviewed_sha256=digest,
         qvl_path="/pinned/qvl",
+        now=TEST_NOW,
         confirm=True,
         exclusive_writer_asserted=True,
         chain_loader=chain_loader,
@@ -491,3 +569,547 @@ def test_exact_u16_vector_is_signed_read_back_and_finalized_once(
     }
     assert journal["submission_finalized_count"] == 1
     assert SN39_MORTAL_PERIOD_BLOCKS == 16
+
+
+def test_submit_refuses_regressed_or_unrelated_finalized_head(tmp_path: Path) -> None:
+    path, digest, _runtime_root = _preview_files(tmp_path)
+    preview, _observed = launch.load_reviewed_preview(path, reviewed_sha256=digest)
+    regressed = _state(
+        block_number=999,
+        block_hash="0x" + "5" * 64,
+        last_update=799,
+        blocks_since_last_update=200,
+        blocks_until_next_epoch=201,
+    )
+    with pytest.raises(launch.UID30LaunchError, match="regressed"):
+        launch._fresh_state_matches_preview(regressed, preview, now=TEST_NOW)
+    unrelated = _state(block_hash="0x" + "6" * 64)
+    with pytest.raises(launch.UID30LaunchError, match="not canonical"):
+        launch._fresh_state_matches_preview(unrelated, preview, now=TEST_NOW)
+
+
+def test_private_or_wrong_port_axon_is_refused_before_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for ip, port, message in (
+        ("10.0.0.2", 8081, "not canonical public IP"),
+        ("8.8.8.8", 443, "port 8081"),
+    ):
+        preflight = _preflight(1_000, "0x" + "1" * 64, 1_200)
+        preflight.subtensor.metagraph = lambda _netuid, *, block, ip=ip, port=port: (
+            SimpleNamespace(
+                block=block,
+                uids=[61],
+                hotkeys=[launch.MINER_HOTKEY],
+                axons=[SimpleNamespace(ip=ip, port=port, is_serving=True)],
+            )
+        )
+        dialed: list[str] = []
+
+        def dial(url, *_args, _dialed=dialed, **_kwargs):
+            _dialed.append(url)
+            raise AssertionError("endpoint gate must run before dial")
+
+        monkeypatch.setattr(launch, "_try_collect", dial)
+        with pytest.raises(launch.UID30LaunchError, match=message):
+            launch.collect_verified_miner(
+                _state(preflight=preflight), qvl_path="/not/read"
+            )
+        assert dialed == []
+
+
+def test_fresh_miner_requires_same_current_finalized_axon(tmp_path: Path) -> None:
+    path, digest, _runtime_root = _preview_files(tmp_path)
+    preview, _observed = launch.load_reviewed_preview(path, reviewed_sha256=digest)
+    preflight = _preflight(1_000, "0x" + "1" * 64, 1_200)
+    preflight.subtensor.metagraph = lambda _netuid, *, block: SimpleNamespace(
+        block=block,
+        uids=[61],
+        hotkeys=[launch.MINER_HOTKEY],
+        axons=[SimpleNamespace(ip="1.1.1.1", port=8081, is_serving=True)],
+    )
+    with pytest.raises(launch.UID30LaunchError, match="no longer the same"):
+        launch._fresh_miner_matches_preview(
+            _proof(), state=_state(preflight=preflight), preview=preview
+        )
+
+
+def test_finalized_readback_requires_exact_signed_call_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _state()
+    preview = launch.build_preview(
+        state=state,
+        miner=_proof(),
+        runtime_root=tmp_path / "runtime",
+        created_at="2026-08-28T12:00:00Z",
+    )
+    identity = launch._attempt_identity(
+        preview=preview,
+        preview_sha256="a" * 64,
+        state=state,
+        fresh_miner=_proof(),
+    )
+    observed: dict[str, object] = {}
+
+    def classify(_subtensor, **kwargs):
+        observed["extrinsic_hash"] = kwargs["extrinsic_hash"]
+        return canonical_validator.FAIL
+
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt_awaiting_finality",
+        classify,
+    )
+    submission = canonical_validator.ChainSubmission(
+        success=True,
+        extrinsic_hash="0x" + "9" * 64,
+        block_hash=state.block_hash,
+        block_number=state.block_number,
+        finalized=False,
+    )
+    with pytest.raises(launch.UID30LaunchAmbiguous, match="signed-call proof"):
+        launch._finalized_readback(
+            state=state,
+            submission=submission,
+            receipt=SimpleNamespace(is_success=True),
+            identity=identity,
+        )
+    assert observed == {"extrinsic_hash": "0x" + "9" * 64}
+
+
+def test_signed_ambiguity_has_read_only_exact_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+    recovered_preflight = _preflight(1_002, "0x" + "b" * 64, 1_200)
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: canonical_validator.PASS,
+    )
+
+    def locate(*_args, **_kwargs):
+        return (
+            canonical_validator.PASS,
+            canonical_validator.ChainSubmission(
+                success=True,
+                extrinsic_hash="0x" + "a" * 64,
+                block_hash="0x" + "b" * 64,
+                block_number=1_002,
+                finalized=True,
+            ),
+        )
+
+    result = launch.recover_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        exclusive_writer_asserted=True,
+        preflight_loader=lambda: recovered_preflight,
+        locate_call=locate,
+    )
+    assert result.status == "RECOVERED_FINALIZED"
+    assert result.miner_uid == 61
+    assert result.stored_weight == W
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    args.state_file = str(runtime_root / "uid30-authority-state.json")
+    journal = canonical_validator._read_state(
+        canonical_validator._submission_state_path(args)
+    )
+    mirrored = canonical_validator._recover_common_finalized_submission(args, journal)
+    assert mirrored is not None
+    assert mirrored.burn_uid is None
+    assert mirrored.burn_share == 0.0
+
+
+def test_recovery_expires_absent_attempt_without_retry(tmp_path: Path) -> None:
+    path, digest, _runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+    result = launch.recover_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        exclusive_writer_asserted=True,
+        preflight_loader=lambda: _preflight(1_020, "0x" + "c" * 64, 1_200),
+        locate_call=lambda *_args, **_kwargs: (
+            canonical_validator.EXPIRED_WITHOUT_INCLUSION,
+            None,
+        ),
+    )
+    assert result.status == canonical_validator.EXPIRED_WITHOUT_INCLUSION
+    assert result.stored_weight is None
+
+
+def test_recovery_durably_fences_a_positive_historical_mismatch(
+    tmp_path: Path,
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+
+    with pytest.raises(launch.UID30LaunchContradiction, match="not uniquely proven"):
+        launch.recover_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            exclusive_writer_asserted=True,
+            preflight_loader=lambda: _preflight(1_002, "0x" + "b" * 64, 1_200),
+            locate_call=lambda *_args, **_kwargs: (canonical_validator.FAIL, None),
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    journal = canonical_validator._read_state(
+        canonical_validator._submission_state_path(args)
+    )
+    assert journal["submission_pending_proof_status"] == canonical_validator.FAIL
+
+    called = False
+
+    def forbidden_locate(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("positive mismatch must fence before an archive retry")
+
+    with pytest.raises(launch.UID30LaunchContradiction, match="recovery is forbidden"):
+        launch.recover_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            exclusive_writer_asserted=True,
+            preflight_loader=lambda: _preflight(1_002, "0x" + "b" * 64, 1_200),
+            locate_call=forbidden_locate,
+        )
+    assert called is False
+
+
+def test_already_finalized_recovery_reproves_the_exact_chain_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, _runtime_root = _preview_files(tmp_path)
+    result = launch.submit_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        qvl_path="/pinned/qvl",
+        now=TEST_NOW,
+        confirm=True,
+        exclusive_writer_asserted=True,
+        chain_loader=_state,
+        miner_loader=lambda *_args, **_kwargs: _proof(),
+        submit_call=_intent_then_receipt,
+        readback_call=lambda **_kwargs: {
+            "dests": [61],
+            "weights_u16": [W],
+        },
+    )
+    assert result.extrinsic_hash == "0x" + "a" * 64
+
+    observed: dict[str, object] = {}
+
+    def classify(_subtensor, **kwargs):
+        observed.update(kwargs)
+        return canonical_validator.PASS
+
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt",
+        classify,
+    )
+    recovered = launch.recover_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        exclusive_writer_asserted=True,
+        preflight_loader=lambda: _preflight(1_003, "0x" + "d" * 64, 1_200),
+    )
+    assert recovered.status == "ALREADY_FINALIZED"
+    assert recovered.extrinsic_hash == "0x" + "a" * 64
+    assert observed["extrinsic_hash"] == "0x" + "a" * 64
+    assert observed["block_hash"] == "0x" + "b" * 64
+    assert observed["wire_uids"] == [61]
+    assert observed["wire_weights"] == [W]
+    assert observed["require_receipt"] is False
+
+
+def test_canonical_startup_recovers_zero_burn_uid30_without_resubmitting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    args.state_file = str(runtime_root / "uid30-authority-state.json")
+    args._tick_preflight = _preflight(1_003, "0x" + "d" * 64, 1_200)
+    monkeypatch.setattr(
+        canonical_validator,
+        "_prepare_tick_preflight",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
+    monkeypatch.setattr(
+        canonical_validator,
+        "_locate_pending_broadcast_receipt",
+        lambda *_args, **_kwargs: (
+            canonical_validator.PASS,
+            canonical_validator.ChainSubmission(
+                success=True,
+                extrinsic_hash="0x" + "a" * 64,
+                block_hash="0x" + "b" * 64,
+                block_number=1_002,
+                finalized=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: canonical_validator.PASS,
+    )
+
+    recovered = canonical_validator._recover_pending_launch_receipt(args)
+    assert isinstance(recovered, canonical_validator.RecoveredAuthoritySubmission)
+    assert recovered.uid_weights == ((61, 1.0),)
+    assert recovered.burn_uid is None
+    assert recovered.burn_share == 0.0
+    assert recovered.extrinsic_hash == "0x" + "a" * 64
+    assert recovered.boundary_detail == (
+        "authority=full_provenance uids=1 vector=61:1.000000"
+    )
+    assert status_publisher.parse_weight_boundary(recovered.boundary_detail) == {
+        "authority": "full_provenance",
+        "uid_count": 1,
+        "burn_uid": None,
+        "burn_share": None,
+        "uid_weights": {"61": 1.0},
+    }
+
+
+def test_canonical_startup_rejects_malformed_zero_burn_before_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    args.state_file = str(runtime_root / "uid30-authority-state.json")
+    args._tick_preflight = _preflight(1_003, "0x" + "d" * 64, 1_200)
+    state_path = canonical_validator._submission_state_path(args)
+    journal = canonical_validator._read_state(state_path)
+    pending_id = journal["submission_pending_id"]
+    malformed = copy.deepcopy(journal)
+    malformed["submission_pending_identity"]["uid_weights"] = [
+        [61, 0.5],
+        [62, 0.5],
+    ]
+    malformed["submission_pending_identity"]["uid_hotkeys"] = [
+        [61, launch.MINER_HOTKEY],
+        [62, launch.UID30_HOTKEY],
+    ]
+    canonical_validator._replace_private_state(state_path, malformed)
+
+    monkeypatch.setattr(
+        canonical_validator,
+        "_prepare_tick_preflight",
+        lambda _args: None,
+    )
+    monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
+    located = False
+
+    def forbidden_locate(*_args, **_kwargs):
+        nonlocal located
+        located = True
+        raise AssertionError(
+            "malformed zero-burn identity must fail before archive reads"
+        )
+
+    monkeypatch.setattr(
+        canonical_validator,
+        "_locate_pending_broadcast_receipt",
+        forbidden_locate,
+    )
+    with pytest.raises(
+        canonical_validator._PostSignedSubmissionMismatch,
+        match="one exact target row",
+    ):
+        canonical_validator._recover_pending_launch_receipt(args)
+    assert located is False
+    after = canonical_validator._read_state(state_path)
+    assert after["submission_pending_id"] == pending_id
+    assert after.get("submission_finalized_id") is None
+    assert after.get("submission_pending_receipt_candidate") is None
+
+
+def test_finalized_mirror_rejects_loose_zero_burn_markers_before_lane_write(
+    tmp_path: Path,
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+    launch.submit_reviewed_preview(
+        preview_path=path,
+        reviewed_sha256=digest,
+        qvl_path="/pinned/qvl",
+        now=TEST_NOW,
+        confirm=True,
+        exclusive_writer_asserted=True,
+        chain_loader=_state,
+        miner_loader=lambda *_args, **_kwargs: _proof(),
+        submit_call=_intent_then_receipt,
+        readback_call=lambda **_kwargs: {
+            "dests": [61],
+            "weights_u16": [W],
+        },
+    )
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    lane_state = runtime_root / "uid30-authority-state.json"
+    args.state_file = str(lane_state)
+    common_state = canonical_validator._submission_state_path(args)
+    journal = canonical_validator._read_state(common_state)
+    malformed = copy.deepcopy(journal)
+    identity = malformed["submission_finalized_identity"]
+    identity["validator_hotkey"] = "5FakeValidator"
+    identity["uid_hotkeys"] = [[61, "5ArbitraryMiner"]]
+    identity["subnet_owner_hotkey"] = "not-an-ss58"
+    identity["burn_share"] = False
+    identity.pop("exclusive_writer_assertion")
+    malformed["submission_validator_hotkey"] = "5FakeValidator"
+    canonical_validator._replace_private_state(common_state, malformed)
+
+    with pytest.raises(
+        canonical_validator.wire.VectorError,
+        match="exact reviewed launch contract",
+    ):
+        canonical_validator._recover_common_finalized_submission(args, malformed)
+    assert lane_state.exists() is False
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    (
+        {"burn_share": False},
+        {"burn_hotkey": canonical_validator.SN39_BURN_HOTKEY},
+    ),
+)
+def test_specialized_recovery_uses_the_strict_zero_burn_identity(
+    tmp_path: Path, contradiction: dict[str, object]
+) -> None:
+    state = _state()
+    proof = _proof()
+    preview = launch.build_preview(
+        state=state,
+        miner=proof,
+        runtime_root=tmp_path / "runtime",
+        created_at="2026-08-28T12:00:00Z",
+    )
+    identity = launch._attempt_identity(
+        preview=preview,
+        preview_sha256="a" * 64,
+        state=state,
+        fresh_miner=proof,
+    )
+    identity.update(contradiction)
+    with pytest.raises(launch.UID30LaunchError, match="identity is invalid"):
+        launch._validate_attempt_identity(
+            identity,
+            preview=preview,
+            preview_sha256="a" * 64,
+        )
