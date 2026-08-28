@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 from bittensor.utils import get_mechid_storage_index
 from bittensor_wallet import Keypair
 
@@ -206,6 +207,16 @@ def _raw_value(value: Any) -> Any:
 
 def _strict_nonnegative_int(value: Any, *, label: str) -> int:
     raw = _raw_value(value)
+    # Bittensor 10.5 returns ``Metagraph.block`` as a zero-dimensional NumPy
+    # integer array even when the requested block is a normal Python integer.
+    # Accept only that lossless integer-scalar representation.  Floats, bools,
+    # and non-scalar arrays remain invalid rather than being coerced.
+    if isinstance(raw, np.ndarray):
+        if raw.ndim != 0 or not np.issubdtype(raw.dtype, np.integer):
+            raise UID30LaunchError(f"{label} is not a non-negative integer")
+        raw = raw.item()
+    elif isinstance(raw, np.integer):
+        raw = raw.item()
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         raise UID30LaunchError(f"{label} is not a non-negative integer")
     return raw

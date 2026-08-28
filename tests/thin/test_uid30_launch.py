@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from cathedral_thin import uid30_launch as launch
@@ -165,6 +166,32 @@ def _proof(**changes) -> launch.VerifiedMinerProof:
     }
     values.update(changes)
     return launch.VerifiedMinerProof(**values)
+
+
+def test_strict_nonnegative_int_accepts_bittensor_numpy_block_scalar() -> None:
+    assert (
+        launch._strict_nonnegative_int(
+            np.array(1_000, dtype=np.int64), label="metagraph block"
+        )
+        == 1_000
+    )
+    assert (
+        launch._strict_nonnegative_int(np.int64(1_000), label="metagraph block")
+        == 1_000
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.array([1_000], dtype=np.int64),
+        np.array(1_000.0),
+        np.array(True),
+    ],
+)
+def test_strict_nonnegative_int_rejects_non_integer_numpy_values(value) -> None:
+    with pytest.raises(launch.UID30LaunchError, match="not a non-negative integer"):
+        launch._strict_nonnegative_int(value, label="metagraph block")
 
 
 def _preview_files(
