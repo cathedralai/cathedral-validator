@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from bittensor.utils import get_mechid_storage_index
+
 from . import render
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
@@ -3808,6 +3810,69 @@ def _strict_zero_burn_uid30_owner(
         )
     assert isinstance(owner, str)
     return owner
+
+
+def _classify_zero_burn_uid30_historical_weights(
+    subtensor: Any,
+    *,
+    block_hash: str,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    reason_out: list[str] | None = None,
+) -> str:
+    """Prove the exact UID30 mechanism-0 storage row at inclusion.
+
+    A decoded successful extrinsic proves what the signer asked the chain to do.
+    The historical storage row proves what SN39 retained for UID30 at the same
+    finalized block. Archive/RPC failures remain inconclusive so recovery stays
+    fenced, while a concrete non-exact row is a terminal contradiction.
+    """
+
+    if len(wire_uids) != 1 or len(wire_weights) != 1:
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "zero-burn UID30 storage proof did not receive one exact target",
+        )
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the subtensor client exposes no substrate interface for UID30 storage",
+        )
+    try:
+        observed = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[
+                get_mechid_storage_index(39, 0),
+                SN39_UID30_LAUNCH_VALIDATOR_UID,
+            ],
+            block_hash=block_hash,
+        )
+        rows = getattr(observed, "value", observed)
+    except Exception as exc:  # noqa: BLE001 - archive/RPC failure is inconclusive
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "chain read failed at substrate.query(SubtensorModule.Weights for "
+            f"UID30): {stable_error(exc)}",
+        )
+    expected_list = [[wire_uids[0], wire_weights[0]]]
+    expected_tuple = [(wire_uids[0], wire_weights[0])]
+    if rows != expected_list and rows != expected_tuple:
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "UID30 mechanism-0 storage at inclusion differs from the exact "
+            "reviewed zero-burn vector",
+        )
+    return _receipt_verdict(
+        reason_out,
+        PASS,
+        "UID30 mechanism-0 storage at inclusion matches the exact reviewed vector",
+    )
 
 
 CHAIN_OPERATION_DEADLINE_SECS = 180.0
@@ -9227,7 +9292,16 @@ def _recover_pending_launch_receipt(
                     version_key=version_key,
                     wire_uids=wire_uids,
                     wire_weights=wire_weights,
-                    uid_hotkeys=uid_hotkeys,
+                    uid_hotkeys=(
+                        {
+                            **uid_hotkeys,
+                            SN39_UID30_LAUNCH_VALIDATOR_UID: (
+                                SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                            ),
+                        }
+                        if zero_burn_uid30
+                        else uid_hotkeys
+                    ),
                     expected_subnet_owner_hotkey=str(
                         identity.get(
                             "subnet_owner_hotkey" if zero_burn_uid30 else "burn_hotkey"
@@ -9238,6 +9312,14 @@ def _recover_pending_launch_receipt(
                     require_receipt=False,
                     reason_out=proof_reason,
                 )
+                if proof_status == PASS and zero_burn_uid30:
+                    proof_status = _classify_zero_burn_uid30_historical_weights(
+                        preflight.subtensor,
+                        block_hash=block_hash,
+                        wire_uids=wire_uids,
+                        wire_weights=wire_weights,
+                        reason_out=proof_reason,
+                    )
         except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
             raise
         except Exception as exc:

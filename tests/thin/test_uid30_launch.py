@@ -654,6 +654,7 @@ def test_finalized_readback_requires_exact_signed_call_proof(
 
     def classify(_subtensor, **kwargs):
         observed["extrinsic_hash"] = kwargs["extrinsic_hash"]
+        observed["uid_hotkeys"] = kwargs["uid_hotkeys"]
         return canonical_validator.FAIL
 
     monkeypatch.setattr(
@@ -675,7 +676,155 @@ def test_finalized_readback_requires_exact_signed_call_proof(
             receipt=SimpleNamespace(is_success=True),
             identity=identity,
         )
-    assert observed == {"extrinsic_hash": "0x" + "9" * 64}
+    assert observed == {
+        "extrinsic_hash": "0x" + "9" * 64,
+        "uid_hotkeys": {
+            61: launch.MINER_HOTKEY,
+            launch.UID30: launch.UID30_HOTKEY,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("uid30_hotkey", "signer_uid", "expected"),
+    (
+        (launch.UID30_HOTKEY, launch.UID30, canonical_validator.PASS),
+        ("5AttackerAtUid30", 62, canonical_validator.FAIL),
+    ),
+)
+def test_real_classifier_binds_uid30_to_the_signer_at_inclusion(
+    uid30_hotkey: str, signer_uid: int, expected: str
+) -> None:
+    block_number = 1_002
+    finalized_number = 1_003
+    block_hash = "0x" + "b" * 64
+    finalized_hash = "0x" + "d" * 64
+    extrinsic_hash = "0x" + "a" * 64
+    call = {
+        "call_module": "SubtensorModule",
+        "call_function": "set_mechanism_weights",
+        "call_args": [
+            {"name": "netuid", "value": launch.NETUID},
+            {"name": "mecid", "value": launch.MECID},
+            {"name": "version_key", "value": VERSION_KEY},
+            {"name": "dests", "value": [61]},
+            {"name": "weights", "value": [W]},
+        ],
+    }
+    substrate = SimpleNamespace(
+        get_chain_finalised_head=lambda: finalized_hash,
+        get_block_number=lambda value: (
+            finalized_number if value == finalized_hash else block_number
+        ),
+        get_block_hash=lambda number: (
+            finalized_hash if number == finalized_number else block_hash
+        ),
+        get_block=lambda **_kwargs: {
+            "extrinsics": [
+                SimpleNamespace(
+                    value={
+                        "extrinsic_hash": extrinsic_hash,
+                        "address": launch.UID30_HOTKEY,
+                        "call": call,
+                    }
+                )
+            ]
+        },
+        retrieve_extrinsic_by_hash=lambda *_args: SimpleNamespace(
+            is_success=True,
+            error_message=None,
+            extrinsic_idx=0,
+        ),
+    )
+    if signer_uid == launch.UID30:
+        inclusion = SimpleNamespace(
+            block=block_number,
+            uids=[launch.UID30, 61],
+            hotkeys=[uid30_hotkey, launch.MINER_HOTKEY],
+            validator_permit=[True, False],
+        )
+    else:
+        inclusion = SimpleNamespace(
+            block=block_number,
+            uids=[launch.UID30, 61, signer_uid],
+            hotkeys=[uid30_hotkey, launch.MINER_HOTKEY, launch.UID30_HOTKEY],
+            validator_permit=[False, False, True],
+        )
+    subtensor = SimpleNamespace(
+        substrate=substrate,
+        metagraph=lambda _netuid, *, block: inclusion,
+    )
+
+    assert (
+        canonical_validator._classify_finalized_receipt(
+            subtensor,
+            receipt=None,
+            extrinsic_hash=extrinsic_hash,
+            block_hash=block_hash,
+            block_number=block_number,
+            validator_hotkey=launch.UID30_HOTKEY,
+            netuid=launch.NETUID,
+            version_key=VERSION_KEY,
+            wire_uids=[61],
+            wire_weights=[W],
+            uid_hotkeys={
+                61: launch.MINER_HOTKEY,
+                launch.UID30: launch.UID30_HOTKEY,
+            },
+            require_receipt=False,
+        )
+        == expected
+    )
+
+
+def test_primary_finalization_rejects_nonexact_historical_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _state()
+    historical_queries: list[dict[str, object]] = []
+    state.preflight.subtensor.substrate.query = lambda **kwargs: (
+        historical_queries.append(kwargs) or [[62, W]]
+    )
+    preview = launch.build_preview(
+        state=state,
+        miner=_proof(),
+        runtime_root=tmp_path / "runtime",
+        created_at="2026-08-28T12:00:00Z",
+    )
+    identity = launch._attempt_identity(
+        preview=preview,
+        preview_sha256="a" * 64,
+        state=state,
+        fresh_miner=_proof(),
+    )
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt_awaiting_finality",
+        lambda *_args, **_kwargs: canonical_validator.PASS,
+    )
+    submission = canonical_validator.ChainSubmission(
+        success=True,
+        extrinsic_hash="0x" + "9" * 64,
+        block_hash=state.block_hash,
+        block_number=state.block_number,
+        finalized=False,
+    )
+
+    with pytest.raises(launch.UID30LaunchContradiction, match="mechanism weights"):
+        launch._finalized_readback(
+            state=state,
+            submission=submission,
+            receipt=SimpleNamespace(is_success=True),
+            identity=identity,
+        )
+    assert historical_queries == [
+        {
+            "module": "SubtensorModule",
+            "storage_function": "Weights",
+            "params": [39, launch.UID30],
+            "block_hash": state.block_hash,
+        }
+    ]
 
 
 def test_signed_ambiguity_has_read_only_exact_recovery(
@@ -915,10 +1064,101 @@ def test_canonical_startup_recovers_zero_burn_uid30_without_resubmitting(
     )
     args.state_file = str(runtime_root / "uid30-authority-state.json")
     args._tick_preflight = _preflight(1_003, "0x" + "d" * 64, 1_200)
+    historical_queries: list[dict[str, object]] = []
+    args._tick_preflight.subtensor.substrate.query = lambda **kwargs: (
+        historical_queries.append(kwargs) or [[61, W]]
+    )
     monkeypatch.setattr(
         canonical_validator,
         "_prepare_tick_preflight",
         lambda _args: None,
+    )
+    monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
+    monkeypatch.setattr(
+        canonical_validator,
+        "_locate_pending_broadcast_receipt",
+        lambda *_args, **_kwargs: (
+            canonical_validator.PASS,
+            canonical_validator.ChainSubmission(
+                success=True,
+                extrinsic_hash="0x" + "a" * 64,
+                block_hash="0x" + "b" * 64,
+                block_number=1_002,
+                finalized=True,
+            ),
+        ),
+    )
+    classifier_args: dict[str, object] = {}
+
+    def classify(*_args, **kwargs):
+        classifier_args.update(kwargs)
+        return canonical_validator.PASS
+
+    monkeypatch.setattr(canonical_validator, "_classify_finalized_receipt", classify)
+
+    recovered = canonical_validator._recover_pending_launch_receipt(args)
+    assert isinstance(recovered, canonical_validator.RecoveredAuthoritySubmission)
+    assert recovered.uid_weights == ((61, 1.0),)
+    assert recovered.burn_uid is None
+    assert recovered.burn_share == 0.0
+    assert recovered.extrinsic_hash == "0x" + "a" * 64
+    assert classifier_args["uid_hotkeys"] == {
+        61: launch.MINER_HOTKEY,
+        launch.UID30: launch.UID30_HOTKEY,
+    }
+    assert historical_queries == [
+        {
+            "module": "SubtensorModule",
+            "storage_function": "Weights",
+            "params": [39, launch.UID30],
+            "block_hash": "0x" + "b" * 64,
+        }
+    ]
+    assert recovered.boundary_detail == (
+        "authority=full_provenance uids=1 vector=61:1.000000"
+    )
+    assert status_publisher.parse_weight_boundary(recovered.boundary_detail) == {
+        "authority": "full_provenance",
+        "uid_count": 1,
+        "burn_uid": None,
+        "burn_share": None,
+        "uid_weights": {"61": 1.0},
+    }
+
+
+def test_canonical_zero_burn_recovery_fences_historical_storage_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    args.state_file = str(runtime_root / "uid30-authority-state.json")
+    args._tick_preflight = _preflight(1_003, "0x" + "d" * 64, 1_200)
+    args._tick_preflight.subtensor.substrate.query = lambda **_kwargs: [[62, W]]
+    monkeypatch.setattr(
+        canonical_validator, "_prepare_tick_preflight", lambda _args: None
     )
     monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
     monkeypatch.setattr(
@@ -941,22 +1181,41 @@ def test_canonical_startup_recovers_zero_burn_uid30_without_resubmitting(
         lambda *_args, **_kwargs: canonical_validator.PASS,
     )
 
-    recovered = canonical_validator._recover_pending_launch_receipt(args)
-    assert isinstance(recovered, canonical_validator.RecoveredAuthoritySubmission)
-    assert recovered.uid_weights == ((61, 1.0),)
-    assert recovered.burn_uid is None
-    assert recovered.burn_share == 0.0
-    assert recovered.extrinsic_hash == "0x" + "a" * 64
-    assert recovered.boundary_detail == (
-        "authority=full_provenance uids=1 vector=61:1.000000"
+    with pytest.raises(
+        canonical_validator._PostSignedSubmissionMismatch,
+        match="historical inclusion contract",
+    ):
+        canonical_validator._recover_pending_launch_receipt(args)
+
+    journal = canonical_validator._read_state(
+        canonical_validator._submission_state_path(args)
     )
-    assert status_publisher.parse_weight_boundary(recovered.boundary_detail) == {
-        "authority": "full_provenance",
-        "uid_count": 1,
-        "burn_uid": None,
-        "burn_share": None,
-        "uid_weights": {"61": 1.0},
-    }
+    assert journal["submission_pending_proof_status"] == canonical_validator.FAIL
+    assert journal["submission_pending_id"] is not None
+    assert journal.get("submission_finalized_id") is None
+    assert Path(args.state_file).exists() is False
+
+
+def test_zero_burn_historical_storage_rpc_failure_is_not_positive_mismatch() -> None:
+    subtensor = SimpleNamespace(
+        substrate=SimpleNamespace(
+            query=lambda **_kwargs: (_ for _ in ()).throw(
+                ConnectionError("archive unavailable")
+            )
+        )
+    )
+    reasons: list[str] = []
+    assert (
+        canonical_validator._classify_zero_burn_uid30_historical_weights(
+            subtensor,
+            block_hash="0x" + "b" * 64,
+            wire_uids=[61],
+            wire_weights=[W],
+            reason_out=reasons,
+        )
+        == canonical_validator.NOT_PROVEN
+    )
+    assert reasons[-1].startswith("chain read failed at substrate.query")
 
 
 def test_canonical_startup_rejects_malformed_zero_burn_before_finalization(

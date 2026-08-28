@@ -1464,7 +1464,13 @@ def _finalized_readback(
         version_key=VERSION_KEY,
         wire_uids=[state.miner_uid],
         wire_weights=[W],
-        uid_hotkeys={state.miner_uid: MINER_HOTKEY},
+        # Prove both ends of the reviewed contract at inclusion. The validator
+        # hotkey being registered and permitted somewhere is insufficient: it
+        # must still be the signer bound to UID30 at the receipt block.
+        uid_hotkeys={
+            state.miner_uid: MINER_HOTKEY,
+            UID30: UID30_HOTKEY,
+        },
         expected_subnet_owner_hotkey=owner,
         inclusion_policy=policy,
         require_receipt=require_receipt,
