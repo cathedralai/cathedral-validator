@@ -38,7 +38,7 @@ from cathedral_thin.independent.fetch_policy import (
     validate_policy_url,
     validated_peer_ips,
 )
-from cathedral_thin.independent.sat import SAT_WORK_PATH
+from cathedral_thin.independent.sat import MAX_SAT_RESPONSE_BYTES, SAT_WORK_PATH
 
 from .errors import IndependentLiveError
 
@@ -215,7 +215,16 @@ class HttpsEvidenceTransport:
             connection.request("POST", path, body=body, headers=headers)
             response = connection.getresponse()
             chunks: list[bytes] = []
-            budget = MAX_EVIDENCE_RESPONSE_BYTES
+            # The bound belongs to the resource, not to the transport: the
+            # sealed SAT contract refuses a work body over 64 KiB rather than
+            # truncating it, so a body the contract forbids is never handed
+            # back here. Evidence keeps the 128 KiB collect bound.
+            if path == SAT_WORK_PATH:
+                budget = MAX_SAT_RESPONSE_BYTES
+                oversize = "work response exceeded the sat-work body bound"
+            else:
+                budget = MAX_EVIDENCE_RESPONSE_BYTES
+                oversize = "evidence response exceeded the collect body bound"
             while not response.isclosed():
                 peer_socket.settimeout(remaining())
                 chunk = response.read(min(65536, budget + 1))
@@ -223,9 +232,7 @@ class HttpsEvidenceTransport:
                     break
                 budget -= len(chunk)
                 if budget < 0:
-                    raise IndependentLiveError(
-                        "evidence response exceeded the collect body bound"
-                    )
+                    raise IndependentLiveError(oversize)
                 chunks.append(chunk)
             return int(response.status), b"".join(chunks)
         finally:
