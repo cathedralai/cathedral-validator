@@ -82,6 +82,6 @@ A passing source test does not authorize a seal. Before preflight, prove:
    receipt being sealed.
 4. A claimed replay checkpoint has matching controlled envelopes, public
    evidence, candidate set, and pinned verifier bytes.
-5. The shadow or authority provenance gate is currently passing.
+5. The supported shadow provenance gate is currently passing.
 6. An independent operator can reproduce the versioned release from a clean
    checkout after publication.

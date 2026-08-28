@@ -30,7 +30,7 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Validator thin-path checks | Implemented |
 | Concurrent shadow provenance audit | Implemented; the only recurring runtime |
 | Authority/full operator mode | Removed from profiles and command-line entrypoints |
-| Current deployed vector vs independent verifier | `FAIL`: public v1/GPU-allocation contract does not match the v2/fixed-burn/body-binding verifier |
+| Current deployed vector vs independent verifier | `NOT PROVEN`: dated sources disagree, and no fresh live reproduction passed during this review. Re-derive against the live signed vector before any broadcast. |
 | General validator launch | Pending a scoreable corpus and final acceptance |
 
 ### Launch truth, 2026-08-28
@@ -44,10 +44,11 @@ The shipped recurring relay policy is not the consumed UID30 100/0 launch
 vector. Do not start it with `--broadcast` until a no-write preview proves the
 exact intended UID row and burn allocation. Any mismatch fails the launch gate.
 
-The current public contract mismatch is a launch blocker. Shadow mode reports
-it but does not veto an otherwise valid thin vector, which is why operators
-must remain in non-writing preview modes until the supported release
-converges.
+Current agreement between the deployed vector and independent verifier is not
+proven. Dated records disagree across different deployments. Shadow mode
+reports mismatches when they occur but does not veto an otherwise valid thin
+vector. Treat the unknown state as a launch blocker and remain in non-writing
+preview until a fresh reproduction against the live signed vector passes.
 
 ## What happens on each tick
 
@@ -572,7 +573,8 @@ Do not add `--broadcast` until all of the following are true:
 - [ ] You verified the source/package digest and all signing-key pins.
 - [ ] Synthetic-map and metagraph-backed dry runs passed on your machine.
 - [ ] The current vector, evidence index, and provenance outcome match your
-      intended assurance level; the known public contract mismatch is resolved.
+      intended assurance level; a fresh live reproduction proves the deployed
+      vector and independent verifier agree.
 - [ ] Your validator hotkey, permit, wallet isolation, RPC, and rollback-state
       backup are confirmed.
 - [ ] You have explicit operator authorization for a mainnet transaction.
