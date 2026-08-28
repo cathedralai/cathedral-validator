@@ -39,8 +39,12 @@ A dedicated second miner is a separate future chain change, not an extension of
 the existing UID124 machine. The read-only
 [second-miner plan](docs/SN39_SECOND_MINER_PLAN.md) pins the intended hotkey,
 checks one finalized snapshot, and derives the exact equal-score row without
-loading a wallet or exposing a write path. Its output never authorizes
-registration, axon announcement, or replacement of UID30's complete row.
+loading a wallet or exposing a write path. The separate
+`cathedral-second-miner-announce` command is a bounded first-time axon writer.
+It has its own hotkey, fixed endpoint, runtime root, preview schema, lock, and
+one-attempt journal. It refuses until registration has assigned the second
+hotkey a finalized UID. Neither command registers a miner or replaces UID30's
+complete row. The full sequence and stop conditions are in the plan.
 
 ## Quickstart
 
