@@ -250,10 +250,10 @@ def snapshot_epoch(subtensor: Any) -> EpochSnapshot:
     the composer would then check destinations against a view that predates the
     epoch it is paying for.
 
-    Finney's public endpoints prune historical state, so a node that cannot
-    answer at ``anchor_number`` answers at the head instead. That is a weaker
-    view, not a silent one: ``at_anchor`` is false and ``note`` says why, and
-    the inclusion re-check still runs against a second, later snapshot.
+    Finney's public endpoints can prune historical state, so a node that cannot
+    answer at ``anchor_number`` answers at the head for diagnostics only.
+    ``at_anchor`` is false and ``note`` says why. The live runner refuses that
+    weaker view before any Worker API call, miner dial, compose, or submission.
     """
     anchor = _epoch_anchor(subtensor)
     at_anchor = True
@@ -448,6 +448,47 @@ def cmd_run(options: argparse.Namespace) -> int:
         "tdx_create_enabled": False,
         "qvl_pass_count": 0,
     }
+
+    # Chain identity and the exact closed-tempo view are pre-spend gates. A
+    # Worker rental is billable, and a head-era UID map cannot substitute for
+    # the historical map this vector claims to score. Keep the fallback in
+    # ``snapshot_epoch`` for a useful diagnostic report, but never continue the
+    # live path with it.
+    try:
+        subtensor = _connect_subtensor()
+        report["genesis"] = observed_genesis_hash(subtensor)
+        snapshot = snapshot_epoch(subtensor)
+        anchor = snapshot.anchor
+        anchor_view = snapshot.anchor_view
+        axons = snapshot.axons
+        report["anchor"] = snapshot.as_report()
+        report["sn39"] = {
+            "uids": len(anchor_view.uid_to_hotkey),
+            "axon_skip": snapshot.skipped,
+            "serving_axons": [
+                {
+                    "uid": axon.uid,
+                    "hotkey": axon.hotkey,
+                    "ip": axon.ip,
+                    "port": axon.port,
+                    "evidence_url": axon.evidence_url(),
+                    "sat_work_url": axon.sat_work_url(),
+                }
+                for axon in axons
+            ],
+        }
+    except Exception as exc:
+        report["blockers"].append(f"chain: {type(exc).__name__}: {exc}")
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
+    if not snapshot.at_anchor:
+        report["blockers"].append(
+            "anchor: the exact closed-tempo metagraph is unavailable; the head "
+            "fallback is diagnostic only and cannot compose or submit"
+        )
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
+
     catalog: Any = None
     try:
         catalog = fetch_public_json("/v1/profiles")
@@ -519,36 +560,6 @@ def cmd_run(options: argparse.Namespace) -> int:
     except WorkersApiError as exc:
         report["blockers"].append(f"workers: {exc}")
 
-    try:
-        subtensor = _connect_subtensor()
-        report["genesis"] = observed_genesis_hash(subtensor)
-        # The closed-tempo anchor is chosen before any metagraph is read, so
-        # the anchor view belongs to the epoch this vector pays for.
-        snapshot = snapshot_epoch(subtensor)
-        anchor = snapshot.anchor
-        anchor_view = snapshot.anchor_view
-        axons = snapshot.axons
-        report["anchor"] = snapshot.as_report()
-        report["sn39"] = {
-            "uids": len(anchor_view.uid_to_hotkey),
-            "axon_skip": snapshot.skipped,
-            "serving_axons": [
-                {
-                    "uid": axon.uid,
-                    "hotkey": axon.hotkey,
-                    "ip": axon.ip,
-                    "port": axon.port,
-                    "evidence_url": axon.evidence_url(),
-                    "sat_work_url": axon.sat_work_url(),
-                }
-                for axon in axons
-            ],
-        }
-    except Exception as exc:
-        report["blockers"].append(f"chain: {type(exc).__name__}: {exc}")
-        print(json.dumps(report, indent=2, sort_keys=True, default=str))
-        return 2
-
     validator_ss58 = CANARY_HOTKEY
     collect_hits: list[dict[str, Any]] = []
     # A rented Cathedral Worker is a listed machine. It is not an SN39 miner
@@ -569,6 +580,7 @@ def cmd_run(options: argparse.Namespace) -> int:
     # UIDs advertising one machine is one machine's worth of work, not two.
     claimed: dict[str, str] = {}
     pass_count = 0
+    qvl_infra_count = 0
     qvl = None
     try:
         qvl = load_verifier(options.qvl)
@@ -601,6 +613,24 @@ def cmd_run(options: argparse.Namespace) -> int:
                 # liveness; the only thing that binds mass is the integer unit
                 # count re-derived from the challenge below.
                 pass_count += 1
+                # Claim the quote-bound machine identity before attempting SAT.
+                # Otherwise a second hotkey on the same machine could make its
+                # SAT request fail and avoid the duplicate-identity ledger,
+                # leaving the first hotkey paid for the shared machine.
+                machine_id = collected.channel_binding.digest.hex()
+                try:
+                    assert_machine_identity(
+                        machine_id, collected.assigned_hotkey, claimed
+                    )
+                except MachineIdentityConflict as exc:
+                    _forfeit_machine_conflict(
+                        rows=collect_hits,
+                        verified_units=verified_units,
+                        hotkeys={claimed[machine_id], collected.assigned_hotkey},
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    report["blockers"].append(f"machine-identity: {exc}")
+                    continue
                 sat_url = row.get("sat_url")
                 if not isinstance(sat_url, str) or not sat_url:
                     row["sat_error"] = "the axon carried no work URL"
@@ -619,29 +649,13 @@ def cmd_run(options: argparse.Namespace) -> int:
                     # and SystemExit still stop the process.
                     row["sat_error"] = f"{type(exc).__name__}: {exc}"
                     continue
-                # The machine identity is the observed TLS SPKI digest, already
-                # 64 lowercase hex, so it is the ledger key as-is.
-                machine_id = collected.channel_binding.digest.hex()
-                try:
-                    assert_machine_identity(
-                        machine_id, collected.assigned_hotkey, claimed
-                    )
-                except MachineIdentityConflict as exc:
-                    _forfeit_machine_conflict(
-                        rows=collect_hits,
-                        verified_units=verified_units,
-                        hotkeys={claimed[machine_id], collected.assigned_hotkey},
-                        reason=f"{type(exc).__name__}: {exc}",
-                    )
-                    report["blockers"].append(f"machine-identity: {exc}")
-                    continue
                 row["sat_units"] = units
                 row["sat_rule"] = SAT_WORK_UNIT_RULE
                 verified_units[collected.assigned_hotkey] = units
             elif verdict is QuoteVerdict.FAIL:
                 continue
             elif verdict is QuoteVerdict.INFRA:
-                report["blockers"].append("qvl: infrastructure failure on a quote")
+                qvl_infra_count += 1
             else:
                 never: QuoteVerdict = verdict
                 raise IndependentLiveError(f"unhandled quote verdict {never}")
@@ -656,8 +670,19 @@ def cmd_run(options: argparse.Namespace) -> int:
     # sat_work_units_v1 -- never a pass count, never quote bytes, never a
     # miner's own claim. CyberGym/Voice stay at 0.
     report["sat_work_rule"] = SAT_WORK_UNIT_RULE
-    verified_mass = mass_from_units(COMPUTE_ALLOCATION, verified_units)
     report["verified_units"] = dict(verified_units)
+    if qvl_infra_count:
+        # INFRA says this validator failed to reach a verdict. It must not turn
+        # into a miner FAIL and reallocate that miner's share to the remaining
+        # PASS rows. Preserve the evidence report, but compose no mass at all.
+        report["verified_mass"] = {}
+        report["blockers"].append(
+            f"qvl: infrastructure failure on {qvl_infra_count} quote(s); "
+            "the epoch remains uncomposed so no miner is penalized"
+        )
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 2
+    verified_mass = mass_from_units(COMPUTE_ALLOCATION, verified_units)
     report["verified_mass"] = dict(verified_mass)
     if not verified_mass:
         report["blockers"].append(

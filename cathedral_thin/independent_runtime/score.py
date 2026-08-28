@@ -42,14 +42,10 @@ def mass_from_units(allocation: int, units: Mapping[str, int]) -> dict[str, int]
     if total <= 0:
         return {}
     assigned: dict[str, int] = {}
-    used = 0
     items = sorted(cleaned.items(), key=lambda item: (-item[1], item[0]))
-    for index, (ss58, value) in enumerate(items):
+    for ss58, value in items:
         share = allocation * value // total
-        if index == len(items) - 1:
-            share = allocation - used
         if share <= 0:
             continue
         assigned[ss58] = share
-        used += share
     return assigned

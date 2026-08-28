@@ -187,6 +187,13 @@ def test_mass_from_units_omits_zero_and_splits_two_miners():
     assert set(masses) == {BOB, charlie}
 
 
+def test_mass_from_units_leaves_integer_remainder_for_burn():
+    charlie = "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y"
+    masses = mass_from_units(100, {BOB: 2, charlie: 1})
+    assert masses == {BOB: 66, charlie: 33}
+    assert sum(masses.values()) == 99
+
+
 def test_axon_evidence_url_brackets_ipv6():
     assert (
         axon_evidence_url("2001:db8::1", 8443)
@@ -651,6 +658,44 @@ def test_a_pruning_node_snapshots_the_head_and_says_so():
     assert snapshot.as_report()["at_anchor"] is False
 
 
+def test_a_pruned_anchor_stops_before_worker_spend_or_miner_dial(
+    monkeypatch, tmp_path, capsys
+):
+    """A head snapshot is diagnostic evidence, never a payable anchor view."""
+    head = TEMPO_BLOCKS * 17_000 + 41
+
+    class PrunedRunnerSubtensor(RunnerSubtensor):
+        def metagraph(self, netuid: int, block: int | None = None):
+            if block is not None:
+                self.metagraph_blocks.append(block)
+                raise RuntimeError("state already discarded for block")
+            return super().metagraph(netuid, block=block)
+
+    subtensor = PrunedRunnerSubtensor(head, port=8443)
+    monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a pruned anchor must stop before Worker or miner I/O")
+
+    monkeypatch.setattr(run_module, "fetch_public_json", forbidden)
+    monkeypatch.setattr(run_module, "_workers", forbidden)
+    monkeypatch.setattr(run_module, "_try_collect", forbidden)
+
+    code = run_module.cmd_run(run_options(tmp_path, rent=True))
+    report = json.loads(capsys.readouterr().out)
+    epoch_open = TEMPO_BLOCKS * 17_000
+
+    assert code == 2
+    assert subtensor.metagraph_blocks == [epoch_open - 1, None]
+    assert report["anchor"]["at_anchor"] is False
+    assert any("head fallback is diagnostic only" in row for row in report["blockers"])
+    assert report["catalog"] is None
+    assert report["workers"] == []
+    assert report["collect"] == []
+    assert report["compose"] is None
+    assert not (tmp_path / "state").exists()
+
+
 class FakeGenesisSubstrate:
     def get_block_hash(self, number: int) -> str:
         assert number == 0
@@ -1032,6 +1077,39 @@ def test_two_hotkeys_on_one_tls_spki_are_both_unpaid(monkeypatch, tmp_path, caps
     assert report["compose"]["status"] != STATUS_COMPOSED
 
 
+def test_duplicate_machine_cannot_hide_behind_a_failing_sat(
+    monkeypatch, tmp_path, capsys
+):
+    """A duplicate quote forfeits both identities before either SAT outcome matters."""
+    two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: ONE_SPKI})
+    sat_calls: list[str] = []
+
+    def second_sat_would_fail(*, url, assigned_hotkey, item, transport):
+        del url, item, transport
+        sat_calls.append(assigned_hotkey)
+        if assigned_hotkey == CHARLIE:
+            raise SatWorkError("deliberate duplicate-side failure")
+        return SAT_UNITS
+
+    monkeypatch.setattr(run_module, "collect_sat_work", second_sat_would_fail)
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert sat_calls == [BOB]
+    assert report["qvl_pass_count"] == 2
+    assert report["verified_units"] == {}
+    assert report["verified_mass"] == {}
+    rows = collect_rows(report)
+    for hotkey in (BOB, CHARLIE):
+        assert "MachineIdentityConflict" in rows[hotkey]["sat_error"]
+        assert "sat_units" not in rows[hotkey]
+        assert "sat_rule" not in rows[hotkey]
+    assert any("machine-identity" in row for row in report["blockers"])
+    assert report["compose"]["status"] != STATUS_COMPOSED
+
+
 def test_two_hotkeys_on_distinct_tls_spki_are_both_paid(monkeypatch, tmp_path, capsys):
     """Two machines are two machines. The ledger only refuses duplicates."""
     two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
@@ -1089,6 +1167,53 @@ def test_a_failing_quote_is_never_asked_for_work(monkeypatch, tmp_path, capsys):
     ((row,),) = (report["collect"],)
     assert row["verdict"] == "FAIL"
     assert "sat_error" not in row
+
+
+def test_one_qvl_infra_result_blocks_mass_for_the_whole_epoch(
+    monkeypatch, tmp_path, capsys
+):
+    """Validator infrastructure failure never becomes another miner's windfall."""
+    two_axon_runner(monkeypatch, {BOB: ONE_SPKI, CHARLIE: OTHER_SPKI})
+    evidence = {
+        BOB: CollectedEvidence(
+            **{**collected_for(BOB, digest=ONE_SPKI).__dict__, "quote": b"infra"}
+        ),
+        CHARLIE: CollectedEvidence(
+            **{**collected_for(CHARLIE, digest=OTHER_SPKI).__dict__, "quote": b"pass"}
+        ),
+    }
+
+    class MixedVerifier:
+        digest = PINNED_QVL
+
+        def verify(self, quote: bytes, *, expected_report_data: bytes):
+            del expected_report_data
+            return QuoteVerdict.INFRA if quote == b"infra" else QuoteVerdict.PASS
+
+    def fake_collect(url, hotkey, validator_ss58, sat_work_url_value):
+        del validator_ss58
+        return {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": evidence[hotkey],
+        }
+
+    monkeypatch.setattr(run_module, "load_verifier", lambda path: MixedVerifier())
+    monkeypatch.setattr(run_module, "_try_collect", fake_collect)
+    monkeypatch.setattr(run_module, "collect_sat_work", lambda **kwargs: SAT_UNITS)
+
+    code = run_module.cmd_run(run_options(tmp_path, confirm_canary=True))
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert report["qvl_pass_count"] == 1
+    assert report["verified_units"] == {CHARLIE: SAT_UNITS}
+    assert report["verified_mass"] == {}
+    assert any("epoch remains uncomposed" in row for row in report["blockers"])
+    assert report["compose"] is None
+    assert not (tmp_path / "state").exists()
 
 
 def test_the_runner_asks_for_the_anchor_bound_challenge(monkeypatch, tmp_path, capsys):
