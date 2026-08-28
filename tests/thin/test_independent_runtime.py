@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import ast
 import http.client
+import http.server
 import json
 import ssl
 import stat
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -66,6 +68,7 @@ from cathedral_thin.independent_runtime.errors import (
     QuoteVerifyError,
 )
 from cathedral_thin.independent_runtime.https import (
+    HttpsEvidenceTransport,
     axon_evidence_url,
     axon_sat_work_url,
     require_cert_chain_matches_peer,
@@ -279,6 +282,109 @@ def self_signed_der(common_name: str = "axon.test") -> bytes:
         .sign(key, algorithm=None)
     )
     return certificate.public_bytes(serialization.Encoding.DER)
+
+
+@pytest.fixture
+def content_length_close_tls_server(tmp_path):
+    """One real TLS/http.client peer that closes after a bounded response."""
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, algorithm=None)
+    )
+    certificate_path = tmp_path / "peer.crt"
+    private_key_path = tmp_path / "peer.key"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    private_key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+
+    requests: list[tuple[str, bytes, str | None]] = []
+    response_body = b'{"bounded":true}'
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                (self.path, self.rfile.read(length), self.headers.get("Authorization"))
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(response_body)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate_path, private_key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, requests, response_body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("path", ["/v1/evidence", "/v1/sat-work"])
+def test_https_transport_reads_content_length_before_connection_close(
+    content_length_close_tls_server, path
+):
+    """A complete short body must not dereference http.client's cleared socket."""
+
+    port, requests, expected_response = content_length_close_tls_server
+    endpoint = type(
+        "Endpoint",
+        (),
+        {
+            "host": "127.0.0.1",
+            "port": port,
+            "path": path,
+            "host_header": f"127.0.0.1:{port}",
+        },
+    )()
+    transport = HttpsEvidenceTransport(timeout=2)
+    request_body = {"route": path}
+
+    status, response_body = transport._post_peer(
+        endpoint,
+        "127.0.0.1",
+        json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode(),
+        lambda: 2.0,
+    )
+
+    assert status == 200
+    assert response_body == expected_response
+    assert requests == [
+        (
+            path,
+            json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode(),
+            None,
+        )
+    ]
 
 
 def test_a_collected_chain_whose_leaf_is_the_peer_is_accepted():

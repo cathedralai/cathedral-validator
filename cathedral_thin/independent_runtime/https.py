@@ -197,7 +197,10 @@ class HttpsEvidenceTransport:
         )
         try:
             connection.connect()
-            peer_cert = connection.sock.getpeercert(binary_form=True)
+            peer_socket = connection.sock
+            if peer_socket is None:
+                raise IndependentLiveError("TLS handshake produced no peer socket")
+            peer_cert = peer_socket.getpeercert(binary_form=True)
             self.last_spki = spki_sha256(bytes(peer_cert))
             if body is None:
                 return 0, b""
@@ -207,14 +210,14 @@ class HttpsEvidenceTransport:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            connection.sock.settimeout(remaining())
+            peer_socket.settimeout(remaining())
             path = endpoint.path if endpoint.path else EVIDENCE_PATH
             connection.request("POST", path, body=body, headers=headers)
             response = connection.getresponse()
             chunks: list[bytes] = []
             budget = MAX_EVIDENCE_RESPONSE_BYTES
-            while True:
-                connection.sock.settimeout(remaining())
+            while not response.isclosed():
+                peer_socket.settimeout(remaining())
                 chunk = response.read(min(65536, budget + 1))
                 if not chunk:
                     break
