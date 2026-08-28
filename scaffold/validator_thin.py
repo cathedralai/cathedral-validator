@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from bittensor.utils import get_mechid_storage_index
+
 from . import render
 from . import wire_vector as wire
 from .chain import CHAIN_ENDPOINT_ENV, connection_target
@@ -116,6 +118,15 @@ SN39_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
 SN39_LAUNCH_APPROVAL_OWNER_UID = 0
 SN39_RELEASE_SHA_ENV = "CATHEDRAL_SN39_RELEASE_SHA"
 SN39_LAUNCH_CONFIG_DIGEST_ENV = "CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"
+SN39_UID30_LAUNCH_SCHEMA = "cathedral_sn39_uid30_launch_preview_v1"
+SN39_UID30_LAUNCH_POLICY = "uid30_single_verified_miner_100_v1"
+SN39_UID30_LAUNCH_VALIDATOR_UID = 30
+SN39_UID30_LAUNCH_VALIDATOR_HOTKEY = (
+    "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"  # pragma: allowlist secret
+)
+SN39_UID30_LAUNCH_MINER_HOTKEY = (
+    "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G"  # pragma: allowlist secret
+)
 
 
 class _RetryablePreSignHeadDrift(wire.VectorError):
@@ -3630,7 +3641,7 @@ class RecoveredSubmission:
     vector_id: str
     signed_vector_sha256: str
     uid_weights: tuple[tuple[int, float], ...]
-    burn_uid: int
+    burn_uid: int | None
     burn_share: float
     extrinsic_hash: str
     block_hash: str
@@ -3639,10 +3650,13 @@ class RecoveredSubmission:
     @property
     def boundary_detail(self) -> str:
         vector = ",".join(f"{uid}:{weight:.6f}" for uid, weight in self.uid_weights)
+        burn = (
+            ""
+            if self.burn_uid is None
+            else f"burn_uid={self.burn_uid} burn_share={self.burn_share:.6f} "
+        )
         return (
-            f"authority=thin uids={len(self.uid_weights)} "
-            f"burn_uid={self.burn_uid} burn_share={self.burn_share:.6f} "
-            f"vector={vector}"
+            f"authority=thin uids={len(self.uid_weights)} {burn}vector={vector}"
         )
 
 
@@ -3654,7 +3668,7 @@ class RecoveredAuthoritySubmission:
     source_epoch: int
     report_id: str
     uid_weights: tuple[tuple[int, float], ...]
-    burn_uid: int
+    burn_uid: int | None
     burn_share: float
     extrinsic_hash: str
     block_hash: str
@@ -3663,11 +3677,202 @@ class RecoveredAuthoritySubmission:
     @property
     def boundary_detail(self) -> str:
         vector = ",".join(f"{uid}:{weight:.6f}" for uid, weight in self.uid_weights)
+        burn = (
+            ""
+            if self.burn_uid is None
+            else f"burn_uid={self.burn_uid} burn_share={self.burn_share:.6f} "
+        )
         return (
             f"authority=full_provenance uids={len(self.uid_weights)} "
-            f"burn_uid={self.burn_uid} "
-            f"burn_share={self.burn_share:.6f} vector={vector}"
+            f"{burn}vector={vector}"
         )
+
+
+def _canonical_uid30_launch_ss58(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        from bittensor_wallet import Keypair
+
+        return str(Keypair(ss58_address=value).ss58_address) == value
+    except Exception:  # noqa: BLE001 - malformed public identity is a refusal
+        return False
+
+
+def _strict_zero_burn_uid30_owner(
+    identity: dict[str, Any], *, lane: object
+) -> str | None:
+    """Return the exact UID30 launch owner, or reject a partial launch marker."""
+
+    marker_keys = {
+        "uid30_launch_schema",
+        "uid30_launch_policy",
+        "uid30_launch_preview_sha256",
+        "allocation_contract",
+    }
+    if not marker_keys.intersection(identity):
+        return None
+    raw_uid_weights = identity.get("uid_weights")
+    raw_uid_hotkeys = identity.get("uid_hotkeys")
+    owner = identity.get("subnet_owner_hotkey")
+    preview_digest = identity.get("uid30_launch_preview_sha256")
+    reviewed = identity.get("reviewed_preview")
+    fresh = identity.get("fresh_miner_evidence")
+    if not isinstance(reviewed, dict) or not isinstance(fresh, dict):
+        raise wire.VectorError(
+            "zero-burn UID30 identity has no exact reviewed and fresh miner evidence"
+        )
+    reviewed_miner = reviewed.get("miner")
+    reviewed_vector = reviewed.get("vector")
+    if not isinstance(reviewed_miner, dict) or not isinstance(reviewed_vector, dict):
+        raise wire.VectorError(
+            "zero-burn UID30 reviewed identity is malformed"
+        )
+    exact_rows = bool(
+        isinstance(raw_uid_weights, list)
+        and len(raw_uid_weights) == 1
+        and isinstance(raw_uid_weights[0], list)
+        and len(raw_uid_weights[0]) == 2
+        and isinstance(raw_uid_hotkeys, list)
+        and len(raw_uid_hotkeys) == 1
+        and isinstance(raw_uid_hotkeys[0], list)
+        and len(raw_uid_hotkeys[0]) == 2
+    )
+    if not exact_rows:
+        raise wire.VectorError(
+            "zero-burn UID30 identity is not one exact target row"
+        )
+    uid = raw_uid_weights[0][0]
+    weight = raw_uid_weights[0][1]
+    hotkey_uid = raw_uid_hotkeys[0][0]
+    miner_hotkey = raw_uid_hotkeys[0][1]
+    mapping_block = identity.get("mapping_block")
+    source_epoch = identity.get("source_epoch")
+    burn_share = identity.get("burn_share")
+    if (
+        lane != "authority"
+        or identity.get("network") != "finney"
+        or type(identity.get("netuid")) is not int
+        or identity.get("netuid") != 39
+        or type(identity.get("validator_uid")) is not int
+        or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or identity.get("validator_hotkey")
+        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or identity.get("uid30_launch_schema") != SN39_UID30_LAUNCH_SCHEMA
+        or identity.get("uid30_launch_policy") != SN39_UID30_LAUNCH_POLICY
+        or identity.get("allocation_contract") != SN39_UID30_LAUNCH_POLICY
+        or not isinstance(preview_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", preview_digest) is None
+        or identity.get("report_id") != preview_digest
+        or "burn_destination" not in identity
+        or identity.get("burn_destination") is not None
+        or type(burn_share) is not float
+        or burn_share != 0.0
+        or "burn_hotkey" in identity
+        or identity.get("exclusive_writer_assertion")
+        != {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        }
+        or not _canonical_uid30_launch_ss58(owner)
+        or owner
+        in {
+            SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+            SN39_UID30_LAUNCH_MINER_HOTKEY,
+        }
+        or type(uid) is not int
+        or uid < 0
+        or uid > 65535
+        or uid == SN39_UID30_LAUNCH_VALIDATOR_UID
+        or type(hotkey_uid) is not int
+        or hotkey_uid != uid
+        or miner_hotkey != SN39_UID30_LAUNCH_MINER_HOTKEY
+        or type(weight) is not float
+        or weight != 1.0
+        or type(mapping_block) is not int
+        or mapping_block <= 0
+        or type(source_epoch) is not int
+        or source_epoch != mapping_block
+        or not isinstance(identity.get("uid_safety"), dict)
+        or not identity["uid_safety"]
+        or reviewed_miner.get("uid") != uid
+        or reviewed_miner.get("hotkey") != SN39_UID30_LAUNCH_MINER_HOTKEY
+        or fresh.get("uid") != uid
+        or fresh.get("hotkey") != SN39_UID30_LAUNCH_MINER_HOTKEY
+        or reviewed_vector.get("dests") != [uid]
+        or reviewed_vector.get("weights_u16") != [65535]
+        or reviewed_vector.get("burn_destination") is not None
+        or reviewed_vector.get("burn_weight_u16") != 0
+        or reviewed_vector.get("sum_u16") != 65535
+    ):
+        raise wire.VectorError(
+            "zero-burn UID30 identity differs from the exact reviewed launch contract"
+        )
+    assert isinstance(owner, str)
+    return owner
+
+
+def _classify_zero_burn_uid30_historical_weights(
+    subtensor: Any,
+    *,
+    block_hash: str,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    reason_out: list[str] | None = None,
+) -> str:
+    """Prove the exact UID30 mechanism-0 storage row at inclusion.
+
+    A decoded successful extrinsic proves what the signer asked the chain to do.
+    The historical storage row proves what SN39 retained for UID30 at the same
+    finalized block. Archive/RPC failures remain inconclusive so recovery stays
+    fenced, while a concrete non-exact row is a terminal contradiction.
+    """
+
+    if len(wire_uids) != 1 or len(wire_weights) != 1:
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "zero-burn UID30 storage proof did not receive one exact target",
+        )
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "the subtensor client exposes no substrate interface for UID30 storage",
+        )
+    try:
+        observed = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[
+                get_mechid_storage_index(39, 0),
+                SN39_UID30_LAUNCH_VALIDATOR_UID,
+            ],
+            block_hash=block_hash,
+        )
+        rows = getattr(observed, "value", observed)
+    except Exception as exc:  # noqa: BLE001 - archive/RPC failure is inconclusive
+        return _receipt_verdict(
+            reason_out,
+            NOT_PROVEN,
+            "chain read failed at substrate.query(SubtensorModule.Weights for "
+            f"UID30): {stable_error(exc)}",
+        )
+    expected_list = [[wire_uids[0], wire_weights[0]]]
+    expected_tuple = [(wire_uids[0], wire_weights[0])]
+    if rows != expected_list and rows != expected_tuple:
+        return _receipt_verdict(
+            reason_out,
+            FAIL,
+            "UID30 mechanism-0 storage at inclusion differs from the exact "
+            "reviewed zero-burn vector",
+        )
+    return _receipt_verdict(
+        reason_out,
+        PASS,
+        "UID30 mechanism-0 storage at inclusion matches the exact reviewed vector",
+    )
 
 
 CHAIN_OPERATION_DEADLINE_SECS = 180.0
@@ -8314,6 +8519,8 @@ def _recover_common_finalized_submission(
         raise _PostSignedSubmissionMismatch(
             "finalized common submission recovery record is contradictory"
         )
+    zero_burn_owner_hotkey = _strict_zero_burn_uid30_owner(identity, lane=lane)
+    zero_burn_uid30 = zero_burn_owner_hotkey is not None
     try:
         extrinsic_hash = str(receipt["extrinsic_hash"]).lower()
         block_hash = str(receipt["block_hash"]).lower()
@@ -8337,11 +8544,17 @@ def _recover_common_finalized_submission(
             [uid for uid, _weight in ordered_weights],
             [weight for _uid, weight in ordered_weights],
         )
-        burn_hotkey = str(identity["burn_hotkey"])
-        burn_uid = next(
-            uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
-        )
-        burn_share = uid_weights[burn_uid]
+        if zero_burn_uid30:
+            assert zero_burn_owner_hotkey is not None
+            burn_hotkey = zero_burn_owner_hotkey
+            burn_uid = None
+            burn_share = 0.0
+        else:
+            burn_hotkey = str(identity["burn_hotkey"])
+            burn_uid = next(
+                uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
+            )
+            burn_share = uid_weights[burn_uid]
     except (KeyError, StopIteration, TypeError, ValueError) as exc:
         raise _PostSignedSubmissionMismatch(
             "finalized common submission identity or receipt is malformed"
@@ -8353,7 +8566,21 @@ def _recover_common_finalized_submission(
         or identity.get("validator_hotkey") != state.get("submission_validator_hotkey")
         or intent_era_reference_block != identity.get("mapping_block")
         or set(uid_hotkeys) != set(uid_weights)
-        or list(uid_hotkeys.values()).count(burn_hotkey) != 1
+        or (
+            zero_burn_uid30
+            and (
+                not burn_hotkey
+                or burn_hotkey in uid_hotkeys.values()
+                or len(uid_weights) != 1
+                or not math.isclose(
+                    next(iter(uid_weights.values())),
+                    1.0,
+                    rel_tol=0.0,
+                    abs_tol=0.0,
+                )
+            )
+        )
+        or (not zero_burn_uid30 and list(uid_hotkeys.values()).count(burn_hotkey) != 1)
         or not math.isfinite(burn_share)
         or burn_share < 0.0
         or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
@@ -8891,6 +9118,10 @@ def _recover_pending_launch_receipt(
             raise wire.VectorError(
                 "pending submission has no complete submission identity"
             )
+        zero_burn_owner_hotkey = _strict_zero_burn_uid30_owner(
+            identity, lane=pending_lane
+        )
+        zero_burn_uid30 = zero_burn_owner_hotkey is not None
         preflight = getattr(args, "_tick_preflight", None)
         if not isinstance(preflight, ChainPreflight):
             raise _PendingReceiptNotProven(
@@ -8910,6 +9141,18 @@ def _recover_pending_launch_receipt(
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise wire.VectorError("pending submission identity is malformed") from exc
+        if zero_burn_uid30:
+            assert zero_burn_owner_hotkey is not None
+            if (
+                preflight.validator_uid != SN39_UID30_LAUNCH_VALIDATOR_UID
+                or preflight.validator_hotkey
+                != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                or preflight.validator_uid in uid_weights
+                or preflight.validator_hotkey in uid_hotkeys.values()
+            ):
+                raise wire.VectorError(
+                    "pending zero-burn UID30 preflight differs from the launch signer"
+                )
         inclusion_policy = _policy_from_submission_identity(identity)
         intent = state.get("submission_pending_broadcast_intent")
         if not isinstance(intent, dict):
@@ -9049,12 +9292,34 @@ def _recover_pending_launch_receipt(
                     version_key=version_key,
                     wire_uids=wire_uids,
                     wire_weights=wire_weights,
-                    uid_hotkeys=uid_hotkeys,
-                    expected_subnet_owner_hotkey=str(identity.get("burn_hotkey") or ""),
+                    uid_hotkeys=(
+                        {
+                            **uid_hotkeys,
+                            SN39_UID30_LAUNCH_VALIDATOR_UID: (
+                                SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+                            ),
+                        }
+                        if zero_burn_uid30
+                        else uid_hotkeys
+                    ),
+                    expected_subnet_owner_hotkey=str(
+                        identity.get(
+                            "subnet_owner_hotkey" if zero_burn_uid30 else "burn_hotkey"
+                        )
+                        or ""
+                    ),
                     inclusion_policy=inclusion_policy,
                     require_receipt=False,
                     reason_out=proof_reason,
                 )
+                if proof_status == PASS and zero_burn_uid30:
+                    proof_status = _classify_zero_burn_uid30_historical_weights(
+                        preflight.subtensor,
+                        block_hash=block_hash,
+                        wire_uids=wire_uids,
+                        wire_weights=wire_weights,
+                        reason_out=proof_reason,
+                    )
         except (_PostSignedSubmissionMismatch, _PendingReceiptNotProven):
             raise
         except Exception as exc:
@@ -9093,11 +9358,17 @@ def _recover_pending_launch_receipt(
             version_key=version_key,
         )
         try:
-            burn_hotkey = str(identity["burn_hotkey"])
-            burn_uid = next(
-                uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
-            )
-            burn_share = float(uid_weights[burn_uid])
+            if zero_burn_uid30:
+                assert zero_burn_owner_hotkey is not None
+                burn_hotkey = zero_burn_owner_hotkey
+                burn_uid = None
+                burn_share = 0.0
+            else:
+                burn_hotkey = str(identity["burn_hotkey"])
+                burn_uid = next(
+                    uid for uid, hotkey in uid_hotkeys.items() if hotkey == burn_hotkey
+                )
+                burn_share = float(uid_weights[burn_uid])
         except (KeyError, StopIteration, TypeError, ValueError) as exc:
             raise wire.VectorError(
                 "recovered submission has no exact burn identity"
