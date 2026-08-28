@@ -240,13 +240,22 @@ def _anchor_config_paths(cfg: dict, config_path: str) -> None:
                 break
 
 
-def _load_config_file(path: str) -> dict:
+def _load_config_file(
+    path: str, *, reject_retired_feed_fallback: bool = True
+) -> dict:
     if tomllib is None:
         raise RuntimeError("TOML config requires Python 3.11+")
     with open(path, "rb") as fh:
         doc = tomllib.load(fh)
     provenance = doc.get("provenance")
-    if isinstance(provenance, dict) and "feed_down_fallback" in provenance:
+    # Serve/launch still reject a leftover [provenance].feed_down_fallback so
+    # a stale TOML cannot imply a fallback exists. Status only needs the
+    # journal path and tick interval, so it skips this check.
+    if (
+        reject_retired_feed_fallback
+        and isinstance(provenance, dict)
+        and "feed_down_fallback" in provenance
+    ):
         raise ValueError(
             "[provenance].feed_down_fallback was removed; a missing feed now "
             "always fails closed without changing submission authority"
@@ -270,10 +279,17 @@ def _parse_bool(value: object, *, field: str) -> bool:
     raise ValueError(f"{field} must be true or false")
 
 
-def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
+def _resolve_serve_config(
+    ns: argparse.Namespace, *, reject_retired_feed_fallback: bool = True
+) -> SimpleNamespace:
     cfg = dict(_DEFAULTS)
     if ns.config:
-        cfg.update(_load_config_file(ns.config))
+        cfg.update(
+            _load_config_file(
+                ns.config,
+                reject_retired_feed_fallback=reject_retired_feed_fallback,
+            )
+        )
     for env, flat in _ENV_MAP.items():
         v = os.environ.get(env)
         if v:
@@ -553,7 +569,7 @@ def _cmd_status(ns: argparse.Namespace) -> int:
     """
     from . import health, render
 
-    cfg = _resolve_serve_config(ns)
+    cfg = _resolve_serve_config(ns, reject_retired_feed_fallback=False)
     journal = getattr(cfg, "jsonl", None)
     if not journal:
         print(
