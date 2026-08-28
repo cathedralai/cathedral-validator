@@ -15,6 +15,7 @@ from cathedral_thin.independent_runtime import miner_axon as axon
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST
 
 SERVICE_IP = "8.8.8.8"
+SUCCESSOR_IP = "1.1.1.1"
 
 
 def chain_hash(number: int) -> str:
@@ -117,11 +118,24 @@ class FakeResponse:
     extrinsic_receipt = FakeReceipt()
 
 
+def response_at(block: int | None):
+    hash_number = 232 if block is None else block
+    return SimpleNamespace(
+        success=True,
+        extrinsic_receipt=SimpleNamespace(
+            extrinsic_hash="0x" + "cd" * 32,
+            block_hash=chain_hash(hash_number),
+            block_number=block,
+        ),
+    )
+
+
 def write_review(
     tmp_path: Path,
     *,
     state: axon.FinalizedMinerState | None = None,
     proof: axon.EndpointProof | None = None,
+    name: str = "preview.json",
 ) -> tuple[Path, str, dict]:
     document = axon.build_preview(
         state=state or miner_state(),
@@ -129,7 +143,7 @@ def write_review(
         runtime_root=tmp_path,
         created_at="2026-08-28T12:00:00Z",
     )
-    path, _, digest = axon.write_preview(document, tmp_path / "preview.json")
+    path, _, digest = axon.write_preview(document, tmp_path / name)
     return path, digest, document
 
 
@@ -145,6 +159,9 @@ def announce(
     selected_wallet=None,
     confirm=True,
     exclusive=True,
+    allow_finalized_successor=False,
+    predecessor_preview_path=None,
+    predecessor_reviewed_sha256=None,
 ):
     monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
     return axon.announce_reviewed_preview(
@@ -160,7 +177,161 @@ def announce(
         proof_loader=proof_loader,
         serve_call=serve_call,
         runtime_root=tmp_path,
+        allow_finalized_successor=allow_finalized_successor,
+        predecessor_preview_path=predecessor_preview_path,
+        predecessor_reviewed_sha256=predecessor_reviewed_sha256,
     )
+
+
+def finalized_predecessor(tmp_path: Path, monkeypatch):
+    """Create the exact first-generation FINAL journal used by successor tests."""
+
+    initial = miner_state(uid=axon.FINALIZED_SUCCESSOR_UID)
+    path, digest, _ = write_review(
+        tmp_path,
+        state=initial,
+        name="predecessor-preview.json",
+    )
+    served = miner_state(
+        block=102,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SERVICE_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=path,
+        digest=digest,
+        state_loader=StateSequence(
+            initial,
+            replace(initial, block_number=101, block_hash=chain_hash(101)),
+            served,
+        ),
+        serve_call=lambda **_kwargs: FakeResponse(),
+    )
+    journal_path = tmp_path / axon.JOURNAL_NAME
+    return path, digest, served, journal_path, journal_path.read_bytes()
+
+
+def successor_review(tmp_path: Path, *, block: int = 230, ip: str = SUCCESSOR_IP):
+    current = miner_state(
+        block=block,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SERVICE_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    proof = endpoint_proof(
+        ip=ip,
+        tls_spki_sha256="55" * 32,
+        nonce_sha256="66" * 32,
+        quote_sha256="77" * 32,
+        report_data_sha256="88" * 32,
+        anchor_number=block - 10,
+        anchor_hash=chain_hash(block - 10),
+    )
+    return (
+        *write_review(
+            tmp_path,
+            state=current,
+            proof=proof,
+            name=f"successor-{block}-{ip.replace('.', '-')}.json",
+        ),
+        current,
+        proof,
+    )
+
+
+def persisted_started_successor(tmp_path: Path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+    return (
+        predecessor_path,
+        predecessor_digest,
+        predecessor_bytes,
+        successor_path,
+        successor_digest,
+        current,
+        journal_path,
+        json.loads(journal_path.read_text()),
+    )
+
+
+def persisted_finalized_successor(tmp_path: Path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=lambda **_kwargs: response_at(232),
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+    return (
+        predecessor_path,
+        predecessor_digest,
+        successor_path,
+        successor_digest,
+        current,
+        target,
+        journal_path,
+        result,
+    )
+
+
+class UnlockTrapWallet:
+    hotkeypub = SimpleNamespace(ss58_address=axon.MINER_HOTKEY)
+    coldkeypub = SimpleNamespace(ss58_address=axon.CATHEDRAL_COLDKEY)
+
+    def __init__(self) -> None:
+        self.hotkey_accesses = 0
+
+    @property
+    def hotkey(self):
+        self.hotkey_accesses += 1
+        raise AssertionError("successor refusal reached signing-hotkey access")
 
 
 def test_preview_is_owner_only_canonical_and_proves_no_chain_write(tmp_path):
@@ -454,6 +625,7 @@ def test_digest_authorized_announcement_calls_only_serve_axon_and_reads_back(
     )
 
     assert result["status"] == "finalized_proven"
+    assert result["schema"] == axon.JOURNAL_SCHEMA
     assert result["retry_allowed"] is False
     assert result["readback"]["axon"] == {
         "ip": SERVICE_IP,
@@ -794,6 +966,1665 @@ def test_finalized_journal_is_idempotent_and_does_not_call_serve_again(
     assert first["status"] == "finalized_proven"
     assert second["status"] == "finalized_proven"
     assert len(calls) == 1
+
+
+def test_existing_baseline_recovery_never_accesses_signing_hotkey(
+    tmp_path, monkeypatch
+):
+    preview_path, digest, served, _, _ = finalized_predecessor(tmp_path, monkeypatch)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=preview_path,
+        digest=digest,
+        state_loader=StateSequence(served),
+        selected_wallet=trapped,
+        serve_call=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert result["status"] == "finalized_proven"
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+
+
+def test_existing_final_successor_default_recovery_never_accesses_signing_hotkey(
+    tmp_path, monkeypatch
+):
+    (
+        _,
+        _,
+        successor_path,
+        successor_digest,
+        _,
+        target,
+        _,
+        _,
+    ) = persisted_finalized_successor(tmp_path, monkeypatch)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(target),
+        selected_wallet=trapped,
+        serve_call=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert result["status"] == "finalized_proven"
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+
+
+def test_existing_corrupt_successor_default_refusal_never_accesses_signing_hotkey(
+    tmp_path, monkeypatch
+):
+    (
+        _,
+        _,
+        _,
+        successor_path,
+        successor_digest,
+        _,
+        journal_path,
+        started,
+    ) = persisted_started_successor(tmp_path, monkeypatch)
+    started["status"] = "corrupt"
+    journal_path.write_bytes(axon._canonical_json_bytes(started))
+    before = journal_path.read_bytes()
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=lambda _subtensor: (_ for _ in ()).throw(
+                AssertionError("corrupt successor reached chain state")
+            ),
+            selected_wallet=trapped,
+            serve_call=lambda **kwargs: calls.append(kwargs),
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_one_finalized_successor_preserves_exact_predecessor_lineage(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    states = StateSequence(
+        current,
+        replace(current, block_number=231, block_hash=chain_hash(231)),
+        miner_state(
+            block=232,
+            uid=axon.FINALIZED_SUCCESSOR_UID,
+            ip=SUCCESSOR_IP,
+            port=axon.SN39_HTTPS_PORT,
+            serving=True,
+        ),
+    )
+    calls = []
+
+    def serve_call(**kwargs):
+        calls.append(kwargs)
+        return response_at(232)
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=states,
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP,
+            tls_spki_sha256="55" * 32,
+        ),
+        serve_call=serve_call,
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+
+    assert result["status"] == "finalized_proven"
+    assert result["schema"] == axon.SUCCESSOR_JOURNAL_SCHEMA
+    assert result["journal_kind"] == axon.SUCCESSOR_JOURNAL_KIND
+    assert result["journal_generation"] == 1
+    assert result["attempt_id"].startswith("successor-sha256:")
+    assert len(calls) == 1
+    assert calls[0]["axon"].external_ip == SUCCESSOR_IP
+    lineage = result["predecessor_lineage"]
+    assert lineage["generation"] == 1
+    assert (
+        lineage["journal_sha256"]
+        == "sha256:" + hashlib.sha256(predecessor_bytes).hexdigest()
+    )
+    assert axon._canonical_json_bytes(lineage["journal"]) == predecessor_bytes
+    assert lineage["journal"]["status"] == "finalized_proven"
+    assert lineage["journal"]["readback"]["axon"]["ip"] == SERVICE_IP
+    assert json.loads(journal_path.read_text()) == result
+    assert (tmp_path / axon.LOCK_NAME).exists()
+
+
+def test_final_successor_recovery_accepts_receipt_at_stored_final_block(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    calls = []
+
+    def serve_call(**kwargs):
+        calls.append(kwargs)
+        return response_at(232)
+
+    first = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=serve_call,
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+    second = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(target),
+        serve_call=serve_call,
+    )
+
+    assert first == second
+    assert (
+        first["receipt"]["block_number"] == first["readback"]["finalized_block_number"]
+    )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["stale_current", "forked_stored_final"])
+def test_final_successor_recovery_rejects_stale_or_forked_stored_final(
+    tmp_path, monkeypatch, failure
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=lambda **_kwargs: response_at(232),
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+    journal = json.loads(journal_path.read_text())
+    if failure == "forked_stored_final":
+        journal["readback"]["finalized_block_hash"] = chain_hash(999)
+        journal_path.write_bytes(axon._canonical_json_bytes(journal))
+        current_readback = replace(target, block_number=233, block_hash=chain_hash(233))
+    else:
+        current_readback = replace(target, block_number=231, block_hash=chain_hash(231))
+    before = journal_path.read_bytes()
+
+    with pytest.raises(axon.MinerAxonAmbiguous):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current_readback),
+        )
+
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_target_readback_must_strictly_postdate_preflight(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    preflight = replace(current, block_number=231, block_hash=chain_hash(231))
+    target_at_preflight = replace(preflight, ip=SUCCESSOR_IP)
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                preflight,
+                target_at_preflight,
+                target_at_preflight,
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: response_at(231),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert json.loads(journal_path.read_text())["status"] == "submission_ambiguous"
+
+
+def test_predecessor_readback_must_strictly_postdate_its_preflight_before_unlock(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    predecessor = json.loads(journal_path.read_text())
+    predecessor["readback"]["finalized_block_number"] = predecessor["preflight"][
+        "finalized_block_number"
+    ]
+    predecessor["readback"]["finalized_block_hash"] = predecessor["preflight"][
+        "finalized_block_hash"
+    ]
+    journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
+    before = journal_path.read_bytes()
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="postdate"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            selected_wallet=trapped,
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_refuses_ambiguous_predecessor_before_unlock_or_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    predecessor = json.loads(journal_path.read_text())
+    predecessor["status"] = "submission_ambiguous"
+    journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
+    before = journal_path.read_bytes()
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="not finalized"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_refuses_current_axon_mismatch_before_unlock_or_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    mismatched = replace(current, ip="9.9.9.9")
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="axon changed"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(mismatched),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_requires_distinct_reviewed_digest_before_unlock_or_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="distinct reviewed"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=predecessor_path,
+            digest=predecessor_digest,
+            state_loader=StateSequence(miner_state()),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_requires_distinct_endpoint_without_consuming_transition(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, served, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    same_path, same_digest, _ = write_review(
+        tmp_path,
+        state=replace(served, block_number=230, block_hash=chain_hash(230)),
+        proof=endpoint_proof(nonce_sha256="99" * 32),
+        name="same-endpoint-new-review.json",
+    )
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="endpoint must differ"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=same_path,
+            digest=same_digest,
+            state_loader=StateSequence(served),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_refuses_before_128_finalized_blocks(tmp_path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(
+        tmp_path, block=229
+    )
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="127 < 128"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        {"finalized_block_number": 1},
+        {"finalized_block_hash": chain_hash(999)},
+        {"finalized_block_number": 999, "finalized_block_hash": chain_hash(999)},
+    ],
+)
+def test_successor_refuses_unreliable_predecessor_block(
+    tmp_path, monkeypatch, corruption
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    predecessor = json.loads(journal_path.read_text())
+    predecessor["readback"].update(corruption)
+    journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
+    before = journal_path.read_bytes()
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_incompatible_sdk_refuses_before_unlock_and_preserves_final(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    def incompatible(*, netuid, axon, wait_for_finalization):
+        calls.append((netuid, axon, wait_for_finalization))
+
+    with pytest.raises(axon.MinerAxonError, match="incompatible before submission"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=incompatible,
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_is_single_use_and_cannot_cycle(tmp_path, monkeypatch):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    served_successor = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            served_successor,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=lambda **_kwargs: response_at(232),
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+    third_ip = "9.9.9.9"
+    third_state = replace(
+        served_successor,
+        block_number=400,
+        block_hash=chain_hash(400),
+    )
+    third_path, third_digest, _ = write_review(
+        tmp_path,
+        state=third_state,
+        proof=endpoint_proof(ip=third_ip, tls_spki_sha256="aa" * 32),
+        name="third-preview.json",
+    )
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="already consumed"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=third_path,
+            digest=third_digest,
+            state_loader=StateSequence(third_state),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=successor_path,
+            predecessor_reviewed_sha256=successor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+
+
+def test_successor_lagging_target_readback_stays_ambiguous(tmp_path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    lagging_target = miner_state(
+        block=229,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+                lagging_target,
+                lagging_target,
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: FakeResponse(),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "submission_ambiguous"
+    assert journal["retry_allowed"] is False
+    assert journal["predecessor_lineage"]["generation"] == 1
+
+
+def test_successor_null_receipt_block_accepts_later_canonical_readback_and_is_idempotent(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    calls = []
+
+    def serve_call(**kwargs):
+        calls.append(kwargs)
+        return response_at(None)
+
+    first = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=serve_call,
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+    second = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            replace(target, block_number=233, block_hash=chain_hash(233))
+        ),
+        serve_call=serve_call,
+    )
+
+    assert first["status"] == "finalized_proven"
+    assert first["receipt"]["block_number"] is None
+    assert second["status"] == "finalized_proven"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("receipt_block", [101, 231])
+def test_successor_stale_success_receipt_is_recovered_only_by_exact_readback(
+    tmp_path, monkeypatch, receipt_block
+):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=lambda **_kwargs: response_at(receipt_block),
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+
+    assert result["status"] == "finalized_recovered"
+    assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert result["receipt"] is None
+
+
+def test_successor_numbered_receipt_without_hash_recovers_by_exact_readback(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    response = SimpleNamespace(
+        success=True,
+        extrinsic_receipt=SimpleNamespace(
+            extrinsic_hash="0x" + "cd" * 32,
+            block_hash=None,
+            block_number=232,
+        ),
+    )
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=successor_path,
+        digest=successor_digest,
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=231, block_hash=chain_hash(231)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+            ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+        ),
+        serve_call=lambda **_kwargs: response,
+        allow_finalized_successor=True,
+        predecessor_preview_path=predecessor_path,
+        predecessor_reviewed_sha256=predecessor_digest,
+    )
+
+    assert result["status"] == "finalized_recovered"
+    assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert result["receipt"] is None
+
+
+def test_successor_atomic_replace_failure_preserves_predecessor_final(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    original_write = axon._write_state
+    calls = []
+
+    def fail_successor_intent(path, document, *, exclusive):
+        if document.get("predecessor_lineage") is not None:
+            raise OSError("simulated atomic replacement failure")
+        return original_write(path, document, exclusive=exclusive)
+
+    monkeypatch.setattr(axon, "_write_state", fail_successor_intent)
+    with pytest.raises(axon.MinerAxonError, match="predecessor remains exact"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_post_replace_directory_fsync_failure_is_ambiguous_no_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    original_fsync = axon.os.fsync
+    fsync_calls = {"count": 0}
+    calls = []
+
+    def fail_directory_fsync(descriptor):
+        fsync_calls["count"] += 1
+        if fsync_calls["count"] == 2:
+            raise OSError("simulated post-replace directory fsync failure")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(axon.os, "fsync", fail_directory_fsync)
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    installed = json.loads(journal_path.read_text())
+    assert installed["schema"] == axon.SUCCESSOR_JOURNAL_SCHEMA
+    assert installed["status"] == "submission_started"
+    assert installed["predecessor_lineage"]["journal_sha256"] == (
+        "sha256:" + hashlib.sha256(predecessor_bytes).hexdigest()
+    )
+    assert calls == []
+
+
+def test_successor_crash_after_replace_leaves_recoverable_linked_intent(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    started = json.loads(journal_path.read_text())
+    assert started["status"] == "submission_started"
+    assert started["retry_allowed"] is False
+    assert (
+        axon._canonical_json_bytes(started["predecessor_lineage"]["journal"])
+        == predecessor_bytes
+    )
+    trapped = UnlockTrapWallet()
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=successor_path,
+            predecessor_reviewed_sha256=successor_digest,
+        )
+    assert trapped.hotkey_accesses == 0
+    monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
+    recovered = axon.recover_ambiguous_preview(
+        subtensor=FakeSubtensor(),
+        preview_path=successor_path,
+        reviewed_sha256=successor_digest,
+        state_loader=StateSequence(
+            miner_state(
+                block=233,
+                uid=axon.FINALIZED_SUCCESSOR_UID,
+                ip=SUCCESSOR_IP,
+                port=axon.SN39_HTTPS_PORT,
+                serving=True,
+            )
+        ),
+        runtime_root=tmp_path,
+    )
+    assert recovered["status"] == "finalized_recovered"
+    assert recovered["predecessor_lineage"] == started["predecessor_lineage"]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["lineage_digest", "lineage_generation", "lineage_null", "status"]
+)
+def test_corrupted_persisted_successor_intent_is_ambiguous_never_no_write(
+    tmp_path, monkeypatch, corruption
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    corrupted = json.loads(journal_path.read_text())
+    if corruption == "lineage_digest":
+        corrupted["predecessor_lineage"]["journal_sha256"] = "sha256:" + "00" * 32
+    elif corruption == "lineage_generation":
+        corrupted["predecessor_lineage"]["generation"] = 2
+    elif corruption == "lineage_null":
+        corrupted["predecessor_lineage"] = None
+    else:
+        corrupted["status"] = "corrupt"
+    journal_path.write_bytes(axon._canonical_json_bytes(corrupted))
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        axon.recover_ambiguous_preview(
+            subtensor=FakeSubtensor(),
+            preview_path=successor_path,
+            reviewed_sha256=successor_digest,
+            state_loader=StateSequence(
+                miner_state(
+                    block=233,
+                    uid=axon.FINALIZED_SUCCESSOR_UID,
+                    ip=SUCCESSOR_IP,
+                    port=axon.SN39_HTTPS_PORT,
+                    serving=True,
+                )
+            ),
+            runtime_root=tmp_path,
+        )
+
+    assert journal_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "schema",
+        "journal_kind",
+        "journal_generation",
+        "status",
+        "attempt_id",
+        "identity",
+        "preflight",
+        "fresh_endpoint_proof",
+        "fresh_endpoint_proof_non_mapping",
+        "remote_exclusive_announcer_asserted",
+        "serve_axon_call_authorized",
+        "serve_axon_outcome",
+        "receipt",
+        "readback",
+        "retry_allowed",
+        "predecessor_lineage",
+        "extra_field",
+        "delete_schema",
+        "delete_journal_kind",
+        "delete_journal_generation",
+        "delete_predecessor_lineage",
+        "only_attempt_marker",
+        "malformed_json",
+    ],
+)
+def test_every_persisted_successor_invariant_corruption_is_ambiguous_no_rewrite(
+    tmp_path, monkeypatch, corruption
+):
+    (
+        predecessor_path,
+        predecessor_digest,
+        _,
+        successor_path,
+        successor_digest,
+        _,
+        journal_path,
+        started,
+    ) = persisted_started_successor(tmp_path, monkeypatch)
+    corrupted = json.loads(json.dumps(started))
+    if corruption == "schema":
+        corrupted["schema"] = axon.JOURNAL_SCHEMA
+    elif corruption == "journal_kind":
+        corrupted["journal_kind"] = "other"
+    elif corruption == "journal_generation":
+        corrupted["journal_generation"] = 2
+    elif corruption == "status":
+        corrupted["status"] = "corrupt"
+    elif corruption == "attempt_id":
+        corrupted["attempt_id"] = "successor-sha256:" + "00" * 32
+    elif corruption == "identity":
+        corrupted["identity"]["preview_sha256"] = corrupted["predecessor_lineage"][
+            "journal"
+        ]["identity"]["preview_sha256"]
+    elif corruption == "preflight":
+        corrupted["preflight"]["finalized_block_number"] += 1
+    elif corruption == "fresh_endpoint_proof":
+        corrupted["fresh_endpoint_proof"]["tls_spki_sha256"] = "ff" * 32
+    elif corruption == "fresh_endpoint_proof_non_mapping":
+        corrupted["fresh_endpoint_proof"] = []
+    elif corruption == "remote_exclusive_announcer_asserted":
+        corrupted["remote_exclusive_announcer_asserted"] = False
+    elif corruption == "serve_axon_call_authorized":
+        corrupted["serve_axon_call_authorized"] = False
+    elif corruption == "serve_axon_outcome":
+        corrupted["serve_axon_outcome"] = "SUCCESS"
+    elif corruption == "receipt":
+        corrupted["receipt"] = {
+            "extrinsic_hash": "0x" + "ab" * 32,
+            "block_hash": chain_hash(232),
+            "block_number": 232,
+            "success": True,
+        }
+    elif corruption == "readback":
+        corrupted["readback"] = miner_state(
+            block=232,
+            uid=axon.FINALIZED_SUCCESSOR_UID,
+            ip=SUCCESSOR_IP,
+            port=axon.SN39_HTTPS_PORT,
+            serving=True,
+        ).artifact()
+    elif corruption == "retry_allowed":
+        corrupted["retry_allowed"] = True
+    elif corruption == "predecessor_lineage":
+        corrupted["predecessor_lineage"]["journal_sha256"] = "sha256:" + "00" * 32
+    elif corruption == "extra_field":
+        corrupted["unreviewed"] = True
+    elif corruption == "delete_schema":
+        del corrupted["schema"]
+    elif corruption == "delete_journal_kind":
+        del corrupted["journal_kind"]
+    elif corruption == "delete_journal_generation":
+        del corrupted["journal_generation"]
+    elif corruption == "delete_predecessor_lineage":
+        del corrupted["predecessor_lineage"]
+    elif corruption == "only_attempt_marker":
+        corrupted["schema"] = axon.JOURNAL_SCHEMA
+        del corrupted["journal_kind"]
+        del corrupted["journal_generation"]
+        del corrupted["predecessor_lineage"]
+
+    if corruption == "malformed_json":
+        journal_path.write_bytes(b'{"schema":')
+    else:
+        journal_path.write_bytes(axon._canonical_json_bytes(corrupted))
+    before = journal_path.read_bytes()
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=lambda _subtensor: (_ for _ in ()).throw(
+                AssertionError("corrupt successor reached chain state")
+            ),
+            selected_wallet=trapped,
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "proven_outcome",
+        "proven_receipt_null",
+        "proven_receipt_unsuccessful",
+        "proven_readback_null",
+        "recovered_outcome",
+        "recovered_receipt_malformed",
+        "recovered_readback_null",
+        "stored_final_equals_preflight",
+        "receipt_equals_preflight",
+    ],
+)
+def test_finalized_successor_status_shape_corruption_is_ambiguous_no_rewrite(
+    tmp_path, monkeypatch, corruption
+):
+    (
+        predecessor_path,
+        predecessor_digest,
+        successor_path,
+        successor_digest,
+        _,
+        _,
+        journal_path,
+        finalized,
+    ) = persisted_finalized_successor(tmp_path, monkeypatch)
+    corrupted = json.loads(json.dumps(finalized))
+    if corruption == "proven_outcome":
+        corrupted["serve_axon_outcome"] = "FINALIZED_BY_READBACK"
+    elif corruption == "proven_receipt_null":
+        corrupted["receipt"] = None
+    elif corruption == "proven_receipt_unsuccessful":
+        corrupted["receipt"]["success"] = False
+    elif corruption == "proven_readback_null":
+        corrupted["readback"] = None
+    else:
+        corrupted["status"] = "finalized_recovered"
+        corrupted["serve_axon_outcome"] = "FINALIZED_BY_READBACK"
+        corrupted["receipt"] = None
+        if corruption == "recovered_outcome":
+            corrupted["serve_axon_outcome"] = "SUCCESS"
+        elif corruption == "recovered_receipt_malformed":
+            corrupted["receipt"] = {"success": True}
+        elif corruption == "recovered_readback_null":
+            corrupted["readback"] = None
+        elif corruption == "stored_final_equals_preflight":
+            corrupted["readback"] = json.loads(json.dumps(corrupted["preflight"]))
+            corrupted["readback"]["axon"] = {
+                "ip": SUCCESSOR_IP,
+                "port": axon.SN39_HTTPS_PORT,
+                "is_serving": True,
+            }
+        elif corruption == "receipt_equals_preflight":
+            block = corrupted["preflight"]["finalized_block_number"]
+            corrupted["receipt"] = {
+                "extrinsic_hash": "0x" + "ab" * 32,
+                "block_hash": chain_hash(block),
+                "block_number": block,
+                "success": True,
+            }
+    journal_path.write_bytes(axon._canonical_json_bytes(corrupted))
+    before = journal_path.read_bytes()
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=lambda _subtensor: (_ for _ in ()).throw(
+                AssertionError("corrupt final successor reached chain state")
+            ),
+            selected_wallet=trapped,
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_recovery_persistence_failure_remains_ambiguous(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
+    monkeypatch.setattr(
+        axon,
+        "_write_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated recovery persistence failure")
+        ),
+    )
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        axon.recover_ambiguous_preview(
+            subtensor=FakeSubtensor(),
+            preview_path=successor_path,
+            reviewed_sha256=successor_digest,
+            state_loader=StateSequence(
+                miner_state(
+                    block=233,
+                    uid=axon.FINALIZED_SUCCESSOR_UID,
+                    ip=SUCCESSOR_IP,
+                    port=axon.SN39_HTTPS_PORT,
+                    serving=True,
+                )
+            ),
+            runtime_root=tmp_path,
+        )
+
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_final_persistence_failure_recovers_without_second_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, _, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    original_write = axon._write_state
+    fail_final = {"enabled": True}
+    calls = []
+
+    def persistence_fault(path, document, *, exclusive):
+        if (
+            fail_final["enabled"]
+            and document.get("predecessor_lineage") is not None
+            and document.get("status") == "finalized_proven"
+        ):
+            raise OSError("simulated final persistence failure")
+        return original_write(path, document, exclusive=exclusive)
+
+    monkeypatch.setattr(axon, "_write_state", persistence_fault)
+
+    def serve_call(**kwargs):
+        calls.append(kwargs)
+        return response_at(232)
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="persistence failed"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+                target,
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=serve_call,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    fail_final["enabled"] = False
+    monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
+    recovered = axon.recover_ambiguous_preview(
+        subtensor=FakeSubtensor(),
+        preview_path=successor_path,
+        reviewed_sha256=successor_digest,
+        state_loader=StateSequence(
+            replace(target, block_number=233, block_hash=chain_hash(233))
+        ),
+        runtime_root=tmp_path,
+    )
+    assert recovered["status"] == "finalized_recovered"
+    assert len(calls) == 1
+
+
+def test_successor_external_writer_at_target_is_refused_not_laundered(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    external_target = replace(current, ip=SUCCESSOR_IP)
+    trapped = UnlockTrapWallet()
+
+    with pytest.raises(axon.MinerAxonError, match="axon changed"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(external_target),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_receipt_after_predecessor_readback_is_refused(tmp_path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    predecessor = json.loads(journal_path.read_text())
+    predecessor["receipt"].update({"block_number": 103, "block_hash": chain_hash(103)})
+    journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
+    before = journal_path.read_bytes()
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+
+    with pytest.raises(axon.MinerAxonError, match="postdates"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert journal_path.read_bytes() == before
+
+
+def test_successor_partial_opt_in_arguments_refuse_before_preview_or_unlock(
+    tmp_path, monkeypatch
+):
+    trapped = UnlockTrapWallet()
+    missing = tmp_path / "missing.json"
+
+    with pytest.raises(axon.MinerAxonError, match="requires the reviewed predecessor"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=missing,
+            digest="00" * 32,
+            state_loader=StateSequence(miner_state()),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+        )
+    with pytest.raises(axon.MinerAxonError, match="require --allow"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=missing,
+            digest="00" * 32,
+            state_loader=StateSequence(miner_state()),
+            selected_wallet=trapped,
+            predecessor_preview_path=missing,
+        )
+
+    assert trapped.hotkey_accesses == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "extra_field",
+        "wrong_readback_hotkey",
+        "readback_endpoint_mismatch",
+        "preflight_already_target",
+    ],
+)
+def test_successor_refuses_malformed_or_wrong_pin_predecessor(
+    tmp_path, monkeypatch, corruption
+):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    predecessor = json.loads(journal_path.read_text())
+    if corruption == "extra_field":
+        predecessor["unreviewed"] = True
+    elif corruption == "wrong_readback_hotkey":
+        predecessor["readback"]["hotkey"] = axon.VALIDATOR_HOTKEY
+    elif corruption == "readback_endpoint_mismatch":
+        predecessor["readback"]["axon"]["ip"] = SUCCESSOR_IP
+    else:
+        predecessor["preflight"]["axon"] = {
+            "ip": SERVICE_IP,
+            "port": axon.SN39_HTTPS_PORT,
+            "is_serving": True,
+        }
+    journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
+    before = journal_path.read_bytes()
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == before
+
+
+def test_finalized_successor_is_pinned_to_uid124_before_unlock_or_call(
+    tmp_path, monkeypatch
+):
+    initial = miner_state(uid=17)
+    predecessor_path, predecessor_digest, _ = write_review(
+        tmp_path,
+        state=initial,
+        name="uid17-predecessor.json",
+    )
+    served = miner_state(
+        block=102,
+        uid=17,
+        ip=SERVICE_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=predecessor_path,
+        digest=predecessor_digest,
+        state_loader=StateSequence(initial, initial, served),
+        serve_call=lambda **_kwargs: FakeResponse(),
+    )
+    successor_path, successor_digest, _ = write_review(
+        tmp_path,
+        state=replace(served, block_number=230, block_hash=chain_hash(230)),
+        proof=endpoint_proof(ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32),
+        name="uid17-successor.json",
+    )
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="pinned to miner UID 124"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(served),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+
+
+def test_successor_uses_the_existing_stable_lock_and_preserves_final_on_contention(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, document, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    assert document["local_state"]["announcement_lock"] == str(
+        tmp_path / axon.LOCK_NAME
+    )
+    with axon._announcement_lock(tmp_path):
+        with pytest.raises(axon.MinerAxonError, match="another local"):
+            announce(
+                tmp_path,
+                monkeypatch,
+                preview_path=successor_path,
+                digest=successor_digest,
+                state_loader=StateSequence(current),
+                serve_call=lambda **kwargs: calls.append(kwargs),
+                selected_wallet=trapped,
+                allow_finalized_successor=True,
+                predecessor_preview_path=predecessor_path,
+                predecessor_reviewed_sha256=predecessor_digest,
+            )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_fresh_spki_drift_refuses_before_unlock_or_call(
+    tmp_path, monkeypatch
+):
+    predecessor_path, predecessor_digest, _, journal_path, predecessor_bytes = (
+        finalized_predecessor(tmp_path, monkeypatch)
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    trapped = UnlockTrapWallet()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="tls_spki"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(current),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="ff" * 32
+            ),
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=trapped,
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert calls == []
+    assert journal_path.read_bytes() == predecessor_bytes
+
+
+def test_successor_noncanonical_target_readback_stays_ambiguous(tmp_path, monkeypatch):
+    predecessor_path, predecessor_digest, _, journal_path, _ = finalized_predecessor(
+        tmp_path, monkeypatch
+    )
+    successor_path, successor_digest, _, current, _ = successor_review(tmp_path)
+    noncanonical_target = miner_state(
+        block=232,
+        uid=axon.FINALIZED_SUCCESSOR_UID,
+        ip=SUCCESSOR_IP,
+        port=axon.SN39_HTTPS_PORT,
+        serving=True,
+    )
+    noncanonical_target = replace(noncanonical_target, block_hash=chain_hash(999))
+
+    with pytest.raises(axon.MinerAxonAmbiguous, match="do not retry"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=successor_path,
+            digest=successor_digest,
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=231, block_hash=chain_hash(231)),
+                noncanonical_target,
+                noncanonical_target,
+            ),
+            proof_loader=lambda *_args, **_kwargs: endpoint_proof(
+                ip=SUCCESSOR_IP, tls_spki_sha256="55" * 32
+            ),
+            serve_call=lambda **_kwargs: response_at(232),
+            allow_finalized_successor=True,
+            predecessor_preview_path=predecessor_path,
+            predecessor_reviewed_sha256=predecessor_digest,
+        )
+
+    assert json.loads(journal_path.read_text())["status"] == "submission_ambiguous"
 
 
 class FakeAxonInfo:
