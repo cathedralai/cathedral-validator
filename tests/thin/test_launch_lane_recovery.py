@@ -50,8 +50,7 @@ def test_launch_lane_transition_is_bound_to_signer_chain_and_netuid() -> None:
         is False
     )
     assert (
-        vt._authority_lane_transition_authorized(_state(), _identity(netuid=7))
-        is False
+        vt._authority_lane_transition_authorized(_state(), _identity(netuid=7)) is False
     )
 
 

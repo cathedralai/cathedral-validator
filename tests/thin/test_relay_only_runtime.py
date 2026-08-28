@@ -37,7 +37,9 @@ def test_only_the_relay_profile_ships_and_the_release_binds_it() -> None:
         str(ROOT / "scripts" / "build_sn39_release_manifest.py")
     )["RELEASE_FILES"]
     assert "config/validator-thin-sn39-relay.toml" in release_files
-    assert all("authority" not in path and "selfcompose" not in path for path in release_files)
+    assert all(
+        "authority" not in path and "selfcompose" not in path for path in release_files
+    )
 
 
 def test_every_shipped_validator_profile_selects_shadow() -> None:
