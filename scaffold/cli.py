@@ -29,6 +29,10 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
 
+class _RetiredFeedFallbackError(ValueError):
+    """A removed fallback key remains in an operator configuration."""
+
+
 _DEFAULTS = {
     "publisher_url": "https://api.cathedral.computer",
     "public_key_hex": "",
@@ -240,9 +244,7 @@ def _anchor_config_paths(cfg: dict, config_path: str) -> None:
                 break
 
 
-def _load_config_file(
-    path: str, *, reject_retired_feed_fallback: bool = True
-) -> dict:
+def _load_config_file(path: str, *, reject_retired_feed_fallback: bool = True) -> dict:
     if tomllib is None:
         raise RuntimeError("TOML config requires Python 3.11+")
     with open(path, "rb") as fh:
@@ -250,15 +252,21 @@ def _load_config_file(
     provenance = doc.get("provenance")
     # Serve/launch still reject a leftover [provenance].feed_down_fallback so
     # a stale TOML cannot imply a fallback exists. Status only needs the
-    # journal path and tick interval, so it skips this check.
-    if (
-        reject_retired_feed_fallback
-        and isinstance(provenance, dict)
-        and "feed_down_fallback" in provenance
-    ):
-        raise ValueError(
+    # journal path and tick interval, so it warns and continues reading them.
+    retired_feed_fallback = (
+        isinstance(provenance, dict) and "feed_down_fallback" in provenance
+    )
+    if retired_feed_fallback:
+        message = (
             "[provenance].feed_down_fallback was removed; a missing feed now "
             "always fails closed without changing submission authority"
+        )
+        if reject_retired_feed_fallback:
+            raise _RetiredFeedFallbackError(message)
+        print(
+            f"warning: {message}. Status will read the journal, but serve and "
+            "launch commands refuse this config until you delete the retired key.",
+            file=sys.stderr,
         )
     out: dict = {}
     for (section, key), flat in _CONFIG_MAP.items():
@@ -878,6 +886,9 @@ def main(argv: list[str] | None = None) -> int:
     # treats it as a failed start.
     try:
         return ns.func(ns)
+    except _RetiredFeedFallbackError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except EventLogPathError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
