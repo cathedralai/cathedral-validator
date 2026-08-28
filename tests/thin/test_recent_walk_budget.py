@@ -11,8 +11,8 @@ happened (issue #64).
 
 The bridge now distinguishes three conditions BEFORE spending any fetches:
 a tip that aged out of the signed window, a gap wider than the remaining
-budget affords (both are unreachable-tip, operator-catch-up diagnoses), and
-a link that fails inside the walk — only that last one is a chain break.
+budget affords (both require a future reviewed reconciliation command), and a
+link that fails inside the walk — only that last one is a chain break.
 """
 
 from __future__ import annotations
@@ -181,7 +181,9 @@ def test_a_local_store_walk_is_not_budget_bounded(fake_cathedral):
 # -- an unreachable tip names its condition, before spending anything -------
 
 
-def test_a_gap_beyond_the_affordable_walk_asks_for_catch_up(fake_cathedral):
+def test_a_gap_beyond_the_affordable_walk_requires_reviewed_reconciliation(
+    fake_cathedral,
+):
     store = _BlobStore()
     rows, final_report_id = _chain(
         store, [200, 300, 400, 500], tip_report_id="report-100"
@@ -189,7 +191,7 @@ def test_a_gap_beyond_the_affordable_walk_asks_for_catch_up(fake_cathedral):
     # 11 remaining artifacts afford 3 links; the gap is 4 links wide.
     with pytest.raises(
         pa.ProvenanceAuditError,
-        match=r"4 links behind.*affords only 3 links.*catch-up",
+        match=r"4 links behind.*affords only 3 links.*reconciliation command",
     ) as excinfo:
         _bridge(
             rows,
@@ -204,7 +206,7 @@ def test_a_gap_beyond_the_affordable_walk_asks_for_catch_up(fake_cathedral):
     assert store.calls == 0
 
 
-def test_a_tip_that_aged_out_of_the_window_asks_for_catch_up(fake_cathedral):
+def test_a_tip_that_aged_out_requires_reviewed_reconciliation(fake_cathedral):
     store = _BlobStore()
     # No row at or below the tip's epoch survives in the signed window, so
     # continuity back to the tip is unprovable — not broken.
@@ -213,7 +215,7 @@ def test_a_tip_that_aged_out_of_the_window_asks_for_catch_up(fake_cathedral):
     )
     with pytest.raises(
         pa.ProvenanceAuditError,
-        match=r"aged out.*oldest retained epoch 200.*catch-up",
+        match=r"aged out.*oldest retained epoch 200.*reconciliation command",
     ) as excinfo:
         _bridge(rows, store, latest_previous_report_id=final_report_id)
     assert "breaks the recorded export chain" not in str(excinfo.value)
@@ -262,7 +264,7 @@ def test_an_in_walk_predecessor_mismatch_is_still_a_chain_break(fake_cathedral):
         match=r"link for epoch 300 failed verification.*breaks the recorded",
     ) as excinfo:
         _bridge(rows, store, latest_previous_report_id=final_report_id)
-    assert "catch-up" not in str(excinfo.value)
+    assert "reconciliation command" not in str(excinfo.value)
 
 
 def test_a_completed_walk_whose_last_link_is_not_cited_is_still_a_break(

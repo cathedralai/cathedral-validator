@@ -1,4 +1,4 @@
-# Cathedral SN39 self-composing publisher — slim runtime image.
+# Cathedral SN39 origin publisher — slim runtime image.
 #
 # Ported verbatim from the hub's deploy/Dockerfile (cathedral repo) with two
 # deliberate deltas for the consolidated validator:
@@ -11,9 +11,9 @@
 #      publisher runtime imports only scaffold.* (scaffold.publisher.server:app,
 #      mechanism_router, external_scores, weights).
 #
-# This image REPLACES the hub-hosted publisher trio (cathedral-scorer-sn39,
-# cathedral-publisher, cathedral-weight-feed-publish) at cutover — same module
-# path (scaffold.publisher.server:app), validator-sourced code.
+# This image runs the same canonical origin app as
+# cathedral-scorer-sn39.service: scaffold.publisher.server:app from
+# validator-sourced code. It does not define an alternate publisher role.
 FROM python:3.12-slim AS base
 
 # Faster, quieter, no .pyc clutter; unbuffered logs.
@@ -58,4 +58,4 @@ ENTRYPOINT ["/app/deploy/publisher/entrypoint.sh"]
 
 # Run through sh so the runtime PORT expands after the entrypoint drops
 # privileges; exec lets uvicorn receive SIGTERM directly.
-CMD ["sh", "-c", "exec uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --no-access-log"]
+CMD ["sh", "-c", "exec uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --no-access-log"]

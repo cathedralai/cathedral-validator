@@ -38,8 +38,8 @@ _DEFAULTS = {
     "wallet_name": "validator",
     "wallet_hotkey": "default",
     "state_file": str(Path.home() / ".cathedral" / "thin_validator.json"),
-    # Shared by thin and FULL-authority processes, independent of HOME and
-    # lane-specific state files. The service installer creates it mode 0700.
+    # Shared by recurring submissions and bounded launch/recovery, independent
+    # of HOME and lane-specific state files. The installer creates it mode 0700.
     "runtime_root": "/var/lib/cathedral-validator",
     "interval_secs": 1500.0,
     "max_submissions": 0,
@@ -57,21 +57,16 @@ _DEFAULTS = {
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
-    # Attestation-verified (thin/shadow) is the PRINCIPAL default: submit exactly
+    # Attestation-verified (thin/shadow) is the ONLY recurring operator mode:
+    # submit exactly
     # the signed weight vector after the on-chain write path enforces the
     # weight-policy signature + freshness + monotonic rollback fence, while the
     # full-provenance verifier re-checks the published evidence chain (TDX
     # attestation + per-report signatures) concurrently in shadow and never blocks
     # the write. The TDX attestation itself is verified compose-side by the
     # publisher and by that non-blocking shadow verifier — NOT on the write path.
-    # This is the mode that wins the chain-finality race — a heavy per-tick
-    # recompute (authority) loses it. Authority is OPT-IN, for operators who hold the controlled
-    # raw-evidence package and deliberately originate weights: select it with
-    # `--mode full` (or `mode = "authority"` in the TOML). No shipped config
-    # profile selects it — the authority profiles were removed in PR #39 — so
-    # it is reachable only from an operator's own config or flag. full -> thin
-    # remains the forbidden direction, so authority is never reached by a
-    # silent downgrade.
+    # Authority-labelled code remains internal only for bounded launch-journal
+    # recovery. The recurring CLI never originates weights from a recomputation.
     "provenance": "shadow",
     "evidence_url": None,  # default: <publisher_url>/v1/evidence
     "evidence_dir": None,
@@ -88,20 +83,18 @@ _DEFAULTS = {
     "provenance_source_revision": None,
     "provenance_burn_hotkey": None,
     "provenance_index_max_age_secs": 3600.0,
-    # Anchor freshness ceiling. Mandatory in full/authority mode: every
-    # independent chain check runs at the producer-chosen candidate block,
-    # so an unbounded anchor lets the producer pick which moment is audited.
+    # Anchor freshness ceiling for strict bounded launch replay. Every
+    # independent chain check runs at the producer-chosen candidate block, so
+    # an unbounded anchor lets the producer pick which moment is audited.
     "provenance_max_anchor_lag_blocks": None,
-    # Lowest assurance the full-provenance verifier will treat as PROVEN, and
-    # the bar the opt-in AUTHORITY submission path must clear. Left at
+    # Lowest assurance the provenance verifier will report as PROVEN. Left at
     # "rewarded_set_proven": every rewarded hotkey independently replayed from
-    # raw evidence, everything unreplayed at exactly zero. This is NOT the thin
-    # write path's gate — attestation-verified/thin submits the signed vector
+    # raw evidence, everything unreplayed at exactly zero. This is not the
+    # recurring write path's gate: it submits the signed vector
     # after enforcing the weight-policy signature + freshness + rollback fence
     # (TDX attestation + report-signature verification is compose-side and the
     # non-blocking shadow verifier's job, never on the write path) and never
-    # consults this rank (the shadow verifier's proof labeling and the authority
-    # gate do).
+    # consults this rank. The value labels shadow health and launch readiness.
     # Lowering it to "receipts_only" is a deliberate operator choice (it makes a
     # receipts-only shadow audit persist observational chain state and read as a
     # PASS); "full_over_epoch" restores the pre-rank behaviour that never submits
@@ -112,14 +105,6 @@ _DEFAULTS = {
     # Beta escape: waive the one-shot launch ceremony. Correctness checks are
     # unaffected. See _continuous_transition_required for the exact scope.
     "beta_skip_launch_ceremony": False,
-    # Thin has nothing to submit when the signed vector is unreachable. The
-    # launch default is to IDLE (fail closed, write nothing) rather than
-    # auto-escalate to the FULL/authority tick, so the live shadow validator is
-    # single-mode in practice: nothing can flip it into an authority writer at
-    # tick time (cathedral-validator#40, step 1). The degrade-UP-into-FULL path
-    # still exists for a runtime that explicitly opts in and is provisioned for
-    # raw-evidence recomputation; FULL -> thin stays forbidden either way.
-    "feed_down_fallback": False,
 }
 
 # config-file keys -> our flat config keys (a [section].key map, flattened)
@@ -162,7 +147,6 @@ _CONFIG_MAP = {
     ("logs", "jsonl"): "jsonl",
     ("logs", "status_jsonl"): "status_jsonl",
     ("launch", "beta_skip_launch_ceremony"): "beta_skip_launch_ceremony",
-    ("provenance", "feed_down_fallback"): "feed_down_fallback",
     ("provenance", "max_anchor_lag_blocks"): "provenance_max_anchor_lag_blocks",
     ("provenance", "min_assurance"): "min_assurance",
 }
@@ -261,6 +245,12 @@ def _load_config_file(path: str) -> dict:
         raise RuntimeError("TOML config requires Python 3.11+")
     with open(path, "rb") as fh:
         doc = tomllib.load(fh)
+    provenance = doc.get("provenance")
+    if isinstance(provenance, dict) and "feed_down_fallback" in provenance:
+        raise ValueError(
+            "[provenance].feed_down_fallback was removed; a missing feed now "
+            "always fails closed without changing submission authority"
+        )
     out: dict = {}
     for (section, key), flat in _CONFIG_MAP.items():
         if section in doc and key in doc[section]:
@@ -305,7 +295,6 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         "require_completed_launch_for_broadcast",
         "launch_approval_file",
         "require_policy",
-        "provenance",
         "evidence_url",
         "provenance_registry_keys",
         "provenance_registry_keys_digest",
@@ -352,23 +341,10 @@ def _resolve_serve_config(ns: argparse.Namespace) -> SimpleNamespace:
         cfg["provenance_max_anchor_lag_blocks"] = int(
             cfg["provenance_max_anchor_lag_blocks"]
         )
-    cfg["feed_down_fallback"] = _parse_bool(
-        cfg["feed_down_fallback"], field="feed_down_fallback"
-    )
     cfg["beta_skip_launch_ceremony"] = _parse_bool(
         cfg["beta_skip_launch_ceremony"], field="beta_skip_launch_ceremony"
     )
     return SimpleNamespace(**cfg)
-
-
-# Operator-facing names for the submission authority, mapped onto the internal
-# vocabulary. "full" and "thin" are what these modes are called in practice.
-_MODE_ALIASES = {
-    "thin": "shadow",
-    "shadow": "shadow",
-    "full": "authority",
-    "authority": "authority",
-}
 
 
 def _cmd_serve(ns: argparse.Namespace) -> int:
@@ -378,6 +354,16 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
     # alone already works on this path; this makes the flag work too).
     if getattr(ns, "chain_endpoint", None):
         os.environ[validator_thin.CHAIN_ENDPOINT_ENV] = ns.chain_endpoint
+    provenance_mode = (getattr(cfg, "provenance", "shadow") or "shadow").strip().lower()
+    if provenance_mode != "shadow":
+        print(
+            "error: cathedral-validator serve supports only the shadow relay "
+            "runtime; authority/full operator modes were removed. "
+            f"Configured provenance was {getattr(cfg, 'provenance', None)!r}",
+            file=sys.stderr,
+        )
+        return 2
+    cfg.provenance = "shadow"
     if not cfg.public_key_hex:
         print(
             "error: no signing key pinned. Set [weight_policy].public_key_hex in your "
@@ -398,21 +384,6 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # `full` and `thin` are what an operator actually calls these, so accept
-    # them as first-class names for the two modes anyone runs in practice. The
-    # internal vocabulary stays authority/shadow/off so nothing downstream has
-    # to learn a second spelling.
-    provenance_mode = _MODE_ALIASES.get(
-        (getattr(cfg, "provenance", "shadow") or "shadow").strip().lower()
-    )
-    if provenance_mode is None:
-        print(
-            f"error: mode must be one of {', '.join(sorted(_MODE_ALIASES))}; got "
-            f"{getattr(cfg, 'provenance', None)!r}",
-            file=sys.stderr,
-        )
-        return 2
-    cfg.provenance = provenance_mode
     min_assurance = getattr(cfg, "min_assurance", None)
     if min_assurance is not None and min_assurance not in (
         "receipts_only",
@@ -437,17 +408,11 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         return 2
     from . import render
 
-    authority = {
-        "shadow": [
-            render.bold("thin"),
-            "follows the signed vector",
-            "audits provenance every tick",
-        ],
-        "authority": [
-            render.bold("full"),
-            "independent recomputation is what gets submitted",
-        ],
-    }[provenance_mode]
+    writer = [
+        render.bold("thin"),
+        "follows the signed vector",
+        "audits provenance every tick",
+    ]
     rows = [
         (
             "mode",
@@ -455,7 +420,7 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
             if cfg.broadcast
             else render.yellow("dry run · no chain writes"),
         ),
-        ("authority", authority),
+        ("writer", writer),
         (
             "feed",
             [
@@ -703,8 +668,8 @@ def main(argv: list[str] | None = None) -> int:
         "--runtime-root",
         dest="runtime_root",
         default=None,
-        help="absolute owner-only directory shared by thin and FULL processes "
-        "for the cross-mode lock and ambiguity journal",
+        help="absolute owner-only directory for the submission lock and "
+        "ambiguity journal",
     )
     sp.add_argument("--interval-secs", dest="interval_secs", type=float, default=None)
     sp.add_argument(
@@ -730,8 +695,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         default=None,
         help="refuse continuous writes until reconcile-launch proves the finalized "
-        "FULL-gated launch; on by default and mandatory for provenance=authority "
-        "or any host holding the controlled launch material. A third-party "
+        "launch; on by default and mandatory for any host holding the controlled "
+        "launch material. A third-party "
         "validator that only relays Cathedral's signed vector opts out in its "
         "config file (see config/validator-thin-sn39-relay.toml)",
     )
@@ -742,16 +707,6 @@ def main(argv: list[str] | None = None) -> int:
         help="pin the validator to a signed policy contract "
         "(confidential_primary_v1 or validated_supply_v1); "
         "legacy/v3 vectors are rejected",
-    )
-    sp.add_argument(
-        "--provenance",
-        "--mode",
-        dest="provenance",
-        default=None,
-        choices=tuple(sorted(_MODE_ALIASES)),
-        help="full-provenance mode: shadow (default) audits published "
-        "evidence concurrently; authority submits the independent "
-        "recomputation; off disables the audit",
     )
     sp.add_argument("--evidence-url", dest="evidence_url", default=None)
     sp.add_argument(
@@ -793,15 +748,15 @@ def main(argv: list[str] | None = None) -> int:
         dest="provenance_max_anchor_lag_blocks",
         type=int,
         default=None,
-        help="how stale the anchored candidate block may be; mandatory in full "
-        "mode because every independent chain check is evaluated at it",
+        help="how stale the anchored candidate block may be when the shadow audit "
+        "uses controlled evidence",
     )
     sp.add_argument(
         "--min-assurance",
         dest="min_assurance",
         default=None,
         choices=("receipts_only", "rewarded_set_proven", "full_over_epoch"),
-        help="lowest assurance full mode will submit on",
+        help="lowest assurance the background shadow audit reports as proven",
     )
     sp.add_argument(
         "--provenance-source-revision", dest="provenance_source_revision", default=None
@@ -838,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rp = sub.add_parser(
         "reconcile-launch",
-        help="verify the finalized FULL-gated launch and unlock continuous broadcast",
+        help="verify the finalized strict-replay launch and unlock continuous broadcast",
     )
     rp.add_argument("--config", required=True)
     rp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None)
@@ -852,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pp = sub.add_parser(
         "preflight-launch",
-        help="run the exact SN39 FULL launch gate read-only and emit approval",
+        help="run the exact SN39 strict replay read-only and emit approval",
     )
     pp.add_argument("--config", required=True)
     pp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None)

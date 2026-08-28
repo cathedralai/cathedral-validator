@@ -10,26 +10,17 @@ is contradictory" check. Both WEDGE startup. These tests lock:
   (b) a journal pre-seeded with an authority lane REJECTS a thin reservation
       (the wedge you get by editing live state — must fail, not silently flip);
   (c) a journal carrying a half-written finalized record trips the contradiction
-      check rather than being silently accepted;
-  (d) deploy/publisher/init-clean-journal.sh REFUSES to run against an existing
-      journal (forcing the archive-not-edit migration), and provisions a clean
-      one on an absent file.
+      check rather than being silently accepted.
 """
 
 from __future__ import annotations
 
-import getpass
-import pathlib
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from scaffold import validator_thin as vt
 
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-HELPER = ROOT / "deploy" / "publisher" / "init-clean-journal.sh"
 
 _ATTEMPT = "sha256:" + "0" * 64
 
@@ -219,55 +210,3 @@ def test_abort_of_a_later_unsigned_attempt_does_not_wedge_recovery(
             vt._recover_common_finalized_submission(args, vt._read_state(journal))
             is None
         )
-
-
-# -- (d) the init helper enforces archive-not-edit --------------------------
-
-
-def test_helper_refuses_an_existing_journal(tmp_path) -> None:
-    state_file = tmp_path / "thin-state.json"
-    state_file.write_text("{}", encoding="utf-8")
-    result = subprocess.run(
-        [str(HELPER), "--state-file", str(state_file), "--owner", getpass.getuser()],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 1
-    assert "REFUSING" in result.stderr
-
-
-def test_helper_provisions_a_clean_empty_journal(tmp_path) -> None:
-    runtime_root = tmp_path / "cathedral-validator"
-    state_file = runtime_root / "thin-state.json"
-    result = subprocess.run(
-        [
-            str(HELPER),
-            "--mode",
-            "empty",
-            "--state-file",
-            str(state_file),
-            "--owner",
-            getpass.getuser(),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert state_file.read_text(encoding="utf-8") == "{}"
-    # And that clean journal loads + admits a thin reservation.
-    assert vt._read_state(state_file) == {}
-    vt._write_state_fenced(state_file, _thin_reservation_updates())
-    assert vt._read_state(state_file)["submission_pending_lane"] == "thin"
-
-
-def test_helper_absent_mode_leaves_no_journal(tmp_path) -> None:
-    runtime_root = tmp_path / "cathedral-validator"
-    state_file = runtime_root / "thin-state.json"
-    result = subprocess.run(
-        [str(HELPER), "--state-file", str(state_file), "--owner", getpass.getuser()],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert not state_file.exists()
-    assert runtime_root.is_dir()

@@ -25,11 +25,10 @@ the startup profile alone would have been worse than not widening it at all:
     re-pin to v3 would have SILENTLY DROPPED the obligation: a real weakening
     bought with a one-word config change.
 
-Finally, the guard refusing require_policy=validated_supply_v3 together with
-provenance=authority is re-proven here. It already had a test, but that test
-lives in the advisory publisher suite, which does not gate CI; the guard is what
-keeps a v3 operator from configuring a validator that starts, fails closed on
-every tick, and goes dark with no single loud reason.
+Finally, the guard refusing require_policy=validated_supply_v3 with the internal
+authority compatibility marker is re-proven here. The marker is retained for
+bounded single-lane replay and historical launch recovery, not recurring
+operation. It must not satisfy the signed multi-lane v3 contract.
 """
 
 from __future__ import annotations
@@ -225,19 +224,18 @@ def test_non_canonical_runtime_root_is_still_refused_under_a_v3_pin() -> None:
 
 
 # --------------------------------------------------------------------------
-# The PR #45 guard: v3 + authority is still refused
+# The PR #45 compatibility guard: v3 + strict single-lane replay is refused
 # --------------------------------------------------------------------------
 
 
-def test_v3_pin_with_authority_provenance_is_still_refused_at_startup() -> None:
-    """A v3 pin is a RELAY posture; authority mode never applies the signed v3
-    vector, so every tick fails closed and the validator goes dark silently.
+def test_v3_pin_refuses_the_internal_authority_compatibility_marker() -> None:
+    """The internal marker derives one replay lane, not the signed v3 vector.
 
     This guard predates the widening and must survive it. It fires before any
     profile check, so it applies to an offline or non-SN39 runtime too.
     """
     with pytest.raises(
-        vt.wire.VectorError, match="incompatible with provenance=authority"
+        vt.wire.VectorError, match="incompatible with the bounded full-replay"
     ):
         vt._validate_runtime_contract(
             _profile_args(
@@ -247,9 +245,9 @@ def test_v3_pin_with_authority_provenance_is_still_refused_at_startup() -> None:
         )
 
 
-def test_v3_authority_guard_fires_even_off_the_sn39_profile() -> None:
+def test_v3_strict_replay_guard_fires_even_off_the_sn39_profile() -> None:
     with pytest.raises(
-        vt.wire.VectorError, match="incompatible with provenance=authority"
+        vt.wire.VectorError, match="incompatible with the bounded full-replay"
     ):
         vt._validate_runtime_contract(
             SimpleNamespace(
@@ -263,43 +261,9 @@ def test_v3_authority_guard_fires_even_off_the_sn39_profile() -> None:
         )
 
 
-def test_v1_pin_with_authority_provenance_is_unaffected() -> None:
-    """authority is a valid v1 posture; the widening must not have changed that."""
+def test_v1_pin_preserves_the_internal_marker_for_launch_recovery() -> None:
+    """The v1 launch and recovery compatibility marker remains accepted."""
     vt._validate_runtime_contract(_profile_args(provenance="authority"))
-
-
-# --------------------------------------------------------------------------
-# The same contract, re-asked before the feed-down switch
-# --------------------------------------------------------------------------
-
-
-def test_the_feed_down_switch_is_held_to_this_profile() -> None:
-    """A dead publisher must not buy a runtime the posture its config was refused.
-
-    The switch is one-way and happens after startup, so without this the guard
-    above only covers configs an operator wrote down, not the one the process
-    ends up running.
-    """
-    args = _profile_args(require_policy=vt.REQUIRE_POLICY_VALIDATED_SUPPLY_V3)
-    vt._validate_runtime_contract(args)
-    refusal = vt._feed_down_switch_refusal(args)
-    assert refusal is not None
-    assert "incompatible with provenance=authority" in refusal
-
-
-def test_the_feed_down_switch_still_serves_a_gated_v1_runtime() -> None:
-    """The fallback stays available where authority is an admissible posture."""
-    assert vt._feed_down_switch_refusal(_profile_args()) is None
-
-
-def test_the_feed_down_switch_does_not_hand_out_the_completed_launch_gate(
-    no_launch_material,
-) -> None:
-    """Escalating makes the runtime originate weights, which is the capability
-    the completed-launch gate protects. An ungated relay stays thin."""
-    args = _profile_args(require_completed_launch_for_broadcast=False)
-    vt._validate_runtime_contract(args)
-    assert "completed-launch gate" in str(vt._feed_down_switch_refusal(args))
 
 
 # --------------------------------------------------------------------------

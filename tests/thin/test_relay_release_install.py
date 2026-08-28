@@ -16,12 +16,11 @@ naming an absent file is an unbuildable manifest rather than a stricter one. It
 also binds one thing the Cathedral manifest does not: the shadow-audit mismatch
 alert, which on a relay is the only health surface there is.
 
-The relay profile is only sound because the relay's audit never needed the
-verifier: `config/validator-thin-sn39-relay.toml` omits `controlled_dir` and
-`verifier_binary`, `scaffold/provenance_audit.py` requires both only in
-authority mode, and its full-assurance replay is reached only when
-`controlled_dir` is set. Without them the audit is receipts-only and still
-never delays or blocks the thin submission.
+The relay profile is only sound because its recurring shadow audit never needs
+the controlled verifier. `config/validator-thin-sn39-relay.toml` omits
+`controlled_dir` and `verifier_binary`. Strict replay for bounded launch tools
+requires both. Without them the shadow audit is receipts-only and still never
+delays or blocks the recurring signed-vector submission.
 
 These tests run the builder end to end against a fixture release, so a change
 that reintroduces a Cathedral-only requirement fails here rather than on a

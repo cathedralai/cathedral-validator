@@ -7,7 +7,7 @@ projection is what the public status service reads, group-readable.
 Three files have to agree for that to hold, and a re-sync broke it by changing only
 one of them:
 
-  1. config/validator-selfcompose-sn39.toml must set [logs].status_jsonl, or nothing
+  1. config/validator-thin-sn39-relay.toml must set [logs].status_jsonl, or nothing
      ever writes the projection.
   2. deploy/sn39/cathedral-sn39-public-status.service names exactly that path in
      ConditionPathExists, so if (1) is missing the unit can never start and skips
@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_CONFIG = _ROOT / "config" / "validator-selfcompose-sn39.toml"
+_CONFIG = _ROOT / "config" / "validator-thin-sn39-relay.toml"
 _STATUS_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-sn39-public-status.service"
 _VALIDATOR_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39.service"
 _LAUNCHER = _ROOT / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"

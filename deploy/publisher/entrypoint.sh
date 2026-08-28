@@ -3,7 +3,7 @@
 # then drop privileges to the runtime user and exec the CMD with env intact.
 #
 # Ported verbatim from the hub's deploy/entrypoint.sh (cathedral repo). The
-# self-composing validator's publisher role is byte-for-byte the same serving
+# validator-adjacent origin publisher is byte-for-byte the same serving
 # surface, so the volume-ownership fixup is identical.
 set -e
 

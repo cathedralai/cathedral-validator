@@ -10,13 +10,10 @@
 #   1. ConditionPathExists= on the root-signed recurring-write authorization
 #      and its detached signature. Those files authorize the ORIGIN host's
 #      recurring mainnet writes and are signed by the release-attestation key.
-#      A relay never needs one: the runtime demands it only for a host that
-#      owes SN39 its own launch (scaffold/validator_thin.py
-#      _sn39_launch_obligation -> _continuous_transition_required), which means
-#      provenance = "authority", require_full_provenance_for_broadcast, or
-#      possession of the launch material at the release-pinned paths. A pure
-#      relay is none of those, so the condition gated the unit on a file the
-#      code below it never asks for. An unmet Condition= is not a failure to
+#      A relay never needs one: the runtime demands it only for a bounded launch
+#      or a host possessing launch material at the release-pinned paths. A pure
+#      relay is neither, so the condition gated the unit on a file the code below
+#      never asks for. An unmet Condition= is not a failure to
 #      systemd; the unit is skipped and reported as started.
 #   2. SupplementaryGroups=cathedral-validator-evidence. That group belongs to
 #      the evidence producer and is declared by the producer's own deploy tree,

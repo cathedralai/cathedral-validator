@@ -202,8 +202,8 @@ class ChainClient:
         """Submit weights. DRY-RUN unless broadcast=True (explicit opt-in).
 
         SN39 is hard-disabled regardless of network label or endpoint. The
-        immutable two-mode release is the only repository path permitted to
-        write Cathedral mainnet weights.
+        canonical signed-vector relay and bounded launch tools are the only
+        repository paths permitted to write Cathedral mainnet weights.
         """
         if not self.broadcast:
             return {

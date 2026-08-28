@@ -8,20 +8,18 @@
 > controlled-disclosure package. Commands below are a verification contract,
 > not permission to write weights.
 
-Two concurrent modes ship in `cathedral-validator serve`:
+One recurring runtime ships in `cathedral-validator serve`:
 
 | Mode | Submits | Trust basis |
 |---|---|---|
-| `shadow` (default) | Cathedral's signed vector (thin gates) | audits the published evidence every tick in a single-flight background worker; never delays or changes the thin submission |
-| `authority` | the validator's OWN recomputation | **Deprecated** (no shipped profile; removal tracked in #40). Required **FULL assurance**: raw-evidence replay through the pinned verifier |
+| `shadow` | Cathedral's signed vector (thin gates) | audits the published evidence every tick in a single-flight background worker; never delays or changes the thin submission |
 
-**Mainnet launch mode is `shadow`.** Thin validation remains the submission
-authority while the independent provenance audit runs concurrently. Authority
-mode refuses an epoch unless every historically anchored candidate is
-independently replayable as `verified`; the launch artifact model does not
+Thin validation remains the recurring submission authority while the independent
+provenance audit runs concurrently. A FULL audit requires every historically
+anchored candidate to be independently replayable as `verified`; the launch artifact model does not
 publish candidate-specific raw negative evidence, so any `rejected` or
 `retired` row truthfully downgrades that epoch to `receipts_only`. Do not
-describe such an epoch as FULL, and do not expect authority mode to submit it.
+describe such an epoch as FULL. The recurring CLI never submits a recomputation.
 
 **Assurance levels.** `receipts_only` means Cathedral's signed registry →
 receipt → report chain is internally consistent — PARTIAL provenance, always
@@ -54,8 +52,8 @@ queries the validator's OWN chain connection for
 `get_block_hash(block)`, requiring EXACT set equality — not a subset — with
 the manifest candidates and exact hash equality with the anchor. An omitted
 historically registered hotkey or a fabricated extra candidate FAILS; an
-unavailable or malformed historical lookup is NOT_PROVEN and can never back
-authority. The per-tick current-metagraph snapshot supplies only the UID
+unavailable or malformed historical lookup is NOT_PROVEN and can never back a
+FULL assurance claim. The per-tick current-metagraph snapshot supplies only the UID
 map and the current block for the validity window; today's membership
 proves nothing about the anchored epoch and is deliberately not an input
 to candidate verification. Every historically registered hotkey must be
@@ -78,7 +76,6 @@ surface serves. The current exact pins are recorded in
 
 ```toml
 [provenance]
-mode = "shadow"                     # or "authority"
 registry_keys = "/etc/cathedral-validator/provenance/registry-keys.json"
 registry_keys_digest = "sha256:<from the release notes>"
 report_keys = "/etc/cathedral-validator/provenance/report-keys.json"
@@ -107,7 +104,7 @@ envelope digest + `controlled-manifest.json`). An authorized validator points
 `controlled_dir` at it; every byte is verified against the public manifest
 digests before use, so no trust in the transport is required. Without the
 package, shadow mode still audits the public receipts chain and logs
-`NOT_PROVEN`; authority mode refuses to submit.
+`NOT_PROVEN`; the audit never substitutes its recomputation for the signed feed.
 
 ## Reproducing a decision from scratch
 

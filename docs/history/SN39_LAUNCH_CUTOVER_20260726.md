@@ -8,10 +8,11 @@ Nothing here authorizes a chain write, infrastructure spend, or a public claim.
 > `config/validator-mainnet-sn39.toml` and
 > `config/validator-mainnet-sn39-launch.toml`, named in the pin tables below,
 > were deleted in PR #39 with the rest of the authority/launch ceremony. They
-> are kept in this record because they were pin sites at the time; the
-> surviving profiles are `config/validator-thin-sn39-relay.toml`,
-> `config/validator-selfcompose-sn39.toml`, and `config/validator.toml`. To
-> install and run a validator today, follow [README's
+> are kept in this record because they were pin sites at the time.
+> `config/validator-selfcompose-sn39.toml` was subsequently retired with the
+> recurring authority/fallback posture. As of 2026-08-28, the only shipped SN39
+> recurring profile is `config/validator-thin-sn39-relay.toml`. To install and
+> run a validator today, follow [README's
 > quickstart](../../README.md#quickstart).
 
 ## 1. Producer revision reconciliation

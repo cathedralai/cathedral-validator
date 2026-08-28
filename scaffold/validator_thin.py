@@ -169,13 +169,6 @@ class _PostSignedSubmissionMismatch(wire.VectorError):
     """A signed attempt has a positive receipt or execution contradiction."""
 
 
-class _NothingToScoreYet(wire.VectorError):
-    """No paid hotkey was independently proven this epoch. This is NOT a failure:
-    the validator verified there is nothing to submit and should idle until the
-    next epoch's evidence arrives. A passive listener waiting for a job, not a
-    fault to fail loudly on."""
-
-
 class _ChainWeightCooldownActive(wire.VectorError):
     """The chain itself forbids this validator's next weight write for now.
 
@@ -1052,19 +1045,14 @@ def _authority_lane_transition_authorized(
     state: dict[str, Any],
     identity: dict[str, Any],
 ) -> bool:
-    """Allow only the reviewed one-way thin-to-FULL authority handoff.
+    """Allow only the reviewed transition into a historical full-replay lane.
 
-    The authority process has already reproduced the root-signed launch seal
-    and completed a current FULL audit before it can construct this identity.
+    The bounded launch process has already reproduced the root-signed launch seal
+    and completed a current strict replay before it constructs this identity.
     This check binds that authorization back to the durable launch journal.
-    There is deliberately no automatic authority-to-thin transition.
+    The serialized lane remains named ``authority`` for journal compatibility.
     """
-    # Operator-declared authority. The fence exists to stop the submission
-    # lane changing SILENTLY, and there are two non-silent ways it can change:
-    # the operator configures full mode outright, or thin loses its feed and
-    # degrades up. Both are one-way into FULL and both are the operator's
-    # decision, so both are the "explicit reconciliation" the fence asks for.
-    #
+    # Historical beta launch journals carry an explicit marker for this lane.
     # The launch journal proves a completed ceremony, which a beta runtime
     # deliberately does not have, so that half is waived exactly as the rest of
     # the ceremony is. Chain identity is NOT waived: the transition still has to
@@ -1152,7 +1140,7 @@ def _assert_anchor_not_rewound(
 
 
 def _write_state_fenced(state_file: Path, updates: dict[str, Any]) -> None:
-    """Atomic CHECK-AND-RESERVE under the state lock (authority path).
+    """Atomic CHECK-AND-RESERVE under the shared submission-state lock.
 
     The high-water comparison and the write happen inside ONE flock hold:
     a concurrent writer that reserved a newer epoch, an equivocating
@@ -1516,7 +1504,7 @@ def save_fence(state_file: Path, version: int, vector_id: str) -> None:
     )
 
 
-# -- two-mode provenance --------------------------------------------------------
+# -- provenance audit -----------------------------------------------------------
 
 
 def _provenance_settings(args) -> ProvenanceSettings:
@@ -1556,23 +1544,20 @@ def _provenance_settings(args) -> ProvenanceSettings:
 
 
 def _operator_declared_authority(args: Any) -> bool:
-    """True when running FULL is the operator's stated intent, not a drift.
+    """Read the legacy marker used by bounded full-replay launch journals.
 
-    Either the runtime is configured for authority outright, or thin lost its
-    signed vector and degraded up. Both are one-way into FULL. Gated on the
-    beta waiver so the reviewed production path still demands the signed
+    Recurring operator entrypoints never call this as a mode selector. It stays
+    for bounded launch and historical-journal recovery and is gated on the beta
+    waiver so the reviewed production path still demands the signed
     ContinuousAuthorization instead of this.
     """
     if not bool(getattr(args, "beta_skip_launch_ceremony", False)):
         return False
-    if bool(getattr(args, "_feed_down_fallback_active", False)):
-        return True
     return (getattr(args, "provenance", "shadow") or "shadow") == "authority"
 
 
 def _minimum_assurance_rank(args: Any) -> int:
-    """The lowest assurance the shadow verifier treats as PROVEN and the bar the
-    opt-in AUTHORITY submission path must clear.
+    """The lowest assurance the shadow verifier treats as PROVEN.
 
     Defaults to rewarded_set_proven: every hotkey receiving weight was
     independently replayed from raw evidence, and everything not replayed
@@ -1596,7 +1581,7 @@ def _minimum_assurance_rank(args: Any) -> int:
 
 
 def _runtime_modes(args: Any) -> tuple[str, str]:
-    """Return the truthful submission authority and provenance runtime mode."""
+    """Return the serialized event-writer label and provenance audit mode."""
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
     if provenance_mode not in {"shadow", "authority"}:
         raise wire.VectorError(f"unsupported provenance mode {provenance_mode!r}")
@@ -1607,7 +1592,7 @@ def _runtime_modes(args: Any) -> tuple[str, str]:
 
 
 def _get_events(args) -> EventLogger:
-    """One logger per process; authority is stamped on every record."""
+    """One logger per process; the compatibility writer label is recorded."""
     existing = getattr(args, "_events", None)
     if existing is not None:
         return existing
@@ -1633,8 +1618,8 @@ def _get_events(args) -> EventLogger:
 
 # The versioned mechanism fixes the burn fraction; the burn DESTINATION is
 # the operator's configured pin resolved against the live metagraph. The
-# signed Cathedral vector's burn row is comparison input only — authority
-# mode never derives allocation from it.
+# signed Cathedral vector's burn row is comparison input only for the bounded
+# full-replay launch calculation.
 # Every supported mechanism pins its own burn contract. The fraction is always
 # looked up by the operator's own pinned mechanism, never by the id the manifest
 # claims, so MECHANISM_ACCEPTED widening which evidence is admitted can never let
@@ -1652,7 +1637,7 @@ def _provenance_uid_weights(
     burn_hotkey: str,
     hotkey_to_uid: dict[str, int],
 ) -> dict[int, float]:
-    """Authority mode: the COMPLETE UID vector from OUR recomputation.
+    """Bounded launch: the COMPLETE UID vector from a strict recomputation.
 
     Inputs are the pinned versioned mechanism's shares, the operator's
     configured burn hotkey, and the live chain metagraph — nothing from
@@ -1660,14 +1645,14 @@ def _provenance_uid_weights(
     duplicate, or unmappable weights reject the whole vector.
     """
     if mechanism == "validated_supply_v3":
-        # Authority/FULL mode re-derives a SINGLE-lane vector (TDX + fixed burn)
+        # The bounded full-replay gate derives a SINGLE-lane vector (TDX + fixed burn)
         # from cathedral.provenance.verify_and_recompute. The v3 contract adds a
         # second (CyberGym) lane whose independent recompute needs the
         # cathedral-distill producer contract, which is not wired into this
         # single-lane recomposition. Fail closed rather than pay the whole
         # recomputed TDX lane as if it were 100% of emission.
         raise wire.VectorError(
-            "authority-mode FULL re-derivation of validated_supply_v3 is not "
+            "bounded full-replay derivation of validated_supply_v3 is not "
             "supported: the CyberGym lane requires the cathedral-distill "
             "recompute contract. Run v3 in shadow/thin mode (signed-vector "
             "re-derivation via vector_to_uid_weights) until that is wired."
@@ -1677,7 +1662,7 @@ def _provenance_uid_weights(
         raise wire.VectorError(f"mechanism {mechanism!r} has no pinned burn contract")
     if not isinstance(burn_hotkey, str) or not burn_hotkey:
         raise wire.VectorError(
-            "authority mode requires --provenance-burn-hotkey (the configured "
+            "bounded full replay requires a configured provenance burn hotkey (the "
             "burn destination; never taken from Cathedral's vector)"
         )
     if burn_hotkey not in hotkey_to_uid:
@@ -1816,9 +1801,9 @@ def _get_shadow_auditor(args) -> _ShadowAuditor:
 def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) -> bool:
     """Log one completed audit and (for shadow) persist chain state
     observationally — the fence still refuses stale/equivocating writes, but
-    a refusal is logged and skipped, never fatal. Authority passes
-    persist=False because it has ALREADY reserved under the fence BEFORE any
-    PASS event is emitted (main thread only)."""
+    a refusal is logged and skipped, never fatal. A bounded strict-replay caller
+    passes persist=False because it already reserved under the fence before any
+    PASS event is emitted on the main thread."""
     events = _get_events(args)
     status_map = {"PASS": PASS, "FAIL": FAIL, "NOT_PROVEN": NOT_PROVEN}
     if audit.status == "PASS" and audit.agrees_with_vector is False:
@@ -1906,10 +1891,11 @@ def _log_audit_events(args, audit, state_file: Path, *, persist: bool = True) ->
             detail=detail[:512],
             vector_agrees=audit.agrees_with_vector,
             remediation=(
-                "keep thin authority; FULL requires independently replayable "
+                "the recurring writer remains on the signed vector; strict replay "
+                "requires independently replayable "
                 "evidence for every anchored candidate outcome"
                 if reasons
-                else "provide the controlled package and verifier pins for FULL"
+                else "provide the controlled package and verifier pins for strict replay"
             ),
         )
         return False
@@ -1991,114 +1977,11 @@ def _run_provenance_stage(
 ) -> tuple[str, dict[str, float] | None]:
     """Provenance stage for this tick.
 
-    Shadow: a bounded SINGLE-FLIGHT background worker — the previous audit's
-    result is drained and logged, a new audit is submitted without blocking,
-    and the thin submission proceeds untouched regardless of audit speed or
-    health. Authority: synchronous; the tick refuses to submit anything
-    unless the audit PASSes at or above the configured minimum assurance
-    (default rewarded_set_proven: every paid hotkey raw-replayed, everything
-    unreplayed at exactly zero).
+    A bounded SINGLE-FLIGHT background worker drains and logs the previous
+    audit, then starts a new audit without blocking. The signed-vector thin
+    submission proceeds untouched regardless of audit speed or health.
     """
     settings = _provenance_settings(args)
-    if settings.mode == "authority":
-        from .events import _neutralize
-
-        state = _read_state(state_file)
-        audit = run_audit(
-            settings,
-            network=args.network,
-            netuid=args.netuid,
-            vector_payload=payload,
-            state=state,
-            current_block=current_block,
-            historical_hotkeys_lookup=historical_hotkeys_lookup,
-            block_hash_lookup=block_hash_lookup,
-        )
-        if audit.status != "PASS":
-            _log_audit_events(args, audit, state_file, persist=False)
-            raise wire.VectorError(
-                f"full-provenance authority audit did not PASS ({audit.status}): "
-                f"{audit.error or 'see events'}"
-            )
-        # Rank, not string equality. The old test demanded the whole-epoch
-        # claim, which cannot be constructed on a subnet with more registered
-        # hotkeys than the manifest's receipt cap, so authority could never
-        # submit. rewarded_set_proven is the answerable claim: everything paid
-        # was replayed, everything unreplayed gets zero.
-        minimum = _minimum_assurance_rank(args)
-        if assurance_rank(getattr(audit, "assurance", None)) < minimum:
-            # A receipts-only PASS must not emit a PASS event or reserve.
-            # The audit already knows exactly which sub-claim it could not
-            # establish; dropping that and printing a fixed sentence left the
-            # operator diagnosing a refusal from its category alone. The
-            # shadow path has always rendered these (see _log_audit_events),
-            # so authority printing less than shadow was the defect.
-            reasons = list(getattr(audit, "not_proven_reasons", ()) or ())
-            replayed = list(getattr(audit, "raw_replayed_hotkeys", ()) or ())
-            scope = dict(getattr(audit, "assurance_scope", {}) or {})
-            detail = (
-                f"assurance {getattr(audit, 'assurance', 'unknown')!s} ranks below "
-                f"the configured minimum; {len(replayed)} miner(s) raw-replayed, "
-                f"{scope.get('unproven_count', '?')} candidate(s) not replayed"
-            )
-            for reason in list(scope.get("failures") or []) + reasons:
-                detail += f"; {reason}"
-            _get_events(args).event(
-                "PROVENANCE_AUDIT_NOT_PROVEN",
-                stage="provenance",
-                status=NOT_PROVEN,
-                artifact=audit.manifest_digest,
-                detail=detail[:512],
-                remediation="provide the controlled package and verifier pins",
-            )
-            _lifecycle("PROVENANCE not proven", detail)
-            # Not a failure: a full validator that finds nothing independently
-            # proven this epoch has nothing to score. It idles and waits for the
-            # next job rather than failing closed loudly.
-            raise _NothingToScoreYet(
-                "nothing to score yet: no paid hotkey was independently proven "
-                "this epoch; waiting for the next job"
-            )
-        # RESERVE FIRST, under ONE flock hold covering the index line, the
-        # policy line, the report line, and the chain identity. Only a
-        # successful reservation may emit PASS: a concurrently advanced
-        # state makes THIS audit fail before any success is visible
-        # anywhere, so an older/equivocating writer can neither log PASS
-        # nor overwrite the newer reservation.
-        try:
-            _write_state_fenced(
-                state_file,
-                {
-                    "provenance_network": args.network,
-                    "provenance_netuid": args.netuid,
-                    "provenance_last_source_epoch": audit.source_epoch,
-                    "provenance_last_report_id": audit.report_id,
-                    "provenance_index_epoch": audit.index_source_epoch,
-                    "provenance_index_manifest": audit.index_manifest,
-                    "provenance_policy_release": audit.policy_release,
-                    "provenance_policy_digest": audit.policy_digest,
-                    "provenance_candidate_block": audit.candidate_block,
-                },
-            )
-        except (ValueError, OSError) as exc:
-            _get_events(args).event(
-                "PROVENANCE_RESERVATION_REFUSED",
-                stage="provenance",
-                status=FAIL,
-                artifact=audit.manifest_digest,
-                detail=_neutralize(str(exc))[:512],
-                remediation=(
-                    "a newer reservation exists or the state file is "
-                    "unwritable; nothing was submitted"
-                ),
-            )
-            raise wire.VectorError(
-                f"authority reservation refused: {_neutralize(str(exc))}"
-            ) from exc
-        _log_audit_events(args, audit, state_file, persist=False)
-        args._authority_full_audit = audit
-        return audit.status, dict(audit.recomputed)
-
     auditor = _get_shadow_auditor(args)
     for finished_audit, finished_state_file in auditor.drain():
         _log_audit_events(args, finished_audit, finished_state_file)
@@ -2471,7 +2354,7 @@ def _launch_approval_bindings(
         or rewarded != receipt_hotkeys
     ):
         raise wire.VectorError(
-            "launch approval requires one exact FULL rewarded-set replay"
+            "launch approval requires one exact strict rewarded-set replay"
         )
     burn_hotkey = burn_snapshot.get("burn_hotkey")
     burn_uid = hotkey_to_uid.get(burn_hotkey)
@@ -2672,7 +2555,7 @@ def _require_launch_approval(
     if document["bindings"] != expected_bindings:
         raise wire.VectorError(
             "launch approval differs from the fresh vector, signer, mapping, or "
-            "FULL provenance"
+            "strict provenance replay"
         )
     args._launch_approval = document
     return document
@@ -3669,7 +3552,7 @@ class RecoveredSubmission:
 
 @dataclass(frozen=True)
 class RecoveredAuthoritySubmission:
-    """Exact finalized FULL-authority transaction recovered without a write."""
+    """Exact finalized authority-labelled launch recovered without a write."""
 
     attempt_id: str
     source_epoch: int
@@ -4882,38 +4765,6 @@ def _vector_inclusion_policy(
     return policy
 
 
-def _authority_inclusion_policy(
-    audit: Any,
-    preflight: ChainPreflight,
-) -> InclusionPolicy:
-    valid_from_block = getattr(audit, "report_valid_from_block", None)
-    valid_until_block = getattr(audit, "report_valid_until_block", None)
-    if (
-        isinstance(valid_from_block, bool)
-        or isinstance(valid_until_block, bool)
-        or not isinstance(valid_from_block, int)
-        or not isinstance(valid_until_block, int)
-    ):
-        raise wire.VectorError(
-            "authority report has no canonical block-validity window"
-        )
-    policy = InclusionPolicy(
-        valid_from_block=valid_from_block,
-        valid_until_block=valid_until_block,
-        valid_from_time=wire._parse_canonical_utc(
-            getattr(audit, "report_generated_at", None),
-            field="provenance report generated_at",
-        ),
-        valid_until_time=wire._parse_canonical_utc(
-            getattr(audit, "report_valid_until", None),
-            field="provenance report valid_until",
-        ),
-        expected_next_epoch_start_block=preflight.next_epoch_start_block,
-    )
-    _require_inclusion_policy_ready(policy, preflight)
-    return policy
-
-
 @contextlib.contextmanager
 def _isolated_argv():
     """Hide sys.argv from bittensor while it builds its own config.
@@ -6050,9 +5901,9 @@ def _authorize_sn39_chain_submission(
     Callers cannot reach the irreversible extrinsic by importing this module
     and calling ``set_weights_on_chain`` directly.  A write must carry the
     exact immutable runtime profile, resolved Finney identity, and a durable
-    reservation made by the thin/FULL state machine.  The first launch also
-    carries its synchronous FULL replay; later writes re-prove the independent
-    root-signed launch seal plus a separate bounded recurring-write approval.
+    reservation made by the shared submission state machine. The bounded launch
+    also carries its synchronous strict replay. Later recurring writes re-prove
+    the independent root-signed launch seal plus a separate bounded approval.
     """
     if args is None:
         raise wire.VectorError(
@@ -6176,10 +6027,10 @@ def _authorize_sn39_chain_submission(
     if lane == "thin":
         # Applies to relay, thin-continuous, and launch alike: all three relay a
         # signed vector, so the payload is the authority for what may be
-        # written and re-proving it is strictly more evidence. The authority
-        # lane originates weights from its own FULL recomputation and has no
-        # signed vector to bind, so it keeps proving its allocation through the
-        # evidence identity and the recurring-write authorization below.
+        # written and re-proving it is strictly more evidence. The serialized
+        # authority lane is retained for bounded UID30 launch and historical
+        # recovery. Those identities have their own reviewed replay proof and
+        # no signed feed vector to rebind here.
         _reverify_reserved_signed_vector(
             args,
             identity=identity,
@@ -6193,12 +6044,11 @@ def _authorize_sn39_chain_submission(
         # recurring-write authorization to re-prove. Everything that makes the
         # write safe still ran above (pinned trust profile, verified signature,
         # exact durable reservation, UID/epoch/inclusion safety). Refuse a call
-        # that nonetheless claims launch or recurring authority it cannot
+        # that nonetheless claims launch or recurring approval it cannot
         # present, so the relay path can never be used to smuggle one.
-        # The authority lane reaches here only on a runtime whose operator
-        # declared FULL mode under the beta waiver: no ceremony to re-prove, so
-        # nothing to smuggle. Every claim this branch actually guards against
-        # stays refused below for both lanes.
+        # A bounded UID30 or historical authority-labelled launch lane reaches
+        # here only under the beta launch waiver. Every guarded claim remains
+        # refused below for both serialized lanes.
         allowed_lanes = (
             ("thin", "authority") if _operator_declared_authority(args) else ("thin",)
         )
@@ -7177,9 +7027,9 @@ def _finalized_block(raw) -> int | None:
 
     Only a positive integral number is a usable finalized block: booleans,
     fractional floats, junk strings, and non-positive values are all None.
-    Thin mode tolerates None (it never anchors a validity window); authority
-    REFUSES on None instead of silently skipping report block-validity
-    checks."""
+    The recurring shadow relay tolerates None because it never anchors a report
+    validity window. A strict replay caller refuses None instead of silently
+    skipping report block-validity checks."""
     if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, float) and not raw.is_integer():
@@ -7332,18 +7182,12 @@ def metagraph_hotkey_to_uid(*, network: str, netuid: int) -> dict[str, int]:
 
 def tick(args) -> bool:
     provenance_mode_early = getattr(args, "provenance", "shadow") or "shadow"
+    if provenance_mode_early != "shadow":
+        raise wire.VectorError(
+            "recurring validator ticks support only the shadow relay runtime; "
+            f"got provenance={provenance_mode_early!r}"
+        )
     _lifecycle("FEED fetch", f"source={_feed_label(args.publisher_url)}")
-    if provenance_mode_early == "authority":
-        # Authority's basis is the evidence chain + pins + chain snapshot.
-        # Cathedral's vector is best-effort comparison input only; a down,
-        # stale, or malformed endpoint must not stop independent audit.
-        try:
-            payload = fetch_vector(args.publisher_url)
-        except Exception as exc:  # noqa: BLE001
-            _lifecycle("FEED unavailable", f"reason={type(exc).__name__}")
-            payload = None
-        _prepare_tick_preflight(args)
-        return _authority_tick(args, payload)
     _prepare_tick_preflight(args)
     with _thin_tick_lock(args):
         args._continuous_submission_authorization = None
@@ -7358,108 +7202,15 @@ def tick(args) -> bool:
             # The public seal can require archive/network work. Refresh every
             # mutable chain fact after it, while still holding the shared lock.
             _prepare_tick_preflight(args)
-        try:
-            return _thin_tick_locked(args)
-        except _FeedUnavailableForThin as exc:
-            # Thin follows Cathedral's signed vector, so a dead feed leaves it
-            # with nothing to submit. FULL derives the same answer from raw
-            # evidence and does not need the feed at all, so a provisioned
-            # runtime degrades UP into the stronger claim instead of idling.
-            # The reverse (FULL degrading into thin) stays forbidden: that
-            # direction would let anyone who can break the evidence path force
-            # the validator back onto trusting the publisher.
-            if not bool(getattr(args, "feed_down_fallback", False)):
-                raise
-            if not _full_path_provisioned(args):
-                raise
-            # Degrading up rewrites the trust model of the whole process, which
-            # is the same choice _validate_runtime_contract admits or refuses
-            # before the loop starts. Hold the switch to that contract instead
-            # of stepping past it: a validated_supply_v3 pin under authority
-            # mode is refused at startup precisely because it fails closed on
-            # every tick, and taking that state at tick time is worse, because
-            # nothing switches back and the validator goes dark for good.
-            # Idling until the publisher returns is the recoverable failure.
-            switch_refusal = _feed_down_switch_refusal(args)
-            if switch_refusal is not None:
-                _lifecycle(
-                    "FEED unavailable",
-                    f"reason={exc} switching_to=none refused={switch_refusal}",
-                )
-                raise
-            fallback_reason = str(exc)
-    # Outside the thin lock: the authority tick takes its own.
-    _lifecycle(
-        "FEED unavailable",
-        f"reason={fallback_reason} switching_to=full permanent=true",
-    )
-    args._feed_down_fallback_active = True
-    # The switch is the whole runtime's, not one call's. The provenance stage
-    # dispatches on args.provenance, so leaving it at "shadow" sent the
-    # authority tick through the shadow audit, which produces no recomputed
-    # vector, and the fallback crashed on its only target path. Setting it
-    # here also makes the one-way conversion visible in every later banner
-    # and event instead of only in the lane state.
-    args.provenance = "authority"
-    _prepare_tick_preflight(args)
-    return _authority_tick(args, None)
+        # A missing or invalid signed feed leaves a relay with no vector to
+        # submit. Propagate the classified failure so the run loop records the
+        # refusal and retries on its normal cadence. Never change submission
+        # authority at tick time.
+        return _thin_tick_locked(args)
 
 
 class _FeedUnavailableForThin(wire.VectorError):
     """The signed vector could not be fetched, so thin has nothing to follow."""
-
-
-class _ProvenanceView:
-    """Read-only view of args carrying one substituted provenance mode.
-
-    The contract check has to be answered BEFORE the live args are rewritten,
-    or a refused switch would have to be undone on an object other threads and
-    later ticks read. A view keeps the runtime unchanged until the switch is
-    known to be admissible.
-    """
-
-    def __init__(self, args: Any, provenance: str) -> None:
-        object.__setattr__(self, "_args", args)
-        object.__setattr__(self, "provenance", provenance)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_args"), name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        # A contract check that started writing would write to the view and lose
-        # it. Fail loudly rather than silently discard a runtime mutation.
-        raise AttributeError(f"provenance view is read-only; refused write to {name}")
-
-
-def _feed_down_switch_refusal(args: Any) -> str | None:
-    """Why this runtime may not degrade up into FULL, or None when it may.
-
-    Answered by the startup contract itself rather than by a copy of one of its
-    rules, so a configuration the guard would refuse under authority mode stays
-    refused when the feed, not the operator, is what proposes the change.
-    """
-    try:
-        _validate_runtime_contract(_ProvenanceView(args, "authority"))
-    except wire.VectorError as exc:
-        return str(exc)
-    return None
-
-
-def _full_path_provisioned(args: Any) -> bool:
-    """True when this runtime can actually recompute independently.
-
-    Falling back to FULL is only meaningful if the controlled raw evidence and
-    the pinned verifier are both present. Without them the fallback would swap
-    one unavailable input for another, so thin fails closed instead.
-    """
-    controlled = getattr(args, "provenance_controlled_dir", None)
-    verifier = getattr(args, "provenance_verifier_binary", None)
-    return (
-        bool(controlled)
-        and Path(str(controlled)).is_dir()
-        and bool(verifier)
-        and Path(str(verifier)).exists()
-    )
 
 
 def _thin_tick_locked(args) -> bool:
@@ -7590,8 +7341,8 @@ def _thin_tick_locked(args) -> bool:
         )
         raise
 
-    # Concurrent full-provenance stage (shadow audits; authority replaces the
-    # submitted vector with the independent recomputation).
+    # Provenance work is either the bounded launch-only strict replay gate or a
+    # nonblocking recurring shadow audit. It never changes the recurring writer.
     provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
     submission_authority = "thin"
     launch_rewarded_set_gate = bool(
@@ -7664,9 +7415,9 @@ def _thin_tick_locked(args) -> bool:
             preflight=preflight,
             burn_uid=int(burn_uid) if burn_uid is not None else None,
         )
-    # The launch and authority paths both refuse a burn destination that is not
-    # the operator-pinned hotkey (see _revalidate_launch_after_rewarded_set_replay
-    # and _revalidate_authority_after_audit). The thin tick had no equivalent, so
+    # The bounded launch path refuses a burn destination that is not the
+    # operator-pinned hotkey (see _revalidate_launch_after_rewarded_set_replay).
+    # The thin tick had no equivalent, so
     # the recurring writer took the destination from the signed vector alone.
     # The pin is already in process and _validate_resolved_chain_contract has
     # already proven it is the live subnet owner, so anchoring the feed's
@@ -8043,7 +7794,8 @@ def _prepare_tick_preflight(args: Any) -> None:
 # dedup identity carries exactly one monotone field per lane:
 #
 #   thin      -> identity["policy_version"] = P
-#   authority -> identity["source_epoch"]   = E
+#   authority (serialized launch/recovery lane)
+#             -> identity["source_epoch"]   = E
 #
 # `_reserve_common_submission` derives the lane high-water from that SAME
 # field, and both the reservation (`_write_state_fenced`) and the commit refuse
@@ -8178,7 +7930,7 @@ def _reserve_common_submission(
     elif lane == "authority":
         source_epoch = identity.get("source_epoch")
         if isinstance(source_epoch, bool) or not isinstance(source_epoch, int):
-            raise ValueError("authority submission identity has no source epoch")
+            raise ValueError("full-replay launch identity has no source epoch")
         lane_fence = {"submission_highest_source_epoch": source_epoch}
     else:
         raise ValueError("submission lane must be thin or authority")
@@ -8188,9 +7940,8 @@ def _reserve_common_submission(
     launch_attempt = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     authorization = getattr(args, "_continuous_submission_authorization", None)
     # `_continuous_transition_required` is the single source of truth. Keeping
-    # a separate config conjunct here let an authority-lane operator who set
-    # the flag false reserve without the signed authorization the tick had
-    # already demanded, so the reservation and the tick disagreed.
+    # a separate config conjunct here let a historical full-replay lane reserve
+    # without the signed authorization already demanded by the launch gate.
     recurring_required = bool(
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
@@ -8259,9 +8010,9 @@ def _reserve_common_submission(
                         isinstance(authorization, ContinuousAuthorization)
                         and "authority" in authorization.lanes
                     )
-                    # Operator-declared authority has no ContinuousAuthorization
-                    # to carry lanes; _authority_lane_transition_authorized still
-                    # binds the transition to this chain, netuid and hotkey.
+                    # A bounded beta launch has no ContinuousAuthorization to
+                    # carry lanes; _authority_lane_transition_authorized still
+                    # binds the historical lane to this chain, netuid and hotkey.
                     or _operator_declared_authority(args)
                 )
             ),
@@ -9305,7 +9056,7 @@ def _expire_pending_common_submission(args: Any, *, attempt_id: str) -> None:
 def _recover_pending_launch_receipt(
     args: Any,
 ) -> RecoveredSubmission | RecoveredAuthoritySubmission | None:
-    """Re-prove and finalize one journaled thin or FULL receipt without writing.
+    """Re-prove and finalize one thin or authority-labelled launch receipt.
 
     This runs before every profile tick. ``None`` means there is no pending
     submission. A positive historical mismatch or unavailable archive remains
@@ -10236,18 +9987,15 @@ def _sn39_launch_obligation(args: Any) -> bool:
     operator except Cathedral out of SN39 entirely. The obligation therefore
     tracks the things an operator cannot simply restate in a config file:
 
-      1. the authority code path, which submits its own recomputation instead
-         of relaying the signed vector, and so originates trust rather than
-         carrying it;
+      1. the internal ``provenance="authority"`` marker retained for bounded
+         launch and historical recovery. Recurring entrypoints refuse it;
       2. the launch runtime itself, which performs the one-shot transaction;
       3. possession of, or journalled lineage from, the controlled launch
          material at the release-pinned absolute paths.
 
     Every branch reads code constants or this runtime's own durable journal, so
     no config value, CLI flag, endpoint label, or environment variable can
-    clear an obligation the runtime actually has. Declaring `provenance =
-    "shadow"` to dodge branch 1 also gives up the ability to originate weights,
-    which is the capability the gate exists to protect.
+    clear an obligation the runtime actually has.
     """
     if (getattr(args, "provenance", "shadow") or "shadow") == "authority":
         return True
@@ -10310,9 +10058,10 @@ def _continuous_transition_required(args: Any) -> bool:
 def _submission_tick_lock(args: Any, *, lane: str):
     """One non-blocking cross-process submission section for every mode.
 
-    Thin and FULL-authority processes contend on the same file, so only one can
-    reach an irreversible chain call. Shadow audit work remains concurrent
-    because it never enters a submission tick on its own.
+    Recurring thin writes and bounded or historical authority-labelled launch
+    operations contend on the same file, so only one can reach an irreversible
+    chain call. Shadow audit work stays concurrent because it never enters a
+    submission tick on its own.
     """
     import fcntl
 
@@ -10369,393 +10118,6 @@ def _pending_recovery_tick_lock(args: Any):
         raise _PendingReceiptNotProven(
             "pending receipt recovery lock is temporarily unavailable"
         ) from exc
-
-
-@contextlib.contextmanager
-def _authority_tick_lock(args: Any):
-    with _submission_tick_lock(args, lane="authority"):
-        yield
-
-
-def _authority_tick(args, payload: dict[str, Any] | None) -> bool:
-    """Full-authority tick, linearized: the entire audit→reserve→submit
-    sequence runs inside ONE cross-process critical section per state file,
-    so no interleaving of concurrent authority ticks can put stale weights
-    on-chain after newer ones."""
-    if (
-        not bool(getattr(args, "offline", False))
-        and getattr(args, "_tick_preflight", None) is None
-    ):
-        _prepare_tick_preflight(args)
-    with _authority_tick_lock(args):
-        args._continuous_submission_authorization = None
-        if bool(getattr(args, "broadcast", False)) and _continuous_transition_required(
-            args
-        ):
-            args._continuous_submission_authorization = (
-                _require_continuous_launch_transition(args)
-            )
-            _prepare_tick_preflight(args)
-        return _authority_tick_locked(args, payload)
-
-
-def _revalidate_authority_after_audit(
-    args: Any,
-    *,
-    audit: Any,
-    recomputed: dict[str, float],
-) -> tuple[ChainPreflight, dict[str, int], dict[int, float], InclusionPolicy]:
-    """Refresh every mutable chain input after the potentially slow FULL audit."""
-    fresh = chain_preflight(
-        network=args.network,
-        netuid=args.netuid,
-        wallet_name=args.wallet_name,
-        wallet_hotkey=args.wallet_hotkey,
-    )
-    _validate_resolved_chain_contract(args, fresh)
-    _bind_submission_identity(args, fresh)
-    if fresh.block is None:
-        raise wire.VectorError(
-            "fresh authority preflight has no finalized block after audit"
-        )
-    uid_weights = _provenance_uid_weights(
-        recomputed,
-        mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
-        or MECHANISM_DEFAULT,
-        burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
-        hotkey_to_uid=fresh.hotkey_to_uid,
-    )
-    burn_uid = fresh.hotkey_to_uid.get(getattr(args, "provenance_burn_hotkey", None))
-    _require_no_validator_compute_reward(
-        uid_weights,
-        preflight=fresh,
-        burn_uid=burn_uid,
-    )
-    _validate_chain_constraints(uid_weights, fresh)
-    inclusion_policy = _authority_inclusion_policy(audit, fresh)
-    uid_safety = _require_uid_mapping_stability(
-        fresh,
-        {
-            uid: hotkey
-            for hotkey, uid in fresh.hotkey_to_uid.items()
-            if uid in uid_weights
-        },
-        mortal_period_blocks=inclusion_policy.mortal_period_blocks,
-    )
-    # The reservation downstream re-runs the stability proof over the filtered
-    # vector, so what gets reserved and what gets signed are the same set.
-    uid_weights = _drop_unprovable_targets(
-        args,
-        uid_weights,
-        uid_safety,
-        fresh.hotkey_to_uid,
-        fresh.hotkey_to_uid.get(getattr(args, "provenance_burn_hotkey", None)),
-    )
-    args._tick_preflight = fresh
-    return fresh, fresh.hotkey_to_uid, uid_weights, inclusion_policy
-
-
-def _authority_tick_locked(args, payload: dict[str, Any] | None) -> bool:
-    """Full-authority tick body: audit the published evidence, recompute, and
-    submit the independently derived UID vector (fixed mechanism burn to the
-    configured destination). The signed Cathedral vector, when reachable and
-    valid, is used for comparison inside the audit only — it is never
-    UID-mapped and never a precondition. The chain snapshot is taken FIRST
-    so its finalized block anchors the report validity window. Callers MUST
-    hold the authority tick lock (see _authority_tick)."""
-    comparison = None
-    if payload is not None:
-        try:
-            wire.verify_signature(
-                payload,
-                public_key_hex=args.public_key_hex,
-                expected_key_id=args.key_id,
-            )
-            comparison = payload
-        except Exception as exc:  # noqa: BLE001 - comparison-only input
-            _lifecycle("FEED invalid", f"reason={type(exc).__name__}")
-
-    current_block: int | None = None
-    preflight = None
-    if args.offline:
-        broadcast = False
-        hk2uid: dict[str, int] = {}
-    else:
-        broadcast = args.broadcast
-        preflight = getattr(args, "_tick_preflight", None)
-        if preflight is None:
-            preflight = chain_preflight(
-                network=args.network,
-                netuid=args.netuid,
-                wallet_name=args.wallet_name,
-                wallet_hotkey=args.wallet_hotkey,
-            )
-            _bind_submission_identity(args, preflight)
-        hk2uid = preflight.hotkey_to_uid
-        current_block = preflight.block
-
-    # A missing or malformed metagraph block must never degrade to
-    # current_block=None (which silently skips the report block-validity
-    # check inside the audit): refuse BEFORE audit and BEFORE submission.
-    if not args.offline and current_block is None:
-        raise wire.VectorError(
-            "authority requires a finalized integer metagraph block to anchor "
-            "the report validity window; the chain snapshot did not provide "
-            "one (refusing before audit or submission)"
-        )
-
-    _, recomputed = _run_provenance_stage(
-        args,
-        comparison if comparison is not None else {},
-        Path(args.state_file),
-        current_block=current_block,
-        historical_hotkeys_lookup=(
-            None
-            if args.offline
-            else _historical_metagraph_lookup(args.network, args.netuid)
-        ),
-        block_hash_lookup=(None if args.offline else _block_hash_lookup(args.network)),
-    )
-    if args.offline:
-        hk2uid = {hotkey: index for index, hotkey in enumerate(sorted(recomputed))}
-        hk2uid.setdefault(
-            getattr(args, "provenance_burn_hotkey", None) or "", len(hk2uid)
-        )
-    uid_weights = _provenance_uid_weights(
-        recomputed,
-        mechanism=getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
-        or MECHANISM_DEFAULT,
-        burn_hotkey=getattr(args, "provenance_burn_hotkey", None),
-        hotkey_to_uid=hk2uid,
-    )
-    inclusion_policy: InclusionPolicy | None = None
-    if broadcast:
-        # Same reasoning as the thin lane: the audit above already ran, and
-        # `_revalidate_authority_after_audit` would otherwise re-sample the
-        # head only to hit the identical cooldown refusal. Waiting can only
-        # move the countdown down, never up, so the pre-audit snapshot is a
-        # sound basis for the skip.
-        _require_chain_weight_write_permitted(args, preflight)
-        authority_audit = getattr(args, "_authority_full_audit", None)
-        # Same rank test as the audit gate. Two places comparing assurance by
-        # string equality is how one of them ends up demanding a level the
-        # other stopped producing.
-        if getattr(authority_audit, "status", None) != PASS or assurance_rank(
-            getattr(authority_audit, "assurance", None)
-        ) < _minimum_assurance_rank(args):
-            raise wire.VectorError(
-                "authority submission has no provenance audit at the required assurance"
-            )
-        preflight, hk2uid, uid_weights, inclusion_policy = (
-            _revalidate_authority_after_audit(
-                args,
-                audit=authority_audit,
-                recomputed=recomputed,
-            )
-        )
-        current_block = preflight.block
-    ordered = sorted(uid_weights.items())
-    preview = ",".join(f"{uid}:{weight:.6f}" for uid, weight in ordered[:12])
-    _lifecycle(
-        "AUTHORITY provenance",
-        f"independently derived vector ({len(recomputed)} verified miners) "
-        f"block={current_block} vector={preview}",
-    )
-    state_file = Path(args.state_file)
-    attempt_id: str | None = None
-    if broadcast:
-        authority_audit = getattr(args, "_authority_full_audit", None)
-        if inclusion_policy is None:
-            raise wire.VectorError(
-                "authority submission has no fresh post-audit inclusion policy"
-            )
-        # Reserve an exact attempt BEFORE the irreversible chain call. A crash,
-        # RPC ambiguity, telemetry failure, or merely advancing to a later
-        # metagraph block can therefore never cause an automatic duplicate
-        # submission. The durable attempt ID is derived from the evidence,
-        # independently recomputed hotkey allocation, resolved UID allocation,
-        # mechanism, burn destination, and validator identity. The mapping
-        # block remains in the stored exact submission identity for public
-        # proof, but is deliberately excluded from the deduplication identity:
-        # a new block with the same mapping is not new work. A genuinely new
-        # report or allocation gets a different attempt ID and remains eligible.
-        reserved = _read_state(state_file)
-        mechanism = (
-            getattr(args, "provenance_mechanism", MECHANISM_DEFAULT)
-            or MECHANISM_DEFAULT
-        )
-        burn_hotkey = getattr(args, "provenance_burn_hotkey", None)
-        identity = {
-            "network": args.network,
-            "netuid": args.netuid,
-            # Authorizes the one-way thin-to-FULL lane transition on a runtime
-            # with no completed launch ceremony. Set when the operator declared
-            # full mode in config, or when thin degraded up because its feed
-            # was unreachable. Never set by an ordinary thin tick.
-            **(
-                {"operator_declared_authority": True}
-                if _operator_declared_authority(args)
-                else {}
-            ),
-            "mapping_block": current_block,
-            "validator_hotkey": preflight.validator_hotkey,
-            "validator_uid": preflight.validator_uid,
-            "source_epoch": reserved.get("provenance_last_source_epoch"),
-            "report_id": reserved.get("provenance_last_report_id"),
-            "index_epoch": reserved.get("provenance_index_epoch"),
-            "index_manifest": reserved.get("provenance_index_manifest"),
-            "policy_release": reserved.get("provenance_policy_release"),
-            "policy_digest": reserved.get("provenance_policy_digest"),
-            "mechanism": mechanism,
-            "burn_hotkey": burn_hotkey,
-            "hotkey_weights": [
-                [hotkey, recomputed[hotkey]] for hotkey in sorted(recomputed)
-            ],
-            "uid_weights": [[uid, weight] for uid, weight in ordered],
-            "uid_hotkeys": [
-                [uid, hotkey]
-                for hotkey, uid in sorted(hk2uid.items(), key=lambda item: item[1])
-                if uid in uid_weights
-            ],
-            "next_epoch_start_block": (preflight.next_epoch_start_block),
-            "inclusion_policy": _inclusion_policy_identity(inclusion_policy),
-            "uid_safety": _require_uid_mapping_stability(
-                preflight,
-                {
-                    uid: hotkey
-                    for hotkey, uid in preflight.hotkey_to_uid.items()
-                    if uid in uid_weights
-                },
-                mortal_period_blocks=inclusion_policy.mortal_period_blocks,
-            ),
-        }
-        continuous_authorization = getattr(
-            args, "_continuous_submission_authorization", None
-        )
-        if _continuous_transition_required(args):
-            if not isinstance(continuous_authorization, ContinuousAuthorization):
-                raise wire.VectorError(
-                    "authority submission lacks pre-reservation continuous "
-                    "authorization"
-                )
-            identity["continuous_authorization"] = _continuous_authorization_identity(
-                continuous_authorization
-            )
-        required_identity = (
-            "source_epoch",
-            "report_id",
-            "index_epoch",
-            "index_manifest",
-            "policy_release",
-            "policy_digest",
-        )
-        if any(identity.get(key) is None for key in required_identity):
-            raise wire.VectorError(
-                "authority reservation lacks a complete evidence identity; "
-                "refusing before submission"
-            )
-        dedup_identity = {
-            key: value
-            for key, value in identity.items()
-            if key not in {"mapping_block", "uid_safety"}
-        }
-        attempt_bytes = json.dumps(
-            dedup_identity,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        attempt_id = "sha256:" + hashlib.sha256(attempt_bytes).hexdigest()
-        try:
-            _reserve_common_submission(
-                args,
-                lane="authority",
-                attempt_id=attempt_id,
-                identity=identity,
-            )
-        except (ValueError, OSError) as exc:
-            raise _SubmissionFenceRefused(
-                "authority submission attempt fence refused before chain write: "
-                f"{stable_error(exc)}"
-            ) from exc
-    submission = set_weights_on_chain(
-        uid_weights,
-        network=args.network,
-        netuid=args.netuid,
-        wallet_name=args.wallet_name,
-        wallet_hotkey=args.wallet_hotkey,
-        broadcast=broadcast,
-        preflight=preflight,
-        uid_hotkeys=(
-            {uid: hotkey for hotkey, uid in hk2uid.items() if uid in uid_weights}
-            if not args.offline
-            else None
-        ),
-        inclusion_policy=inclusion_policy,
-        runtime_contract=args,
-    )
-    if broadcast:
-        submission = _require_release_grade_submission(submission)
-    ok = bool(submission)
-    if ok and broadcast:
-        # The common journal is canonical for crash recovery. Finalize it before
-        # the lane-local telemetry file so a crash cannot strand a proven
-        # finalized extrinsic behind an unrecoverable common pending fence.
-        _finalize_common_submission(
-            args,
-            attempt_id=attempt_id,
-            submission=submission,
-        )
-        _write_state_fenced(
-            state_file,
-            {
-                "authority_submission_attempt_id": attempt_id,
-                "authority_submission_attempt_status": "finalized",
-                "authority_submission_attempted_at": _ms_iso_now(),
-                "authority_submission_identity": identity,
-                "authority_submission_dedup_identity": dedup_identity,
-                "authority_submission_finalized_id": attempt_id,
-                "authority_submission_finalized_at": _ms_iso_now(),
-                "authority_submission_extrinsic_hash": getattr(
-                    submission, "extrinsic_hash", None
-                ),
-                "authority_submission_block_hash": getattr(
-                    submission, "block_hash", None
-                ),
-                "authority_submission_block_number": getattr(
-                    submission, "block_number", None
-                ),
-            },
-        )
-    _get_events(args).event(
-        "WEIGHTS_SUBMITTED" if (ok and broadcast) else "WEIGHTS_DRY_RUN",
-        stage="submit",
-        status=PASS if ok else FAIL,
-        detail=(
-            f"authority=full_provenance uids={len(ordered)} "
-            f"block={current_block} vector={preview}"
-        ),
-        authority="full_provenance",
-        uid_count=len(ordered),
-        wire_uids=(
-            _wire_weights(
-                [uid for uid, _weight in ordered],
-                [weight for _uid, weight in ordered],
-            )[0]
-            if not args.offline
-            else None
-        ),
-        wire_weights=(
-            _wire_weights(
-                [uid for uid, _weight in ordered],
-                [weight for _uid, weight in ordered],
-            )[1]
-            if not args.offline
-            else None
-        ),
-        version_key=_weight_version_key() if not args.offline else None,
-    )
-    return ok
 
 
 def _drain_shadow_audit_once(args) -> bool:
@@ -10819,24 +10181,17 @@ def _validate_runtime_contract(args: Any) -> None:
     max_submissions = int(getattr(args, "max_submissions", 0) or 0)
     if max_submissions < 0:
         raise wire.VectorError("max_submissions must be nonnegative")
-    # Refuse the silent-death combo at startup rather than every tick. A validator
-    # pinned to validated_supply_v3 while running the authority (independent
-    # recompute) provenance mode never applies the signed v3 vector the pin
-    # requires, so it fails closed on every tick and the validator goes dark with
-    # no single loud reason (cathedral-validator#35). A v3 pin is a RELAY posture —
-    # it accepts and submits Cathedral's signed v3 vector — so authority mode
-    # contradicts it. Say so once, at startup, with the fix.
+    # The internal authority-labelled lane is retained for bounded full replay
+    # and historical journal compatibility. It derives a single-lane vector and
+    # therefore cannot satisfy the signed multi-lane v3 contract.
     if (
         getattr(args, "require_policy", None) == REQUIRE_POLICY_VALIDATED_SUPPLY_V3
         and (getattr(args, "provenance", "shadow") or "shadow") == "authority"
     ):
         raise wire.VectorError(
-            "require_policy=validated_supply_v3 is incompatible with "
-            "provenance=authority: a v3 pin relays Cathedral's signed v3 vector, "
-            "while authority mode recomputes independently and never applies it, so "
-            "every tick would fail closed and the validator would go dark silently. "
-            "Use provenance=shadow (relay + concurrent audit) with a v3 pin, or drop "
-            "the v3 pin if you intend to run authority."
+            "require_policy=validated_supply_v3 is incompatible with the bounded "
+            "full-replay launch lane: v3 requires Cathedral's signed multi-lane "
+            "vector, while strict replay currently derives only the TDX lane"
         )
     launch_gate = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     launch_preflight = bool(getattr(args, "launch_preflight", False))
@@ -10957,7 +10312,7 @@ def _validate_runtime_contract(args: Any) -> None:
     ):
         suffix = f"; missing {', '.join(missing)}" if missing else ""
         raise wire.VectorError(
-            "launch full-provenance mode requires exactly one online action "
+            "bounded launch strict replay requires exactly one online action "
             "(read-only preflight or approved broadcast), --once, "
             "provenance=shadow, max_submissions=1, controlled evidence, verifier "
             f"binary, immutable launch/approval paths, and burn hotkey{suffix}"
@@ -11019,6 +10374,12 @@ def run(args) -> int:
     `cathedral-validator serve` console command. `args` is any object carrying
     the tick attributes (an argparse Namespace or a SimpleNamespace from the
     CLI's config loader)."""
+    provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
+    if provenance_mode != "shadow":
+        raise wire.VectorError(
+            "recurring validator run supports only the shadow relay runtime; "
+            f"got provenance={provenance_mode!r}"
+        )
     _validate_runtime_contract(args)
     if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
         if bool(getattr(args, "launch_preflight", False)):
@@ -11029,18 +10390,11 @@ def run(args) -> int:
     require_policy = getattr(args, "require_policy", None)
     if require_policy:
         _lifecycle("PIN active", f"policy={require_policy}")
-    submission_authority, provenance_mode = _runtime_modes(args)
+    submission_authority, provenance_mode = "thin", "shadow"
     _lifecycle(
         "MODE active",
-        f"submission_authority={submission_authority} provenance={provenance_mode} "
-        + (
-            "(thin submits; provenance audits concurrently; FULL requires "
-            "controlled raw evidence)"
-            if provenance_mode == "shadow"
-            else "(independent recomputation submits)"
-            if provenance_mode == "authority"
-            else "(thin only; no provenance audit)"
-        ),
+        "submission_authority=thin provenance=shadow "
+        "(signed vector submits; provenance audits concurrently)",
     )
     _get_events(args).event(
         "STARTUP",
@@ -11254,24 +10608,6 @@ def run(args) -> int:
                     detail=str(e)[:512],
                 )
                 break
-            except _NothingToScoreYet as e:
-                # Passive-listener state: the validator ran a full, correct check
-                # and there is simply nothing to score this epoch. Report it as a
-                # calm waiting status, not a failure, and stay up for the next tick.
-                tick_ok = True
-                render.outcome(True, "waiting for a job — nothing to score this epoch")
-                _get_events(args).event(
-                    "WAITING_FOR_JOB",
-                    stage="result",
-                    status=NOT_PROVEN,
-                    detail=str(e)[:512],
-                    remediation=(
-                        "No submission this epoch by design: nothing was "
-                        "independently proven, so there is nothing to score. The "
-                        "validator stays up and re-checks on the next interval."
-                    ),
-                )
-                break
             except _EpochRoomUnavailable as e:
                 # The tick started too close to an epoch boundary to prove
                 # mortal inclusion inside the epoch it was composed against.
@@ -11439,7 +10775,7 @@ def build_parser() -> argparse.ArgumentParser:
             "CATHEDRAL_VALIDATOR_RUNTIME_ROOT",
             str(_VALIDATOR_RUNTIME_ROOT),
         ),
-        help="absolute owner-only cross-mode lock and ambiguity-journal directory",
+        help="absolute owner-only submission-lock and ambiguity-journal directory",
     )
     p.add_argument("--interval-secs", type=float, default=1500.0)
     p.add_argument(
@@ -11470,7 +10806,7 @@ def build_parser() -> argparse.ArgumentParser:
         .strip()
         .lower()
         in {"1", "true", "yes", "on"},
-        help="launch-only: require synchronous FULL raw-evidence replay and exact "
+        help="launch-only: require synchronous strict raw-evidence replay and exact "
         "vector agreement before the one permitted chain write",
     )
     p.add_argument(
@@ -11483,14 +10819,10 @@ def build_parser() -> argparse.ArgumentParser:
         "10%% unadmitted GPU-to-burn allocation. "
         "Default: validated_supply_v1.",
     )
-    p.add_argument(
-        "--provenance",
-        choices=("shadow", "authority"),
-        default=os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "shadow"),
-        help="full-provenance mode: 'shadow' (default) audits the "
-        "published evidence concurrently while thin mode submits; "
-        "'authority' submits the independent recomputation.",
-    )
+    # The recurring runtime has one submission posture. Authority-labelled
+    # internals remain only for bounded launch-journal recovery and are not an
+    # operator-selectable module mode.
+    p.set_defaults(provenance="shadow")
     p.add_argument(
         "--evidence-url",
         default=os.environ.get("CATHEDRAL_EVIDENCE_URL", "") or None,
@@ -11541,7 +10873,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--provenance-controlled-dir",
         default=os.environ.get("CATHEDRAL_PROVENANCE_CONTROLLED_DIR") or None,
-        help="controlled-disclosure envelope directory (enables FULL assurance)",
+        help="controlled-disclosure envelope directory (enables strict replay)",
     )
     p.add_argument(
         "--provenance-verifier-binary",
@@ -11556,9 +10888,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--provenance-burn-hotkey",
         default=os.environ.get("CATHEDRAL_PROVENANCE_BURN_HOTKEY") or None,
-        help="authority mode's configured burn destination hotkey (the fixed "
-        "10%% mechanism burn goes here; never taken from Cathedral's "
-        "signed vector)",
+        help="pinned burn destination used to verify the signed vector contract",
     )
     p.add_argument("--provenance-index-max-age-secs", type=float, default=3600.0)
     p.add_argument(
@@ -11568,8 +10898,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(
             "CATHEDRAL_PROVENANCE_MIN_ASSURANCE", "rewarded_set_proven"
         ),
-        help="lowest assurance the shadow verifier treats as PROVEN and the bar "
-        "the opt-in authority submission path must clear (default "
+        help="lowest assurance the shadow verifier treats as PROVEN (default "
         "rewarded_set_proven). NOT the thin write path's gate — attestation-"
         "verified/thin submits the signed vector after signature verification "
         "regardless. Opt down to receipts_only or up to full_over_epoch.",
@@ -11590,6 +10919,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     p = build_parser()
     args = p.parse_args()
+    configured_mode = os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "").strip()
+    if configured_mode and configured_mode.lower() != "shadow":
+        p.error(
+            "CATHEDRAL_VALIDATOR_PROVENANCE no longer selects a runtime mode; "
+            "the recurring validator supports only the shadow relay. "
+            f"authority/full was refused (got {configured_mode!r})"
+        )
     if not args.public_key_hex:
         p.error(
             "--public-key-hex (or CATHEDRAL_WEIGHT_POLICY_PUBLIC_KEY) is required — "

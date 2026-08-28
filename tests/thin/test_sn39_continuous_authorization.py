@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -555,7 +556,7 @@ def test_refuses_a_lane_outside_the_approval(lanes, lane) -> None:
         _validate(_document(lanes=lanes), lane=lane)
 
 
-def test_accepts_both_lanes_only_when_both_were_authorized() -> None:
+def test_historical_two_lane_document_remains_verifiable_for_each_lane() -> None:
     document = _document(lanes=["authority", "thin"])
     assert _validate(document, lane="thin").lanes == ("authority", "thin")
     assert _validate(document, lane="authority").lanes == ("authority", "thin")
@@ -989,7 +990,6 @@ def _build(state=None, **kwargs):
         "max_attempts": 8,
         "valid_for_blocks": 600,
         "valid_for_seconds": 3600,
-        "allow_authority_lane": False,
         "now": NOW,
     }
     parameters.update(kwargs)
@@ -1009,8 +1009,11 @@ def test_build_from_journal_produces_a_document_its_own_gate_accepts() -> None:
     assert verified.valid_until_nonce_exclusive - verified.valid_from_nonce == 8
 
 
-def test_build_from_journal_opts_into_the_authority_lane_explicitly() -> None:
-    assert _build(allow_authority_lane=True)["lanes"] == ["authority", "thin"]
+def test_build_from_journal_issues_only_the_recurring_thin_lane() -> None:
+    assert (
+        "allow_authority_lane"
+        not in inspect.signature(auth.build_from_journal).parameters
+    )
 
 
 @pytest.mark.parametrize(
@@ -1374,9 +1377,10 @@ def test_build_parser_requires_every_reviewed_bound() -> None:
         parser.parse_args(["--journal", str(_journal_path())])
     args = parser.parse_args(CLI_ARGUMENTS)
     assert args.max_attempts == 8
-    assert args.allow_full_authority_writes is False
     assert args.replace_existing is False
     assert args.i_authorize_recurring_mainnet_writes is False
+    with pytest.raises(SystemExit):
+        parser.parse_args(CLI_ARGUMENTS + ["--allow-full-authority-writes"])
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="asserts the non-root refusal")

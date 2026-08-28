@@ -26,13 +26,11 @@ RELEASES = Path("/opt/cathedral-sn39/releases")
 VENVS = Path("/opt/cathedral-sn39/venvs")
 RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
 CONFIGS = {
-    # The RELAY profile is the launch posture: fetch_vector is hardened to
-    # public-HTTPS-only, so the selfcompose profile's loopback publisher URL can
-    # never be fetched (cathedral-validator#37). The live self-compose shape is
-    # "local publisher publishes to the public feed; validator fetches it back".
+    # The sole continuous profile follows the public HTTPS relay. An origin
+    # publishes locally, while the validator fetches the pinned public feed.
     "continuous": INSTALL_ROOT / "validator-thin-sn39-relay.toml",
 }
-MODES = frozenset({*CONFIGS, "status", "preflight", "finalize"})
+MODES = frozenset({*CONFIGS, "verify", "status", "preflight", "finalize"})
 JOURNAL_RE = re.compile(r"journal-[0-9a-f]{64}\.json")
 FINALIZER_CONTEXT_ENV = "CATHEDRAL_SN39_FINALIZER_CONTEXT"
 LEGACY_SERVICE_MASK = Path("/etc/systemd/system/cathedral-thin-validator.service")
@@ -466,7 +464,7 @@ def main(argv: list[str]) -> int:
     ):
         print(
             "usage: cathedral-sn39-release "
-            "{continuous|status|preflight JOURNAL|finalize JOURNAL}",
+            "{verify|continuous|status|preflight JOURNAL|finalize JOURNAL}",
             file=sys.stderr,
         )
         return 2
@@ -475,11 +473,19 @@ def main(argv: list[str]) -> int:
         return 1
     try:
         journal = _finalizer_journal(argv[1]) if ceremony else None
-        release, python, manifest_digest = _verify(mode)
+        release, python, manifest_digest = _verify(
+            "continuous" if mode == "verify" else mode
+        )
     except InstallError as exc:
         print(f"SN39 immutable-install check failed: {exc}", file=sys.stderr)
         return 1
-    # -u on every mode. The child's stdout is a journald pipe, and Python's
+    if mode == "verify":
+        print(
+            "SN39 immutable-install verification PASS: "
+            f"release={release.name} manifest={manifest_digest}"
+        )
+        return 0
+    # -u on every child mode. The child's stdout is a journald pipe, and Python's
     # default for a non-tty stdout is an 8192-byte BLOCK buffer -- so a tick's
     # worth of operator output can sit unflushed for hours, and a SIGTERM
     # (systemctl restart/stop) discards it entirely. scaffold.cli.main also
