@@ -827,6 +827,72 @@ def test_primary_finalization_rejects_nonexact_historical_weights(
     ]
 
 
+def test_primary_historical_storage_rpc_failure_remains_ambiguous_and_fenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+    fresh = _state(
+        block_number=1_003,
+        block_hash="0x" + "d" * 64,
+        blocks_since_last_update=203,
+        blocks_until_next_epoch=197,
+    )
+    fresh.preflight.subtensor.substrate.query = lambda **_kwargs: (_ for _ in ()).throw(
+        ConnectionError("historical storage unavailable")
+    )
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt_awaiting_finality",
+        lambda *_args, **_kwargs: canonical_validator.PASS,
+    )
+    calls = 0
+
+    def submit_call(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _intent_then_receipt(*args, **kwargs)
+
+    with pytest.raises(launch.UID30LaunchAmbiguous, match="do not retry"):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=lambda: fresh,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=submit_call,
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    journal = canonical_validator._read_state(
+        canonical_validator._submission_state_path(args)
+    )
+    assert journal["submission_pending_proof_status"] == "pending"
+    assert journal["submission_pending_id"] is not None
+    assert journal.get("submission_finalized_id") is None
+
+    with pytest.raises(launch.UID30LaunchError, match="journal refused"):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=lambda: fresh,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=submit_call,
+        )
+    assert calls == 1
+
+
 def test_signed_ambiguity_has_read_only_exact_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1191,6 +1257,78 @@ def test_canonical_zero_burn_recovery_fences_historical_storage_mismatch(
         canonical_validator._submission_state_path(args)
     )
     assert journal["submission_pending_proof_status"] == canonical_validator.FAIL
+    assert journal["submission_pending_id"] is not None
+    assert journal.get("submission_finalized_id") is None
+    assert Path(args.state_file).exists() is False
+
+
+def test_canonical_zero_burn_recovery_fences_historical_storage_rpc_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, digest, runtime_root = _preview_files(tmp_path)
+
+    def ambiguous(*args, **kwargs):
+        _intent_then_receipt(*args, **kwargs)
+        raise ConnectionError("receipt transport closed after broadcast")
+
+    with pytest.raises(launch.UID30LaunchAmbiguous):
+        launch.submit_reviewed_preview(
+            preview_path=path,
+            reviewed_sha256=digest,
+            qvl_path="/pinned/qvl",
+            now=TEST_NOW,
+            confirm=True,
+            exclusive_writer_asserted=True,
+            chain_loader=_state,
+            miner_loader=lambda *_args, **_kwargs: _proof(),
+            submit_call=ambiguous,
+        )
+
+    args = launch._submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256=digest,
+        authorized=True,
+    )
+    args.state_file = str(runtime_root / "uid30-authority-state.json")
+    args._tick_preflight = _preflight(1_003, "0x" + "d" * 64, 1_200)
+    args._tick_preflight.subtensor.substrate.query = lambda **_kwargs: (
+        _ for _ in ()
+    ).throw(ConnectionError("archive unavailable"))
+    monkeypatch.setattr(
+        canonical_validator, "_prepare_tick_preflight", lambda _args: None
+    )
+    monkeypatch.setattr(canonical_validator, "ChainPreflight", SimpleNamespace)
+    monkeypatch.setattr(
+        canonical_validator,
+        "_locate_pending_broadcast_receipt",
+        lambda *_args, **_kwargs: (
+            canonical_validator.PASS,
+            canonical_validator.ChainSubmission(
+                success=True,
+                extrinsic_hash="0x" + "a" * 64,
+                block_hash="0x" + "b" * 64,
+                block_number=1_002,
+                finalized=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        canonical_validator,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: canonical_validator.PASS,
+    )
+
+    with pytest.raises(
+        canonical_validator._PendingReceiptNotProven,
+        match="still not provable",
+    ):
+        canonical_validator._recover_pending_launch_receipt(args)
+
+    journal = canonical_validator._read_state(
+        canonical_validator._submission_state_path(args)
+    )
+    assert journal["submission_pending_proof_status"] == canonical_validator.NOT_PROVEN
     assert journal["submission_pending_id"] is not None
     assert journal.get("submission_finalized_id") is None
     assert Path(args.state_file).exists() is False
