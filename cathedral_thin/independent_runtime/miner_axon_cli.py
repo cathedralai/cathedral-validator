@@ -58,6 +58,19 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="assert every other process or host able to announce this miner is stopped",
     )
+    announce.add_argument(
+        "--allow-finalized-successor",
+        action="store_true",
+        help="allow the one reviewed successor to a strictly proven final journal",
+    )
+    announce.add_argument(
+        "--predecessor-preview",
+        help="owner-only reviewed preview for the finalized predecessor",
+    )
+    announce.add_argument(
+        "--predecessor-reviewed-sha256",
+        help="exact reviewed SHA256 for the finalized predecessor preview",
+    )
 
     recover = sub.add_parser(
         "recover",
@@ -143,6 +156,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     qvl_path=options.qvl,
                     confirm=options.confirm_miner_announce,
                     exclusive_announcer_asserted=options.assert_exclusive_announcer,
+                    allow_finalized_successor=options.allow_finalized_successor,
+                    predecessor_preview_path=options.predecessor_preview,
+                    predecessor_reviewed_sha256=options.predecessor_reviewed_sha256,
                 )
             )
         elif options.command == "recover":

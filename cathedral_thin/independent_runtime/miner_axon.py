@@ -45,6 +45,7 @@ NETWORK = "finney"
 NETUID = 39
 SN39_HTTPS_PORT = 8081
 ANNOUNCEMENT_PERIOD_BLOCKS = 128
+FINALIZED_SUCCESSOR_UID = 124
 
 VALIDATOR_HOTKEY = (
     "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"  # pragma: allowlist secret
@@ -58,6 +59,9 @@ CATHEDRAL_COLDKEY = (
 
 PREVIEW_SCHEMA = "cathedral_sn39_miner_axon_preview_v1"
 JOURNAL_SCHEMA = "cathedral_sn39_miner_axon_journal_v1"
+SUCCESSOR_JOURNAL_SCHEMA = "cathedral_sn39_miner_axon_successor_journal_v1"
+SUCCESSOR_JOURNAL_KIND = "finalized_successor"
+SUCCESSOR_ATTEMPT_DOMAIN = "cathedral_sn39_miner_axon_successor_attempt_v1"
 PREVIEW_READY = "READY_FOR_OPERATOR_REVIEW"
 PREVIEW_ALREADY = "ALREADY_ANNOUNCED_NO_WRITE_REQUIRED"
 AMBIGUOUS_STATUSES = frozenset(
@@ -155,6 +159,21 @@ class EndpointProof:
         }
 
 
+@dataclass(frozen=True)
+class _ValidatedSuccessorJournal:
+    """Strict immutable and resolution state for one durable successor intent."""
+
+    preflight: FinalizedMinerState
+    stored_readback: FinalizedMinerState | None
+
+    @property
+    def minimum_readback_block(self) -> int:
+        target_floor = self.preflight.block_number + 1
+        if self.stored_readback is None:
+            return target_floor
+        return max(target_floor, self.stored_readback.block_number)
+
+
 def _raw_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
@@ -191,6 +210,17 @@ def _digest(value: object, *, label: str) -> str:
     if _SHA256_RE.fullmatch(text) is None:
         raise MinerAxonError(f"{label} is not one lowercase SHA256")
     return text
+
+
+def _looks_like_successor_journal(document: Mapping[str, Any]) -> bool:
+    attempt_id = str(document.get("attempt_id", ""))
+    return (
+        document.get("schema") == SUCCESSOR_JOURNAL_SCHEMA
+        or "journal_kind" in document
+        or "journal_generation" in document
+        or "predecessor_lineage" in document
+        or attempt_id.startswith("successor-sha256:")
+    )
 
 
 def _require_ss58(value: object, *, label: str) -> str:
@@ -940,10 +970,21 @@ def _load_journal(path: Path) -> dict[str, Any] | None:
         path.lstat()
     except FileNotFoundError:
         return None
-    raw = _require_owner_only_file(path, max_bytes=MAX_DOCUMENT_BYTES)
-    journal = _strict_json(raw, label="announcement journal")
-    if journal.get("schema") != JOURNAL_SCHEMA:
-        raise MinerAxonError("announcement journal schema differs from the launch pin")
+    except OSError as exc:
+        raise MinerAxonAmbiguous(
+            "announcement journal path is unreadable; preserve it and do not retry"
+        ) from exc
+    try:
+        raw = _require_owner_only_file(path, max_bytes=MAX_DOCUMENT_BYTES)
+        journal = _strict_json(raw, label="announcement journal")
+    except MinerAxonError as exc:
+        raise MinerAxonAmbiguous(
+            "existing announcement journal is unreadable; preserve it and do not retry"
+        ) from exc
+    if journal.get("schema") not in {JOURNAL_SCHEMA, SUCCESSOR_JOURNAL_SCHEMA}:
+        raise MinerAxonAmbiguous(
+            "existing announcement journal schema is unrecognized; preserve it and do not retry"
+        )
     return journal
 
 
@@ -1077,16 +1118,39 @@ def _finalized_readback(
     port: int,
     receipt: Mapping[str, Any] | None = None,
     state_loader: Callable[[Any], FinalizedMinerState] = finalized_miner_state,
+    minimum_block_number: int | None = None,
+    receipt_after_block_number: int | None = None,
+    require_canonical_state: bool = False,
 ) -> Mapping[str, Any]:
     state = state_loader(subtensor)
     if not _same_endpoint(state, ip=ip, port=port):
         raise MinerAxonAmbiguous(
             "finalized SN39 axon differs from the authorized HTTPS endpoint"
         )
+    if minimum_block_number is not None and state.block_number < minimum_block_number:
+        raise MinerAxonAmbiguous("finalized successor readback predates its preflight")
+    if require_canonical_state:
+        try:
+            _canonical_state_block(
+                subtensor, state, label="successor finalized readback"
+            )
+        except MinerAxonError as exc:
+            raise MinerAxonAmbiguous(
+                "successor finalized readback block is not canonical"
+            ) from exc
     if receipt is not None and receipt.get("block_number") is not None:
         receipt_number = _strict_nonnegative_int(
             receipt["block_number"], label="receipt block number"
         )
+        receipt_floor = (
+            minimum_block_number
+            if receipt_after_block_number is None
+            else receipt_after_block_number
+        )
+        if receipt_floor is not None and receipt_number <= receipt_floor:
+            raise MinerAxonAmbiguous(
+                "successor receipt does not postdate its finalized preflight"
+            )
         if receipt_number > state.block_number:
             raise MinerAxonAmbiguous("receipt block is not finalized")
         receipt_hash = receipt.get("block_hash")
@@ -1126,17 +1190,534 @@ def _journal_identity(
     }
 
 
+def _state_from_artifact(
+    value: object, *, label: str, require_serving: bool = False
+) -> FinalizedMinerState:
+    """Parse one exact finalized miner artifact without trusting journal fields."""
+
+    if not isinstance(value, Mapping):
+        raise MinerAxonError(f"{label} is not a finalized miner state")
+    if set(value) != {
+        "finalized_block_number",
+        "finalized_block_hash",
+        "uid",
+        "hotkey",
+        "coldkey",
+        "axon",
+    }:
+        raise MinerAxonError(f"{label} fields differ from the finalized-state schema")
+    uid = _strict_nonnegative_int(value.get("uid"), label=f"{label} UID")
+    hotkey = _require_ss58(value.get("hotkey"), label=f"{label} hotkey")
+    coldkey = _require_ss58(value.get("coldkey"), label=f"{label} coldkey")
+    if uid < 0 or hotkey != MINER_HOTKEY or coldkey != CATHEDRAL_COLDKEY:
+        raise MinerAxonError(f"{label} identity differs from the Cathedral pins")
+    axon = value.get("axon")
+    if not isinstance(axon, Mapping) or set(axon) != {"ip", "port", "is_serving"}:
+        raise MinerAxonError(f"{label} axon fields differ from the schema")
+    ip = str(axon.get("ip", ""))
+    try:
+        parsed_ip = ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise MinerAxonError(f"{label} axon IP is malformed") from exc
+    if parsed_ip.version != 4 or str(parsed_ip) != ip:
+        raise MinerAxonError(f"{label} axon IP is not canonical IPv4")
+    port = _strict_nonnegative_int(axon.get("port"), label=f"{label} axon port")
+    serving = axon.get("is_serving")
+    if port > 65535 or not isinstance(serving, bool):
+        raise MinerAxonError(f"{label} axon row is malformed")
+    if require_serving and not serving:
+        raise MinerAxonError(f"{label} does not prove a serving axon")
+    return FinalizedMinerState(
+        block_number=_strict_nonnegative_int(
+            value.get("finalized_block_number"), label=f"{label} block number"
+        ),
+        block_hash=_canonical_hash(
+            value.get("finalized_block_hash"), label=f"{label} block hash"
+        ),
+        uid=uid,
+        hotkey=hotkey,
+        coldkey=coldkey,
+        ip=ip,
+        port=port,
+        is_serving=serving,
+    )
+
+
+def _endpoint_proof_from_artifact(value: object, *, label: str) -> EndpointProof:
+    if not isinstance(value, Mapping):
+        raise MinerAxonError(f"{label} is not an endpoint proof")
+    proof = EndpointProof(
+        hotkey=str(value.get("hotkey", "")),
+        validator_hotkey=str(value.get("validator_hotkey", "")),
+        ip=str(value.get("ip", "")),
+        port=value.get("port"),  # type: ignore[arg-type]
+        qvl=str(value.get("qvl", "")),
+        qvl_digest=str(value.get("qvl_digest", "")),
+        sat_units=value.get("sat_units"),  # type: ignore[arg-type]
+        sat_rule=str(value.get("sat_rule", "")),
+        tls_spki_sha256=str(value.get("tls_spki_sha256", "")),
+        nonce_sha256=str(value.get("nonce_sha256", "")),
+        quote_sha256=str(value.get("quote_sha256", "")),
+        report_data_sha256=str(value.get("report_data_sha256", "")),
+        anchor_number=value.get("anchor_number"),  # type: ignore[arg-type]
+        anchor_hash=str(value.get("anchor_hash", "")),
+    )
+    if set(value) != set(proof.artifact()):
+        raise MinerAxonError(f"{label} fields differ from the endpoint-proof schema")
+    return validate_endpoint_proof(proof, ip=proof.ip, port=proof.port)
+
+
+def _validated_receipt(
+    value: object, *, required_success: bool, label: str = "predecessor"
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "extrinsic_hash",
+        "block_hash",
+        "block_number",
+        "success",
+    }:
+        raise MinerAxonError(f"{label} receipt fields differ from the SDK schema")
+    for key in ("extrinsic_hash", "block_hash"):
+        if value[key] is not None:
+            _canonical_hash(value[key], label=f"{label} receipt {key}")
+    if value["block_number"] is not None:
+        _strict_nonnegative_int(
+            value["block_number"], label=f"{label} receipt block number"
+        )
+    if not isinstance(value["success"], bool):
+        raise MinerAxonError(f"{label} receipt success is not boolean")
+    if required_success and value["success"] is not True:
+        raise MinerAxonError(f"finalized {label} receipt is not successful")
+    return value
+
+
+def _validated_final_predecessor(
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any] | None = None,
+    preview_sha256: str | None = None,
+) -> tuple[FinalizedMinerState, str]:
+    """Require a complete, unambiguous first-generation finalized journal."""
+
+    if _looks_like_successor_journal(journal):
+        raise MinerAxonError("the bounded finalized successor was already consumed")
+    expected_fields = {
+        "schema",
+        "status",
+        "attempt_id",
+        "identity",
+        "preflight",
+        "fresh_endpoint_proof",
+        "remote_exclusive_announcer_asserted",
+        "serve_axon_call_authorized",
+        "serve_axon_outcome",
+        "receipt",
+        "readback",
+        "retry_allowed",
+    }
+    if set(journal) != expected_fields or journal.get("schema") != JOURNAL_SCHEMA:
+        raise MinerAxonError("predecessor journal fields differ from the launch schema")
+    status = journal.get("status")
+    if status not in FINAL_STATUSES:
+        raise MinerAxonError("predecessor announcement is not finalized and proven")
+    if (
+        journal.get("retry_allowed") is not False
+        or journal.get("remote_exclusive_announcer_asserted") is not True
+        or journal.get("serve_axon_call_authorized") is not True
+    ):
+        raise MinerAxonError(
+            "predecessor journal does not retain the one-attempt fence"
+        )
+    identity = journal.get("identity")
+    if not isinstance(identity, Mapping):
+        raise MinerAxonError("predecessor journal identity is missing")
+    if preview is not None and preview_sha256 is not None:
+        if dict(identity) != _journal_identity(
+            preview=preview, preview_sha256=preview_sha256
+        ):
+            raise MinerAxonError(
+                "predecessor journal differs from its reviewed preview"
+            )
+    expected_attempt = "sha256:" + _sha256(_canonical_json_bytes(dict(identity)))
+    if journal.get("attempt_id") != expected_attempt:
+        raise MinerAxonError("predecessor attempt ID is not derived from its identity")
+    expected_identity = {
+        "network": NETWORK,
+        "netuid": NETUID,
+        "preview_sha256": identity.get("preview_sha256"),
+        "uid": identity.get("uid"),
+        "hotkey": identity.get("hotkey"),
+        "coldkey": identity.get("coldkey"),
+        "ip": identity.get("ip"),
+        "port": identity.get("port"),
+    }
+    if dict(identity) != expected_identity:
+        raise MinerAxonError(
+            "predecessor identity fields differ from the launch schema"
+        )
+    _digest(identity.get("preview_sha256"), label="predecessor preview digest")
+    if (
+        identity.get("network") != NETWORK
+        or identity.get("netuid") != NETUID
+        or identity.get("hotkey") != MINER_HOTKEY
+        or identity.get("coldkey") != CATHEDRAL_COLDKEY
+    ):
+        raise MinerAxonError("predecessor identity differs from the Cathedral pins")
+    uid = _strict_nonnegative_int(identity.get("uid"), label="predecessor UID")
+    if uid != FINALIZED_SUCCESSOR_UID:
+        raise MinerAxonError(
+            f"finalized successor is pinned to miner UID {FINALIZED_SUCCESSOR_UID}"
+        )
+    ip = _global_ipv4(identity.get("ip"))
+    port = _service_port(identity.get("port"))
+    preflight = _state_from_artifact(
+        journal.get("preflight"), label="predecessor preflight"
+    )
+    proof = _endpoint_proof_from_artifact(
+        journal.get("fresh_endpoint_proof"), label="predecessor endpoint proof"
+    )
+    readback = _state_from_artifact(
+        journal.get("readback"),
+        label="predecessor finalized readback",
+        require_serving=True,
+    )
+    if any(
+        state.uid != uid
+        or state.hotkey != MINER_HOTKEY
+        or state.coldkey != CATHEDRAL_COLDKEY
+        for state in (preflight, readback)
+    ):
+        raise MinerAxonError("predecessor state identity differs from its journal")
+    if preview is not None:
+        _current_matches_preview(preflight, preview)
+    if (proof.ip, proof.port) != (ip, port):
+        raise MinerAxonError("predecessor proof endpoint differs from its identity")
+    if (preflight.ip, preflight.port, preflight.is_serving) == (ip, port, True):
+        raise MinerAxonError("predecessor preflight already has its identity endpoint")
+    if preview is not None:
+        _fresh_matches_preview(proof, preview)
+    if (readback.ip, readback.port, readback.is_serving) != (ip, port, True):
+        raise MinerAxonError("predecessor readback differs from its identity endpoint")
+    if readback.block_number <= preflight.block_number:
+        raise MinerAxonError("predecessor readback does not postdate its preflight")
+    receipt = journal.get("receipt")
+    if status == "finalized_proven":
+        if journal.get("serve_axon_outcome") != "SUCCESS":
+            raise MinerAxonError("finalized predecessor outcome is not SUCCESS")
+        validated_receipt = _validated_receipt(receipt, required_success=True)
+    else:
+        if journal.get("serve_axon_outcome") != "FINALIZED_BY_READBACK":
+            raise MinerAxonError("recovered predecessor outcome is not exact")
+        if receipt is not None:
+            validated_receipt = _validated_receipt(receipt, required_success=False)
+        else:
+            validated_receipt = None
+    if (
+        validated_receipt is not None
+        and validated_receipt["block_number"] is not None
+        and validated_receipt["block_number"] > readback.block_number
+    ):
+        raise MinerAxonError("predecessor receipt postdates its finalized readback")
+    return readback, expected_attempt
+
+
+def _validated_predecessor_lineage(journal: Mapping[str, Any]) -> None:
+    if "predecessor_lineage" not in journal:
+        return
+    lineage = journal.get("predecessor_lineage")
+    if not isinstance(lineage, Mapping) or set(lineage) != {
+        "generation",
+        "journal_sha256",
+        "journal",
+    }:
+        raise MinerAxonError("successor predecessor lineage fields differ from schema")
+    if lineage.get("generation") != 1:
+        raise MinerAxonError("successor predecessor generation is not bounded to one")
+    predecessor = lineage.get("journal")
+    if not isinstance(predecessor, Mapping):
+        raise MinerAxonError("successor predecessor journal is missing")
+    expected = _digest(
+        lineage.get("journal_sha256"), label="predecessor journal digest"
+    )
+    if _sha256(_canonical_json_bytes(dict(predecessor))) != expected:
+        raise MinerAxonError("embedded predecessor journal digest does not match")
+    _validated_final_predecessor(predecessor)
+
+
+def _successor_attempt_id(
+    *,
+    identity: Mapping[str, Any],
+    preflight: Mapping[str, Any],
+    fresh_endpoint_proof: Mapping[str, Any],
+    predecessor_lineage: Mapping[str, Any],
+) -> str:
+    lineage_digest = "sha256:" + _sha256(
+        _canonical_json_bytes(dict(predecessor_lineage))
+    )
+    material = {
+        "domain": SUCCESSOR_ATTEMPT_DOMAIN,
+        "schema": SUCCESSOR_JOURNAL_SCHEMA,
+        "journal_kind": SUCCESSOR_JOURNAL_KIND,
+        "journal_generation": 1,
+        "identity": dict(identity),
+        "preflight": dict(preflight),
+        "fresh_endpoint_proof": dict(fresh_endpoint_proof),
+        "remote_exclusive_announcer_asserted": True,
+        "serve_axon_call_authorized": True,
+        "retry_allowed": False,
+        "predecessor_lineage_sha256": lineage_digest,
+    }
+    return "successor-sha256:" + _sha256(_canonical_json_bytes(material))
+
+
+def _validated_successor_identity(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "network",
+        "netuid",
+        "preview_sha256",
+        "uid",
+        "hotkey",
+        "coldkey",
+        "ip",
+        "port",
+    }:
+        raise MinerAxonError("successor identity fields differ from schema")
+    identity = dict(value)
+    if (
+        identity["network"] != NETWORK
+        or identity["netuid"] != NETUID
+        or identity["hotkey"] != MINER_HOTKEY
+        or identity["coldkey"] != CATHEDRAL_COLDKEY
+        or _strict_nonnegative_int(identity["uid"], label="successor UID")
+        != FINALIZED_SUCCESSOR_UID
+    ):
+        raise MinerAxonError("successor identity differs from the UID124 launch pins")
+    _digest(identity["preview_sha256"], label="successor preview digest")
+    _global_ipv4(identity["ip"])
+    _service_port(identity["port"])
+    return identity
+
+
+def _validated_successor_receipt(
+    value: object,
+    *,
+    required_success: bool,
+    preflight: FinalizedMinerState,
+    readback: FinalizedMinerState | None,
+) -> Mapping[str, Any]:
+    receipt = _validated_receipt(
+        value, required_success=required_success, label="successor"
+    )
+    block_number = receipt["block_number"]
+    if block_number is not None:
+        if receipt["block_hash"] is None:
+            raise MinerAxonError("numbered successor receipt has no block hash")
+        if block_number <= preflight.block_number:
+            raise MinerAxonError("successor receipt does not postdate preflight")
+        if readback is not None and block_number > readback.block_number:
+            raise MinerAxonError("successor receipt postdates stored readback")
+    return receipt
+
+
+def _validated_successor_journal(
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any] | None = None,
+    preview_sha256: str | None = None,
+) -> _ValidatedSuccessorJournal:
+    """Strictly validate every persisted field of one successor intent."""
+
+    expected_fields = {
+        "schema",
+        "journal_kind",
+        "journal_generation",
+        "status",
+        "attempt_id",
+        "identity",
+        "preflight",
+        "fresh_endpoint_proof",
+        "remote_exclusive_announcer_asserted",
+        "serve_axon_call_authorized",
+        "serve_axon_outcome",
+        "receipt",
+        "readback",
+        "retry_allowed",
+        "predecessor_lineage",
+    }
+    if set(journal) != expected_fields:
+        raise MinerAxonError("successor journal fields differ from schema")
+    if (
+        journal.get("schema") != SUCCESSOR_JOURNAL_SCHEMA
+        or journal.get("journal_kind") != SUCCESSOR_JOURNAL_KIND
+        or journal.get("journal_generation") != 1
+    ):
+        raise MinerAxonError("successor journal markers differ from the launch pin")
+    if (preview is None) != (preview_sha256 is None):
+        raise MinerAxonError("successor review identity is incomplete")
+    _validated_predecessor_lineage(journal)
+    lineage = journal["predecessor_lineage"]
+    if not isinstance(lineage, Mapping):
+        raise MinerAxonError("successor predecessor lineage is missing")
+    identity = _validated_successor_identity(journal.get("identity"))
+    if preview is not None and preview_sha256 is not None:
+        if identity != _journal_identity(
+            preview=preview, preview_sha256=preview_sha256
+        ):
+            raise MinerAxonError("successor journal differs from its reviewed preview")
+    predecessor_journal = lineage["journal"]
+    if not isinstance(predecessor_journal, Mapping):
+        raise MinerAxonError("successor embedded predecessor journal is missing")
+    predecessor, _ = _validated_final_predecessor(predecessor_journal)
+    predecessor_identity = predecessor_journal.get("identity")
+    if not isinstance(predecessor_identity, Mapping):
+        raise MinerAxonError("successor embedded predecessor identity is missing")
+    if _digest(identity["preview_sha256"], label="successor preview digest") == _digest(
+        predecessor_identity.get("preview_sha256"),
+        label="embedded predecessor preview digest",
+    ):
+        raise MinerAxonError(
+            "successor preview digest does not differ from predecessor"
+        )
+    preflight = _state_from_artifact(
+        journal.get("preflight"), label="successor journal preflight"
+    )
+    _current_matches_predecessor(preflight, predecessor)
+    if preflight.block_number - predecessor.block_number < ANNOUNCEMENT_PERIOD_BLOCKS:
+        raise MinerAxonError("successor journal does not preserve the 128-block fence")
+    proof = _endpoint_proof_from_artifact(
+        journal.get("fresh_endpoint_proof"), label="successor endpoint proof"
+    )
+    if (proof.ip, proof.port) != (identity["ip"], identity["port"]):
+        raise MinerAxonError("successor proof endpoint differs from identity")
+    if (proof.ip, proof.port) == (predecessor.ip, predecessor.port):
+        raise MinerAxonError("successor endpoint does not differ from predecessor")
+    if preview is not None:
+        _current_matches_preview(preflight, preview)
+        _fresh_matches_preview(proof, preview)
+    if (
+        journal.get("remote_exclusive_announcer_asserted") is not True
+        or journal.get("serve_axon_call_authorized") is not True
+        or journal.get("retry_allowed") is not False
+    ):
+        raise MinerAxonError("successor journal authorization fence is incomplete")
+    preflight_value = journal.get("preflight")
+    proof_value = journal.get("fresh_endpoint_proof")
+    if not isinstance(preflight_value, Mapping) or not isinstance(proof_value, Mapping):
+        raise MinerAxonError("successor immutable intent artifacts are malformed")
+    if journal.get("attempt_id") != _successor_attempt_id(
+        identity=identity,
+        preflight=preflight_value,
+        fresh_endpoint_proof=proof_value,
+        predecessor_lineage=lineage,
+    ):
+        raise MinerAxonError(
+            "successor attempt ID is not bound to exact immutable intent"
+        )
+
+    status = journal.get("status")
+    outcome = journal.get("serve_axon_outcome")
+    receipt = journal.get("receipt")
+    readback_value = journal.get("readback")
+    stored_readback: FinalizedMinerState | None = None
+    if status == "submission_started":
+        if outcome != "UNKNOWN" or receipt is not None or readback_value is not None:
+            raise MinerAxonError("started successor journal has contradictory outcome")
+    elif status == "submission_ambiguous":
+        allowed = {
+            "SDK_EXCEPTION": None,
+            "SDK_RESPONSE_UNPROVEN": None,
+            "SDK_UNSUCCESSFUL": False,
+            "FINALIZED_READBACK_UNPROVEN": True,
+        }
+        if outcome not in allowed or readback_value is not None:
+            raise MinerAxonError(
+                "ambiguous successor journal has contradictory outcome"
+            )
+        expected_success = allowed[outcome]
+        if expected_success is None:
+            if receipt is not None:
+                raise MinerAxonError("ambiguous successor receipt must be absent")
+        else:
+            validated = _validated_successor_receipt(
+                receipt,
+                required_success=expected_success,
+                preflight=preflight,
+                readback=None,
+            )
+            if validated["success"] is not expected_success:
+                raise MinerAxonError("ambiguous successor receipt success disagrees")
+    elif status in FINAL_STATUSES:
+        stored_readback = _state_from_artifact(
+            readback_value,
+            label="successor stored finalized readback",
+            require_serving=True,
+        )
+        if (
+            stored_readback.block_number <= preflight.block_number
+            or stored_readback.uid != FINALIZED_SUCCESSOR_UID
+            or stored_readback.hotkey != MINER_HOTKEY
+            or stored_readback.coldkey != CATHEDRAL_COLDKEY
+            or (stored_readback.ip, stored_readback.port)
+            != (identity["ip"], identity["port"])
+        ):
+            raise MinerAxonError("successor stored readback differs from exact target")
+        if status == "finalized_proven":
+            if outcome != "SUCCESS":
+                raise MinerAxonError("proven successor outcome is not SUCCESS")
+            _validated_successor_receipt(
+                receipt,
+                required_success=True,
+                preflight=preflight,
+                readback=stored_readback,
+            )
+        else:
+            if outcome != "FINALIZED_BY_READBACK":
+                raise MinerAxonError("recovered successor outcome is not exact")
+            if receipt is not None:
+                _validated_successor_receipt(
+                    receipt,
+                    required_success=False,
+                    preflight=preflight,
+                    readback=stored_readback,
+                )
+    else:
+        raise MinerAxonError("successor journal status is not recognized")
+    return _ValidatedSuccessorJournal(
+        preflight=preflight,
+        stored_readback=stored_readback,
+    )
+
+
+def _successor_minimum_readback(journal: Mapping[str, Any]) -> int | None:
+    """Return the strict successor preflight, or None for a true baseline journal."""
+
+    if not _looks_like_successor_journal(journal):
+        return None
+    return _validated_successor_journal(journal).minimum_readback_block
+
+
 def _journal_for_attempt(
     *,
     preview: Mapping[str, Any],
     preview_sha256: str,
     fresh: EndpointProof,
     state: FinalizedMinerState,
+    predecessor_lineage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     identity = _journal_identity(preview=preview, preview_sha256=preview_sha256)
-    attempt_id = "sha256:" + _sha256(_canonical_json_bytes(identity))
-    return {
-        "schema": JOURNAL_SCHEMA,
+    successor = predecessor_lineage is not None
+    attempt_id = (
+        _successor_attempt_id(
+            identity=identity,
+            preflight=state.artifact(),
+            fresh_endpoint_proof=fresh.artifact(),
+            predecessor_lineage=predecessor_lineage,
+        )
+        if predecessor_lineage is not None
+        else "sha256:" + _sha256(_canonical_json_bytes(identity))
+    )
+    journal = {
+        "schema": SUCCESSOR_JOURNAL_SCHEMA if successor else JOURNAL_SCHEMA,
         "status": "submission_started",
         "attempt_id": attempt_id,
         "identity": identity,
@@ -1149,6 +1730,11 @@ def _journal_for_attempt(
         "readback": None,
         "retry_allowed": False,
     }
+    if predecessor_lineage is not None:
+        journal["journal_kind"] = SUCCESSOR_JOURNAL_KIND
+        journal["journal_generation"] = 1
+        journal["predecessor_lineage"] = dict(predecessor_lineage)
+    return journal
 
 
 def _validated_serve_axon_call(
@@ -1195,6 +1781,39 @@ def _journal_matches(
         raise MinerAxonError("announcement journal does not carry the no-retry fence")
 
 
+def _recoverable_successor_validation(
+    journal: Mapping[str, Any], *, preview: Mapping[str, Any], digest: str
+) -> _ValidatedSuccessorJournal | None:
+    """Keep every malformed successor intent behind the ambiguity fence."""
+
+    if not _looks_like_successor_journal(journal):
+        _journal_matches(journal, preview=preview, digest=digest)
+        return None
+    try:
+        return _validated_successor_journal(
+            journal,
+            preview=preview,
+            preview_sha256=digest,
+        )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "successor intent journal is contradictory; preserve it and do not retry"
+        ) from exc
+
+
+def _post_intent_successor_validation(
+    journal: Mapping[str, Any],
+) -> _ValidatedSuccessorJournal | None:
+    if not _looks_like_successor_journal(journal):
+        return None
+    try:
+        return _validated_successor_journal(journal)
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "successor intent validation failed after persistence; do not retry"
+        ) from exc
+
+
 def _recover_existing_journal(
     *,
     journal: dict[str, Any],
@@ -1204,13 +1823,41 @@ def _recover_existing_journal(
     subtensor: Any,
     state_loader: Callable[[Any], FinalizedMinerState],
 ) -> Mapping[str, Any]:
-    _journal_matches(journal, preview=preview, digest=digest)
+    successor_validation = _recoverable_successor_validation(
+        journal, preview=preview, digest=digest
+    )
+    successor_minimum = (
+        successor_validation.minimum_readback_block
+        if successor_validation is not None
+        else None
+    )
+    if successor_validation is not None:
+        try:
+            _canonical_state_block(
+                subtensor,
+                successor_validation.preflight,
+                label="successor stored preflight",
+            )
+            if successor_validation.stored_readback is not None:
+                _canonical_state_block(
+                    subtensor,
+                    successor_validation.stored_readback,
+                    label="successor stored finalized readback",
+                )
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "successor stored chain proof is no longer canonical; do not retry"
+            ) from exc
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
     ip = str(requested["ip"])
     port = int(requested["port"])
     status = journal.get("status")
     if status not in AMBIGUOUS_STATUSES | FINAL_STATUSES:
+        if successor_minimum is not None:
+            raise MinerAxonAmbiguous(
+                "successor intent status is contradictory; preserve it and do not retry"
+            )
         raise MinerAxonError(
             f"announcement journal status is not recognized: {status!r}"
         )
@@ -1221,6 +1868,13 @@ def _recover_existing_journal(
             port=port,
             receipt=journal.get("receipt"),
             state_loader=state_loader,
+            minimum_block_number=successor_minimum,
+            receipt_after_block_number=(
+                successor_validation.preflight.block_number
+                if successor_validation is not None
+                else None
+            ),
+            require_canonical_state=successor_minimum is not None,
         )
     except Exception as exc:
         if status in FINAL_STATUSES:
@@ -1241,7 +1895,25 @@ def _recover_existing_journal(
             "retry_allowed": False,
         }
     )
-    _write_state(journal_path, recovered, exclusive=False)
+    if successor_validation is not None:
+        try:
+            _validated_successor_journal(
+                recovered,
+                preview=preview,
+                preview_sha256=digest,
+            )
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "successor recovery state is contradictory; do not retry"
+            ) from exc
+    try:
+        _write_state(journal_path, recovered, exclusive=False)
+    except Exception as exc:
+        if successor_minimum is not None:
+            raise MinerAxonAmbiguous(
+                "successor endpoint was read back but recovery persistence failed; do not retry"
+            ) from exc
+        raise
     return recovered
 
 
@@ -1257,6 +1929,36 @@ def _resolve_after_call(
 ) -> Mapping[str, Any]:
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
+    successor_validation = _post_intent_successor_validation(journal)
+    successor_minimum = (
+        successor_validation.minimum_readback_block
+        if successor_validation is not None
+        else None
+    )
+    if successor_validation is not None:
+        expected_success = {
+            "SDK_EXCEPTION": None,
+            "SDK_RESPONSE_UNPROVEN": None,
+            "SDK_UNSUCCESSFUL": False,
+            "FINALIZED_READBACK_UNPROVEN": True,
+        }.get(failure_kind)
+        if expected_success is None:
+            receipt = None
+        else:
+            try:
+                validated_receipt = _validated_successor_receipt(
+                    receipt,
+                    required_success=expected_success,
+                    preflight=successor_validation.preflight,
+                    readback=None,
+                )
+                if validated_receipt["success"] is not expected_success:
+                    raise MinerAxonError(
+                        "successor SDK outcome disagrees with its receipt"
+                    )
+            except Exception:
+                receipt = None
+                failure_kind = "SDK_RESPONSE_UNPROVEN"
     try:
         readback = _finalized_readback(
             subtensor,
@@ -1264,6 +1966,13 @@ def _resolve_after_call(
             port=int(requested["port"]),
             receipt=receipt,
             state_loader=state_loader,
+            minimum_block_number=successor_minimum,
+            receipt_after_block_number=(
+                successor_validation.preflight.block_number
+                if successor_validation is not None
+                else None
+            ),
+            require_canonical_state=successor_minimum is not None,
         )
     except Exception as exc:
         ambiguous = dict(journal)
@@ -1276,6 +1985,13 @@ def _resolve_after_call(
                 "retry_allowed": False,
             }
         )
+        if successor_validation is not None:
+            try:
+                _validated_successor_journal(ambiguous)
+            except Exception as validation_exc:
+                raise MinerAxonAmbiguous(
+                    "successor resolution state is contradictory; do not retry"
+                ) from validation_exc
         try:
             _write_state(journal_path, ambiguous, exclusive=False)
         except Exception:
@@ -1293,6 +2009,13 @@ def _resolve_after_call(
             "retry_allowed": False,
         }
     )
+    if successor_validation is not None:
+        try:
+            _validated_successor_journal(recovered)
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "successor recovered state is contradictory; do not retry"
+            ) from exc
     try:
         _write_state(journal_path, recovered, exclusive=False)
     except Exception as exc:
@@ -1300,6 +2023,376 @@ def _resolve_after_call(
             "finalized endpoint was read back but proof persistence failed; do not retry"
         ) from exc
     return recovered
+
+
+def _canonical_state_block(
+    subtensor: Any, state: FinalizedMinerState, *, label: str
+) -> None:
+    try:
+        canonical = _canonical_hash(
+            subtensor.substrate.get_block_hash(state.block_number),
+            label=f"{label} canonical block hash",
+        )
+    except MinerAxonError:
+        raise
+    except Exception as exc:
+        raise MinerAxonError(f"{label} block could not be resolved") from exc
+    if canonical != state.block_hash:
+        raise MinerAxonError(f"{label} block is not canonical")
+
+
+def _canonical_predecessor_receipt(subtensor: Any, journal: Mapping[str, Any]) -> None:
+    receipt = journal.get("receipt")
+    if not isinstance(receipt, Mapping) or receipt.get("block_number") is None:
+        return
+    block_number = _strict_nonnegative_int(
+        receipt["block_number"], label="predecessor receipt block number"
+    )
+    block_hash = receipt.get("block_hash")
+    if block_hash is None:
+        raise MinerAxonError("numbered predecessor receipt has no block hash")
+    try:
+        canonical = _canonical_hash(
+            subtensor.substrate.get_block_hash(block_number),
+            label="predecessor receipt canonical block hash",
+        )
+    except MinerAxonError:
+        raise
+    except Exception as exc:
+        raise MinerAxonError("predecessor receipt block could not be resolved") from exc
+    if canonical != _canonical_hash(block_hash, label="predecessor receipt block hash"):
+        raise MinerAxonError("predecessor receipt block is not canonical")
+
+
+def _current_matches_predecessor(
+    state: FinalizedMinerState, predecessor: FinalizedMinerState
+) -> None:
+    if state.block_number < predecessor.block_number:
+        raise MinerAxonError("current finalized head predates predecessor readback")
+    if (
+        state.uid != predecessor.uid
+        or state.uid != FINALIZED_SUCCESSOR_UID
+        or state.hotkey != predecessor.hotkey
+        or state.hotkey != MINER_HOTKEY
+        or state.coldkey != predecessor.coldkey
+        or state.coldkey != CATHEDRAL_COLDKEY
+    ):
+        raise MinerAxonError(
+            "current finalized miner identity differs from predecessor"
+        )
+    if (state.ip, state.port, state.is_serving) != (
+        predecessor.ip,
+        predecessor.port,
+        predecessor.is_serving,
+    ):
+        raise MinerAxonError("current finalized axon differs from predecessor readback")
+
+
+def _persist_submission_intent(
+    *,
+    journal_path: Path,
+    journal: Mapping[str, Any],
+    replace_finalized_predecessor: bool,
+) -> None:
+    """Classify failures around the atomic predecessor-to-successor replacement."""
+
+    try:
+        _write_state(
+            journal_path,
+            journal,
+            exclusive=not replace_finalized_predecessor,
+        )
+        return
+    except Exception as exc:
+        if not replace_finalized_predecessor:
+            raise
+        lineage = journal.get("predecessor_lineage")
+        predecessor = lineage.get("journal") if isinstance(lineage, Mapping) else None
+        try:
+            observed = _load_journal(journal_path)
+        except Exception as observation_exc:
+            raise MinerAxonAmbiguous(
+                "successor intent persistence failed and canonical state is unreadable; "
+                "do not retry"
+            ) from observation_exc
+        if (
+            isinstance(predecessor, Mapping)
+            and observed is not None
+            and _canonical_json_bytes(observed) == _canonical_json_bytes(predecessor)
+        ):
+            raise MinerAxonError(
+                "successor intent was not installed; predecessor remains exact"
+            ) from exc
+        raise MinerAxonAmbiguous(
+            "successor intent persistence crossed the atomic replacement boundary; "
+            "preserve the journal and do not retry"
+        ) from exc
+
+
+def _submit_journaled_axon(
+    *,
+    journal: dict[str, Any],
+    journal_path: Path,
+    replace_finalized_predecessor: bool,
+    preview: Mapping[str, Any],
+    subtensor: Any,
+    state_loader: Callable[[Any], FinalizedMinerState],
+    call: Callable[..., Any],
+    call_kwargs: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Persist one no-retry intent, call once, and resolve only by final state."""
+
+    _persist_submission_intent(
+        journal_path=journal_path,
+        journal=journal,
+        replace_finalized_predecessor=replace_finalized_predecessor,
+    )
+    try:
+        response = call(**dict(call_kwargs))
+    except Exception:
+        return _resolve_after_call(
+            journal=journal,
+            journal_path=journal_path,
+            preview=preview,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            receipt=None,
+            failure_kind="SDK_EXCEPTION",
+        )
+    try:
+        receipt = _receipt_fields(response)
+    except Exception:
+        return _resolve_after_call(
+            journal=journal,
+            journal_path=journal_path,
+            preview=preview,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            receipt=None,
+            failure_kind="SDK_RESPONSE_UNPROVEN",
+        )
+    if receipt["success"] is not True:
+        return _resolve_after_call(
+            journal=journal,
+            journal_path=journal_path,
+            preview=preview,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            receipt=receipt,
+            failure_kind="SDK_UNSUCCESSFUL",
+        )
+    requested = preview["requested_endpoint"]
+    assert isinstance(requested, Mapping)
+    successor_validation = _post_intent_successor_validation(journal)
+    successor_minimum = (
+        successor_validation.minimum_readback_block
+        if successor_validation is not None
+        else None
+    )
+    if successor_validation is not None:
+        try:
+            _validated_successor_receipt(
+                receipt,
+                required_success=True,
+                preflight=successor_validation.preflight,
+                readback=None,
+            )
+        except Exception:
+            return _resolve_after_call(
+                journal=journal,
+                journal_path=journal_path,
+                preview=preview,
+                subtensor=subtensor,
+                state_loader=state_loader,
+                receipt=None,
+                failure_kind="SDK_RESPONSE_UNPROVEN",
+            )
+    try:
+        readback = _finalized_readback(
+            subtensor,
+            ip=str(requested["ip"]),
+            port=int(requested["port"]),
+            receipt=receipt,
+            state_loader=state_loader,
+            minimum_block_number=successor_minimum,
+            receipt_after_block_number=(
+                successor_validation.preflight.block_number
+                if successor_validation is not None
+                else None
+            ),
+            require_canonical_state=successor_minimum is not None,
+        )
+    except Exception:
+        return _resolve_after_call(
+            journal=journal,
+            journal_path=journal_path,
+            preview=preview,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            receipt=receipt,
+            failure_kind="FINALIZED_READBACK_UNPROVEN",
+        )
+    finalized = dict(journal)
+    finalized.update(
+        {
+            "status": "finalized_proven",
+            "serve_axon_outcome": "SUCCESS",
+            "receipt": receipt,
+            "readback": dict(readback),
+            "retry_allowed": False,
+        }
+    )
+    if successor_validation is not None:
+        try:
+            _validated_successor_journal(finalized)
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "successor finalized state is contradictory; do not retry"
+            ) from exc
+    try:
+        _write_state(journal_path, finalized, exclusive=False)
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "serve_axon finalized but proof persistence failed; do not retry"
+        ) from exc
+    return finalized
+
+
+def _announce_finalized_successor_locked(
+    *,
+    bt_module: Any,
+    subtensor: Any,
+    wallet: Any,
+    preview: Mapping[str, Any],
+    digest: str,
+    predecessor_preview_path: Path | str,
+    predecessor_reviewed_sha256: str,
+    qvl_path: str,
+    state_loader: Callable[[Any], FinalizedMinerState],
+    proof_loader: Callable[..., EndpointProof],
+    serve_call: Callable[..., Any] | None,
+    runtime_root: Path,
+    journal_path: Path,
+    existing: dict[str, Any] | None,
+) -> Mapping[str, Any]:
+    """Authorize the single bounded successor while the canonical lock is held."""
+
+    if existing is None:
+        raise MinerAxonError("finalized successor requires the canonical predecessor")
+    predecessor_preview, predecessor_digest = load_reviewed_preview(
+        predecessor_preview_path,
+        reviewed_sha256=predecessor_reviewed_sha256,
+    )
+    predecessor_local = predecessor_preview["local_state"]
+    assert isinstance(predecessor_local, Mapping)
+    if Path(str(predecessor_local["runtime_root"])).resolve(
+        strict=False
+    ) != runtime_root.resolve(strict=False):
+        raise MinerAxonError("predecessor preview names a different runtime root")
+    if _looks_like_successor_journal(existing):
+        _post_intent_successor_validation(existing)
+        if existing.get("status") in FINAL_STATUSES:
+            raise MinerAxonError("the bounded finalized successor was already consumed")
+        raise MinerAxonAmbiguous(
+            "existing successor intent is unresolved; preserve it and do not retry"
+        )
+    predecessor, _ = _validated_final_predecessor(
+        existing,
+        preview=predecessor_preview,
+        preview_sha256=predecessor_digest,
+    )
+    _canonical_state_block(
+        subtensor, predecessor, label="predecessor finalized readback"
+    )
+    _canonical_predecessor_receipt(subtensor, existing)
+    if digest == predecessor_digest:
+        raise MinerAxonError("successor requires a distinct reviewed preview digest")
+    requested = preview["requested_endpoint"]
+    assert isinstance(requested, Mapping)
+    ip = _global_ipv4(requested["ip"])
+    port = _service_port(requested["port"])
+    if (ip, port) == (predecessor.ip, predecessor.port):
+        raise MinerAxonError("successor endpoint must differ from predecessor endpoint")
+    if preview.get("status") != PREVIEW_READY:
+        raise MinerAxonError("successor preview is not a replacement-ready artifact")
+    preview_state = _state_from_artifact(
+        preview.get("chain_at_preview"), label="successor preview chain state"
+    )
+    if preview_state.block_number < predecessor.block_number:
+        raise MinerAxonError(
+            "successor preview predates predecessor finalized readback"
+        )
+    _current_matches_predecessor(preview_state, predecessor)
+    _canonical_state_block(subtensor, preview_state, label="successor preview")
+
+    before = state_loader(subtensor)
+    _current_matches_preview(before, preview)
+    _current_matches_predecessor(before, predecessor)
+    _canonical_state_block(subtensor, before, label="successor preflight")
+    elapsed = before.block_number - predecessor.block_number
+    if elapsed < ANNOUNCEMENT_PERIOD_BLOCKS:
+        raise MinerAxonError(
+            "successor announcement period has not elapsed: "
+            f"{elapsed} < {ANNOUNCEMENT_PERIOD_BLOCKS} finalized blocks"
+        )
+
+    fresh = proof_loader(subtensor, qvl_path=qvl_path, ip=ip, port=port)
+    _fresh_matches_preview(fresh, preview)
+    after = state_loader(subtensor)
+    if (
+        after.uid != before.uid
+        or after.hotkey != before.hotkey
+        or after.coldkey != before.coldkey
+        or after.block_number < before.block_number
+        or (after.ip, after.port, after.is_serving)
+        != (before.ip, before.port, before.is_serving)
+    ):
+        raise MinerAxonError(
+            "finalized miner registration or predecessor axon changed during evidence collection"
+        )
+    _current_matches_predecessor(after, predecessor)
+    _canonical_state_block(subtensor, after, label="successor evidence recheck")
+
+    call = serve_call or subtensor.serve_axon
+    call_kwargs = _validated_serve_axon_call(call, advertisement=object())
+    advertisement = make_axon(
+        bt_module,
+        wallet=wallet,
+        port=port,
+        external_ip=ip,
+        external_port=port,
+        max_workers=2,
+    )
+    call_kwargs["axon"] = advertisement
+    predecessor_sha256 = _sha256(_canonical_json_bytes(existing))
+    lineage = {
+        "generation": 1,
+        "journal_sha256": "sha256:" + predecessor_sha256,
+        "journal": dict(existing),
+    }
+    journal = _journal_for_attempt(
+        preview=preview,
+        preview_sha256=digest,
+        fresh=fresh,
+        state=after,
+        predecessor_lineage=lineage,
+    )
+    _validated_successor_journal(
+        journal,
+        preview=preview,
+        preview_sha256=digest,
+    )
+    _wallet_identity(wallet)
+    return _submit_journaled_axon(
+        journal=journal,
+        journal_path=journal_path,
+        replace_finalized_predecessor=True,
+        preview=preview,
+        subtensor=subtensor,
+        state_loader=state_loader,
+        call=call,
+        call_kwargs=call_kwargs,
+    )
 
 
 def announce_reviewed_preview(
@@ -1316,6 +2409,9 @@ def announce_reviewed_preview(
     proof_loader: Callable[..., EndpointProof] = collect_endpoint_proof,
     serve_call: Callable[..., Any] | None = None,
     runtime_root: Path | None = None,
+    allow_finalized_successor: bool = False,
+    predecessor_preview_path: Path | str | None = None,
+    predecessor_reviewed_sha256: str | None = None,
 ) -> Mapping[str, Any]:
     """Authorize at most one serve_axon call from an exact reviewed preview."""
 
@@ -1326,6 +2422,18 @@ def announce_reviewed_preview(
     if exclusive_announcer_asserted is not True:
         raise MinerAxonError(
             "--assert-exclusive-announcer is required; stop every other miner announcer"
+        )
+    predecessor_supplied = (
+        predecessor_preview_path is not None or predecessor_reviewed_sha256 is not None
+    )
+    if allow_finalized_successor is True:
+        if predecessor_preview_path is None or predecessor_reviewed_sha256 is None:
+            raise MinerAxonError(
+                "--allow-finalized-successor requires the reviewed predecessor preview and digest"
+            )
+    elif predecessor_supplied:
+        raise MinerAxonError(
+            "predecessor arguments require --allow-finalized-successor"
         )
     preview, digest = load_reviewed_preview(
         preview_path, reviewed_sha256=reviewed_sha256
@@ -1341,12 +2449,32 @@ def announce_reviewed_preview(
         strict=False
     ):
         raise MinerAxonError("reviewed preview names a different runtime root")
-    _wallet_identity(wallet)
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
     ip = _global_ipv4(requested["ip"])
     port = _service_port(requested["port"])
     _, journal_path = _announcement_paths(root)
+    if allow_finalized_successor is True:
+        assert predecessor_preview_path is not None
+        assert predecessor_reviewed_sha256 is not None
+        with _announcement_lock(root):
+            return _announce_finalized_successor_locked(
+                bt_module=bt_module,
+                subtensor=subtensor,
+                wallet=wallet,
+                preview=preview,
+                digest=digest,
+                predecessor_preview_path=predecessor_preview_path,
+                predecessor_reviewed_sha256=predecessor_reviewed_sha256,
+                qvl_path=qvl_path,
+                state_loader=state_loader,
+                proof_loader=proof_loader,
+                serve_call=serve_call,
+                runtime_root=root,
+                journal_path=journal_path,
+                existing=_load_journal(journal_path),
+            )
+
     with _announcement_lock(root):
         existing = _load_journal(journal_path)
         if existing is not None:
@@ -1415,80 +2543,17 @@ def announce_reviewed_preview(
             fresh=fresh,
             state=after,
         )
-        _write_state(journal_path, journal, exclusive=True)
-        try:
-            response = call(**call_kwargs)
-        except Exception:
-            return _resolve_after_call(
-                journal=journal,
-                journal_path=journal_path,
-                preview=preview,
-                subtensor=subtensor,
-                state_loader=state_loader,
-                receipt=None,
-                failure_kind="SDK_EXCEPTION",
-            )
-        # The SDK call has returned, but receipt decoding is still post-call:
-        # the extrinsic might already be finalized even when an SDK property or
-        # SCALE value is malformed. Keep every response-inspection failure
-        # behind the same durable no-retry fence as a transport exception.
-        try:
-            receipt = _receipt_fields(response)
-        except Exception:
-            return _resolve_after_call(
-                journal=journal,
-                journal_path=journal_path,
-                preview=preview,
-                subtensor=subtensor,
-                state_loader=state_loader,
-                receipt=None,
-                failure_kind="SDK_RESPONSE_UNPROVEN",
-            )
-        if receipt["success"] is not True:
-            return _resolve_after_call(
-                journal=journal,
-                journal_path=journal_path,
-                preview=preview,
-                subtensor=subtensor,
-                state_loader=state_loader,
-                receipt=receipt,
-                failure_kind="SDK_UNSUCCESSFUL",
-            )
-        try:
-            readback = _finalized_readback(
-                subtensor,
-                ip=ip,
-                port=port,
-                receipt=receipt,
-                state_loader=state_loader,
-            )
-        except Exception:
-            return _resolve_after_call(
-                journal=journal,
-                journal_path=journal_path,
-                preview=preview,
-                subtensor=subtensor,
-                state_loader=state_loader,
-                receipt=receipt,
-                failure_kind="FINALIZED_READBACK_UNPROVEN",
-            )
-        finalized = dict(journal)
-        finalized.update(
-            {
-                "status": "finalized_proven",
-                "serve_axon_outcome": "SUCCESS",
-                "receipt": receipt,
-                "readback": dict(readback),
-                "retry_allowed": False,
-            }
+        _wallet_identity(wallet)
+        return _submit_journaled_axon(
+            journal=journal,
+            journal_path=journal_path,
+            replace_finalized_predecessor=False,
+            preview=preview,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            call=call,
+            call_kwargs=call_kwargs,
         )
-        try:
-            _write_state(journal_path, finalized, exclusive=False)
-        except Exception as exc:
-            raise MinerAxonAmbiguous(
-                "serve_axon finalized but proof persistence failed; do not retry"
-            ) from exc
-        return finalized
 
 
 def recover_ambiguous_preview(
@@ -1531,6 +2596,7 @@ __all__ = [
     "DEFAULT_RUNTIME_ROOT",
     "EndpointProof",
     "FINAL_STATUSES",
+    "FINALIZED_SUCCESSOR_UID",
     "FinalizedMinerState",
     "JOURNAL_SCHEMA",
     "MINER_HOTKEY",
