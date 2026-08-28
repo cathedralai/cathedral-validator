@@ -56,7 +56,7 @@ SECOND_MINER_HOTKEY = (
 )
 
 STATUS_UNREGISTERED = "BLOCKED_SECOND_MINER_UNREGISTERED"
-STATUS_AXON = "BLOCKED_SECOND_MINER_AXON_UNANNOUNCED"
+STATUS_AXON = "BLOCKED_MINER_AXON_CONTRACT"
 STATUS_PROOF = "CHAIN_READY_FRESH_QVL_SAT_REQUIRED"
 
 
@@ -226,7 +226,18 @@ def read_finalized_snapshot(
             int(substrate.get_block_number(finalized_hash)),
             label="finalized block number",
         )
-        metagraph = subtensor.metagraph(NETUID, lite=True, block=finalized_number)
+        metagraph = subtensor.metagraph(
+            NETUID,
+            lite=True,
+            block=finalized_number,
+            mechid=MECID,
+        )
+        metagraph_block = _raw(getattr(metagraph, "block", None))
+        if hasattr(metagraph_block, "item"):
+            metagraph_block = metagraph_block.item()
+        metagraph_block = _nonnegative(metagraph_block, label="metagraph block")
+        if metagraph_block != finalized_number:
+            raise SecondMinerPlanError("SN39 metagraph is not at the finalized head")
         weights = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
@@ -275,6 +286,14 @@ def equal_wire(primary_uid: int, second_uid: int) -> tuple[list[int], list[int]]
             "installed Bittensor does not encode equal semantic weights as two 65535 rows"
         )
     return uids, weights
+
+
+def _is_https_axon(neuron: Neuron) -> bool:
+    return (
+        neuron.serving
+        and neuron.port == HTTPS_PORT
+        and neuron.protocol == HTTPS_PROTOCOL
+    )
 
 
 def build_plan(snapshot: FinalizedSnapshot) -> dict[str, Any]:
@@ -331,17 +350,21 @@ def build_plan(snapshot: FinalizedSnapshot) -> dict[str, Any]:
             "weights_u16": weights,
             "expected_storage": [list(row) for row in zip(uids, weights)],
         }
-        if not (
-            second.serving
-            and second.port == HTTPS_PORT
-            and second.protocol == HTTPS_PROTOCOL
-        ):
+        invalid_axons = [
+            name
+            for name, neuron in (("primary", primary), ("second", second))
+            if not _is_https_axon(neuron)
+        ]
+        if invalid_axons:
             status = STATUS_AXON
             blockers = [
-                "produce and review a dedicated second-miner axon preview",
-                "announce exactly once only after separate write authorization",
-                "confirm the finalized HTTPS 8081 axon at later heads",
+                f"{name} miner must have a finalized HTTPS 8081 protocol-4 axon"
+                for name in invalid_axons
             ]
+            blockers.append(
+                "any axon change requires a separately reviewed one-shot writer"
+            )
+            blockers.append("confirm each changed axon at two later finalized heads")
         else:
             status = STATUS_PROOF
             blockers = [

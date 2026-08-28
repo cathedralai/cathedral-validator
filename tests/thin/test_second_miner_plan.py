@@ -161,7 +161,7 @@ def test_identity_and_chain_pin_failures_are_refused() -> None:
 def test_finalized_reader_uses_only_pinned_public_chain_queries() -> None:
     finalized_hash = "0x" + "c" * 64
     query_calls: list[dict[str, object]] = []
-    metagraph_calls: list[tuple[int, bool, int]] = []
+    metagraph_calls: list[tuple[int, bool, int, int]] = []
 
     class Substrate:
         def get_block_hash(self, block: int) -> str:
@@ -182,10 +182,11 @@ def test_finalized_reader_uses_only_pinned_public_chain_queries() -> None:
     class Subtensor:
         substrate = Substrate()
 
-        def metagraph(self, netuid: int, *, lite: bool, block: int):
-            metagraph_calls.append((netuid, lite, block))
+        def metagraph(self, netuid: int, *, lite: bool, block: int, mechid: int):
+            metagraph_calls.append((netuid, lite, block, mechid))
             axon = SimpleNamespace(ip="34.48.111.10", port=8081, protocol=4)
             return SimpleNamespace(
+                block=block,
                 uids=[plan.UID30, 124],
                 hotkeys=[plan.UID30_HOTKEY, plan.PRIMARY_MINER_HOTKEY],
                 coldkeys=[plan.CATHEDRAL_COLDKEY, plan.CATHEDRAL_COLDKEY],
@@ -202,7 +203,7 @@ def test_finalized_reader_uses_only_pinned_public_chain_queries() -> None:
 
     assert snapshot.block_hash == finalized_hash
     assert snapshot.uid30_weights == ((124, plan.W),)
-    assert metagraph_calls == [(plan.NETUID, True, 8_946_847)]
+    assert metagraph_calls == [(plan.NETUID, True, 8_946_847, plan.MECID)]
     assert query_calls == [
         {
             "module": "SubtensorModule",
@@ -211,6 +212,60 @@ def test_finalized_reader_uses_only_pinned_public_chain_queries() -> None:
             "block_hash": finalized_hash,
         }
     ]
+
+
+def test_finalized_reader_rejects_mixed_head_metagraph() -> None:
+    finalized_hash = "0x" + "c" * 64
+
+    class Substrate:
+        def get_block_hash(self, block: int) -> str:
+            assert block == 0
+            return FINNEY_GENESIS_HASH
+
+        def get_chain_finalised_head(self) -> str:
+            return finalized_hash
+
+        def get_block_number(self, block_hash: str) -> int:
+            assert block_hash == finalized_hash
+            return 8_946_847
+
+    class Subtensor:
+        substrate = Substrate()
+
+        def metagraph(self, *_args, **_kwargs):
+            return SimpleNamespace(block=8_946_846)
+
+    with pytest.raises(plan.SecondMinerPlanError, match="finalized head"):
+        plan.read_finalized_snapshot(
+            subtensor_factory=lambda *, network: (
+                Subtensor() if network == plan.NETWORK else pytest.fail(network)
+            )
+        )
+
+
+def test_ready_status_requires_primary_and_second_https_axons() -> None:
+    snapshot = _snapshot(
+        second=_neuron(
+            200,
+            plan.SECOND_MINER_HOTKEY,
+            ip="34.46.19.69",
+            port=plan.HTTPS_PORT,
+            protocol=plan.HTTPS_PROTOCOL,
+        )
+    )
+    primary = snapshot.neurons[1]
+    invalid_primary = plan.Neuron(**{**primary.__dict__, "port": 80, "serving": True})
+    snapshot = plan.FinalizedSnapshot(
+        **{
+            **snapshot.__dict__,
+            "neurons": (snapshot.neurons[0], invalid_primary, snapshot.neurons[2]),
+        }
+    )
+
+    document = plan.build_plan(snapshot)
+
+    assert document["status"] == plan.STATUS_AXON
+    assert any("primary miner" in blocker for blocker in document["blockers"])
 
 
 def test_plan_writer_is_owner_only_hashed_and_refuses_overwrite(tmp_path: Path) -> None:

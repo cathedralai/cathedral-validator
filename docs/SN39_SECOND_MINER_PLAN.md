@@ -28,7 +28,8 @@ pull request, a plan artifact, a VM startup script, or an operator log.
 2. Confirms UID30 still has its validator permit and the first miner still has
    the expected owner.
 3. Reports whether the second hotkey is unregistered, lacks its finalized HTTPS
-   axon, or has reached the point where fresh machine proofs are required.
+   axon, either miner violates the HTTPS axon contract, or both have reached the
+   point where fresh machine proofs are required.
 4. Derives the exact complete two-miner row only after the second hotkey has a
    finalized UID.
 5. Writes owner-only JSON plus a detached SHA-256 digest without overwriting an
