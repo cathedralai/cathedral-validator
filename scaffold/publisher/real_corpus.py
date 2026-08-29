@@ -29,6 +29,7 @@ the CNF payload's source differs in the new modes.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import random
 
@@ -40,7 +41,18 @@ import random
 def challenge_source() -> str:
     """CATHEDRAL_V2_CHALLENGE_SOURCE — default 'planted' (current behaviour)."""
     raw = os.environ.get("CATHEDRAL_V2_CHALLENGE_SOURCE", "").strip().lower()
-    return raw if raw in ("combinatorial", "corpus") else "planted"
+    if raw in ("", "planted"):
+        return "planted"
+    if raw in ("combinatorial", "corpus"):
+        return raw
+    from . import launch_profile
+
+    if launch_profile.strict():
+        raise RuntimeError(
+            "unknown CATHEDRAL_V2_CHALLENGE_SOURCE="
+            f"{raw!r}; expected planted, combinatorial, or corpus"
+        )
+    return "planted"
 
 
 def corpus_dir() -> str | None:
@@ -53,15 +65,29 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw) if raw else default
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid integer {name}={raw!r}")
         return default
 
 
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     try:
-        return float(raw) if raw else default
+        value = float(raw) if raw else default
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid numeric {name}={raw!r}")
         return default
+    if not math.isfinite(value):
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid finite numeric {name}={raw!r}")
+    return value
 
 
 # Small-but-real shapes: solve_cnf (the scaffold's tiny DPLL) must finish these
@@ -84,7 +110,17 @@ def latin_shape_for(tier: int) -> int:
 
 def _forced_kind() -> str | None:
     raw = os.environ.get("CATHEDRAL_V2_COMBINATORIAL_KIND", "").strip().lower()
-    return raw if raw in ("coloring", "latin") else None
+    if raw in ("coloring", "latin"):
+        return raw
+    if raw:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(
+                "unknown CATHEDRAL_V2_COMBINATORIAL_KIND="
+                f"{raw!r}; expected coloring or latin"
+            )
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -193,9 +229,12 @@ def _full_latin_square(seed: int, n: int) -> list[list[int]]:
     shuffled row/column/symbol permutations applied."""
     rng = random.Random(seed)
     base = [[(r + c) % n for c in range(n)] for r in range(n)]
-    row_perm = list(range(n)); rng.shuffle(row_perm)
-    col_perm = list(range(n)); rng.shuffle(col_perm)
-    sym_perm = list(range(n)); rng.shuffle(sym_perm)
+    row_perm = list(range(n))
+    rng.shuffle(row_perm)
+    col_perm = list(range(n))
+    rng.shuffle(col_perm)
+    sym_perm = list(range(n))
+    rng.shuffle(sym_perm)
     return [[sym_perm[base[row_perm[r]][col_perm[c]]] for c in range(n)] for r in range(n)]
 
 

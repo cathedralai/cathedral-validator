@@ -16,8 +16,9 @@ Group=cathedral-publisher
 # Per-role environment. Commit NO secrets: the signing key and any
 # DATABASE_URL / bucket credentials are provisioned out of band (see
 # cathedral-scorer-sn39.env.example). CATHEDRAL_EVAL_SIGNING_KEY,
-# CATHEDRAL_DB_PATH, NETUID, PORT, and the weight-policy env live here.
+# NETUID, PORT, and the weight-policy env live here.
 EnvironmentFile=/etc/cathedral-publisher/cathedral-scorer-sn39.env
+Environment=CATHEDRAL_ENV=production
 Environment=NETUID=39
 Environment=CATHEDRAL_WEIGHT_POLICY_NETWORK=finney
 Environment=PORT=8012

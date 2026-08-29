@@ -20,7 +20,9 @@ FROM python:3.12-slim AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CATHEDRAL_ENV=production \
+    CATHEDRAL_LAUNCH_PROFILE=v2-converged
 
 WORKDIR /app
 
@@ -32,13 +34,9 @@ RUN pip install --no-cache-dir -r /app/deploy/publisher/requirements.txt
 # has no game/ package, unlike the hub image.
 COPY scaffold /app/scaffold
 
-# Non-root runtime user. A mounted persistent volume arrives owned by root, so
-# the entrypoint fixes only the active DB path before dropping to `cathedral`.
+# Non-root runtime user. Production state lives in the required Postgres store,
+# so the entrypoint only drops privileges before starting the app.
 RUN useradd --create-home --uid 10001 cathedral && chown -R cathedral:cathedral /app
-
-# DB lives on the persistent volume by default.
-ENV CATHEDRAL_DB_PATH=/data/publisher.db
-RUN mkdir -p /app/data /data && chown cathedral:cathedral /app/data /data
 
 # Host provides $PORT; default 8000 for local runs.
 ENV PORT=8000
@@ -50,12 +48,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 url=f\"http://127.0.0.1:{os.environ.get('PORT','8000')}/health\"; \
 sys.exit(0 if urllib.request.urlopen(url,timeout=4).status==200 else 1)"
 
-# Entrypoint: fix volume ownership as root, then drop to the runtime user.
+# Entrypoint drops from the container bootstrap user to the runtime user.
 # setpriv (util-linux, in slim base) execs with clean uid/gid — no su/gosu dep.
 COPY deploy/publisher/entrypoint.sh /app/deploy/publisher/entrypoint.sh
 RUN chmod +x /app/deploy/publisher/entrypoint.sh
 ENTRYPOINT ["/app/deploy/publisher/entrypoint.sh"]
 
 # Run through sh so the runtime PORT expands after the entrypoint drops
-# privileges; exec lets uvicorn receive SIGTERM directly.
+# privileges. Exec lets uvicorn receive SIGTERM directly.
 CMD ["sh", "-c", "exec uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --no-access-log"]

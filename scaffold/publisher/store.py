@@ -1665,9 +1665,9 @@ class Store:
     Postgres; anything else is a SQLite file path."""
 
     def __init__(self, path: str, *, prefer_env_database_url: bool = True) -> None:
-        # DATABASE_URL wins when set and looks like Postgres — that is how the
-        # deployed publisher (server.py passes CATHEDRAL_DB_PATH) flips to PG
-        # without changing app construction. V2/beta stacks can pass
+        # DATABASE_URL wins over a local path when it looks like Postgres. The
+        # production server passes only its fixed compatibility path and strict
+        # startup requires the accepted source to equal DATABASE_URL. V2/beta stacks can pass
         # prefer_env_database_url=False so a separate explicit path/DSN cannot
         # accidentally fall back to the live DATABASE_URL.
         env_url = os.environ.get("DATABASE_URL") if prefer_env_database_url else None

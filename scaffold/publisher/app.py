@@ -24,6 +24,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import shutil
@@ -106,15 +107,32 @@ def _retry_after_body(reason: str, retry_after_secs: int) -> bytes:
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.environ.get(name, str(default)) or default)
+        value = float(os.environ.get(name, str(default)) or default)
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid numeric {name}={os.environ.get(name)!r}")
         return default
+    if not math.isfinite(value):
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(
+                f"invalid finite numeric {name}={os.environ.get(name)!r}"
+            )
+        return default
+    return value
 
 
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)) or default)
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid integer {name}={os.environ.get(name)!r}")
         return default
 
 
@@ -424,6 +442,55 @@ def _parse_iso(ts: str) -> float | None:
 
 _SERVICE_ROLES = {"all", "read", "submit", "worker"}
 
+# The named production profile has one scored miner protocol and one signed
+# validator feed. Every legacy, shadow, experimental, and snapshot protocol
+# path is denied by default, including future handlers. Public leaderboards,
+# health, JWKS, authenticated confidential-score intake, and two operator
+# health endpoints are separately enumerated below.
+PRODUCTION_PROTOCOL_ALLOWED_ROUTE_TEMPLATES = frozenset(
+    {
+        ("GET", "/v1/validator/weights/next"),
+        ("GET", "/v2/synthetic-boolean/per-miner/challenges"),
+        ("GET", "/v2/synthetic-boolean/per-miner/cnf"),
+        ("POST", "/v2/agents/submit-bitset"),
+        ("GET", "/v2/agents/submit-bitset/receipts/{receipt_id}"),
+    }
+)
+PRODUCTION_SUPPORT_ALLOWED_ROUTE_TEMPLATES = frozenset(
+    {
+        ("GET", "/.well-known/cathedral-jwks.json"),
+        ("GET", "/health"),
+        ("GET", "/health/live"),
+        ("GET", "/health/ready"),
+        ("GET", "/v1/admin/synthetic-boolean/submit-metrics"),
+        ("GET", "/v1/admin/validator-health"),
+        ("POST", "/v1/external-scores/violet"),
+        ("GET", "/v1/leaderboard/explain"),
+        ("GET", "/v1/leaderboard/recent"),
+        ("GET", "/v1/leaderboard/top"),
+    }
+)
+PRODUCTION_ALLOWED_ROUTE_TEMPLATES = (
+    PRODUCTION_PROTOCOL_ALLOWED_ROUTE_TEMPLATES
+    | PRODUCTION_SUPPORT_ALLOWED_ROUTE_TEMPLATES
+)
+
+
+def production_route_allowed(method: str, path: str) -> bool:
+    method = method.upper()
+    if method == "HEAD":
+        method = "GET"
+    if (method, path) in PRODUCTION_ALLOWED_ROUTE_TEMPLATES:
+        return True
+    receipt_prefix = "/v2/agents/submit-bitset/receipts/"
+    receipt_id = path.removeprefix(receipt_prefix)
+    return (
+        method == "GET"
+        and path.startswith(receipt_prefix)
+        and bool(receipt_id)
+        and "/" not in receipt_id
+    )
+
 
 def _service_role_from_env() -> str:
     raw = os.environ.get("CATHEDRAL_SERVICE_ROLE", "all").strip().lower() or "all"
@@ -489,18 +556,38 @@ def build_app(
 ) -> FastAPI:
     from . import launch_profile
     _profile_errors = launch_profile.validate_env(
-        signing_key_hex_provided=signing_key_hex is not None)
+        signing_key_hex=signing_key_hex)
     if _profile_errors:
         raise RuntimeError(
             "launch profile misconfiguration (fail-closed): "
             + "; ".join(_profile_errors))
+    production_database_url = os.environ.get("DATABASE_URL", "")
+    if launch_profile.production() and database_path not in {
+        "publisher.db",
+        production_database_url,
+    }:
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): production storage "
+            "must come from the exact validated DATABASE_URL"
+        )
+    service_role = _service_role_from_env()
     key_hex = signing_key_hex or keys.load_signing_key()
     pub_hex = rows.public_key_hex(key_hex)
     weight_policy_key_hex = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip()
+    # Production validation requires every configured signer source to contain
+    # the same key bytes. Capture the resulting identity once so rows, V2
+    # receipts, JWKS, snapshots, and signed weight vectors cannot diverge after
+    # startup through separate environment lookups. Compatibility mode retains
+    # the historical dedicated weight-key override.
+    weight_key = (
+        key_hex
+        if launch_profile.production()
+        else weight_policy_key_hex or key_hex
+    )
     try:
         jwks_doc = rows.jwks_from_key(
             key_hex,
-            weight_policy_private_key_hex=weight_policy_key_hex or None,
+            weight_policy_private_key_hex=weight_key,
             weight_policy_kid=os.environ.get(
                 weights_mod.KEY_ID_ENV, "cathedral-weight-policy"),
         )
@@ -511,7 +598,28 @@ def build_app(
                 "Ed25519 private key encoded as hex"
             ) from exc
         raise
-    store = Store(database_path)
+    store = (
+        Store(production_database_url, prefer_env_database_url=False)
+        if launch_profile.production()
+        else Store(database_path)
+    )
+    if launch_profile.production() and store.backend != "postgres":
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): production opened "
+            f"storage backend {store.backend!r}; expected 'postgres'"
+        )
+    if launch_profile.production() and store.path != os.environ.get("DATABASE_URL"):
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): production opened "
+            "a Postgres source other than the exact validated DATABASE_URL"
+        )
+    launch_profile.emit_effective_config(
+        database_path=database_path,
+        service_role=service_role,
+        storage_backend=store.backend,
+        signing_key_hex=key_hex,
+    )
+    replica_identity = launch_profile.replica_identity_summary()
     v2_database_path = (
         os.environ.get("CATHEDRAL_V2_DATABASE_URL", "").strip()
         or os.environ.get("CATHEDRAL_V2_DB_PATH", "").strip()
@@ -574,13 +682,18 @@ def build_app(
     # still available for surgical rollout. Refusal reasons are logged inside
     # pin_v2_pm_env().
     v2_pm_env_pinned = v2_pipeline.pin_v2_pm_env()
+    if launch_profile.production() and not v2_pm_env_pinned:
+        raise RuntimeError(
+            "launch profile misconfiguration (fail-closed): production could "
+            "not pin the V2 per-miner environment; remove legacy or conflicting "
+            "CATHEDRAL_PERMINER_* settings"
+        )
     print(f"[v2_pm_env] pinned={v2_pm_env_pinned}")
     # Best-effort hotkey->coldkey resolver for the public receipts feed,
     # reusing the existing metagraph-backed coldkey_map table (see
     # weights._load_coldkey_map). Built once per app instance so its internal
     # 10-minute cache is actually shared across requests.
     v2_receipts_coldkey_resolver = v2_receipts.make_coldkey_resolver(v2_store)
-    service_role = _service_role_from_env()
     _check_read_statement_timeout(service_role)
     verifier = default_verifier()
     epoch_salt = f"epoch_{datetime.now(timezone.utc):%Y%m%d}:{_FAMILY}"
@@ -660,6 +773,11 @@ def build_app(
     solution_manifest_max_bytes = _env_int("CATHEDRAL_V2_MAX_SOLUTION_BYTES", 0)
     solution_blob_upload_enabled = _env_bool(
         "CATHEDRAL_V2_BLOB_UPLOAD_ENABLED", solution_manifest_enabled)
+    production_bitset_only = launch_profile.production() and launch_profile.converged()
+    manifest_blob_compat_enabled = (
+        solution_manifest_enabled and not production_bitset_only
+    )
+    v2_results_publish_enabled = results_publisher.results_publish_enabled()
     solution_blob_upload_max_bytes = _env_int(
         "CATHEDRAL_V2_BLOB_UPLOAD_MAX_BYTES", 5_000_000)
     # Durable inline copy threshold. The local blob dir is per-container /tmp, so
@@ -742,7 +860,9 @@ def build_app(
     v2_read_threads = max(1, _env_int("CATHEDRAL_V2_READ_THREADS", 6))
     v2_read_executor = ThreadPoolExecutor(
         max_workers=v2_read_threads, thread_name_prefix="v2-read")
-    v2_worker_enabled = _env_bool("CATHEDRAL_V2_VERIFY_WORKER_ENABLED", False)
+    v2_worker_enabled = _env_bool(
+        "CATHEDRAL_V2_VERIFY_WORKER_ENABLED", launch_profile.converged()
+    )
     v2_worker_batch_size = max(1, _env_int("CATHEDRAL_V2_VERIFY_BATCH_SIZE", 8))
     v2_worker_interval_secs = max(
         0.1, _env_float("CATHEDRAL_V2_VERIFY_INTERVAL_SECS", 1.0))
@@ -796,6 +916,7 @@ def build_app(
         "max_concurrency": submit_max_concurrency,
         "configured_max_concurrency": configured_submit_max_concurrency,
         "hard_cap": submit_hard_cap,
+        "busy_wait_secs": submit_busy_wait_secs,
         "pm_read_hard_cap": pm_read_hard_cap,
         "configured_pm_read_hard_cap": configured_pm_read_hard_cap,
         "pm_read_min_cap": pm_read_min_cap,
@@ -921,6 +1042,7 @@ def build_app(
                 "max_concurrency": submit_metrics["max_concurrency"],
                 "configured_max_concurrency": submit_metrics["configured_max_concurrency"],
                 "hard_cap": submit_metrics["hard_cap"],
+                "busy_wait_secs": submit_metrics["busy_wait_secs"],
                 "pm_read_hard_cap": submit_metrics["pm_read_hard_cap"],
                 "configured_pm_read_hard_cap": submit_metrics["configured_pm_read_hard_cap"],
                 "pm_read_min_cap": submit_metrics["pm_read_min_cap"],
@@ -1161,8 +1283,7 @@ def build_app(
         signed = dict(payload)
         signed["key_id"] = os.environ.get(
             weights_mod.KEY_ID_ENV, "cathedral-weight-policy")
-        signing_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
-        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(signing_key.strip()))
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(weight_key.strip()))
         signed["signature"] = base64.b64encode(
             sk.sign(weights_mod.canonical_bytes(signed))
         ).decode()
@@ -1170,7 +1291,6 @@ def build_app(
 
     def _sat_snapshot_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
         board_payload, board_etag = board_cache.get()
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             weights_payload = weights_mod.current_vector(
                 store, signing_key_hex=weight_key
@@ -1715,6 +1835,45 @@ def build_app(
 
             await self._app(scope, receive, _send_no_store)
 
+    class _ProductionProtocolGuardMiddleware:
+        """Expose only the named production miner and validator protocol."""
+
+        def __init__(self, asgi_app):
+            self._app = asgi_app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") != "http" or not production_bitset_only:
+                await self._app(scope, receive, send)
+                return
+            # Check the original path. The compatibility prefix is a
+            # development-only surface and must not normalize into an allowed
+            # production route.
+            path = scope.get("path", "")
+            method = scope.get("method", "GET")
+            if production_route_allowed(method, path):
+                await self._app(scope, receive, send)
+                return
+
+            body = b"route_not_in_production_protocol"
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 404,
+                    "headers": [
+                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode()),
+                        (b"x-cathedral-rejection-reason", body),
+                    ],
+                }
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": body,
+                    "more_body": False,
+                }
+            )
+
     app.add_middleware(_StripLegacyPrefixMiddleware)
     app.add_middleware(_SlowRequestLogMiddleware)
 
@@ -1742,6 +1901,10 @@ def build_app(
     # reads only the response-start status, no body buffering.
     app.add_middleware(_StatusCounterMiddleware)
     app.add_middleware(PressureTelemetryMiddleware, telemetry=pressure_telemetry)
+    # Outermost contract boundary. A compatibility handler added later under a
+    # miner/validator namespace is unreachable until this positive allowlist is
+    # deliberately reviewed and extended.
+    app.add_middleware(_ProductionProtocolGuardMiddleware)
 
     app.state.store = store
     app.state.cnf_store = cnf_store
@@ -1769,6 +1932,7 @@ def build_app(
     app.state.public_key_hex = pub_hex
     app.state.signing_key_hex = key_hex
     app.state.service_role = service_role
+    app.state.replica_identity = replica_identity
     app.state.refill_task = None
     app.state.seed_task = None
     app.state.arena_eval_task = None
@@ -1822,7 +1986,6 @@ def build_app(
             print(f"[weights] skipped service_role={service_role}")
             return
         # Start only; the build itself runs in the daemon thread.
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             weights_mod.start_background_refresh(store, signing_key_hex=weight_key)
             print(f"[weights] bg_refresh_started service_role={service_role}")
@@ -2087,15 +2250,17 @@ def build_app(
                     print(f"[v2_verify] heartbeat_failed error={hb_exc!r}")
                 try:
                     batch_started = time.time()
-                    results = await asyncio.to_thread(
-                        v2_pipeline.process_batch,
-                        v2_store,
-                        v2_blob_store,
-                        worker_id=worker_id,
-                        batch_size=v2_worker_batch_size,
-                        lock_secs=v2_worker_lock_secs,
-                        max_blob_bytes=v2_worker_max_blob_bytes,
-                    )
+                    results = []
+                    if manifest_blob_compat_enabled:
+                        results = await asyncio.to_thread(
+                            v2_pipeline.process_batch,
+                            v2_store,
+                            v2_blob_store,
+                            worker_id=worker_id,
+                            batch_size=v2_worker_batch_size,
+                            lock_secs=v2_worker_lock_secs,
+                            max_blob_bytes=v2_worker_max_blob_bytes,
+                        )
                     # Async witness-check + score for thin-submitted bitset events
                     # (status 'received'). The submit handler no longer does this
                     # inline, so it runs here. Same tick, best-effort.
@@ -2548,7 +2713,6 @@ def build_app(
 
     def _current_weight_context() -> dict[str, Any]:
         """Current payment weights for display-only leaderboard annotations."""
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
         except Exception as exc:
@@ -3416,7 +3580,6 @@ def build_app(
         # handler async means concurrent refill fork-gen threads never starve it
         # even when the thread pool is saturated (fork poll holds pool slots).
         # Cold vector builds must never run here; they stall read-origin health.
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
         except Exception:
@@ -3462,6 +3625,7 @@ def build_app(
             "hippius": "ok",
             "polaris": "ok",
             "signing_key": "loaded",
+            "replica_identity": replica_identity,
             "sr25519_backend": getattr(verifier, "backend", "bittensor"),
         }
 
@@ -4946,7 +5110,6 @@ def build_app(
     def _dashboard_weight_freshness() -> dict[str, Any]:
         from . import health_thresholds as ht
 
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         try:
             vec = weights_mod.cached_vector(store, signing_key_hex=weight_key)
         except Exception as exc:
@@ -5114,7 +5277,6 @@ def build_app(
 
         from . import health_thresholds as ht
 
-        weight_key = os.environ.get(weights_mod.SIGNING_KEY_ENV, "").strip() or key_hex
         vec_generated_at: str | None = None
         vec_age: float | None = None
         vector_present = False
@@ -6115,7 +6277,7 @@ def build_app(
                             expires_at=expires_at,
                         )
                         item["submit_token_expires_at"] = expires_at
-                return {
+                payload = {
                     "family_id": _FAMILY,
                     "kind": "per_miner_v2",
                     "issuance": "lazy" if (v2_submit_bitset_enabled and v2_lazy_issuance) else "eager",
@@ -6129,10 +6291,12 @@ def build_app(
                     "next_offset": offset + effective_limit,
                     "count": len(items),
                     "items": items,
-                    "submit_path": "/v2/agents/submit-bitset" if v2_submit_bitset_enabled else "/v2/agents/submit-manifest",
+                    "submit_path": (
+                        "/v2/agents/submit-bitset"
+                        if v2_submit_bitset_enabled
+                        else "/v2/agents/submit-manifest"
+                    ),
                     "submit_bitset_path": "/v2/agents/submit-bitset",
-                    "manifest_submit_path": "/v2/agents/submit-manifest",
-                    "blob_upload_path": "/v2/blobs/solutions",
                     "cnf_path": "/v2/synthetic-boolean/per-miner/cnf",
                     "cnf_params": ["challenge_id", "tier", "seq"],
                     "cnf_access_path": (
@@ -6141,6 +6305,10 @@ def build_app(
                     ),
                     "cnf_access_params": ["challenge_id", "tier", "seq"],
                 }
+                if manifest_blob_compat_enabled:
+                    payload["manifest_submit_path"] = "/v2/agents/submit-manifest"
+                    payload["blob_upload_path"] = "/v2/blobs/solutions"
+                return payload
 
         import asyncio
         payload = await asyncio.get_running_loop().run_in_executor(v2_read_executor, _run)
@@ -6760,7 +6928,7 @@ def build_app(
         This route exists so the full blob -> manifest -> verify path can be
         tested on an isolated V2 stack without touching the V1 submit body path.
         """
-        if not (solution_manifest_enabled and solution_blob_upload_enabled):
+        if not (manifest_blob_compat_enabled and solution_blob_upload_enabled):
             raise HTTPException(404, "solution_blob_upload_v2_not_enabled")
         body = await request.body()
         if solution_blob_upload_max_bytes > 0 and len(body) > solution_blob_upload_max_bytes:
@@ -6892,9 +7060,9 @@ def build_app(
     ):
         """Tiny PM-native V2 submit path.
 
-        This path is beta/shadow-only. It admits only cheap-valid per-miner SAT
-        assignments: token-bound challenge, hotkey signature, exact bitset shape,
-        and SAT witness verification all pass before a durable event is written.
+        The front door verifies the token, hotkey signature, and exact bitset
+        shape before durably admitting a received row. The profile-owned verify
+        worker regenerates the CNF, checks the witness, and records scoring.
         """
         if not (solution_manifest_enabled and v2_submit_bitset_enabled):
             raise HTTPException(404, "v2_submit_bitset_not_enabled")
@@ -6966,7 +7134,8 @@ def build_app(
             raise
         if existing is not None:
             payload = v2_bitset_submit.receipt_payload(existing, inserted=False)
-            payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
+            if v2_results_publish_enabled:
+                payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
             return JSONResponse(
                 payload,
                 status_code=200,
@@ -7034,7 +7203,8 @@ def build_app(
                 return _v2_db_unavailable_response()
             raise
         payload = v2_bitset_submit.receipt_payload(row, inserted=inserted)
-        payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
+        if v2_results_publish_enabled:
+            payload["results_path"] = f"/v2/results/{x_cathedral_hotkey}.json"
         return JSONResponse(
             payload,
             status_code=202 if inserted else 200,
@@ -7072,7 +7242,7 @@ def build_app(
         can test the new "miner uploads blob, Cathedral stores manifest" path
         beside the current synchronous submit.
         """
-        if not solution_manifest_enabled:
+        if not manifest_blob_compat_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         try:
             body = await request.json()
@@ -7121,7 +7291,7 @@ def build_app(
 
     @app.get("/v2/agents/submit-manifest/receipts/{receipt_id}")
     def solution_manifest_receipt_v2(receipt_id: str):
-        if not solution_manifest_enabled:
+        if not manifest_blob_compat_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         row = solution_manifest.get_manifest_receipt(v2_store, receipt_id)
         if row is None:
@@ -7154,10 +7324,9 @@ def build_app(
         now_ts = time.time()
         pending_count = 0
         oldest_iso: str | None = None
-        tables = (
-            ("solution_manifests", "manifest"),
-            ("v2_submit_events", "bitset"),
-        )
+        tables = [("v2_submit_events", "bitset")]
+        if manifest_blob_compat_enabled:
+            tables.insert(0, ("solution_manifests", "manifest"))
         by_source: dict[str, dict[str, Any]] = {}
         for table, source in tables:
             try:
@@ -7284,7 +7453,7 @@ def build_app(
 
     @app.post("/v2/admin/verify/tick")
     def v2_verify_tick_admin(authorization: str | None = Header(None)):
-        if not solution_manifest_enabled:
+        if not manifest_blob_compat_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         _require_v2_admin(authorization)
         results = v2_pipeline.process_batch(
@@ -7302,6 +7471,8 @@ def build_app(
 
     @app.get("/v2/validator/weights/next")
     def validator_weights_next_v2():
+        if production_bitset_only:
+            raise HTTPException(404, "v2_shadow_weights_not_enabled")
         if not solution_manifest_enabled:
             raise HTTPException(404, "solution_manifest_v2_not_enabled")
         # TTL-cached: this endpoint is publicly polled (the miner announcement

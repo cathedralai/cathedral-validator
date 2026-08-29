@@ -5,8 +5,9 @@ the config from the environment. Run with:
 
     uvicorn scaffold.publisher.server:app --host 0.0.0.0 --port $PORT
 
-The DB path comes from CATHEDRAL_DB_PATH (default ./publisher.db). The refill
-loop starts on app startup iff CATHEDRAL_REFILL_ENABLED is truthy (see refill.py).
+Production storage comes only from the required DATABASE_URL. The local path is
+the development/compatibility fallback. The refill loop starts on app startup
+iff CATHEDRAL_REFILL_ENABLED is truthy (see refill.py).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import os
 
 from .app import build_app
 
-app = build_app(database_path=os.environ.get("CATHEDRAL_DB_PATH", "publisher.db"))
+app = build_app(database_path="publisher.db")
 
 
 def _serve_cli() -> None:
@@ -23,8 +24,8 @@ def _serve_cli() -> None:
 
     A thin convenience wrapper around ``uvicorn.run(app, ...)`` reading host and
     port from the same environment as the deploy image. The worker count is
-    fixed at one because SQLite does not provide a cross-process singleton lock
-    for the in-memory signed-vector cache. No serving logic lives here.
+    fixed at one because the signed-vector cache is process-local. No serving
+    logic lives here.
     """
     import uvicorn
 

@@ -254,7 +254,7 @@ def test_the_mechanism_store_is_not_accepted_as_the_data_store():
 
 
 def test_default_data_store_reads_the_publisher_db_not_the_mechanism_db(monkeypatch, tmp_path):
-    """``CATHEDRAL_DB_PATH``, the same var server.py uses — deliberately not
+    """Compatibility refresh uses its data-store selector, deliberately not
     ``CATHEDRAL_MECH_DB_PATH``, which points at the specs database."""
     monkeypatch.setenv(arf.DATA_DB_PATH_ENV, str(tmp_path / "publisher.db"))
     monkeypatch.setenv("CATHEDRAL_MECH_DB_PATH", str(tmp_path / "mechanisms.sqlite3"))

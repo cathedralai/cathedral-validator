@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 import re
 import secrets
@@ -106,15 +107,29 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw) if raw else default
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid integer {name}={raw!r}")
         return default
 
 
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     try:
-        return float(raw) if raw else default
+        value = float(raw) if raw else default
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid numeric {name}={raw!r}")
         return default
+    if not math.isfinite(value):
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise RuntimeError(f"invalid finite numeric {name}={raw!r}")
+    return value
 
 
 def epoch_bucket_hours() -> int:

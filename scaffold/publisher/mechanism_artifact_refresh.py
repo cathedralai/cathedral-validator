@@ -67,9 +67,9 @@ ARTIFACT_ADAPTERS: dict[str, tuple[str, str]] = {
 
 ArtifactAdapter = Callable[..., "tuple[ScoreVector, ScoreVectorMeta]"]
 
-# Where the verified-work tables live. Same env var and default as server.py, so an
-# operator who set CATHEDRAL_DB_PATH for the publisher does not have to set a second
-# one here. Deliberately NOT CATHEDRAL_MECH_DB_PATH — see the module docstring.
+# Development/compatibility selector for standalone artifact-refresh callers.
+# The production ASGI server accepts only DATABASE_URL. Deliberately NOT
+# CATHEDRAL_MECH_DB_PATH, which owns the separate mechanism-spec database.
 DATA_DB_PATH_ENV = "CATHEDRAL_DB_PATH"
 _DEFAULT_DATA_DB_PATH = "publisher.db"
 
