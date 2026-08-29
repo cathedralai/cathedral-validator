@@ -298,9 +298,19 @@ def test_rule_1_still_fires_on_a_recent_mismatch(tmp_path):
 
 
 def test_a_stale_mismatch_does_not_borrow_rule_2s_window(tmp_path):
-    """Rule 1's window is 30 minutes and rule 2 does not read mismatches."""
+    """Rule 4's window is 30 minutes and rule 5 does not read mismatches.
+
+    75 minutes is also rule 2's 3-tick stale cutoff, so a lone record there
+    flakes the instant the clock ticks (``older_than`` is strict at seconds
+    resolution). The recent tick keeps rules 2-3 green; this test is about
+    the mismatch window, not journal liveness.
+    """
     journal = _write_journal(
-        tmp_path / "events.jsonl", [(75, "PROVENANCE_VECTOR_MISMATCH")]
+        tmp_path / "events.jsonl",
+        [
+            (75, "PROVENANCE_VECTOR_MISMATCH"),
+            (5, "PROVENANCE_AUDIT_NOT_PROVEN"),
+        ],
     )
     assert _check(journal).returncode == 0
 
