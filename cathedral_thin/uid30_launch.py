@@ -65,6 +65,7 @@ from cathedral_thin.independent_runtime.run import (
     _try_collect,
     _units_after_quote,
 )
+from cathedral_thin import second_miner_plan
 from scaffold import validator_thin as canonical_validator
 
 PREVIEW_SCHEMA = canonical_validator.SN39_UID30_LAUNCH_SCHEMA
@@ -78,6 +79,9 @@ UID30_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
 MINER_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_MINER_HOTKEY
 DEFAULT_RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
 DEFAULT_PREVIEW = DEFAULT_RUNTIME_ROOT / "uid30-launch-preview.json"
+DEFAULT_SUCCESSOR_PREVIEW = (
+    DEFAULT_RUNTIME_ROOT / "uid30-two-miner-successor-preview.json"
+)
 MAX_PREVIEW_BYTES = 1_048_576
 PREVIEW_VALIDITY_SECONDS = 15 * 60
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
@@ -146,6 +150,49 @@ class UID30ChainState:
 
 
 @dataclass(frozen=True)
+class UID30SuccessorState:
+    """UID30 gates plus both pinned miners at the identical finalized head."""
+
+    base: UID30ChainState
+    targets: tuple[second_miner_plan.Neuron, ...]
+    uid_safety: Mapping[str, Any]
+    current_weights: tuple[tuple[int, int], ...]
+
+    @property
+    def preflight(self) -> Any:
+        return self.base.preflight
+
+    @property
+    def block_number(self) -> int:
+        return self.base.block_number
+
+    @property
+    def block_hash(self) -> str:
+        return self.base.block_hash
+
+    @property
+    def genesis_hash(self) -> str:
+        return self.base.genesis_hash
+
+    @property
+    def subnet_owner_hotkey(self) -> str:
+        return self.base.subnet_owner_hotkey
+
+    @property
+    def next_epoch_start_block(self) -> int:
+        return self.base.next_epoch_start_block
+
+
+@dataclass(frozen=True)
+class UID30SuccessorVerificationState:
+    """Post-write read-only state for inclusion and later finalized proofs."""
+
+    preflight: Any
+    genesis_hash: str
+    targets: tuple[second_miner_plan.Neuron, ...]
+
+
+@dataclass(frozen=True)
 class VerifiedMinerProof:
     """Fresh endpoint evidence for the only destination the launch pays."""
 
@@ -200,6 +247,31 @@ class UID30RecoveryResult:
     block_number: int | None
     miner_uid: int
     stored_weight: int | None
+
+
+@dataclass(frozen=True)
+class UID30SuccessorSubmissionResult:
+    preview_sha256: str
+    attempt_id: str
+    extrinsic_hash: str
+    block_hash: str
+    block_number: int
+    wire_uids: tuple[int, int]
+    wire_weights: tuple[int, int]
+    later_finalized_heads: tuple[tuple[int, str], tuple[int, str]]
+
+
+@dataclass(frozen=True)
+class UID30SuccessorRecoveryResult:
+    status: str
+    preview_sha256: str
+    attempt_id: str
+    extrinsic_hash: str | None
+    block_hash: str | None
+    block_number: int | None
+    wire_uids: tuple[int, int]
+    wire_weights: tuple[int, int] | None
+    later_finalized_heads: tuple[tuple[int, str], tuple[int, str]] | None
 
 
 def _raw_value(value: Any) -> Any:
@@ -343,6 +415,25 @@ def _submission_contract(
         _submission_genesis_hash=genesis_hash,
         _uid30_reviewed_preview_sha256=digest,
     )
+
+
+def _successor_submission_contract(
+    *, runtime_root: Path, genesis_hash: str, preview_sha256: str
+) -> SimpleNamespace:
+    """Select only the fixed non-launch authority_bounded successor."""
+
+    args = _submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=genesis_hash,
+        preview_sha256=preview_sha256,
+        authorized=False,
+    )
+    delattr(args, "_uid30_reviewed_preview_sha256")
+    args._uid30_two_miner_successor_preview_sha256 = _digest_text(
+        preview_sha256,
+        label="reviewed successor preview digest",
+    )
+    return args
 
 
 def _writer_paths(
@@ -546,6 +637,100 @@ def read_uid30_chain_state() -> UID30ChainState:
     return validate_chain_state(state)
 
 
+def validate_uid30_successor_state(
+    state: UID30SuccessorState,
+) -> UID30SuccessorState:
+    """Require two pinned HTTPS axons and the exact predecessor storage row."""
+
+    validate_chain_state(state.base)
+    if len(state.targets) != 2:
+        raise UID30LaunchError("successor requires exactly two finalized miners")
+    targets = {target.hotkey: target for target in state.targets}
+    if len(targets) != 2 or set(targets) != {
+        MINER_HOTKEY,
+        canonical_validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+    }:
+        raise UID30LaunchError("successor targets are not the two pinned hotkeys")
+    if len({target.uid for target in targets.values()}) != 2 or UID30 in {
+        target.uid for target in targets.values()
+    }:
+        raise UID30LaunchError("successor UIDs are not two distinct miner UIDs")
+    endpoints: set[tuple[str, int]] = set()
+    for target in targets.values():
+        if target.protocol != second_miner_plan.HTTPS_PROTOCOL:
+            raise UID30LaunchError("successor miner axon is not HTTPS protocol 4")
+        ip = _require_public_ip(target.ip)
+        if target.port != second_miner_plan.HTTPS_PORT or not target.serving:
+            raise UID30LaunchError("successor miner is not serving HTTPS port 8081")
+        endpoints.add((ip, target.port))
+    if len(endpoints) != 2:
+        raise UID30LaunchError("successor miners do not have distinct HTTPS axons")
+    if state.current_weights != (
+        (canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, W),
+    ):
+        raise UID30LaunchError(
+            "current UID30 row is not the exact finalized one-miner predecessor"
+        )
+    if not isinstance(state.uid_safety, Mapping) or not state.uid_safety:
+        raise UID30LaunchError("successor has no combined UID safety proof")
+    return state
+
+
+def read_uid30_successor_state() -> UID30SuccessorState:
+    """Read both miners at the exact finalized head used by UID30 preflight."""
+
+    base = read_uid30_chain_state()
+    try:
+        snapshot = second_miner_plan.read_snapshot_at(
+            subtensor=base.preflight.subtensor,
+            block_number=base.block_number,
+            block_hash=base.block_hash,
+            genesis_hash=base.genesis_hash,
+        )
+        plan = second_miner_plan.build_plan(snapshot)
+    except second_miner_plan.SecondMinerPlanError as exc:
+        raise UID30LaunchError(f"two-miner finalized snapshot refused: {exc}") from exc
+    if plan.get("status") != second_miner_plan.STATUS_PROOF:
+        raise UID30LaunchError(
+            "two-miner snapshot is not ready for fresh QVL and SAT proofs"
+        )
+    target_hotkeys = {
+        MINER_HOTKEY,
+        canonical_validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+    }
+    rows = tuple(
+        sorted(
+            (row for row in snapshot.neurons if row.hotkey in target_hotkeys),
+            key=lambda row: row.uid,
+        )
+    )
+    if len(rows) != 2 or {row.hotkey for row in rows} != target_hotkeys:
+        raise UID30LaunchError("two-miner finalized mapping is incomplete")
+    primary = next(row for row in rows if row.hotkey == MINER_HOTKEY)
+    if (
+        primary.uid != base.miner_uid
+        or primary.ip != base.serving_axon.ip
+        or primary.port != base.serving_axon.port
+    ):
+        raise UID30LaunchError("primary miner differs across same-head readers")
+    try:
+        uid_safety = canonical_validator._require_uid_mapping_stability(
+            base.preflight,
+            {row.uid: row.hotkey for row in rows},
+            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+        )
+    except Exception as exc:
+        raise UID30LaunchError(f"two-miner UID safety failed: {exc}") from exc
+    return validate_uid30_successor_state(
+        UID30SuccessorState(
+            base=base,
+            targets=rows,
+            uid_safety=uid_safety,
+            current_weights=snapshot.uid30_weights,
+        )
+    )
+
+
 def _serving_axon_from_info_row(raw: Any, *, uid: int, hotkey: str) -> ServingAxon:
     """Decode the axon row already bound to the finalized metagraph info.
 
@@ -584,18 +769,22 @@ def _finalized_serving_axon(state: UID30ChainState) -> ServingAxon:
     return axon
 
 
-def collect_verified_miner(
-    state: UID30ChainState, *, qvl_path: str
+def collect_verified_endpoint(
+    *,
+    state: Any,
+    axon: ServingAxon,
+    miner_hotkey: str,
+    qvl_path: str,
 ) -> VerifiedMinerProof:
-    """Collect fresh QVL and SAT from the exact finalized serving endpoint."""
+    """Collect QVL PASS and SAT from one finalized HTTPS endpoint."""
 
-    validate_chain_state(state)
     try:
-        # Apply public-address and port gates before any network contact.
-        axon = _finalized_serving_axon(state)
+        _require_public_ip(axon.ip)
+        if axon.hotkey != miner_hotkey or axon.port != 8081:
+            raise UID30LaunchError("verified endpoint differs from its miner pin")
         row = _try_collect(
             axon.evidence_url(),
-            MINER_HOTKEY,
+            miner_hotkey,
             UID30_HOTKEY,
             axon.sat_work_url(),
         )
@@ -622,8 +811,8 @@ def collect_verified_miner(
                 "the pinned miner returned no positive canonical SAT units"
             )
         return VerifiedMinerProof(
-            hotkey=MINER_HOTKEY,
-            uid=state.miner_uid,
+            hotkey=miner_hotkey,
+            uid=axon.uid,
             ip=axon.ip,
             port=axon.port,
             qvl_digest=qvl.digest,
@@ -641,9 +830,76 @@ def collect_verified_miner(
         raise UID30LaunchError(f"verified-miner collection failed: {exc}") from exc
 
 
+def collect_verified_miner(
+    state: UID30ChainState, *, qvl_path: str
+) -> VerifiedMinerProof:
+    """Collect fresh QVL and SAT from the exact finalized serving endpoint."""
+
+    validate_chain_state(state)
+    return collect_verified_endpoint(
+        state=state,
+        axon=_finalized_serving_axon(state),
+        miner_hotkey=MINER_HOTKEY,
+        qvl_path=qvl_path,
+    )
+
+
+def validate_verified_endpoint(
+    proof: VerifiedMinerProof,
+    *,
+    state: Any,
+    axon: ServingAxon,
+    miner_hotkey: str,
+) -> VerifiedMinerProof:
+    """Bind one proof to its exact finalized endpoint and canonical anchor."""
+
+    if proof.hotkey != miner_hotkey or axon.hotkey != miner_hotkey:
+        raise UID30LaunchError("verified proof belongs to the wrong miner hotkey")
+    if proof.uid != axon.uid or proof.uid == UID30:
+        raise UID30LaunchError("verified proof belongs to the wrong miner UID")
+    if proof.ip != axon.ip or proof.port != axon.port:
+        raise UID30LaunchError("verified proof belongs to a different HTTPS axon")
+    if proof.qvl_digest != LAUNCH_QVL_DIGEST:
+        raise UID30LaunchError("verified proof used the wrong QVL binary")
+    for value, label in (
+        (proof.quote_sha256, "quote digest"),
+        (proof.report_data_sha256, "report-data digest"),
+        (proof.tls_spki_sha256, "TLS SPKI digest"),
+    ):
+        _digest_text(value, label=label)
+    if proof.sat_rule != SAT_WORK_UNIT_RULE:
+        raise UID30LaunchError("verified proof used the wrong SAT work rule")
+    if (
+        isinstance(proof.sat_units, bool)
+        or not isinstance(proof.sat_units, int)
+        or proof.sat_units <= 0
+    ):
+        raise UID30LaunchError("verified proof has no positive SAT units")
+    if proof.port != 8081:
+        raise UID30LaunchError("verified miner is not serving the pinned TLS port 8081")
+    _require_public_ip(proof.ip)
+    anchor_hash = _canonical_hash(proof.anchor_hash, label="miner evidence anchor hash")
+    if proof.anchor_number > state.block_number:
+        raise UID30LaunchError("miner evidence anchor is ahead of finality")
+    try:
+        canonical = _canonical_hash(
+            state.preflight.subtensor.substrate.get_block_hash(proof.anchor_number),
+            label="canonical miner evidence anchor",
+        )
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchError("miner evidence anchor cannot be re-resolved") from exc
+    if canonical != anchor_hash:
+        raise UID30LaunchError("miner evidence anchor is not canonical")
+    return proof
+
+
 def validate_miner_proof(
     proof: VerifiedMinerProof, *, state: UID30ChainState
 ) -> VerifiedMinerProof:
+    # Preserve the legacy one-miner validator. Its separate fresh-head check
+    # below owns endpoint equality and canonical anchor re-resolution.
     if proof.hotkey != MINER_HOTKEY or proof.hotkey != state.miner_hotkey:
         raise UID30LaunchError("verified proof belongs to the wrong miner hotkey")
     if proof.uid != state.miner_uid or proof.uid == UID30:
@@ -669,6 +925,65 @@ def validate_miner_proof(
     _require_public_ip(proof.ip)
     _canonical_hash(proof.anchor_hash, label="miner evidence anchor hash")
     return proof
+
+
+def _successor_axon(target: second_miner_plan.Neuron) -> ServingAxon:
+    assert target.ip is not None
+    return ServingAxon(
+        uid=target.uid,
+        hotkey=target.hotkey,
+        ip=target.ip,
+        port=target.port,
+    )
+
+
+def collect_verified_successor_miners(
+    state: UID30SuccessorState, *, qvl_path: str
+) -> tuple[VerifiedMinerProof, VerifiedMinerProof]:
+    """Collect fresh proof from both fixed finalized axons."""
+
+    validate_uid30_successor_state(state)
+    proofs = tuple(
+        collect_verified_endpoint(
+            state=state,
+            axon=_successor_axon(target),
+            miner_hotkey=target.hotkey,
+            qvl_path=qvl_path,
+        )
+        for target in state.targets
+    )
+    assert len(proofs) == 2
+    return proofs
+
+
+def validate_successor_proofs(
+    proofs: Sequence[VerifiedMinerProof], *, state: UID30SuccessorState
+) -> tuple[VerifiedMinerProof, VerifiedMinerProof]:
+    """Bind two proofs to distinct machines on the finalized head."""
+
+    validate_uid30_successor_state(state)
+    if len(proofs) != 2:
+        raise UID30LaunchError("successor requires exactly two fresh miner proofs")
+    proof_by_hotkey = {proof.hotkey: proof for proof in proofs}
+    target_by_hotkey = {target.hotkey: target for target in state.targets}
+    if len(proof_by_hotkey) != 2 or set(proof_by_hotkey) != set(target_by_hotkey):
+        raise UID30LaunchError("successor proofs are not the two pinned hotkeys")
+    validated = tuple(
+        validate_verified_endpoint(
+            proof_by_hotkey[target.hotkey],
+            state=state,
+            axon=_successor_axon(target),
+            miner_hotkey=target.hotkey,
+        )
+        for target in state.targets
+    )
+    if (
+        len({proof.tls_spki_sha256 for proof in validated}) != 2
+        or len({(proof.ip, proof.port) for proof in validated}) != 2
+    ):
+        raise UID30LaunchError("successor proofs do not bind distinct machines")
+    assert len(validated) == 2
+    return validated
 
 
 def _assert_writer_available(args: SimpleNamespace) -> None:
@@ -1067,6 +1382,348 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     return preview
 
 
+def _successor_predecessor_artifact() -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "attempt_id": canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_ID,
+        "identity_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_IDENTITY_SHA256
+        ),
+        "intent_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_INTENT_SHA256
+        ),
+        "receipt_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_RECEIPT_SHA256
+        ),
+        "uid_safety_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID_SAFETY_SHA256
+        ),
+        "canonical_journal_filename": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+        ),
+        "journal_identity_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_IDENTITY
+        ),
+        "original_journal_sha256": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+        ),
+        "extrinsic_hash": (
+            canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_EXTRINSIC_HASH
+        ),
+        "block_hash": canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH,
+        "block_number": canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK,
+        "version_key": VERSION_KEY,
+        "wire": [[canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, W]],
+    }
+    return {**body, "sha256": canonical_validator._sha256_document(body)}
+
+
+def _successor_proof_artifact(proof: VerifiedMinerProof) -> dict[str, Any]:
+    return {**proof.artifact(), "qvl_status": canonical_validator.PASS}
+
+
+def _assert_successor_writer_available(args: SimpleNamespace) -> None:
+    """Require exact untouched predecessor bytes while holding the writer lock."""
+
+    try:
+        with canonical_validator._submission_tick_lock(args, lane="authority"):
+            path = canonical_validator._submission_state_path(args)
+            if (
+                path.parent != DEFAULT_RUNTIME_ROOT
+                or path.name
+                != canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+                or canonical_validator._private_state_sha256(path)
+                != canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+            ):
+                raise UID30LaunchError(
+                    "canonical journal differs from the consumed UID30 predecessor"
+                )
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchError(f"canonical successor writer refused: {exc}") from exc
+
+
+def build_successor_preview(
+    *,
+    state: UID30SuccessorState,
+    miners: Sequence[VerifiedMinerProof],
+    runtime_root: Path = DEFAULT_RUNTIME_ROOT,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Build the immutable two-miner successor without a chain mutation."""
+
+    validate_uid30_successor_state(state)
+    proofs = validate_successor_proofs(miners, state=state)
+    args = _successor_submission_contract(
+        runtime_root=Path(runtime_root),
+        genesis_hash=state.genesis_hash,
+        preview_sha256="0" * 64,
+    )
+    _assert_successor_writer_available(args)
+    created = (
+        _parse_utc(created_at, label="successor preview creation time")
+        if created_at is not None
+        else datetime.now(UTC)
+    )
+    timestamp = _canonical_utc(created)
+    valid_until_block = state.next_epoch_start_block - SN39_MORTAL_PERIOD_BLOCKS
+    uids, weights = second_miner_plan.equal_wire(
+        state.targets[0].uid,
+        state.targets[1].uid,
+    )
+    document: dict[str, Any] = {
+        "schema": canonical_validator.SN39_UID30_SUCCESSOR_SCHEMA,
+        "status": PREVIEW_STATUS,
+        "created_at": timestamp,
+        "valid_from_block": state.block_number,
+        "valid_until_block": valid_until_block,
+        "network": {
+            "name": NETWORK,
+            "netuid": NETUID,
+            "mecid": MECID,
+            "genesis_hash": state.genesis_hash,
+            "subnet_owner_hotkey": state.subnet_owner_hotkey,
+            "finalized_block": state.block_number,
+            "finalized_hash": state.block_hash,
+            "next_epoch_start_block": state.next_epoch_start_block,
+            "blocks_until_next_epoch": state.base.blocks_until_next_epoch,
+        },
+        "inclusion_policy": {
+            "valid_from_block": state.block_number,
+            "valid_until_block": valid_until_block,
+            "valid_from_time": timestamp,
+            "valid_until_time": _canonical_utc(
+                created + timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
+            ),
+            "require_commit_reveal_disabled": True,
+            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "expected_next_epoch_start_block": state.next_epoch_start_block,
+        },
+        "validator": state.base.artifact(),
+        "miners": [_successor_proof_artifact(proof) for proof in proofs],
+        "uid_safety": dict(state.uid_safety),
+        "policy": {
+            "id": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+            "each_verified_miner_semantic_weight": "1.0",
+            "burn_allocation": "0.0",
+        },
+        "proposed_vector": {
+            "dests": uids,
+            "weights_u16": weights,
+            "normalized": [[uid, "1.0"] for uid in uids],
+            "expected_storage": [[uid, weight] for uid, weight in zip(uids, weights)],
+            "burn_destination": None,
+            "burn_weight_u16": 0,
+        },
+        "predecessor": _successor_predecessor_artifact(),
+        "exclusivity": {
+            "runtime_root": str(Path(runtime_root)),
+            "canonical_writer_lock": str(
+                canonical_validator._submission_lock_path(args)
+            ),
+            "canonical_ambiguity_journal": str(
+                canonical_validator._submission_state_path(args)
+            ),
+            "remote_writer_exclusivity": "operator_assertion_required",
+        },
+        "weight_submission": {
+            "call": "SubtensorModule.set_mechanism_weights",
+            "version_key": VERSION_KEY,
+            "attempt_budget": {"scope": "authority_bounded", "limit": 1},
+            "signed": False,
+            "submitted": False,
+            "later_finalized_heads_required": 2,
+        },
+    }
+    return validate_successor_preview(document)
+
+
+def validate_successor_preview(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Reject any artifact outside the fixed two-miner successor contract."""
+
+    preview = dict(document)
+    required = {
+        "schema",
+        "status",
+        "created_at",
+        "valid_from_block",
+        "valid_until_block",
+        "network",
+        "inclusion_policy",
+        "validator",
+        "miners",
+        "uid_safety",
+        "policy",
+        "proposed_vector",
+        "predecessor",
+        "exclusivity",
+        "weight_submission",
+    }
+    if (
+        set(preview) != required
+        or preview.get("schema") != (canonical_validator.SN39_UID30_SUCCESSOR_SCHEMA)
+        or preview.get("status") != PREVIEW_STATUS
+    ):
+        raise UID30LaunchError("successor preview schema or fields are not exact")
+    network = preview.get("network")
+    inclusion = preview.get("inclusion_policy")
+    validator = preview.get("validator")
+    miners = preview.get("miners")
+    safety = preview.get("uid_safety")
+    vector = preview.get("proposed_vector")
+    exclusivity = preview.get("exclusivity")
+    if (
+        not all(
+            isinstance(value, Mapping)
+            for value in (network, inclusion, validator, safety, vector, exclusivity)
+        )
+        or not isinstance(miners, list)
+        or len(miners) != 2
+    ):
+        raise UID30LaunchError("successor preview is missing a required object")
+    assert isinstance(network, Mapping)
+    assert isinstance(inclusion, Mapping)
+    assert isinstance(validator, Mapping)
+    assert isinstance(safety, Mapping)
+    assert isinstance(vector, Mapping)
+    assert isinstance(exclusivity, Mapping)
+    block = _strict_nonnegative_int(
+        network.get("finalized_block"),
+        label="successor finalized block",
+    )
+    next_epoch = _strict_nonnegative_int(
+        network.get("next_epoch_start_block"),
+        label="successor next epoch",
+    )
+    created = _parse_utc(preview.get("created_at"), label="successor creation time")
+    if (
+        network.get("name") != NETWORK
+        or network.get("netuid") != NETUID
+        or network.get("mecid") != MECID
+        or network.get("genesis_hash") != FINNEY_GENESIS_HASH
+        or _canonical_hash(network.get("finalized_hash"), label="successor hash")
+        != network.get("finalized_hash")
+        or preview.get("valid_from_block") != block
+        or preview.get("valid_until_block") != next_epoch - SN39_MORTAL_PERIOD_BLOCKS
+        or inclusion.get("valid_from_block") != block
+        or inclusion.get("valid_until_block") != preview.get("valid_until_block")
+        or _parse_utc(inclusion.get("valid_from_time"), label="successor valid-from")
+        != created
+        or _parse_utc(inclusion.get("valid_until_time"), label="successor valid-until")
+        - created
+        != timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
+        or inclusion.get("require_commit_reveal_disabled") is not True
+        or inclusion.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or inclusion.get("expected_next_epoch_start_block") != next_epoch
+        or validator.get("hotkey") != UID30_HOTKEY
+        or validator.get("uid") != UID30
+        or validator.get("validator_permit") is not True
+    ):
+        raise UID30LaunchError("successor preview chain or signer gate differs")
+    try:
+        uid_hotkeys = sorted(
+            [[row["uid"], row["hotkey"]] for row in miners],
+            key=lambda row: row[0],
+        )
+    except (KeyError, TypeError) as exc:
+        raise UID30LaunchError("successor miner rows are malformed") from exc
+    if any(type(row[0]) is not int for row in uid_hotkeys):
+        raise UID30LaunchError("successor miner UID is malformed")
+    uids, weights = second_miner_plan.equal_wire(*(row[0] for row in uid_hotkeys))
+    expected_vector = {
+        "dests": uids,
+        "weights_u16": weights,
+        "normalized": [[uid, "1.0"] for uid in uids],
+        "expected_storage": [[uid, weight] for uid, weight in zip(uids, weights)],
+        "burn_destination": None,
+        "burn_weight_u16": 0,
+    }
+    if (
+        vector != expected_vector
+        or preview.get("predecessor") != _successor_predecessor_artifact()
+        or preview.get("policy")
+        != {
+            "id": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+            "each_verified_miner_semantic_weight": "1.0",
+            "burn_allocation": "0.0",
+        }
+        or preview.get("weight_submission")
+        != {
+            "call": "SubtensorModule.set_mechanism_weights",
+            "version_key": VERSION_KEY,
+            "attempt_budget": {"scope": "authority_bounded", "limit": 1},
+            "signed": False,
+            "submitted": False,
+            "later_finalized_heads_required": 2,
+        }
+    ):
+        raise UID30LaunchError("successor vector, policy, or lineage differs")
+    runtime_root = Path(str(exclusivity.get("runtime_root", "")))
+    expected_args = _successor_submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=FINNEY_GENESIS_HASH,
+        preview_sha256="0" * 64,
+    )
+    if (
+        runtime_root != DEFAULT_RUNTIME_ROOT
+        or exclusivity.get("canonical_writer_lock")
+        != str(canonical_validator._submission_lock_path(expected_args))
+        or exclusivity.get("canonical_ambiguity_journal")
+        != str(canonical_validator._submission_state_path(expected_args))
+        or exclusivity.get("remote_writer_exclusivity") != "operator_assertion_required"
+    ):
+        raise UID30LaunchError("successor preview exclusivity differs")
+    evidence = [dict(row) for row in miners]
+    identity = {
+        "network": NETWORK,
+        "netuid": NETUID,
+        "mapping_block": block,
+        "validator_hotkey": UID30_HOTKEY,
+        "validator_uid": UID30,
+        "source_epoch": block,
+        "uid_weights": [[uid, 1.0] for uid in uids],
+        "uid_hotkeys": uid_hotkeys,
+        "allocation_contract": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+        "burn_destination": None,
+        "burn_share": 0.0,
+        "subnet_owner_hotkey": network.get("subnet_owner_hotkey"),
+        "uid_safety": dict(safety),
+        "uid_safety_sha256": canonical_validator._sha256_document(
+            dict(safety)
+        ).removeprefix("sha256:"),
+        "next_epoch_start_block": next_epoch,
+        "successor_schema": canonical_validator.SN39_UID30_SUCCESSOR_SCHEMA,
+        "successor_contract": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+        "successor_preview_sha256": "sha256:" + "0" * 64,
+        "report_id": "sha256:" + "0" * 64,
+        "operator_declared_authority": True,
+        "exclusive_writer_assertion": {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        },
+        "reviewed_preview": {
+            "valid_from_block": preview["valid_from_block"],
+            "valid_until_block": preview["valid_until_block"],
+            "miners": evidence,
+            "vector": dict(vector),
+            "predecessor": dict(preview["predecessor"]),
+        },
+        "fresh_miner_evidence": evidence,
+        "fresh_evidence_sha256": canonical_validator._sha256_document(
+            {"proofs": evidence}
+        ).removeprefix("sha256:"),
+        "predecessor": dict(preview["predecessor"]),
+    }
+    try:
+        canonical_validator._strict_zero_burn_uid30_successor_contract(
+            identity,
+            lane="authority",
+        )
+    except Exception as exc:
+        raise UID30LaunchError(f"successor preview contract is invalid: {exc}") from exc
+    return preview
+
+
 def _require_owner_only_file(path: Path, *, max_bytes: int) -> bytes:
     try:
         info = path.lstat()
@@ -1214,6 +1871,67 @@ def load_reviewed_preview(
     validated = validate_preview(document)
     if _canonical_json_bytes(validated) != raw:
         raise UID30LaunchError("preview bytes are not in the canonical JSON encoding")
+    return validated, supplied
+
+
+def write_successor_preview(
+    document: Mapping[str, Any], path: Path | str
+) -> tuple[Path, Path, str]:
+    """Create one immutable owner-only successor preview and digest."""
+
+    validated = validate_successor_preview(document)
+    target = Path(path)
+    if not target.is_absolute():
+        raise UID30LaunchError("successor preview output path must be absolute")
+    digest_path = target.with_suffix(target.suffix + ".sha256")
+    data = _canonical_json_bytes(validated)
+    digest = _sha256(data)
+    _write_exclusive_owner_only(target, data)
+    _write_exclusive_owner_only(digest_path, (digest + "\n").encode("ascii"))
+    return target, digest_path, digest
+
+
+def load_reviewed_successor_preview(
+    path: Path | str, *, reviewed_sha256: str
+) -> tuple[dict[str, Any], str]:
+    """Load one byte-canonical, digest-authorized successor preview."""
+
+    target = Path(path)
+    supplied = _digest_text(reviewed_sha256, label="reviewed successor digest")
+    raw = _require_owner_only_file(target, max_bytes=MAX_PREVIEW_BYTES)
+    if _sha256(raw) != supplied:
+        raise UID30LaunchError("reviewed successor digest differs from its bytes")
+    detached = _require_owner_only_file(
+        target.with_suffix(target.suffix + ".sha256"),
+        max_bytes=128,
+    )
+    try:
+        detached_digest = _digest_text(
+            detached.decode("ascii"),
+            label="detached successor digest",
+        )
+    except UnicodeDecodeError as exc:
+        raise UID30LaunchError("detached successor digest is not ASCII") from exc
+    if detached_digest != supplied:
+        raise UID30LaunchError("detached successor digest differs from review")
+
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise UID30LaunchError(f"successor preview duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UID30LaunchError(f"successor preview is not strict JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise UID30LaunchError("successor preview is not a JSON object")
+    validated = validate_successor_preview(document)
+    if _canonical_json_bytes(validated) != raw:
+        raise UID30LaunchError("successor preview bytes are not canonical JSON")
     return validated, supplied
 
 
@@ -1368,6 +2086,233 @@ def _require_miner_on_finalized_head(
         raise UID30LaunchError("fresh miner evidence anchor is not canonical")
 
 
+def _fresh_successor_state_matches_preview(
+    fresh: UID30SuccessorState,
+    preview: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> None:
+    validate_uid30_successor_state(fresh)
+    network = preview.get("network")
+    validator = preview.get("validator")
+    miners = preview.get("miners")
+    if (
+        not isinstance(network, Mapping)
+        or not isinstance(validator, Mapping)
+        or not isinstance(miners, list)
+    ):
+        raise UID30LaunchError("reviewed successor identity is malformed")
+    if fresh.block_number > int(preview["valid_until_block"]):
+        raise UID30LaunchError("reviewed successor preview expired")
+    reviewed_block = int(network["finalized_block"])
+    reviewed_hash = _canonical_hash(
+        network["finalized_hash"],
+        label="reviewed successor hash",
+    )
+    try:
+        canonical_reviewed_hash = _canonical_hash(
+            fresh.preflight.subtensor.substrate.get_block_hash(reviewed_block),
+            label="canonical successor review hash",
+        )
+    except Exception as exc:
+        raise UID30LaunchError("successor review block cannot be re-resolved") from exc
+    reviewed_miners = {
+        str(row.get("hotkey")): row for row in miners if isinstance(row, Mapping)
+    }
+    fresh_targets = {target.hotkey: target for target in fresh.targets}
+    if (
+        fresh.block_number < reviewed_block
+        or canonical_reviewed_hash != reviewed_hash
+        or fresh.base.validator_hotkey != validator.get("hotkey")
+        or fresh.base.validator_uid != validator.get("uid")
+        or fresh.base.last_update != validator.get("last_update")
+        or fresh.genesis_hash != network.get("genesis_hash")
+        or fresh.subnet_owner_hotkey != network.get("subnet_owner_hotkey")
+        or set(reviewed_miners) != set(fresh_targets)
+        or any(
+            reviewed_miners[hotkey].get("uid") != target.uid
+            or reviewed_miners[hotkey].get("ip") != target.ip
+            or reviewed_miners[hotkey].get("port") != target.port
+            for hotkey, target in fresh_targets.items()
+        )
+    ):
+        raise UID30LaunchError("successor signer, mapping, or axon changed")
+    try:
+        canonical_validator._require_inclusion_policy_ready(
+            _preview_inclusion_policy(preview),
+            fresh.preflight,
+            now=now,
+        )
+    except Exception as exc:
+        raise UID30LaunchError(f"successor inclusion window refused: {exc}") from exc
+
+
+def _fresh_successor_proofs_match_preview(
+    proofs: Sequence[VerifiedMinerProof],
+    *,
+    state: UID30SuccessorState,
+    preview: Mapping[str, Any],
+) -> tuple[VerifiedMinerProof, VerifiedMinerProof]:
+    fresh = validate_successor_proofs(proofs, state=state)
+    reviewed = preview.get("miners")
+    if not isinstance(reviewed, list):
+        raise UID30LaunchError("reviewed successor proofs are malformed")
+    reviewed_by_hotkey = {
+        str(row.get("hotkey")): row for row in reviewed if isinstance(row, Mapping)
+    }
+    for proof in fresh:
+        row = reviewed_by_hotkey.get(proof.hotkey)
+        if row is None or any(
+            proof.artifact()[key] != row.get(key)
+            for key in ("hotkey", "uid", "ip", "port", "qvl_digest", "tls_spki_sha256")
+        ):
+            raise UID30LaunchError("fresh successor proof changed machine identity")
+    return fresh
+
+
+def _successor_attempt_identity(
+    *,
+    preview: Mapping[str, Any],
+    preview_sha256: str,
+    state: UID30SuccessorState,
+    fresh_miners: Sequence[VerifiedMinerProof],
+) -> dict[str, Any]:
+    proofs = validate_successor_proofs(fresh_miners, state=state)
+    ordered = sorted(state.targets, key=lambda target: target.uid)
+    uid_hotkeys = [[target.uid, target.hotkey] for target in ordered]
+    evidence = [_successor_proof_artifact(proof) for proof in proofs]
+    safety = dict(state.uid_safety)
+    return {
+        "network": NETWORK,
+        "netuid": NETUID,
+        "mapping_block": state.block_number,
+        "validator_hotkey": UID30_HOTKEY,
+        "validator_uid": UID30,
+        "source_epoch": state.block_number,
+        "uid_weights": [[uid, 1.0] for uid, _hotkey in uid_hotkeys],
+        "uid_hotkeys": uid_hotkeys,
+        "allocation_contract": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+        "burn_destination": None,
+        "burn_share": 0.0,
+        "subnet_owner_hotkey": state.subnet_owner_hotkey,
+        "uid_safety": safety,
+        "uid_safety_sha256": canonical_validator._sha256_document(safety).removeprefix(
+            "sha256:"
+        ),
+        "next_epoch_start_block": state.next_epoch_start_block,
+        "inclusion_policy": dict(preview["inclusion_policy"]),
+        "successor_schema": canonical_validator.SN39_UID30_SUCCESSOR_SCHEMA,
+        "successor_contract": canonical_validator.SN39_UID30_SUCCESSOR_POLICY,
+        "successor_preview_sha256": "sha256:" + preview_sha256,
+        "report_id": "sha256:" + preview_sha256,
+        "operator_declared_authority": True,
+        "exclusive_writer_assertion": {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        },
+        "reviewed_preview": {
+            "valid_from_block": preview["valid_from_block"],
+            "valid_until_block": preview["valid_until_block"],
+            "miners": [dict(row) for row in preview["miners"]],
+            "vector": dict(preview["proposed_vector"]),
+            "predecessor": dict(preview["predecessor"]),
+        },
+        "fresh_miner_evidence": evidence,
+        "fresh_evidence_sha256": canonical_validator._sha256_document(
+            {"proofs": evidence}
+        ).removeprefix("sha256:"),
+        "predecessor": _successor_predecessor_artifact(),
+    }
+
+
+def _validate_successor_attempt_identity(
+    identity: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    preview_sha256: str,
+) -> tuple[tuple[int, int], tuple[int, int], dict[int, str]]:
+    """Bind a durable successor identity back to the reviewed preview bytes."""
+
+    try:
+        contract = canonical_validator._strict_zero_burn_uid30_successor_contract(
+            dict(identity),
+            lane="authority",
+        )
+    except Exception as exc:
+        raise UID30LaunchError(
+            f"journaled two-miner successor identity is invalid: {exc}"
+        ) from exc
+    network = preview.get("network")
+    miners = preview.get("miners")
+    vector = preview.get("proposed_vector")
+    if (
+        not isinstance(network, Mapping)
+        or not isinstance(miners, list)
+        or not isinstance(vector, Mapping)
+    ):
+        raise UID30LaunchError("reviewed successor preview is malformed")
+    try:
+        wire_uids = tuple(vector["dests"])
+        wire_weights = tuple(vector["weights_u16"])
+        uid_hotkeys = {row[0]: row[1] for row in identity["uid_hotkeys"]}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UID30LaunchError(
+            "journaled successor vector identity is malformed"
+        ) from exc
+    expected_reviewed = {
+        "valid_from_block": preview["valid_from_block"],
+        "valid_until_block": preview["valid_until_block"],
+        "miners": [dict(row) for row in miners],
+        "vector": dict(vector),
+        "predecessor": dict(preview["predecessor"]),
+    }
+    if (
+        contract.get("kind") != "two_miner_successor"
+        or tuple(uid for uid, _weight in contract["uid_weights"]) != wire_uids
+        or tuple(weight for _uid, weight in contract["uid_weights"]) != (1.0, 1.0)
+        or tuple(uid_hotkeys) != wire_uids
+        or wire_weights != (W, W)
+        or identity.get("network") != NETWORK
+        or identity.get("netuid") != NETUID
+        or identity.get("validator_hotkey") != UID30_HOTKEY
+        or identity.get("validator_uid") != UID30
+        or identity.get("allocation_contract")
+        != canonical_validator.SN39_UID30_SUCCESSOR_POLICY
+        or identity.get("burn_destination") is not None
+        or identity.get("burn_share") != 0.0
+        or identity.get("subnet_owner_hotkey") != network.get("subnet_owner_hotkey")
+        or identity.get("next_epoch_start_block")
+        != network.get("next_epoch_start_block")
+        or identity.get("inclusion_policy") != preview.get("inclusion_policy")
+        or identity.get("successor_preview_sha256") != "sha256:" + preview_sha256
+        or identity.get("report_id") != "sha256:" + preview_sha256
+        or identity.get("reviewed_preview") != expected_reviewed
+        or identity.get("predecessor") != _successor_predecessor_artifact()
+        or identity.get("exclusive_writer_assertion")
+        != {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        }
+    ):
+        raise UID30LaunchError(
+            "journaled successor identity differs from the reviewed preview"
+        )
+    mapping_block = _strict_nonnegative_int(
+        identity.get("mapping_block"),
+        label="journaled successor mapping block",
+    )
+    policy = _preview_inclusion_policy(preview)
+    if not policy.valid_from_block <= mapping_block < policy.valid_until_block:
+        raise UID30LaunchError(
+            "journaled successor mapping block is outside the reviewed window"
+        )
+    return (
+        (wire_uids[0], wire_uids[1]),
+        (wire_weights[0], wire_weights[1]),
+        uid_hotkeys,
+    )
+
+
 def _attempt_identity(
     *,
     preview: Mapping[str, Any],
@@ -1454,6 +2399,9 @@ def _finalized_readback(
     receipt: Any,
     identity: Mapping[str, Any],
     require_receipt: bool = True,
+    wire_uids: Sequence[int] | None = None,
+    wire_weights: Sequence[int] | None = None,
+    uid_hotkeys: Mapping[int, str] | None = None,
 ) -> Mapping[str, Any]:
     """Prove the exact signed call, its execution, finality, and stored vector."""
 
@@ -1484,6 +2432,13 @@ def _finalized_readback(
         if require_receipt
         else canonical_validator._classify_finalized_receipt
     )
+    exact_uids = list(wire_uids) if wire_uids is not None else [state.miner_uid]
+    exact_weights = list(wire_weights) if wire_weights is not None else [W]
+    exact_hotkeys = (
+        dict(uid_hotkeys)
+        if uid_hotkeys is not None
+        else {state.miner_uid: MINER_HOTKEY}
+    )
     proof = classifier(
         state.preflight.subtensor,
         receipt=receipt,
@@ -1495,13 +2450,13 @@ def _finalized_readback(
         validator_hotkey=UID30_HOTKEY,
         netuid=NETUID,
         version_key=VERSION_KEY,
-        wire_uids=[state.miner_uid],
-        wire_weights=[W],
+        wire_uids=exact_uids,
+        wire_weights=exact_weights,
         # Prove both ends of the reviewed contract at inclusion. The validator
         # hotkey being registered and permitted somewhere is insufficient: it
         # must still be the signer bound to UID30 at the receipt block.
         uid_hotkeys={
-            state.miner_uid: MINER_HOTKEY,
+            **exact_hotkeys,
             UID30: UID30_HOTKEY,
         },
         expected_subnet_owner_hotkey=owner,
@@ -1524,18 +2479,350 @@ def _finalized_readback(
         block_hash=block_hash,
     )
     rows = _raw_value(stored)
-    if rows != [[state.miner_uid, W]] and rows != [(state.miner_uid, W)]:
+    expected_list = [[uid, weight] for uid, weight in zip(exact_uids, exact_weights)]
+    expected_tuple = list(zip(exact_uids, exact_weights))
+    if rows != expected_list and rows != expected_tuple:
         raise UID30LaunchContradiction(
-            "finalized UID30 mechanism weights differ from the reviewed 100/0 vector"
+            "finalized UID30 mechanism weights differ from the exact reviewed vector"
         )
     return {
         "block_number": submission.block_number,
         "block_hash": block_hash,
         "validator_uid": UID30,
-        "dests": [state.miner_uid],
-        "weights_u16": [W],
+        "dests": exact_uids,
+        "weights_u16": exact_weights,
         "exact_signed_call_proof": canonical_validator.PASS,
     }
+
+
+def _verify_successor_later_finalized_heads(
+    *,
+    state: UID30SuccessorState | UID30SuccessorVerificationState,
+    submission: Any,
+    wire_uids: Sequence[int],
+    wire_weights: Sequence[int],
+) -> tuple[tuple[int, str], tuple[int, str]]:
+    """Prove the complete successor row and fixed identities at two later heads."""
+
+    exact_uids = tuple(wire_uids)
+    exact_weights = tuple(wire_weights)
+    if (
+        len(exact_uids) != 2
+        or len(exact_weights) != 2
+        or any(type(uid) is not int for uid in exact_uids)
+        or any(type(weight) is not int for weight in exact_weights)
+        or tuple(sorted(exact_uids)) != exact_uids
+        or exact_weights != (W, W)
+    ):
+        raise UID30LaunchContradiction(
+            "later-head verification received a noncanonical successor vector"
+        )
+    reviewed_targets = {target.uid: target for target in state.targets}
+    reviewed_hotkeys = {uid: target.hotkey for uid, target in reviewed_targets.items()}
+    if set(reviewed_hotkeys) != set(exact_uids) or set(reviewed_hotkeys.values()) != {
+        MINER_HOTKEY,
+        canonical_validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+    }:
+        raise UID30LaunchContradiction(
+            "later-head verification received different reviewed miner UIDs"
+        )
+
+    substrate = state.preflight.subtensor.substrate
+    try:
+        finalized_hash = _canonical_hash(
+            substrate.get_chain_finalised_head(),
+            label="later finalized head hash",
+        )
+        finalized_number = _strict_nonnegative_int(
+            substrate.get_block_number(finalized_hash),
+            label="later finalized head number",
+        )
+        if (
+            _canonical_hash(
+                substrate.get_block_hash(finalized_number),
+                label="reverse-bound later finalized head hash",
+            )
+            != finalized_hash
+        ):
+            raise UID30LaunchAmbiguous(
+                "later finalized head number and hash do not match"
+            )
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchAmbiguous(
+            f"later finalized head could not be read: {exc}"
+        ) from exc
+
+    inclusion_number = _strict_nonnegative_int(
+        submission.block_number,
+        label="successor inclusion block number",
+    )
+    if finalized_number < inclusion_number + 2:
+        raise UID30LaunchAmbiguous(
+            "two strictly later finalized heads are not available yet"
+        )
+
+    proven: list[tuple[int, str]] = []
+    for block_number in (finalized_number - 1, finalized_number):
+        if block_number <= inclusion_number:
+            raise UID30LaunchAmbiguous(
+                "later-head verification did not select two post-inclusion heads"
+            )
+        try:
+            block_hash = _canonical_hash(
+                substrate.get_block_hash(block_number),
+                label=f"later finalized block {block_number} hash",
+            )
+            snapshot = second_miner_plan.read_snapshot_at(
+                subtensor=state.preflight.subtensor,
+                block_number=block_number,
+                block_hash=block_hash,
+                genesis_hash=state.genesis_hash,
+            )
+        except (UID30LaunchError, second_miner_plan.SecondMinerPlanError) as exc:
+            raise UID30LaunchAmbiguous(
+                f"later finalized block {block_number} could not be proven: {exc}"
+            ) from exc
+
+        if snapshot.uid30_weights != tuple(zip(exact_uids, exact_weights)):
+            raise UID30LaunchContradiction(
+                f"UID30 successor row changed at finalized block {block_number}"
+            )
+        by_hotkey: dict[str, list[second_miner_plan.Neuron]] = {}
+        by_uid: dict[int, list[second_miner_plan.Neuron]] = {}
+        for neuron in snapshot.neurons:
+            by_hotkey.setdefault(neuron.hotkey, []).append(neuron)
+            by_uid.setdefault(neuron.uid, []).append(neuron)
+        validator_rows = by_hotkey.get(UID30_HOTKEY, [])
+        if (
+            len(validator_rows) != 1
+            or validator_rows[0].uid != UID30
+            or validator_rows[0].validator_permit is not True
+            or len(by_uid.get(UID30, [])) != 1
+            or by_uid[UID30][0].hotkey != UID30_HOTKEY
+        ):
+            raise UID30LaunchContradiction(
+                f"UID30 signer mapping or permit changed at finalized block {block_number}"
+            )
+        for uid, hotkey in reviewed_hotkeys.items():
+            reviewed_target = reviewed_targets[uid]
+            observed_target = by_uid.get(uid, [])
+            if (
+                len(by_hotkey.get(hotkey, [])) != 1
+                or by_hotkey[hotkey][0].uid != uid
+                or len(observed_target) != 1
+                or observed_target[0].hotkey != hotkey
+            ):
+                raise UID30LaunchContradiction(
+                    "successor miner hotkey-to-UID mapping changed at finalized "
+                    f"block {block_number}"
+                )
+            observed = observed_target[0]
+            if (
+                observed.ip != reviewed_target.ip
+                or observed.port != reviewed_target.port
+                or observed.protocol != reviewed_target.protocol
+                or observed.serving is not True
+                or observed.port != second_miner_plan.HTTPS_PORT
+                or observed.protocol != second_miner_plan.HTTPS_PROTOCOL
+            ):
+                raise UID30LaunchContradiction(
+                    "successor miner serving axon changed at finalized "
+                    f"block {block_number}"
+                )
+        proven.append((block_number, block_hash))
+    return proven[0], proven[1]
+
+
+def submit_reviewed_successor(
+    *,
+    preview_path: Path | str,
+    reviewed_sha256: str,
+    qvl_path: str,
+    confirm: bool,
+    exclusive_writer_asserted: bool = False,
+) -> UID30SuccessorSubmissionResult:
+    """Submit the fixed two-miner successor once through the canonical writer."""
+
+    if confirm is not True:
+        raise UID30LaunchError(
+            "--confirm-uid30-successor is required; no chain call made"
+        )
+    if exclusive_writer_asserted is not True:
+        raise UID30LaunchError(
+            "--assert-exclusive-writer is required; stop every other UID30 writer"
+        )
+    preview, digest = load_reviewed_successor_preview(
+        preview_path,
+        reviewed_sha256=reviewed_sha256,
+    )
+    exclusivity = preview["exclusivity"]
+    network = preview["network"]
+    assert isinstance(exclusivity, Mapping)
+    assert isinstance(network, Mapping)
+    runtime_root = Path(str(exclusivity["runtime_root"]))
+    if runtime_root != DEFAULT_RUNTIME_ROOT:
+        raise UID30LaunchError(
+            f"live UID30 submission requires canonical runtime root {DEFAULT_RUNTIME_ROOT}"
+        )
+    args = _successor_submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=str(network["genesis_hash"]),
+        preview_sha256=digest,
+    )
+    try:
+        with canonical_validator._submission_tick_lock(args, lane="authority"):
+            evidence_state = read_uid30_successor_state()
+            _fresh_successor_state_matches_preview(
+                evidence_state,
+                preview,
+            )
+            collected = collect_verified_successor_miners(
+                evidence_state,
+                qvl_path=qvl_path,
+            )
+            # Evidence collection can cross a finalized block. Re-read all
+            # mutable chain facts immediately before reserving the one attempt.
+            fresh_state = read_uid30_successor_state()
+            _fresh_successor_state_matches_preview(fresh_state, preview)
+            fresh_miners = _fresh_successor_proofs_match_preview(
+                collected,
+                state=fresh_state,
+                preview=preview,
+            )
+            identity = _successor_attempt_identity(
+                preview=preview,
+                preview_sha256=digest,
+                state=fresh_state,
+                fresh_miners=fresh_miners,
+            )
+            wire_uids, wire_weights, uid_hotkeys = _validate_successor_attempt_identity(
+                identity,
+                preview=preview,
+                preview_sha256=digest,
+            )
+            attempt_id = _attempt_id(identity)
+            try:
+                canonical_validator._reserve_common_submission(
+                    args,
+                    lane="authority",
+                    attempt_id=attempt_id,
+                    identity=identity,
+                )
+            except Exception as exc:
+                raise UID30LaunchError(
+                    f"canonical ambiguity journal refused before signing: {exc}"
+                ) from exc
+
+            try:
+                receipt = canonical_validator._submit_exact_sn39_extrinsic(
+                    fresh_state.preflight,
+                    runtime_contract=args,
+                    attempt_id=attempt_id,
+                    netuid=NETUID,
+                    version_key=VERSION_KEY,
+                    wire_uids=list(wire_uids),
+                    wire_weights=list(wire_weights),
+                    mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+                )
+                submission = _receipt_submission(receipt, state=fresh_state)
+                canonical_validator._record_pending_submission_receipt(
+                    args,
+                    attempt_id=attempt_id,
+                    submission=submission,
+                    version_key=VERSION_KEY,
+                    wire_uids=list(wire_uids),
+                    wire_weights=list(wire_weights),
+                )
+                readback = _finalized_readback(
+                    state=fresh_state,
+                    submission=submission,
+                    receipt=receipt,
+                    identity=identity,
+                    wire_uids=wire_uids,
+                    wire_weights=wire_weights,
+                    uid_hotkeys=uid_hotkeys,
+                )
+                if (
+                    tuple(readback.get("dests", ())) != wire_uids
+                    or tuple(readback.get("weights_u16", ())) != wire_weights
+                ):
+                    raise UID30LaunchContradiction(
+                        "finalized readback differs from the reviewed successor vector"
+                    )
+                later_heads = _verify_successor_later_finalized_heads(
+                    state=fresh_state,
+                    submission=submission,
+                    wire_uids=wire_uids,
+                    wire_weights=wire_weights,
+                )
+                canonical_validator._record_pending_proof_status(
+                    args,
+                    attempt_id=attempt_id,
+                    status=canonical_validator.PASS,
+                )
+                canonical_validator._finalize_common_submission(
+                    args,
+                    attempt_id=attempt_id,
+                    submission=canonical_validator.ChainSubmission(
+                        success=True,
+                        extrinsic_hash=submission.extrinsic_hash,
+                        block_hash=submission.block_hash,
+                        block_number=submission.block_number,
+                        finalized=True,
+                    ),
+                    version_key=VERSION_KEY,
+                )
+            except UID30LaunchContradiction as exc:
+                try:
+                    canonical_validator._record_pending_proof_status(
+                        args,
+                        attempt_id=attempt_id,
+                        status=canonical_validator.FAIL,
+                    )
+                except Exception as persist_exc:
+                    raise UID30LaunchContradiction(
+                        f"{exc}; the mismatch could not be recorded, so every "
+                        "writer must remain stopped"
+                    ) from persist_exc
+                raise
+            except UID30LaunchAmbiguous:
+                raise
+            except Exception as exc:
+                try:
+                    safely_aborted = (
+                        canonical_validator._abort_unsigned_common_submission(
+                            args,
+                            attempt_id=attempt_id,
+                        )
+                    )
+                except Exception:
+                    safely_aborted = False
+                if safely_aborted:
+                    raise UID30LaunchError(
+                        f"successor submission refused before signed intent: {exc}"
+                    ) from exc
+                raise UID30LaunchAmbiguous(
+                    "successor signed intent or receipt remains in the canonical "
+                    "journal; do not retry or submit a replacement"
+                ) from exc
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchError(
+            f"canonical successor writer lock refused: {exc}"
+        ) from exc
+    return UID30SuccessorSubmissionResult(
+        preview_sha256=digest,
+        attempt_id=attempt_id,
+        extrinsic_hash=str(submission.extrinsic_hash),
+        block_hash=str(submission.block_hash),
+        block_number=int(submission.block_number),
+        wire_uids=wire_uids,
+        wire_weights=wire_weights,
+        later_finalized_heads=later_heads,
+    )
 
 
 def submit_reviewed_preview(
@@ -2141,6 +3428,425 @@ def recover_reviewed_preview(
         ) from exc
 
 
+def _successor_recovery_state(
+    *,
+    preflight: Any,
+    preview: Mapping[str, Any],
+    uid_hotkeys: Mapping[int, str],
+) -> UID30SuccessorVerificationState:
+    """Build the read-only structural view used by inclusion and later reads."""
+
+    if (
+        preflight.genesis_hash != FINNEY_GENESIS_HASH
+        or preflight.validator_hotkey != UID30_HOTKEY
+        or preflight.validator_uid != UID30
+        or getattr(preflight, "validator_permit", True) is not True
+        or set(uid_hotkeys.values())
+        != {
+            MINER_HOTKEY,
+            canonical_validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+        }
+        or any(
+            preflight.hotkey_to_uid.get(hotkey) != uid
+            or sorted(
+                observed_hotkey
+                for observed_hotkey, observed_uid in preflight.hotkey_to_uid.items()
+                if observed_uid == uid
+            )
+            != [hotkey]
+            for uid, hotkey in uid_hotkeys.items()
+        )
+        or preflight.hotkey_to_uid.get(UID30_HOTKEY) != UID30
+        or sorted(
+            observed_hotkey
+            for observed_hotkey, observed_uid in preflight.hotkey_to_uid.items()
+            if observed_uid == UID30
+        )
+        != [UID30_HOTKEY]
+    ):
+        raise UID30LaunchAmbiguous(
+            "recovery preflight no longer has the reviewed bidirectional UID mappings"
+        )
+    network = preview.get("network")
+    if not isinstance(network, Mapping):
+        raise UID30LaunchError("reviewed successor network is malformed")
+    miners = preview.get("miners")
+    if not isinstance(miners, list):
+        raise UID30LaunchError("reviewed successor miners are malformed")
+    reviewed_by_hotkey = {
+        str(row.get("hotkey")): row for row in miners if isinstance(row, Mapping)
+    }
+    targets = tuple(
+        second_miner_plan.Neuron(
+            uid=uid,
+            hotkey=hotkey,
+            coldkey=second_miner_plan.CATHEDRAL_COLDKEY,
+            validator_permit=False,
+            last_update=0,
+            ip=str(reviewed_by_hotkey[hotkey]["ip"]),
+            port=int(reviewed_by_hotkey[hotkey]["port"]),
+            protocol=second_miner_plan.HTTPS_PROTOCOL,
+            serving=True,
+        )
+        for uid, hotkey in sorted(uid_hotkeys.items())
+    )
+    return UID30SuccessorVerificationState(
+        preflight=preflight,
+        genesis_hash=str(network["genesis_hash"]),
+        targets=targets,
+    )
+
+
+def _successor_signed_record(
+    journal: Mapping[str, Any],
+    *,
+    prefix: str,
+    preview: Mapping[str, Any],
+    preview_sha256: str,
+) -> tuple[
+    str,
+    Mapping[str, Any],
+    Mapping[str, Any],
+    tuple[int, int],
+    tuple[int, int],
+    dict[int, str],
+]:
+    """Decode one exact pending or finalized successor journal record."""
+
+    attempt_id = journal.get(f"submission_{prefix}_id")
+    lane = journal.get(f"submission_{prefix}_lane")
+    identity = journal.get(f"submission_{prefix}_identity")
+    intent = journal.get(f"submission_{prefix}_broadcast_intent")
+    durable_kind = journal.get(f"submission_{prefix}_reviewed_uid30_contract")
+    if (
+        not isinstance(attempt_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+        or lane != "authority"
+        or not isinstance(identity, Mapping)
+        or not isinstance(intent, Mapping)
+        or durable_kind != "two_miner_successor"
+    ):
+        raise UID30LaunchAmbiguous(
+            f"canonical journal has no exact {prefix} two-miner successor"
+        )
+    wire_uids, wire_weights, uid_hotkeys = _validate_successor_attempt_identity(
+        identity,
+        preview=preview,
+        preview_sha256=preview_sha256,
+    )
+    if _attempt_id(identity) != attempt_id:
+        raise UID30LaunchContradiction(
+            "journaled successor attempt id differs from its immutable identity"
+        )
+    try:
+        intent_hash = _canonical_hash(
+            intent["extrinsic_hash"],
+            label="successor signed intent hash",
+        )
+        nonce = intent["nonce"]
+        era_reference = intent["era_reference_block"]
+        mortal_period = intent["mortal_period_blocks"]
+        version_key = intent["version_key"]
+        intent_uids = tuple(intent["wire_uids"])
+        intent_weights = tuple(intent["wire_weights"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UID30LaunchContradiction(
+            "journaled successor signed intent is malformed"
+        ) from exc
+    if (
+        isinstance(nonce, bool)
+        or not isinstance(nonce, int)
+        or nonce < 0
+        or type(era_reference) is not int
+        or era_reference != identity.get("mapping_block")
+        or mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+        or version_key != VERSION_KEY
+        or intent_uids != wire_uids
+        or intent_weights != wire_weights
+    ):
+        raise UID30LaunchContradiction(
+            "journaled successor signed intent differs from the reviewed vector"
+        )
+    return (
+        attempt_id,
+        identity,
+        {**dict(intent), "extrinsic_hash": intent_hash},
+        wire_uids,
+        wire_weights,
+        uid_hotkeys,
+    )
+
+
+def recover_reviewed_successor(
+    *,
+    preview_path: Path | str,
+    reviewed_sha256: str,
+    exclusive_writer_asserted: bool = False,
+) -> UID30SuccessorRecoveryResult:
+    """Recover the fixed signed successor without signing or retrying it."""
+
+    if exclusive_writer_asserted is not True:
+        raise UID30LaunchError(
+            "--assert-exclusive-writer is required; stop every other UID30 writer"
+        )
+    preview, digest = load_reviewed_successor_preview(
+        preview_path,
+        reviewed_sha256=reviewed_sha256,
+    )
+    exclusivity = preview["exclusivity"]
+    network = preview["network"]
+    assert isinstance(exclusivity, Mapping)
+    assert isinstance(network, Mapping)
+    runtime_root = Path(str(exclusivity["runtime_root"]))
+    if runtime_root != DEFAULT_RUNTIME_ROOT:
+        raise UID30LaunchError(
+            f"live UID30 recovery requires canonical runtime root {DEFAULT_RUNTIME_ROOT}"
+        )
+    args = _successor_submission_contract(
+        runtime_root=runtime_root,
+        genesis_hash=str(network["genesis_hash"]),
+        preview_sha256=digest,
+    )
+    try:
+        with canonical_validator._submission_tick_lock(args, lane="authority"):
+            journal = canonical_validator._read_state(
+                canonical_validator._submission_state_path(args)
+            )
+            finalized = journal.get("submission_pending_id") is None
+            prefix = "finalized" if finalized else "pending"
+            if not finalized and journal.get("submission_pending_phase") == (
+                "unsigned_reserved"
+            ):
+                attempt_id = str(journal.get("submission_pending_id") or "")
+                identity = journal.get("submission_pending_identity")
+                if not isinstance(identity, Mapping):
+                    raise UID30LaunchAmbiguous(
+                        "unsigned successor reservation lost its identity"
+                    )
+                _validate_successor_attempt_identity(
+                    identity,
+                    preview=preview,
+                    preview_sha256=digest,
+                )
+                if not canonical_validator._abort_unsigned_common_submission(
+                    args,
+                    attempt_id=attempt_id,
+                ):
+                    raise UID30LaunchAmbiguous(
+                        "unsigned successor reservation changed while recovery held the lock"
+                    )
+                vector = preview["proposed_vector"]
+                assert isinstance(vector, Mapping)
+                return UID30SuccessorRecoveryResult(
+                    status="UNSIGNED_RESERVATION_RELEASED",
+                    preview_sha256=digest,
+                    attempt_id=attempt_id,
+                    extrinsic_hash=None,
+                    block_hash=None,
+                    block_number=None,
+                    wire_uids=tuple(vector["dests"]),
+                    wire_weights=None,
+                    later_finalized_heads=None,
+                )
+            if not finalized and journal.get("submission_pending_phase") != (
+                "signed_intent"
+            ):
+                raise UID30LaunchAmbiguous(
+                    "successor journal has no recognized signed recovery phase"
+                )
+            if (
+                not finalized
+                and journal.get("submission_pending_proof_status")
+                == canonical_validator.FAIL
+            ):
+                raise UID30LaunchContradiction(
+                    "successor journal contains a positive historical mismatch"
+                )
+            (
+                attempt_id,
+                identity,
+                intent,
+                wire_uids,
+                wire_weights,
+                uid_hotkeys,
+            ) = _successor_signed_record(
+                journal,
+                prefix=prefix,
+                preview=preview,
+                preview_sha256=digest,
+            )
+            preflight = _recovery_preflight()
+            verification_state = _successor_recovery_state(
+                preflight=preflight,
+                preview=preview,
+                uid_hotkeys=uid_hotkeys,
+            )
+            receipt_row = (
+                journal.get("submission_finalized_receipt")
+                if finalized
+                else journal.get("submission_pending_receipt_candidate")
+            )
+            if not isinstance(receipt_row, Mapping):
+                if finalized:
+                    raise UID30LaunchContradiction(
+                        "finalized successor journal has no exact receipt"
+                    )
+                policy = _preview_inclusion_policy(preview)
+                locate_status, submission = (
+                    canonical_validator._locate_pending_broadcast_receipt(
+                        preflight.subtensor,
+                        extrinsic_hash=str(intent["extrinsic_hash"]),
+                        era_reference_block=int(intent["era_reference_block"]),
+                        mortal_period_blocks=int(intent["mortal_period_blocks"]),
+                        validator_hotkey=UID30_HOTKEY,
+                        netuid=NETUID,
+                        version_key=VERSION_KEY,
+                        wire_uids=list(wire_uids),
+                        wire_weights=list(wire_weights),
+                        inclusion_policy=policy,
+                    )
+                )
+                if (
+                    locate_status == canonical_validator.EXPIRED_WITHOUT_INCLUSION
+                    and submission is None
+                ):
+                    canonical_validator._expire_pending_common_submission(
+                        args,
+                        attempt_id=attempt_id,
+                    )
+                    return UID30SuccessorRecoveryResult(
+                        status=canonical_validator.EXPIRED_WITHOUT_INCLUSION,
+                        preview_sha256=digest,
+                        attempt_id=attempt_id,
+                        extrinsic_hash=str(intent["extrinsic_hash"]),
+                        block_hash=None,
+                        block_number=None,
+                        wire_uids=wire_uids,
+                        wire_weights=None,
+                        later_finalized_heads=None,
+                    )
+                if locate_status in {
+                    canonical_validator.PASS,
+                    canonical_validator.FAIL,
+                    canonical_validator.NOT_PROVEN,
+                }:
+                    canonical_validator._record_pending_proof_status(
+                        args,
+                        attempt_id=attempt_id,
+                        status=locate_status,
+                    )
+                if locate_status != canonical_validator.PASS or submission is None:
+                    error = (
+                        UID30LaunchContradiction
+                        if locate_status == canonical_validator.FAIL
+                        else UID30LaunchAmbiguous
+                    )
+                    raise error(
+                        "exact successor transaction is not uniquely proven on the "
+                        "finalized chain"
+                    )
+                canonical_validator._record_pending_submission_receipt(
+                    args,
+                    attempt_id=attempt_id,
+                    submission=submission,
+                    version_key=VERSION_KEY,
+                    wire_uids=list(wire_uids),
+                    wire_weights=list(wire_weights),
+                )
+            else:
+                try:
+                    submission = canonical_validator.ChainSubmission(
+                        success=True,
+                        extrinsic_hash=_canonical_hash(
+                            receipt_row["extrinsic_hash"],
+                            label="successor receipt extrinsic hash",
+                        ),
+                        block_hash=_canonical_hash(
+                            receipt_row["block_hash"],
+                            label="successor receipt block hash",
+                        ),
+                        block_number=_strict_nonnegative_int(
+                            receipt_row["block_number"],
+                            label="successor receipt block number",
+                        ),
+                        finalized=True,
+                    )
+                    receipt_version = receipt_row["version_key"]
+                    receipt_uids = tuple(receipt_row["wire_uids"])
+                    receipt_weights = tuple(receipt_row["wire_weights"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise UID30LaunchContradiction(
+                        "journaled successor receipt is malformed"
+                    ) from exc
+                if (
+                    submission.extrinsic_hash != intent["extrinsic_hash"]
+                    or receipt_version != VERSION_KEY
+                    or receipt_uids != wire_uids
+                    or receipt_weights != wire_weights
+                ):
+                    raise UID30LaunchContradiction(
+                        "journaled successor receipt differs from its signed intent"
+                    )
+            readback = _finalized_readback(
+                state=verification_state,
+                submission=submission,
+                receipt=None,
+                identity=identity,
+                require_receipt=False,
+                wire_uids=wire_uids,
+                wire_weights=wire_weights,
+                uid_hotkeys=uid_hotkeys,
+            )
+            if (
+                tuple(readback.get("dests", ())) != wire_uids
+                or tuple(readback.get("weights_u16", ())) != wire_weights
+            ):
+                raise UID30LaunchContradiction(
+                    "recovered inclusion readback differs from the reviewed vector"
+                )
+            later_heads = _verify_successor_later_finalized_heads(
+                state=verification_state,
+                submission=submission,
+                wire_uids=wire_uids,
+                wire_weights=wire_weights,
+            )
+            if not finalized:
+                canonical_validator._record_pending_proof_status(
+                    args,
+                    attempt_id=attempt_id,
+                    status=canonical_validator.PASS,
+                )
+                canonical_validator._finalize_common_submission(
+                    args,
+                    attempt_id=attempt_id,
+                    submission=canonical_validator.ChainSubmission(
+                        success=True,
+                        extrinsic_hash=submission.extrinsic_hash,
+                        block_hash=submission.block_hash,
+                        block_number=submission.block_number,
+                        finalized=True,
+                    ),
+                    version_key=VERSION_KEY,
+                )
+            return UID30SuccessorRecoveryResult(
+                status=("ALREADY_FINALIZED" if finalized else "RECOVERED_FINALIZED"),
+                preview_sha256=digest,
+                attempt_id=attempt_id,
+                extrinsic_hash=str(submission.extrinsic_hash),
+                block_hash=str(submission.block_hash),
+                block_number=int(submission.block_number),
+                wire_uids=wire_uids,
+                wire_weights=wire_weights,
+                later_finalized_heads=later_heads,
+            )
+    except UID30LaunchError:
+        raise
+    except Exception as exc:
+        raise UID30LaunchAmbiguous(
+            f"read-only successor recovery remains fenced: {exc}"
+        ) from exc
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-uid30-launch")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2163,6 +3869,44 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument("--preview", required=True)
     recover.add_argument("--reviewed-sha256", required=True)
     recover.add_argument(
+        "--assert-exclusive-writer",
+        action="store_true",
+        help="assert every other process or host able to write UID30 is stopped",
+    )
+    successor_preview = sub.add_parser(
+        "successor-preview",
+        help="write the fixed no-chain-write two-miner successor artifact",
+    )
+    successor_preview.add_argument(
+        "--qvl",
+        required=True,
+        help="pinned TDX QVL executable",
+    )
+    successor_preview.add_argument("--output", default=str(DEFAULT_SUCCESSOR_PREVIEW))
+    successor_submit = sub.add_parser(
+        "successor-submit",
+        help="submit the fixed reviewed two-miner successor once",
+    )
+    successor_submit.add_argument("--preview", required=True)
+    successor_submit.add_argument("--reviewed-sha256", required=True)
+    successor_submit.add_argument(
+        "--qvl",
+        required=True,
+        help="pinned TDX QVL executable",
+    )
+    successor_submit.add_argument("--confirm-uid30-successor", action="store_true")
+    successor_submit.add_argument(
+        "--assert-exclusive-writer",
+        action="store_true",
+        help="assert every other process or host able to write UID30 is stopped",
+    )
+    successor_recover = sub.add_parser(
+        "successor-recover",
+        help="recover only the fixed journaled successor without retrying it",
+    )
+    successor_recover.add_argument("--preview", required=True)
+    successor_recover.add_argument("--reviewed-sha256", required=True)
+    successor_recover.add_argument(
         "--assert-exclusive-writer",
         action="store_true",
         help="assert every other process or host able to write UID30 is stopped",
@@ -2212,6 +3956,56 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if options.command == "recover":
             result = recover_reviewed_preview(
+                preview_path=Path(options.preview),
+                reviewed_sha256=options.reviewed_sha256,
+                exclusive_writer_asserted=options.assert_exclusive_writer,
+            )
+            print(json.dumps(result.__dict__, indent=2, sort_keys=True))
+            return 0
+        if options.command == "successor-preview":
+            evidence_state = read_uid30_successor_state()
+            miners = collect_verified_successor_miners(
+                evidence_state,
+                qvl_path=options.qvl,
+            )
+            state = read_uid30_successor_state()
+            validate_successor_proofs(miners, state=state)
+            document = build_successor_preview(
+                state=state,
+                miners=miners,
+                runtime_root=DEFAULT_RUNTIME_ROOT,
+            )
+            path, digest_path, digest = write_successor_preview(
+                document,
+                Path(options.output),
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": PREVIEW_STATUS,
+                        "preview": str(path),
+                        "detached_sha256": str(digest_path),
+                        "sha256": digest,
+                        "weight_signed": False,
+                        "weight_submitted": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if options.command == "successor-submit":
+            result = submit_reviewed_successor(
+                preview_path=Path(options.preview),
+                reviewed_sha256=options.reviewed_sha256,
+                qvl_path=options.qvl,
+                confirm=options.confirm_uid30_successor,
+                exclusive_writer_asserted=options.assert_exclusive_writer,
+            )
+            print(json.dumps(result.__dict__, indent=2, sort_keys=True))
+            return 0
+        if options.command == "successor-recover":
+            result = recover_reviewed_successor(
                 preview_path=Path(options.preview),
                 reviewed_sha256=options.reviewed_sha256,
                 exclusive_writer_asserted=options.assert_exclusive_writer,

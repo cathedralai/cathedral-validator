@@ -32,13 +32,9 @@ def _inclusion_policy(*, block: int = MAPPING_BLOCK) -> dict[str, object]:
 def _predecessor() -> dict[str, object]:
     body: dict[str, object] = {
         "attempt_id": validator.SN39_UID30_SUCCESSOR_PREDECESSOR_ID,
-        "identity_sha256": (
-            validator.SN39_UID30_SUCCESSOR_PREDECESSOR_IDENTITY_SHA256
-        ),
+        "identity_sha256": (validator.SN39_UID30_SUCCESSOR_PREDECESSOR_IDENTITY_SHA256),
         "intent_sha256": validator.SN39_UID30_SUCCESSOR_PREDECESSOR_INTENT_SHA256,
-        "receipt_sha256": (
-            validator.SN39_UID30_SUCCESSOR_PREDECESSOR_RECEIPT_SHA256
-        ),
+        "receipt_sha256": (validator.SN39_UID30_SUCCESSOR_PREDECESSOR_RECEIPT_SHA256),
         "uid_safety_sha256": (
             validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID_SAFETY_SHA256
         ),
@@ -51,9 +47,7 @@ def _predecessor() -> dict[str, object]:
         "original_journal_sha256": (
             validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
         ),
-        "extrinsic_hash": (
-            validator.SN39_UID30_SUCCESSOR_PREDECESSOR_EXTRINSIC_HASH
-        ),
+        "extrinsic_hash": (validator.SN39_UID30_SUCCESSOR_PREDECESSOR_EXTRINSIC_HASH),
         "block_hash": validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH,
         "block_number": validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK,
         "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
@@ -79,9 +73,7 @@ def _proof(
         "qvl_status": validator.PASS,
         "qvl_digest": validator.SN39_UID30_SUCCESSOR_QVL_SHA256,
         "quote_sha256": hashlib.sha256(f"quote:{hotkey}".encode()).hexdigest(),
-        "report_data_sha256": hashlib.sha256(
-            f"report:{hotkey}".encode()
-        ).hexdigest(),
+        "report_data_sha256": hashlib.sha256(f"report:{hotkey}".encode()).hexdigest(),
         "tls_spki_sha256": spki,
         "sat_units": 20,
         "sat_rule": validator.SN39_UID30_SUCCESSOR_SAT_RULE,
@@ -149,9 +141,7 @@ def _successor_identity() -> dict[str, object]:
         "burn_share": 0.0,
         "subnet_owner_hotkey": validator.SN39_BURN_HOTKEY,
         "uid_safety": safety,
-        "uid_safety_sha256": validator._sha256_document(safety).removeprefix(
-            "sha256:"
-        ),
+        "uid_safety_sha256": validator._sha256_document(safety).removeprefix("sha256:"),
         "next_epoch_start_block": MAPPING_BLOCK + 200,
         "inclusion_policy": _inclusion_policy(),
         "successor_schema": validator.SN39_UID30_SUCCESSOR_SCHEMA,
@@ -238,9 +228,7 @@ def test_strict_successor_contract_rejects_incomplete_or_shared_machine_proof(
     ).removeprefix("sha256:")
 
     with pytest.raises(validator.wire.VectorError):
-        validator._strict_zero_burn_uid30_successor_contract(
-            identity, lane="authority"
-        )
+        validator._strict_zero_burn_uid30_successor_contract(identity, lane="authority")
 
 
 @pytest.mark.parametrize("bad_uid", [True, "8"])
@@ -249,9 +237,7 @@ def test_strict_successor_contract_rejects_non_integer_uid(bad_uid: object) -> N
     identity["uid_weights"][0][0] = bad_uid
 
     with pytest.raises(validator.wire.VectorError, match="two-row identity"):
-        validator._strict_zero_burn_uid30_successor_contract(
-            identity, lane="authority"
-        )
+        validator._strict_zero_burn_uid30_successor_contract(identity, lane="authority")
 
 
 def _patch_synthetic_predecessor(
@@ -314,9 +300,7 @@ def _predecessor_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     return {
         "submission_genesis_hash": validator.FINNEY_GENESIS_HASH,
         "provenance_netuid": 39,
-        "submission_validator_hotkey": (
-            validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
-        ),
+        "submission_validator_hotkey": (validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY),
         "submission_active_lane": "authority",
         "submission_attempt_ids": [attempt_id],
         "submission_attempt_count": 1,
@@ -375,9 +359,7 @@ def _runtime(root: Path) -> SimpleNamespace:
         require_full_provenance_for_broadcast=False,
         _continuous_submission_authorization=None,
         _submission_genesis_hash=validator.FINNEY_GENESIS_HASH,
-        _submission_validator_hotkey=(
-            validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
-        ),
+        _submission_validator_hotkey=(validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY),
         _uid30_two_miner_successor_preview_sha256="1" * 64,
     )
 
@@ -389,7 +371,9 @@ def _write_predecessor_journal(
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700)
     runtime_root.chmod(0o700)
-    state_path = runtime_root / validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+    state_path = (
+        runtime_root / validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+    )
     state = _predecessor_state(monkeypatch)
     body = validator._canonical_json_bytes(state)
     state_path.write_bytes(body)

@@ -86,9 +86,7 @@ def _base_state() -> launch.UID30ChainState:
     )
 
 
-def _target(
-    *, uid: int, hotkey: str, ip: str
-) -> second_miner_plan.Neuron:
+def _target(*, uid: int, hotkey: str, ip: str) -> second_miner_plan.Neuron:
     return second_miner_plan.Neuron(
         uid=uid,
         hotkey=hotkey,
@@ -223,9 +221,7 @@ def test_successor_state_resolves_both_hotkeys_dynamically_at_one_head(
     state = launch.read_uid30_successor_state()
 
     assert [target.uid for target in state.targets] == [8, 124]
-    assert {target.hotkey for target in state.targets} == set(
-        expected_mapping.values()
-    )
+    assert {target.hotkey for target in state.targets} == set(expected_mapping.values())
     assert state.current_weights == ((124, W),)
     assert state.uid_safety == {"combined": "safe"}
 
@@ -249,7 +245,9 @@ def test_successor_preview_is_exact_two_rows_zero_burn_and_two_later_heads(
 ) -> None:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
-    monkeypatch.setattr(launch, "_assert_successor_writer_available", lambda _args: None)
+    monkeypatch.setattr(
+        launch, "_assert_successor_writer_available", lambda _args: None
+    )
 
     preview = launch.build_successor_preview(
         state=_successor_state(),
@@ -285,7 +283,9 @@ def test_successor_preview_rejects_non_exact_contract(
 ) -> None:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
-    monkeypatch.setattr(launch, "_assert_successor_writer_available", lambda _args: None)
+    monkeypatch.setattr(
+        launch, "_assert_successor_writer_available", lambda _args: None
+    )
     preview = launch.build_successor_preview(
         state=_successor_state(),
         miners=_proofs(),
@@ -316,7 +316,9 @@ def test_successor_preview_write_and_load_is_owner_only_and_digest_bound(
 ) -> None:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
-    monkeypatch.setattr(launch, "_assert_successor_writer_available", lambda _args: None)
+    monkeypatch.setattr(
+        launch, "_assert_successor_writer_available", lambda _args: None
+    )
     preview = launch.build_successor_preview(
         state=_successor_state(),
         miners=_proofs(),
@@ -376,11 +378,7 @@ def _later_snapshot(
             second,
             _target(uid=124, hotkey=launch.MINER_HOTKEY, ip="35.222.166.235"),
         ),
-        uid30_weights=(
-            ((124, W),)
-            if case == "row"
-            else ((8, W), (124, W))
-        ),
+        uid30_weights=(((124, W),) if case == "row" else ((8, W), (124, W))),
     )
 
 
@@ -488,9 +486,7 @@ def test_successor_recovery_state_is_accepted_by_the_same_two_later_head_proof(
         preflight=preflight,
         preview={
             "network": {"genesis_hash": FINNEY_GENESIS_HASH},
-            "miners": [
-                launch._successor_proof_artifact(proof) for proof in _proofs()
-            ],
+            "miners": [launch._successor_proof_artifact(proof) for proof in _proofs()],
         },
         uid_hotkeys={
             8: canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
@@ -580,7 +576,9 @@ def _written_successor_preview(
 ) -> tuple[Path, str, launch.UID30SuccessorState]:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
-    monkeypatch.setattr(launch, "_assert_successor_writer_available", lambda _args: None)
+    monkeypatch.setattr(
+        launch, "_assert_successor_writer_available", lambda _args: None
+    )
     state = _successor_state()
     preview = launch.build_successor_preview(
         state=state,
@@ -620,18 +618,14 @@ def test_successor_submit_uses_only_fixed_canonical_write_and_proof_seams(
         canonical,
         "_submission_tick_lock",
         lambda _args, *, lane: (
-            contextlib.nullcontext()
-            if lane == "authority"
-            else pytest.fail(lane)
+            contextlib.nullcontext() if lane == "authority" else pytest.fail(lane)
         ),
     )
     monkeypatch.setattr(launch, "read_uid30_successor_state", lambda: state)
     monkeypatch.setattr(
         launch,
         "_fresh_successor_state_matches_preview",
-        lambda observed, _preview: (
-            None if observed is state else pytest.fail(observed)
-        ),
+        lambda observed, _preview: None if observed is state else pytest.fail(observed),
     )
     monkeypatch.setattr(
         launch,
@@ -663,8 +657,9 @@ def test_successor_submit_uses_only_fixed_canonical_write_and_proof_seams(
     monkeypatch.setattr(
         launch,
         "_finalized_readback",
-        lambda **_kwargs: sequence.append("readback")
-        or {"dests": [8, 124], "weights_u16": [W, W]},
+        lambda **_kwargs: (
+            sequence.append("readback") or {"dests": [8, 124], "weights_u16": [W, W]}
+        ),
     )
     later_heads = ((BLOCK + 3, "0x" + "a" * 64), (BLOCK + 4, "0x" + "b" * 64))
     monkeypatch.setattr(
@@ -844,7 +839,9 @@ def test_finalized_successor_recovery_is_read_only_and_returns_exact_two_rows(
     monkeypatch.setattr(
         canonical,
         "_finalize_common_submission",
-        lambda *_args, **_kwargs: pytest.fail("already-finalized recovery must not finalize"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "already-finalized recovery must not finalize"
+        ),
     )
 
     recovered = launch.recover_reviewed_successor(

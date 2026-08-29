@@ -226,32 +226,75 @@ def read_finalized_snapshot(
             int(substrate.get_block_number(finalized_hash)),
             label="finalized block number",
         )
+    except SecondMinerPlanError:
+        raise
+    except Exception as exc:
+        raise SecondMinerPlanError("finalized SN39 read failed") from exc
+    return read_snapshot_at(
+        subtensor=subtensor,
+        block_number=finalized_number,
+        block_hash=finalized_hash,
+        genesis_hash=genesis,
+    )
+
+
+def read_snapshot_at(
+    *,
+    subtensor: Any,
+    block_number: int,
+    block_hash: str,
+    genesis_hash: str,
+) -> FinalizedSnapshot:
+    """Read planner fields at one reverse-bound caller-proven finalized block."""
+
+    block_number = _nonnegative(block_number, label="snapshot block number")
+    block_hash = _chain_hash(block_hash, label="snapshot block hash")
+    genesis_hash = _chain_hash(genesis_hash, label="snapshot genesis hash")
+    substrate = subtensor.substrate
+    try:
+        if (
+            _chain_hash(substrate.get_block_hash(0), label="Finney genesis")
+            != genesis_hash
+        ):
+            raise SecondMinerPlanError("requested snapshot is on a different chain")
+        if (
+            _chain_hash(
+                substrate.get_block_hash(block_number),
+                label="canonical snapshot block hash",
+            )
+            != block_hash
+        ):
+            raise SecondMinerPlanError(
+                "requested snapshot block number and hash do not match"
+            )
         metagraph = subtensor.metagraph(
             NETUID,
             lite=True,
-            block=finalized_number,
+            block=block_number,
             mechid=MECID,
         )
         metagraph_block = _raw(getattr(metagraph, "block", None))
         if hasattr(metagraph_block, "item"):
             metagraph_block = metagraph_block.item()
         metagraph_block = _nonnegative(metagraph_block, label="metagraph block")
-        if metagraph_block != finalized_number:
-            raise SecondMinerPlanError("SN39 metagraph is not at the finalized head")
+        if metagraph_block != block_number:
+            raise SecondMinerPlanError(
+                "SN39 metagraph is not at the requested snapshot block"
+            )
         weights = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
             params=[get_mechid_storage_index(NETUID, MECID), UID30],
-            block_hash=finalized_hash,
+            block_hash=block_hash,
         )
     except SecondMinerPlanError:
         raise
     except Exception as exc:
-        raise SecondMinerPlanError("finalized SN39 read failed") from exc
+        raise SecondMinerPlanError("requested SN39 snapshot read failed") from exc
     return FinalizedSnapshot(
-        block_number=finalized_number,
-        block_hash=finalized_hash,
-        genesis_hash=genesis,
+        block_number=block_number,
+        block_hash=block_hash,
+        genesis_hash=genesis_hash,
         neurons=_neuron_rows(metagraph),
         uid30_weights=_rows(weights),
     )

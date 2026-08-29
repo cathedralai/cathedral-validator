@@ -35,8 +35,8 @@ policy is not the consumed UID30 100/0 launch vector. Before any future
 and burn allocation. A different preview is a stop condition, not permission to
 overwrite the finalized launch vector.
 
-A dedicated second miner is a separate future chain change, not an extension of
-the existing UID124 machine. The read-only
+A dedicated second miner requires a separate bounded chain change, not an
+extension of the existing UID124 machine. The read-only
 [second-miner plan](docs/SN39_SECOND_MINER_PLAN.md) pins the intended hotkey,
 checks one finalized snapshot, and derives the exact equal-score row without
 loading a wallet or exposing a write path. The separate
@@ -44,7 +44,16 @@ loading a wallet or exposing a write path. The separate
 It has its own hotkey, fixed endpoint, runtime root, preview schema, lock, and
 one-attempt journal. It refuses until registration has assigned the second
 hotkey a finalized UID. Neither command registers a miner or replaces UID30's
-complete row. The full sequence and stop conditions are in the plan.
+complete row.
+
+After both axons and machine proofs pass, `cathedral-uid30-launch` exposes only
+the fixed `successor-preview`, `successor-submit`, and `successor-recover`
+commands for the two-miner row. They reuse UID30's canonical lock and consumed
+launch journal, authorize one `authority_bounded` attempt, resolve both UIDs
+from the two pinned hotkeys, require zero burn, and finalize only after exact
+inclusion plus two later finalized reads. Shipping these commands is not proof
+that the successor ran. The full commands, outcomes, and stop conditions are
+in the [second-miner plan](docs/SN39_SECOND_MINER_PLAN.md).
 
 The separate `cathedral-uid124-axon-generation2` command bounds one replacement
 of UID124's consumed generation-1 axon. It pins the exact predecessor preview
