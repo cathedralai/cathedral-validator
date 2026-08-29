@@ -163,16 +163,38 @@ cathedral-uid124-axon-generation2 announce \
 ```
 
 This command has no registration, rent, daemon, UID8, or weight path. It does
-not run during installation and this source change proves no chain write.
+not run during installation. Its one live generation-2 attempt is consumed and
+recorded below. The command authorizes no replacement or second attempt.
 
 ## Current boundary
 
-The original UID124 VM has stopped. Its replacement machine is available at
-`35.222.166.235:8081`, but UID124 still advertises the predecessor endpoint
-`34.68.36.156:8081`. The generation-2 command above bounds the separate
-replacement operation, but no new preview, announcement, or finalized readback
-is claimed by this source change. The second machine at `34.46.19.69:8081` uses
-the dedicated second hotkey and remains separate from the UID124 command.
+Two distinct Cathedral miners now have finalized serving axons:
+
+- UID8 serves `34.46.19.69:8081`, protocol 4. Its announcement was included at
+  block 8,947,143,
+  `0x4291de7f46263ddd710ecc6ad7f5f7c9fe99c399744c62a6af423e0406ae0ac4`.
+  Later finalized blocks 8,947,152,
+  `0xd1ddfb1e12eb44e59a4cc1cf88d4f62341d42f66fcdb8bff675583d6cb8885d5`,
+  and 8,947,156,
+  `0x8b19c3aca856bcb8809cc9e545b3c1102a6def85b69964ff1a0a091e811dcf95`,
+  reproduced the exact serving axon.
+- UID124 serves `35.222.166.235:8081`, protocol 4. Its generation-2 announcement
+  was included at block 8,947,452,
+  `0x2fea7be3a2031f3e0523e26d2eeed919c7473c7ca844e5a6c243441cdc231e2e`,
+  in extrinsic
+  `0x8fabb01ac88246a3e41ddd4912e35fc4c9abb6432c7c1ce8ad762ee0292cc3a3`.
+  The journal readback at block 8,947,454 and later finalized blocks 8,947,463,
+  `0x5bac198b0695f96f659ca02276c52758da99c5d76657b4774378945e2e99ee27`,
+  and 8,947,509,
+  `0xd07d21b7692153d964386a5a724f4e49e45ad05dec8bc4b7554489e8d803e7ef`,
+  reproduced UID124's new axon. The last two reads also reproduced UID8's axon.
+
+Post-restart proof collection returned QVL `PASS` and 20 SAT units for each
+machine. Their TLS SPKI SHA-256 values are distinct:
+`5c317b51fdd10060374c41a5f0bbb9d6311f0cabaa40111dc94aa7446b232496`
+for UID8 and
+`a3f9a1a6dcfe3fad342501bcd347484d90f1d3e4c436274c170337667b8de579`
+for UID124.
 
 The unregistered result at finalized block 8,946,847 on 2026-08-28 is a
 historical pre-registration snapshot, not current authority. After registration,
@@ -189,31 +211,23 @@ and UID8 mapping:
 - Block 8,947,053,
   `0xbad83ca212baddb7a421974374be2f1e8f50de8be80774c47119985924b9b310`.
 
-At both reads, UID8 was canonically unannounced: `0.0.0.0:0`, protocol 0,
-serving false. UID124 remained mapped to the first hotkey and the same Cathedral
-coldkey. UID30's mechanism-0 row remained `[[124, 65535]]`. These reads prove
-registration and unchanged prior allocation. They do not prove an axon
-announcement, a two-miner weight row, subnet emission, or TAO earnings.
+Those registration reads predate UID8's axon announcement and remain historical
+lineage evidence. The newer axon evidence above supersedes their unannounced
+row. UID30's mechanism-0 row still remained `[[124, 65535]]` at finalized blocks
+8,947,463 and 8,947,509. This proves two registered serving miners and two
+distinct verified machines. It does not prove the two-miner UID30 row, subnet
+emission, or TAO earnings.
 
-Both previous one-shot launch tools are consumed artifacts. The UID124 axon
-announcement tool is pinned to the first hotkey and exact endpoint. The UID30
-launch tool is pinned to the completed one-miner vector. Neither tool is a safe
-path for a second miner. Only `cathedral-second-miner-announce` has the second
-miner's identity and isolated first-attempt lineage.
-
-The UID124 replacement endpoint is also separate from this command. A second
-machine using `serge_sat_test` remains the same UID124 identity, not the second
-miner. Repointing UID124 requires the generation-2 successor contract above to
-prove the consumed UID124 journal as its predecessor and write a new reviewed
-intent to the canonical lineage. Do not pass UID124 inputs to the second-miner
-command.
+The UID8 first-time axon tool and UID124 generation-2 axon tool are now consumed
+artifacts. Neither authorizes another announcement. The original UID30 launch
+tool remains pinned to the completed one-miner vector. The fixed successor
+commands below are the only source path for the reviewed two-miner UID30 row.
+They do not announce axons, register miners, or authorize recurring weights.
 
 ## Required live sequence
 
-Each step below needs separate operator review and explicit authorization. The
-two bounded axon commands cover steps 5 through 8. They do not perform
-registration, submit an announcement during installation, or expose a weight
-writer.
+Steps 1 through 9 are complete in the evidence above. Steps 10 and 11 remain
+unperformed and require separate operator review and explicit authorization.
 
 1. Completed outside this change. Bootstrap the second machine with the
    dedicated second public hotkey and verify its immutable startup contract.
@@ -223,27 +237,88 @@ writer.
    registration inclusion and later finalized reads are recorded above.
 4. Completed by the finalized reads above. Confirm the dedicated public hotkey,
    Cathedral coldkey ownership, assigned UID8, and canonical unannounced row.
-5. Run `cathedral-second-miner-announce preview`. Review the assigned UID,
-   second public hotkey, external IP, HTTPS port 8081, genesis, fresh endpoint
-   proof, local lineage paths, and detached digest.
-6. Submit that exact reviewed digest once with the two explicit confirmations.
-   If the outcome is ambiguous, preserve the journal and recover without a
-   second call. Confirm the exact axon at inclusion and at two later finalized
-   heads.
-7. Run and review the UID124 generation-2 preview. Require the exact pinned
-   generation-1 preview and journal, current UID124 predecessor axon, exact
-   replacement endpoint, fresh QVL and SAT proof, and reviewed detached digest.
-8. Submit that exact UID124 generation-2 digest once. If the outcome is
-   ambiguous, preserve the canonical journal and recover without a second call.
-   Confirm the exact replacement axon at inclusion and two later finalized
-   heads.
-9. Rerun the read-only planner. Require both hotkeys to resolve uniquely and
-   require the complete intended row below.
-10. Build and review a new one-shot UID30 successor. Bind it to fresh QVL and SAT
-   proofs for both axons, distinct TLS SPKIs, the latest finalized identities,
-   UID30's permit and cooldown, zero burn destination, and one exact write.
-11. Submit once. Confirm the complete UID30 row at inclusion and at two later
-   finalized heads.
+5. Completed. UID8's reviewed first-time axon announcement finalized at the
+   exact endpoint and later heads recorded above.
+6. Completed through no-retry recovery. No second announcement was submitted.
+7. Completed. UID124's reviewed generation-2 preview bound the consumed
+   generation-1 lineage and replacement endpoint.
+8. Completed through no-retry recovery. The exact UID124 announcement and two
+   later finalized reads are recorded above.
+9. Completed by the finalized reads at blocks 8,947,463 and 8,947,509. Both
+   pinned hotkeys resolve uniquely and both exact axons serve. The intended
+   weight row remains unsubmitted.
+10. Outstanding. Run `successor-preview` and review fresh QVL and SAT proofs for
+    both axons, distinct TLS SPKIs, current finalized identities, UID30's permit
+    and cooldown, zero burn, and the exact complete vector.
+11. Outstanding. Run `successor-submit` once. Confirm the exact row at inclusion
+    and at two later finalized heads, or preserve ambiguity and run only
+    `successor-recover`.
+
+## Fixed two-miner UID30 successor
+
+Outcome target: one immutable reviewed preview names exactly the two pinned
+miner hotkeys at their current finalized UIDs, raw weights 65,535 for each, and
+no burn destination. One successful call must reproduce the complete row at
+inclusion and at two distinct later finalized heads. Both later heads must also
+retain UID30's permit and each miner's exact reviewed public HTTPS axon.
+
+Keep every recurring UID30 writer stopped. Use the canonical Linux runtime root
+`/var/lib/cathedral-validator`, the exact consumed predecessor journal already
+stored there, and the reviewed QVL binary. First create a no-write artifact:
+
+```bash
+cathedral-uid30-launch successor-preview \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --output /var/lib/cathedral-validator/uid30-two-miner-successor-preview.json
+```
+
+Review the owner-only JSON and detached SHA-256. Require all of these outcomes:
+
+- The two public hotkeys are the SS58 pins documented above, corresponding to
+  local wallet aliases `serge_sat_test` and `serge_sat_test_2`. Their UIDs are
+  resolved from one finalized head, not typed by hand.
+- The complete vector contains two sorted destinations with raw weights
+  `[65535, 65535]`, no third row, and no burn destination.
+- Both endpoints are distinct public HTTPS port 8081 axons. Both QVL results
+  are `PASS`, both SAT unit counts are positive, and the TLS SPKI digests differ.
+- The predecessor identifies the finalized one-miner attempt and its exact
+  `[[124, 65535]]` inclusion. The canonical journal and lock paths remain under
+  `/var/lib/cathedral-validator`.
+
+If any field differs, stop. Do not edit the preview, copy the predecessor into
+a second journal, enable a recurring mode, or substitute another verifier.
+When the artifact passes review, supply its exact detached digest once:
+
+```bash
+cathedral-uid30-launch successor-submit \
+  --preview /var/lib/cathedral-validator/uid30-two-miner-successor-preview.json \
+  --reviewed-sha256 <exact-detached-sha256> \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --confirm-uid30-successor \
+  --assert-exclusive-writer
+```
+
+Exit status 2 means the command refused before a chain write. Correct the named
+condition and create a new immutable preview at a new path. Running
+`successor-recover` against the exact pristine predecessor also exits 2 with
+`REFUSED_NO_CHAIN_WRITE` and states that no successor attempt exists. It does
+not read chain state or change the journal. Exit status 3 is reserved for a
+signed intent or receipt whose outcome is ambiguous. Preserve the canonical
+journal, keep all UID30 writers stopped, and never run `successor-submit` again.
+Recover only the exact journaled transaction:
+
+```bash
+cathedral-uid30-launch successor-recover \
+  --preview /var/lib/cathedral-validator/uid30-two-miner-successor-preview.json \
+  --reviewed-sha256 <exact-detached-sha256> \
+  --assert-exclusive-writer
+```
+
+Success is the command result carrying the exact inclusion block and two later
+finalized block number/hash pairs. Registration, serving axons, a preview, or a
+signed intent alone is not success. A changed mapping, axon, permit, storage
+row, canonical hash, or unavailable archive remains fenced and authorizes no
+replacement submission.
 
 ## Weight semantics
 

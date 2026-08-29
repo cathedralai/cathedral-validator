@@ -117,7 +117,8 @@ jobs:
       - name: Validator-facing publisher tests (required)
         run: |
           python -m pytest -q --no-header \
-            scaffold/publisher/tests/test_validator_thin_validated_supply.py
+            scaffold/publisher/tests/test_validator_thin_validated_supply.py \
+            scaffold/publisher/tests/test_validator_thin_uid30_successor.py
       # REQUIRED. Covers the tick lifecycle, endpoint/credential sanitization,
       # the durable attempt fence, and the chain weight-cooldown stand-down --
       # the guards that decide whether a refused write is a skip or a fault.
@@ -134,6 +135,7 @@ jobs:
         run: |
           python -m pytest -q scaffold/publisher/tests \
             --ignore=scaffold/publisher/tests/test_validator_thin_validated_supply.py \
+            --ignore=scaffold/publisher/tests/test_validator_thin_uid30_successor.py \
             --ignore=scaffold/publisher/tests/test_validator_lifecycle.py
 
   integration:
