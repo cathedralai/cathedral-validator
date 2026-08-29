@@ -46,6 +46,15 @@ one-attempt journal. It refuses until registration has assigned the second
 hotkey a finalized UID. Neither command registers a miner or replaces UID30's
 complete row. The full sequence and stop conditions are in the plan.
 
+The separate `cathedral-uid124-axon-generation2` command bounds one replacement
+of UID124's consumed generation-1 axon. It pins the exact predecessor preview
+and journal digests, reuses their canonical lock and journal, fixes the target
+to `35.222.166.235:8081`, requires a new reviewed preview and fresh endpoint
+proof, and permits one no-retry generation-2 attempt. It has no UID8, weight,
+registration, rent, or daemon path. Shipping the command is not proof that the
+replacement announcement ran. See the same plan for its exact pins and live
+gates.
+
 ## Quickstart
 
 **This section is the canonical operator path.** Follow it top to bottom and

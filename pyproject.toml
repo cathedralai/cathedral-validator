@@ -122,6 +122,7 @@ cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
 cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
 cathedral-independent-miner-announce = "cathedral_thin.independent_runtime.miner_axon_cli:main"
 cathedral-second-miner-announce = "cathedral_thin.independent_runtime.second_miner_axon_cli:main"
+cathedral-uid124-axon-generation2 = "cathedral_thin.independent_runtime.uid124_axon_generation2_cli:main"
 # Finalized read-only planning for a dedicated second miner. This command has no
 # wallet loader, registration, axon announcement, or weight-submission path.
 cathedral-second-miner-plan = "cathedral_thin.second_miner_plan:main"

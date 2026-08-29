@@ -113,13 +113,66 @@ finalized readback is `finalized_proven`. If the SDK success receipt is missing
 inclusion fields or is stale, exact later readback is recorded as
 `finalized_recovered`, not proof of the inclusion receipt.
 
+## Bounded UID124 generation-2 successor
+
+`cathedral-uid124-axon-generation2` is a separate one-attempt command for the
+existing `serge_sat_test` hotkey at UID124. It does not accept arbitrary
+predecessor flags. Its reviewed source pins all of the following:
+
+- Exact target `35.222.166.235:8081` over HTTPS.
+- Exact predecessor preview
+  `/var/lib/cathedral-validator/miner-axon-preview-r2-20260828T1940Z.json`,
+  SHA-256
+  `27ef74f1f1f9b2cecf762dd850ebe81aa8d0ab03e42c1dc9023961cc7a89ee29`.
+- Exact canonical predecessor journal
+  `/var/lib/cathedral-validator/miner-axon-announcement.json`, SHA-256
+  `b5b401ad8a1610471b15f2a75546f1ecba19c160d9cc35a361995a5274e48c8f`.
+- The existing canonical UID124 lock and journal. It atomically replaces the
+  finalized generation-1 journal only after preserving those exact bytes as
+  generation-2 predecessor lineage.
+- UID124, the first miner hotkey, the Cathedral coldkey owner, UID30 as the
+  evidence collector, the pinned QVL, positive canonical SAT, and the target
+  TLS SPKI.
+
+The preview is a new owner-only artifact and includes all predecessor pins. The
+live command rechecks the canonical predecessor receipt and readback, current
+UID124 identity and axon, the 128-finalized-block fence, fresh endpoint proof,
+and signing hotkey before installing one no-retry generation-2 intent. A
+complete successful inclusion receipt plus a later canonical exact readback is
+`finalized_proven`. Missing or incomplete receipt fields require exact later
+readback and produce `finalized_recovered`. Any unresolved result remains
+ambiguous and must be recovered without resubmission.
+
+Create and review the no-write artifact in the reviewed Linux x86-64 runtime:
+
+```bash
+cathedral-uid124-axon-generation2 preview \
+  --ip 35.222.166.235 \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier
+```
+
+After review, an explicitly authorized operator supplies only the new preview
+digest. The command injects the exact predecessor pins from reviewed source:
+
+```bash
+cathedral-uid124-axon-generation2 announce \
+  --reviewed-sha256 <exact-new-preview-sha256> \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --confirm-miner-announce \
+  --assert-exclusive-announcer
+```
+
+This command has no registration, rent, daemon, UID8, or weight path. It does
+not run during installation and this source change proves no chain write.
+
 ## Current boundary
 
 The original UID124 VM has stopped. Its replacement machine is available at
 `35.222.166.235:8081`, but UID124 still advertises the predecessor endpoint
-`34.68.36.156:8081`. Repointing UID124 is a separate generation-2 successor
-operation. The second machine at `34.46.19.69:8081` uses the dedicated second
-hotkey and is the only endpoint in scope for this first-announcement command.
+`34.68.36.156:8081`. The generation-2 command above bounds the separate
+replacement operation, but no new preview, announcement, or finalized readback
+is claimed by this source change. The second machine at `34.46.19.69:8081` uses
+the dedicated second hotkey and remains separate from the UID124 command.
 
 The unregistered result at finalized block 8,946,847 on 2026-08-28 is a
 historical pre-registration snapshot, not current authority. After registration,
@@ -150,15 +203,16 @@ miner's identity and isolated first-attempt lineage.
 
 The UID124 replacement endpoint is also separate from this command. A second
 machine using `serge_sat_test` remains the same UID124 identity, not the second
-miner. Repointing UID124 requires a generation-2 successor contract that proves
-the consumed UID124 journal as its predecessor and writes a new reviewed intent
-to a separate lineage. Do not pass UID124 inputs to the second-miner command.
+miner. Repointing UID124 requires the generation-2 successor contract above to
+prove the consumed UID124 journal as its predecessor and write a new reviewed
+intent to the canonical lineage. Do not pass UID124 inputs to the second-miner
+command.
 
 ## Required live sequence
 
-Each step below needs separate operator review and explicit authorization. This
-change provides only the bounded axon writer in steps 5 and 6. It does not
-perform registration, submit an announcement by itself, or expose a weight
+Each step below needs separate operator review and explicit authorization. The
+two bounded axon commands cover steps 5 through 8. They do not perform
+registration, submit an announcement during installation, or expose a weight
 writer.
 
 1. Completed outside this change. Bootstrap the second machine with the
@@ -176,12 +230,19 @@ writer.
    If the outcome is ambiguous, preserve the journal and recover without a
    second call. Confirm the exact axon at inclusion and at two later finalized
    heads.
-7. Rerun the read-only planner. Require both hotkeys to resolve uniquely and
+7. Run and review the UID124 generation-2 preview. Require the exact pinned
+   generation-1 preview and journal, current UID124 predecessor axon, exact
+   replacement endpoint, fresh QVL and SAT proof, and reviewed detached digest.
+8. Submit that exact UID124 generation-2 digest once. If the outcome is
+   ambiguous, preserve the canonical journal and recover without a second call.
+   Confirm the exact replacement axon at inclusion and two later finalized
+   heads.
+9. Rerun the read-only planner. Require both hotkeys to resolve uniquely and
    require the complete intended row below.
-8. Build and review a new one-shot UID30 successor. Bind it to fresh QVL and SAT
+10. Build and review a new one-shot UID30 successor. Bind it to fresh QVL and SAT
    proofs for both axons, distinct TLS SPKIs, the latest finalized identities,
    UID30's permit and cooldown, zero burn destination, and one exact write.
-9. Submit once. Confirm the complete UID30 row at inclusion and at two later
+11. Submit once. Confirm the complete UID30 row at inclusion and at two later
    finalized heads.
 
 ## Weight semantics
