@@ -49,6 +49,42 @@ _READ_CHUNK = 65536
 Resolver = Callable[[str, int, float], Sequence[tuple[Any, ...]]]
 
 
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL_USE = ipaddress.ip_network("64:ff9b:1::/48")
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
+def is_globally_routable_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Whether an address is public without an embedded IPv4 routing bypass.
+
+    ``ipaddress.is_global`` alone is insufficient for IPv6 transition forms.
+    Some Python releases classify NAT64 or IPv4-compatible literals as global
+    even when their embedded IPv4 destination is loopback or private.  The
+    validator never needs those transition encodings, so every such form is
+    refused rather than trying to recursively reason about the route chosen by
+    the host kernel.
+    """
+
+    if not isinstance(address, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+        return False
+    if not address.is_global:
+        return False
+    if isinstance(address, ipaddress.IPv4Address):
+        return True
+    if (
+        address.ipv4_mapped is not None
+        or address.sixtofour is not None
+        or address.teredo is not None
+        or address in _NAT64_WELL_KNOWN
+        or address in _NAT64_LOCAL_USE
+        or address in _IPV4_COMPATIBLE
+    ):
+        return False
+    return True
+
+
 def _authority_host(host: str) -> str:
     """Host as it appears in a URL authority or Host header.
 
@@ -194,7 +230,7 @@ def validated_peer_ips(infos: Sequence[tuple[Any, ...]]) -> list[str]:
             raise PolicyFetchError(
                 f"policy DNS answer {raw!r} is not an address"
             ) from exc
-        if not address.is_global:
+        if not is_globally_routable_address(address):
             raise PolicyFetchError(
                 "policy host resolves to a non-public address; the policy "
                 "document is served over public HTTPS"

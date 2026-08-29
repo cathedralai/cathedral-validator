@@ -84,8 +84,9 @@ records a bad write rather than preventing one.
 
 There is no recurring authority/full operator mode or loopback self-compose
 profile. Losing the signed feed produces no write and no mode change. Internal
-authority-labelled journal types remain only for bounded launch and read-only
-recovery of historical launch attempts.
+authority-labelled journal types remain only for read-only recovery of
+historical bounded launch attempts. No launch preview or submit command remains
+in the supported operator surface.
 
 Workers provide hardware evidence. They never receive the validator wallet.
 The validator host stores only the registered validator hotkey needed for a

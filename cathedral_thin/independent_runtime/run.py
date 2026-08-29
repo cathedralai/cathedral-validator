@@ -44,6 +44,7 @@ from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
     INDEPENDENT_CANARY_FILE,
     INDEPENDENT_STATE_FILE,
+    INTEL_COLLATERAL,
     NETUID,
     REFUSE_HOTKEYS,
 )
@@ -89,7 +90,6 @@ from .tempo import closed_epoch_anchor, closed_epoch_open
 from .workers import WorkersClient, fetch_public_json, tdx_create_enabled, tdx_workers
 
 DEFAULT_STATE_DIR = str(INDEPENDENT_STATE_FILE.parent)
-INTEL_COLLATERAL = "https://api.trustedservices.intel.com/sgx/certification/v4/"
 GUEST_PROBE = (
     "echo HOST:$(hostname); "
     "echo IPS:$(hostname -I 2>/dev/null); "
@@ -280,9 +280,14 @@ def snapshot_epoch(subtensor: Any) -> EpochSnapshot:
 
 
 def _try_collect(
-    url: str, hotkey: str, validator_ss58: str, sat_work_url: str
+    url: str,
+    hotkey: str,
+    validator_ss58: str,
+    sat_work_url: str,
+    *,
+    transport: Any | None = None,
 ) -> dict[str, Any]:
-    transport = HttpsEvidenceTransport()
+    transport = transport or HttpsEvidenceTransport()
     try:
         binding = transport.observe_binding(url)
         nonce = mint_nonce(validator_ss58, entropy=os.urandom(16))
@@ -325,15 +330,19 @@ def _try_collect(
 
 
 def _units_after_quote(
-    *, anchor_hash: str, collected: CollectedEvidence, sat_url: str
+    *,
+    anchor_hash: str,
+    collected: CollectedEvidence,
+    sat_url: str,
+    transport: Any | None = None,
 ) -> int:
     """Re-derive integer audit units from a machine whose quote just passed.
 
-    The machine identity is the observed TLS SPKI digest, which v2 REPORT_DATA
-    already bound and the verifier already checked, so the seed is tied to the
-    connection the quote arrived over. It is used as-is rather than re-hashed:
-    it is already a sha256 digest. Until quote-bound key extraction exists, that
-    observed channel identity IS the machine identity for the audit seed.
+    The audit seed uses the observed TLS SPKI digest, which v2 REPORT_DATA
+    already bound and the verifier already checked. This creates a
+    per-connection challenge. It is not the physical-machine identity used for
+    multi-machine deduplication; that comes only from QVL's verified
+    ``stable_platform_id``.
 
     A SPKI change between the evidence POST and this one is a refusal, not a
     retry: the two exchanges have to have reached the same machine. An absent
@@ -346,7 +355,7 @@ def _units_after_quote(
         miner_ss58=collected.assigned_hotkey,
         machine_id=collected.channel_binding.digest.hex(),
     )
-    transport = HttpsEvidenceTransport()
+    transport = transport or HttpsEvidenceTransport()
     units = collect_sat_work(
         url=sat_url,
         assigned_hotkey=collected.assigned_hotkey,
@@ -448,7 +457,6 @@ def cmd_run(options: argparse.Namespace) -> int:
         "tdx_create_enabled": False,
         "qvl_pass_count": 0,
     }
-
     # Chain identity and the exact closed-tempo view are pre-spend gates. A
     # Worker rental is billable, and a head-era UID map cannot substitute for
     # the historical map this vector claims to score. Keep the fallback in
@@ -488,7 +496,6 @@ def cmd_run(options: argparse.Namespace) -> int:
         )
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         return 2
-
     catalog: Any = None
     try:
         catalog = fetch_public_json("/v1/profiles")
@@ -613,10 +620,9 @@ def cmd_run(options: argparse.Namespace) -> int:
                 # liveness; the only thing that binds mass is the integer unit
                 # count re-derived from the challenge below.
                 pass_count += 1
-                # Claim the quote-bound machine identity before attempting SAT.
-                # Otherwise a second hotkey on the same machine could make its
-                # SAT request fail and avoid the duplicate-identity ledger,
-                # leaving the first hotkey paid for the shared machine.
+                # The legacy singleton path uses the quote-bound TLS channel
+                # digest for duplicate defense. It is not physical identity
+                # and never grants multi-machine credit.
                 machine_id = collected.channel_binding.digest.hex()
                 try:
                     assert_machine_identity(

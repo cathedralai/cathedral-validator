@@ -7,11 +7,10 @@ only when the QVL build digest is pinned AND the adapter was constructed with
 non-empty ``verified_mass``. Collecting a quote and getting ``PASS`` from an
 unpinned mock does not bind mass.
 
-Broadcast stays blocked until a live runner (outside this package) collects
-from a listed machine, verifies the quote with a pinned QVL, re-derives work
-units, and constructs this adapter with that integer mass. The remaining
-`cathedralai/cathedral-validator#120` work is discovery, the work report, and
-metering inside the measured image; this module does not perform those.
+Broadcast stays blocked unless a caller supplies integer mass after collecting
+from a listed machine, verifying its quote with a pinned QVL, and re-deriving
+work units. The dedicated fleet preview now performs those checks without
+chain authority. This adapter still performs none of the network operations.
 
 Two rules are enforced at construction, not at use:
 
@@ -29,9 +28,10 @@ nothing otherwise. A PASS verdict from ``verify_quote`` still does not bind
 mass by itself: the live runner has to put integer units into
 ``verified_mass`` after a pinned QVL check.
 
-The machine identity is the digest of the in-guest bound public key, never a
-label the miner chose, so one machine cannot advertise itself as two and two
-hotkeys claiming one machine are both unproven rather than both paid.
+The legacy singleton audit seed uses the quote-bound TLS key digest. It is a
+channel identity, not a physical-machine identity. Multi-machine scoring uses
+only a QVL-verified, quote-bound stable platform identifier, then globally
+zeros every duplicate endpoint, TLS channel, or stable platform claimant.
 
 Nothing here imports ``compose`` at runtime -- the dependency runs the other
 way, because the composer imports this module to name the Compute block reason.
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 from .constants import (
@@ -78,11 +79,10 @@ COMPUTE_LANE = LaneContractId(
 # digest and non-empty verified mass does not use this sentence.
 COMPUTE_BLOCK_REASON = (
     "Compute broadcast is deferred at allocation 0: the adapter is not "
-    "contributing. cathedralai/cathedral-validator#120 (collect from miners, "
-    "discovery, work report, metering in the measured image) still has to be "
-    "satisfied by a live runner, and a PASS verdict from an unpinned dry-run "
-    "QVL is not mass any miner earned. Bind integer verified_mass only after a "
-    "pinned QVL digest and independently re-derived work units"
+    "contributing. No pinned-QVL, independently re-derived integer work mass "
+    "was supplied. A PASS verdict or declared fleet size is not mass any miner "
+    "earned. cathedralai/cathedral-validator#120 remains the governing direct-"
+    "verification contract"
 )
 
 # TDX REPORT_DATA is 64 bytes. A binding checked against anything else is not
@@ -122,6 +122,55 @@ class QuoteVerifier(Protocol):
     """Verifies one TDX quote against collateral, and binds REPORT_DATA."""
 
     def verify(self, quote: bytes, *, expected_report_data: bytes) -> QuoteVerdict: ...
+
+
+@dataclass(frozen=True)
+class QuoteIdentityVerdict:
+    """QVL verdict plus a vendor-verified stable TDX platform identity.
+
+    TLS SPKI remains the channel identity.  It is not a hardware identity: one
+    physical platform can generate several TLS keys.  Multi-machine scoring is
+    enabled only when the QVL result independently verifies the package-stable
+    PCK/PPID-derived identifier.
+    """
+
+    verdict: QuoteVerdict
+    stable_platform_id: str | None
+    platform_identity_verified: bool
+
+
+@runtime_checkable
+class QuoteIdentityVerifier(Protocol):
+    def verify_with_identity(
+        self, quote: bytes, *, expected_report_data: bytes
+    ) -> QuoteIdentityVerdict: ...
+
+
+def require_stable_platform_id(value: object) -> str:
+    prefix = "tdx-platform-sha256:"
+    if (
+        not isinstance(value, str)
+        or not value.startswith(prefix)
+        or len(value) != len(prefix) + 64
+        or any(character not in _HEX for character in value[len(prefix) :])
+    ):
+        raise ComputeEvidenceError(
+            "stable platform identity must be tdx-platform-sha256 plus 64 lowercase hex"
+        )
+    return value
+
+
+def machine_id_from_stable_platform_id(value: object) -> str:
+    """Domain-preserving raw digest used by the profile-neutral aggregator.
+
+    Hashing the validated tagged identity avoids confusing a TDX PPID-derived
+    digest with a future SNP CHIP_ID-derived digest that happens to carry the
+    same 32 bytes.  The SNP verifier boundary is intentionally not enabled in
+    this release; it will use its own validated ``snp-chip-id:`` domain.
+    """
+
+    stable = require_stable_platform_id(value)
+    return hashlib.sha256(stable.encode("ascii")).hexdigest()
 
 
 def require_compute_adapter(verifier: QuoteVerifier | None) -> QuoteVerifier:
@@ -183,12 +232,13 @@ def validate_qvl_digest(digest: str | None) -> str | None:
 
 
 def machine_id_from_key(key: bytes) -> str:
-    """The machine identity for one in-guest bound public key.
+    """Legacy channel identity for one in-guest bound public key.
 
     ``sha256`` over the key bytes as the quote binds them (raw Ed25519 or its
-    DER SPKI wrapping). Deriving the identity from the key rather than from a
-    miner-supplied label is what makes one machine one identity: a miner can
-    advertise the same machine twice, and both advertisements collide here.
+    DER SPKI wrapping). This remains the deterministic SAT seed input for the
+    legacy singleton path. A guest can rotate or generate more than one TLS
+    key, so this digest does not identify a physical machine and must never be
+    used for multi-machine deduplication or credit.
     """
     if not isinstance(key, (bytes, bytearray)):
         raise ComputeEvidenceError("a bound public key must be raw bytes")
@@ -256,10 +306,9 @@ def assert_machine_identity(
 ) -> None:
     """Record which miner owns a machine identity, refusing a second claimant.
 
-    ``claimed`` is the caller's per-epoch ledger and is mutated in place. The
-    first hotkey to claim a machine keeps it for the epoch; a second hotkey
-    claiming the same machine raises, and the caller zeros both rather than
-    picking one.
+    ``claimed`` is the caller's per-epoch conflict ledger and is mutated in
+    place. The first row is retained only so a later duplicate identifies both
+    claimants. A caller must zero both rather than choose a winner.
     """
     require_machine_id(machine_id)
     require_miner_ss58(miner_ss58)
@@ -363,6 +412,17 @@ class ComputeAdapter:
         """
         return self.qvl_digest is not None and bool(self._verified_mass)
 
+    @property
+    def supports_stable_platform_identity(self) -> bool:
+        """Whether the verifier exposes the required physical-identity API.
+
+        This is a verifier capability check. It does not depend on any
+        miner-supplied quote, so one malformed or incomplete quote cannot turn
+        a per-machine exclusion into a batch-wide feature failure.
+        """
+
+        return callable(getattr(self._verifier, "verify_with_identity", None))
+
     def verify_quote(
         self, quote: bytes, *, expected_report_data: bytes
     ) -> QuoteVerdict:
@@ -393,6 +453,53 @@ class ComputeAdapter:
             return QuoteVerdict.INFRA
         return verdict
 
+    def verify_quote_with_identity(
+        self, quote: bytes, *, expected_report_data: bytes
+    ) -> QuoteIdentityVerdict:
+        """Verify quote and require the verifier's stable-identity interface.
+
+        This method is separate from ``verify_quote`` so the single-machine
+        path retains its reviewed PASS/FAIL/INFRA behavior.  A verifier that
+        exposes only a boolean PASS is insufficient for global hardware
+        deduplication and therefore cannot enable multi-machine score.
+        """
+
+        self._validate_quote_inputs(quote, expected_report_data=expected_report_data)
+        method = getattr(self._verifier, "verify_with_identity", None)
+        if not callable(method):
+            raise AdapterUnavailable(
+                "multi-machine scoring requires QVL stable platform identity output"
+            )
+        result = method(bytes(quote), expected_report_data=bytes(expected_report_data))
+        if not isinstance(result, QuoteIdentityVerdict):
+            return QuoteIdentityVerdict(QuoteVerdict.INFRA, None, False)
+        if result.verdict is not QuoteVerdict.PASS:
+            return QuoteIdentityVerdict(result.verdict, None, False)
+        if not result.platform_identity_verified:
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+        try:
+            identity = require_stable_platform_id(result.stable_platform_id)
+        except ComputeEvidenceError:
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True)
+
+    @staticmethod
+    def _validate_quote_inputs(quote: bytes, *, expected_report_data: bytes) -> None:
+        if not isinstance(quote, (bytes, bytearray)) or not quote:
+            raise ComputeEvidenceError("a TDX quote must be non-empty bytes")
+        if len(quote) > MAX_QUOTE_BYTES:
+            raise ComputeEvidenceError(
+                f"a TDX quote of {len(quote)} bytes is over the "
+                f"{MAX_QUOTE_BYTES} byte bound"
+            )
+        if (
+            not isinstance(expected_report_data, (bytes, bytearray))
+            or len(expected_report_data) != REPORT_DATA_BYTES
+        ):
+            raise ComputeEvidenceError(
+                f"expected REPORT_DATA must be exactly {REPORT_DATA_BYTES} bytes"
+            )
+
     def probe(self, *, anchor: EpochAnchor, view: MetagraphView) -> Mapping[str, int]:
         """Return the miner mass this lane earned.
 
@@ -418,15 +525,19 @@ __all__ = [
     "REPORT_DATA_BYTES",
     "SEED_DOMAIN",
     "ComputeAdapter",
+    "QuoteIdentityVerdict",
+    "QuoteIdentityVerifier",
     "QuoteVerdict",
     "QuoteVerifier",
     "assert_machine_identity",
     "canonical_seed_material",
     "fleet_over_cap",
     "machine_id_from_key",
+    "machine_id_from_stable_platform_id",
     "require_compute_adapter",
     "require_machine_id",
     "require_miner_ss58",
+    "require_stable_platform_id",
     "require_verified_mass",
     "validate_collateral_url",
     "validate_qvl_digest",

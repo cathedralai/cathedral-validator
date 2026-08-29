@@ -35,6 +35,9 @@ SN39_MORTAL_PERIOD_BLOCKS = 16
 MIN_ALLOWED_WEIGHTS = 1
 MAX_WEIGHT_LIMIT = 1.0
 COMMIT_REVEAL_ENABLED = False
+# Intel's public PCS collateral root used by every TDX QVL adapter. Keeping it
+# here lets read-only proof modules avoid importing the live runner.
+INTEL_COLLATERAL = "https://api.trustedservices.intel.com/sgx/certification/v4/"
 # Chain cap on the number of destinations in one mechanism weight vector.
 MAX_DESTS = 256
 
@@ -108,6 +111,17 @@ CANARY_HOTKEY = (
     "5G246nVyX3W9FUSj3VgwzxnnUzvp47jmLQPxKdDukHBtetzm"  # pragma: allowlist secret
 )
 
+# Public identities for the canonical UID30 validator and consolidation miner.
+# Read-only fleet tools keep these outside the monolithic writer so importing
+# a proof command never imports chain-submission code.
+UID30_VALIDATOR_UID = 30
+UID30_VALIDATOR_HOTKEY = (
+    "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"  # pragma: allowlist secret
+)
+UID30_MINER_HOTKEY = (
+    "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G"  # pragma: allowlist secret
+)
+
 LINEAGE = "independent_v1"
 
 COMMITMENT_MAGIC = b"CATHPOL1"
@@ -153,6 +167,15 @@ INTEL_PCS_HOSTS = frozenset(
 # actually running the fleet.
 COMPUTE_FLEET_CAP = 256
 
+# Direct validator-to-miner fleet discovery is deliberately narrower than the
+# older sealed collect helper.  It matches the measured worker's
+# ``cathedral_worker_fleet_v1`` response bound.  One canonical SAT challenge is
+# worth 20 independently re-derived units, so one UID can contribute at most
+# 32 * 20 = 640 raw units in one scoring window.  Neither number is supplied by
+# a miner.
+MULTICOMPUTE_FLEET_CAP = 32
+MULTICOMPUTE_MACHINE_WORK_UNIT_CAP = 20
+
 __all__ = [
     "BURN_HOTKEY",
     "CANARY_HOTKEY",
@@ -160,6 +183,8 @@ __all__ = [
     "COMMITMENT_MAGIC",
     "COMMIT_REVEAL_ENABLED",
     "COMPUTE_FLEET_CAP",
+    "MULTICOMPUTE_FLEET_CAP",
+    "MULTICOMPUTE_MACHINE_WORK_UNIT_CAP",
     "COMPUTE_LANE_PLATFORM",
     "COMPUTE_LANE_SCHEMA",
     "ECONOMICS_SET_SCHEMA",
@@ -185,6 +210,9 @@ __all__ = [
     "REFUSE_HOTKEYS",
     "SN39_MORTAL_PERIOD_BLOCKS",
     "TEMPO_BLOCKS",
+    "UID30_MINER_HOTKEY",
+    "UID30_VALIDATOR_HOTKEY",
+    "UID30_VALIDATOR_UID",
     "VERSION_KEY",
     "W",
     "WELL_KNOWN_DEV_HOTKEYS",

@@ -33,16 +33,24 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Current deployed vector vs independent verifier | `NOT PROVEN`: dated sources disagree, and no fresh live reproduction passed during this review. Re-derive against the live signed vector before any broadcast. |
 | General validator launch | Pending a scoreable corpus and final acceptance |
 
-### Launch truth, 2026-08-28
+### Launch truth, 2026-08-29
 
-The bounded UID30 tool finalized `[[124, 65535]]`, all weight to miner UID124
-and zero burn. This is evidence for one finalized launch transaction only. It
-does not activate the recurring relay. SN39 subnet emission was `0`, so it does
-not prove TAO earnings.
+The original bounded UID30 tool finalized `[[124, 65535]]`. A later read-only
+snapshot at finalized block 8,949,280 reports current mechanism-0 storage
+`[[8, 65535], [124, 65535]]`, with both UIDs serving HTTPS port 8081. This is
+evidence for two weighted UIDs. It does not prove two machines behind one UID,
+activate the recurring relay, or prove TAO earnings. Subnet emission was zero.
 
-The shipped recurring relay policy is not the consumed UID30 100/0 launch
-vector. Do not start it with `--broadcast` until a no-write preview proves the
-exact intended UID row and burn allocation. Any mismatch fails the launch gate.
+The supported fleet path is a no-write preview. It gives credit only for
+independently verified work from distinct QVL-bound physical identities. The
+canonical consolidation target is the launch miner public hotkey, currently
+UID124. Its target `[[124, 65535]]` remains NOT PROVEN until its signed fleet
+contains two distinct verified machines with 20 SAT units each. See
+[`docs/SN39_MULTICOMPUTE.md`](docs/SN39_MULTICOMPUTE.md).
+
+Do not start the shipped recurring relay with `--broadcast` until a separate
+review proves the exact intended UID row and burn allocation. The fleet
+artifact has no chain-write authority. Any mismatch fails the launch gate.
 
 Current agreement between the deployed vector and independent verifier is not
 proven. Dated records disagree across different deployments. Shadow mode
@@ -91,8 +99,8 @@ weight by themselves.
 `receipts_only` is reported as `NOT_PROVEN`; it is not accepted as `FULL`.
 There is no `--mode` or `--provenance` selector. A signed-feed failure writes
 nothing and leaves the process in shadow. Authority-labelled internal types and
-journal lanes remain only for bounded launch and read-only recovery of historical
-launch attempts. They are not a recurring operator path.
+journal lanes remain only for read-only recovery of historical bounded launch
+attempts. They are not a recurring operator path.
 
 Read [the full provenance contract](docs/PROVENANCE.md) for the audit's evidence
 and assurance boundaries.

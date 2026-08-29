@@ -1,4 +1,4 @@
-"""Dedicated one-attempt axon writer for the second Cathedral SN39 miner."""
+"""Recovery-only shim for the retired dedicated second-miner axon journal."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="cathedral-second-miner-announce",
         wallet_hotkey=WALLET_HOTKEY,
         contract=SECOND_MINER_AXON_CONTRACT,
+        recovery_only=True,
     )
 
 

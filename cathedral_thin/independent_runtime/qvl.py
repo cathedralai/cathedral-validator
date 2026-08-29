@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from cathedral_thin.independent.compute import QuoteVerdict
+from cathedral_thin.independent.compute import QuoteIdentityVerdict, QuoteVerdict
 
 from .errors import QuoteVerifyError
 
@@ -49,9 +49,11 @@ class SubprocessQuoteVerifier:
         self.command = resolved
         self.digest = digest_file(resolved)
 
-    def verify(self, quote: bytes, *, expected_report_data: bytes) -> QuoteVerdict:
+    def _claims(
+        self, quote: bytes, *, expected_report_data: bytes
+    ) -> tuple[QuoteVerdict, dict[str, object] | None]:
         if not quote or not expected_report_data:
-            return QuoteVerdict.FAIL
+            return QuoteVerdict.FAIL, None
         handle = None
         quote_path = None
         try:
@@ -69,27 +71,70 @@ class SubprocessQuoteVerifier:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return QuoteVerdict.INFRA
+            return QuoteVerdict.INFRA, None
         finally:
             if handle is not None:
                 os.close(handle)
             if quote_path is not None and os.path.exists(quote_path):
                 os.unlink(quote_path)
         if len(completed.stdout) + len(completed.stderr) > MAX_OUTPUT:
-            return QuoteVerdict.INFRA
+            return QuoteVerdict.INFRA, None
         if completed.returncode != 0:
-            return QuoteVerdict.FAIL
+            return QuoteVerdict.FAIL, None
         try:
             claims = json.loads(completed.stdout.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return QuoteVerdict.INFRA
+            return QuoteVerdict.INFRA, None
         if not isinstance(claims, dict):
-            return QuoteVerdict.INFRA
+            return QuoteVerdict.INFRA, None
         if claims.get("intel_verified") is not True:
-            return QuoteVerdict.FAIL
+            return QuoteVerdict.FAIL, claims
         if claims.get("report_data_match") is not True:
-            return QuoteVerdict.FAIL
-        return QuoteVerdict.PASS
+            return QuoteVerdict.FAIL, claims
+        return QuoteVerdict.PASS, claims
+
+    def verify(self, quote: bytes, *, expected_report_data: bytes) -> QuoteVerdict:
+        """Retain the reviewed single-machine PASS/FAIL/INFRA contract."""
+
+        verdict, _claims = self._claims(
+            quote, expected_report_data=expected_report_data
+        )
+        return verdict
+
+    def verify_with_identity(
+        self, quote: bytes, *, expected_report_data: bytes
+    ) -> QuoteIdentityVerdict:
+        """Return PASS plus a strict PCK/PPID-derived stable platform id.
+
+        Missing or malformed stable identity does not rewrite the legacy quote
+        verdict.  It leaves ``platform_identity_verified`` false, which keeps
+        the multi-machine feature disabled while the single-machine path can
+        continue under its existing contract.
+        """
+
+        verdict, claims = self._claims(quote, expected_report_data=expected_report_data)
+        if verdict is not QuoteVerdict.PASS or claims is None:
+            return QuoteIdentityVerdict(verdict, None, False)
+        stable = claims.get("stable_platform_id")
+        platform = claims.get("platform_id")
+        verified = (
+            claims.get("platform_identity_kind") == "stable"
+            and claims.get("platform_identity_verified") is True
+            and claims.get("claims_bound_to_quote") is True
+        )
+        if not isinstance(stable, str) or platform != stable or not verified:
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+        prefix = "tdx-platform-sha256:"
+        if (
+            not stable.startswith(prefix)
+            or len(stable) != len(prefix) + 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in stable[len(prefix) :]
+            )
+        ):
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True)
 
 
 def load_verifier(path: str | None) -> SubprocessQuoteVerifier:

@@ -43,6 +43,20 @@ from cathedral_thin.independent.sat import MAX_SAT_RESPONSE_BYTES, SAT_WORK_PATH
 from .errors import IndependentLiveError
 
 DEFAULT_TIMEOUT = 30.0
+VALIDATOR_REQUEST_HEADER = "X-Cathedral-Validator-Request"
+MAX_VALIDATOR_REQUEST_HEADER_BYTES = 16 * 1024
+
+
+def canonical_post_body(body: Mapping[str, object]) -> bytes:
+    """Encode the exact JSON bytes sent to a miner.
+
+    The signed validator request hashes these bytes.  Keeping the encoder in
+    the transport module prevents the authorization document and the HTTP
+    request from drifting onto two merely equivalent JSON encodings.
+    """
+    if not isinstance(body, Mapping):
+        raise IndependentLiveError("evidence POST body must be a mapping")
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def tls_context_for_evidence(host: str) -> ssl.SSLContext:
@@ -140,14 +154,42 @@ class HttpsEvidenceTransport:
         return ChannelBinding(CHANNEL_BINDING_TYPE_TLS, self.last_spki)
 
     def post(self, url: str, body: Mapping[str, object]) -> tuple[int, bytes]:
-        if not isinstance(body, Mapping):
-            raise IndependentLiveError("evidence POST body must be a mapping")
-        encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-        return self._round_trip(url, encoded)
+        return self._round_trip(url, canonical_post_body(body))
 
-    def _round_trip(self, url: str, body: bytes | None) -> tuple[int, bytes]:
+    def post_authorized(
+        self,
+        url: str,
+        body: Mapping[str, object],
+        authorization: str,
+    ) -> tuple[int, bytes]:
+        """POST with the one reviewed validator-request header.
+
+        No generic header mapping is accepted.  In particular, callers cannot
+        replace ``Host``, content framing, or the media type while continuing
+        to claim the request bytes signed here were the bytes on the wire.
+        """
+        if (
+            not isinstance(authorization, str)
+            or not authorization
+            or not authorization.isascii()
+            or len(authorization) > MAX_VALIDATOR_REQUEST_HEADER_BYTES
+            or "\r" in authorization
+            or "\n" in authorization
+        ):
+            raise IndependentLiveError("validator request header is invalid")
+        return self._round_trip(
+            url,
+            canonical_post_body(body),
+            authorization=authorization,
+        )
+
+    def _round_trip(
+        self,
+        url: str,
+        body: bytes | None,
+        *,
+        authorization: str | None = None,
+    ) -> tuple[int, bytes]:
         endpoint = validate_policy_url(url)
         deadline = time.monotonic() + self.timeout
 
@@ -163,7 +205,13 @@ class HttpsEvidenceTransport:
         last_error: Exception | None = None
         for peer_ip in peer_ips:
             try:
-                return self._post_peer(endpoint, peer_ip, body, remaining)
+                if authorization is None:
+                    # Preserve the reviewed private seam used by legacy tests
+                    # and injected transports byte-for-byte.
+                    return self._post_peer(endpoint, peer_ip, body, remaining)
+                return self._post_peer(
+                    endpoint, peer_ip, body, remaining, authorization=authorization
+                )
             except OSError as exc:
                 # Connectivity only. IndependentLiveError is a contract
                 # refusal from the peer we already reached (oversize SAT
@@ -181,6 +229,8 @@ class HttpsEvidenceTransport:
         peer_ip: str,
         body: bytes | None,
         remaining: Any,
+        *,
+        authorization: str | None = None,
     ) -> tuple[int, bytes]:
         class _Pinned(http.client.HTTPSConnection):
             chosen_ip = peer_ip
@@ -215,6 +265,8 @@ class HttpsEvidenceTransport:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
+            if authorization is not None:
+                headers[VALIDATOR_REQUEST_HEADER] = authorization
             peer_socket.settimeout(remaining())
             path = endpoint.path if endpoint.path else EVIDENCE_PATH
             connection.request("POST", path, body=body, headers=headers)
@@ -251,6 +303,12 @@ def _axon_origin(ip: str, port: int) -> str:
         raise IndependentLiveError("axon port must be in 1..65535")
     host = f"[{ip}]" if ":" in ip else ip
     return f"https://{host}:{port}"
+
+
+def axon_origin(ip: str, port: int) -> str:
+    """Public HTTPS origin for a serving axon."""
+
+    return _axon_origin(ip, port)
 
 
 def axon_evidence_url(ip: str, port: int) -> str:

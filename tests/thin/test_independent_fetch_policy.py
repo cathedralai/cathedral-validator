@@ -90,6 +90,21 @@ def test_every_resolved_address_must_be_globally_routable():
             validated_peer_ips([_info(private)])
 
 
+@pytest.mark.parametrize(
+    "transition",
+    [
+        "64:ff9b::7f00:1",
+        "64:ff9b:1::7f00:1",
+        "::ffff:127.0.0.1",
+        "::7f00:1",
+        "2002:7f00:1::",
+    ],
+)
+def test_ipv6_transition_addresses_never_reach_the_dialer(transition):
+    with pytest.raises(PolicyFetchError, match="non-public address"):
+        validated_peer_ips([_info(transition)])
+
+
 def test_a_private_address_anywhere_in_the_answer_refuses_the_whole_answer():
     """No per-address fallback: a hostile resolver cannot hide one behind a public one."""
     with pytest.raises(PolicyFetchError, match="non-public address"):

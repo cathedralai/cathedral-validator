@@ -518,13 +518,17 @@ def write_plan(path: Path | str, plan: Mapping[str, Any]) -> tuple[Path, Path, s
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-second-miner-plan")
-    sub = parser.add_subparsers(dest="command", required=True)
-    preview = sub.add_parser(
-        "preview", help="read finalized SN39 state and write a no-authority plan"
+    parser = argparse.ArgumentParser(
+        prog="cathedral-second-miner-plan",
+        description=(
+            "RETIRED: use cathedral-uid30-fleet-preview for the supported "
+            "same-UID no-write proof"
+        ),
     )
-    preview.add_argument(
-        "--output", required=True, help="absolute owner-only JSON path"
+    parser.add_argument(
+        "legacy_args",
+        nargs=argparse.REMAINDER,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -537,28 +541,24 @@ def main(
         [Path | str, Mapping[str, Any]], tuple[Path, Path, str]
     ] = write_plan,
 ) -> int:
-    options = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
-    try:
-        if options.command != "preview":
-            raise SecondMinerPlanError(f"unsupported command {options.command}")
-        plan = build_plan(reader())
-        output, digest_path, digest = writer(options.output, plan)
-    except SecondMinerPlanError as exc:
-        print(f"SecondMinerPlanError: {exc}", file=sys.stderr)
-        return 2
+    _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
+    del reader, writer
     print(
         json.dumps(
             {
-                "status": plan["status"],
+                "status": "RETIRED_NO_CHAIN_WRITE",
+                "error": (
+                    "the dedicated second-UID planner is retired; use "
+                    "cathedral-uid30-fleet-preview"
+                ),
                 "authorized_for_chain_write": False,
-                "output": str(output),
-                "sha256_file": str(digest_path),
-                "sha256": digest,
+                "chain_write_submitted": False,
             },
             sort_keys=True,
-        )
+        ),
+        file=sys.stderr,
     )
-    return 0
+    return 2
 
 
 if __name__ == "__main__":

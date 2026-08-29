@@ -1,4 +1,4 @@
-"""Exact one-attempt generation-2 axon successor for Cathedral miner UID124."""
+"""Recovery-only shim for the retired UID124 generation-2 axon journal."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="cathedral-uid124-axon-generation2",
         wallet_hotkey=WALLET_HOTKEY,
         contract=UID124_GENERATION2_AXON_CONTRACT,
+        recovery_only=True,
     )
 
 
