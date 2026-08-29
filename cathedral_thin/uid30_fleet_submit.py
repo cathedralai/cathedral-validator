@@ -1116,7 +1116,7 @@ def submit_reviewed_fleet(
                     wire_uids=[TARGET_UID],
                     wire_weights=[W],
                     mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
-                    allow_reviewed_uid30_finalized_descendant=False,
+                    allow_reviewed_uid30_finalized_descendant=True,
                 )
                 submission = launch._receipt_submission(receipt, state=fresh_state.base)
                 canonical._record_pending_submission_receipt(

@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
+import ipaddress
 import inspect
 import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -525,6 +527,602 @@ def test_identity_is_exact_uid124_zero_burn_and_two_distinct_machines() -> None:
     changed["uid_weights"] = [[8, 1.0], [124, 1.0]]
     with pytest.raises(Exception, match="rows are not exact"):
         canonical._strict_zero_burn_uid30_fleet_contract(changed, lane="authority")
+
+
+def _fleet_descendant_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    drift: int = 1,
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    object,
+    object,
+    str,
+    tuple[dict[str, object], dict[str, object], dict[str, object]],
+]:
+    fleet_state = _fleet_state()
+    original_block = fleet_state.base.block_number
+    original_hash = fleet_state.base.block_hash
+    latest_block = original_block + drift
+    latest_hash = "0x" + "d" * 64
+    intermediate_hash = "0x" + "e" * 64
+    expected_hotkeys = {
+        30: submit.UID30_HOTKEY,
+        8: submit.PREDECESSOR_HOTKEY,
+        124: submit.MINER_HOTKEY,
+    }
+    info_hotkeys = [f"dummy-{uid}" for uid in range(125)]
+    for uid, hotkey in expected_hotkeys.items():
+        info_hotkeys[uid] = hotkey
+    registration_blocks = [original_block - 100] * len(info_hotkeys)
+    prune_metrics = [
+        {
+            "uid": uid,
+            "hotkey": hotkey,
+            "incentive": 0.0,
+            "stake": 0.000002 if uid == 30 else 0.0,
+            "emission": 0.0,
+        }
+        for uid, hotkey in enumerate(info_hotkeys)
+    ]
+    document = submit.validate_reviewed_preview(_preview())
+    identity = submit._attempt_identity(
+        reviewed=document,
+        preview_sha256="d" * 64,
+        fresh=document,
+        state=fleet_state,
+    )
+    safety = copy.deepcopy(identity["uid_safety"])
+    safety["rotation"].update(
+        {
+            "mapping_block": original_block,
+            "mapping_block_hash": original_hash,
+            "era_last_block": original_block + SN39_MORTAL_PERIOD_BLOCKS - 1,
+            "hotkey_swap_on_subnet_interval": 100,
+            "coldkey_swap_announcement_delay": 100,
+        }
+    )
+    for row in safety["rotation"]["targets"]:
+        row.update(
+            {
+                "coldkey": f"coldkey-{row['uid']}",
+                "last_hotkey_swap_block": 0,
+                "hotkey_swap_safe_until_block": None,
+                "swap_lock": "never_rotated",
+                "pending_coldkey_swap": None,
+                "hotkey_successor": None,
+                "hotkey_root": None,
+                "rotation_receipt": None,
+            }
+        )
+    safety["registration"] = {
+        "max_uids": 256,
+        "max_regs_per_block": 1,
+        "immunity_period": 100,
+        "min_nonimmune_uids": 1,
+        "block_at_registration": [
+            {
+                "uid": uid,
+                "hotkey": hotkey,
+                "block_at_registration": registered_at,
+            }
+            for uid, (hotkey, registered_at) in enumerate(
+                zip(info_hotkeys, registration_blocks, strict=True)
+            )
+        ],
+        "subnet_owner_coldkey": "subnet-owner-coldkey",
+        "owned_hotkeys": [],
+        "immune_owner_uids_limit": 1,
+        "free_uid_slots": 256 - len(info_hotkeys),
+        "maximum_era_registrations": SN39_MORTAL_PERIOD_BLOCKS,
+        "owner_immortal_hotkeys": [],
+        "replacement_safe_hotkeys": sorted(
+            {submit.PREDECESSOR_HOTKEY, submit.MINER_HOTKEY}
+        ),
+        "worst_case_evictions": 0,
+        "prune_metrics": prune_metrics,
+        "eviction_depth": [],
+    }
+    identity["uid_safety"] = safety
+    identity["uid_safety_sha256"] = canonical._sha256_document(safety).removeprefix(
+        "sha256:"
+    )
+    attempt_id = launch._attempt_id(identity)
+    args = submit._submission_contract(preview_sha256="d" * 64)
+    contract = canonical._strict_zero_burn_uid30_fleet_contract(
+        identity,
+        lane="authority",
+    )
+    state: dict[str, object] = {
+        "submission_pending_id": attempt_id,
+        "submission_pending_lane": "authority",
+        "submission_pending_phase": "unsigned_reserved",
+        "submission_pending_reviewed_uid30_contract": ("same_uid_fleet_consolidation"),
+        "submission_pending_broadcast_intent": None,
+        "submission_pending_receipt_candidate": None,
+        "submission_pending_proof_status": None,
+        "submission_pending_budget_scope": canonical.SN39_UID30_FLEET_BUDGET_SCOPE,
+        "submission_pending_budget_limit": 1,
+        "submission_pending_predecessor_journal_sha256": (
+            canonical.SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256
+        ),
+        "submission_pending_identity": identity,
+    }
+    parent_by_hash = {latest_hash: original_hash}
+    if drift == 2:
+        parent_by_hash = {
+            latest_hash: intermediate_hash,
+            intermediate_hash: original_hash,
+        }
+    world: dict[str, object] = {
+        "uid_to_hotkey": dict(expected_hotkeys),
+        "hotkey_to_uid": {hotkey: uid for uid, hotkey in expected_hotkeys.items()},
+        "weights": [[8, W], [124, W]],
+        "permit": True,
+        "stake_rao": 2_000,
+        "stake_threshold_rao": 1_000,
+        "last_update": canonical.SN39_UID30_FLEET_PREDECESSOR_BLOCK,
+        "commit_reveal": False,
+        "owner": canonical.SN39_BURN_HOTKEY,
+        "min_weights": 1,
+        "max_weight": 1.0,
+        "next_epoch": fleet_state.base.next_epoch_start_block,
+        "rate_limit": fleet_state.base.weights_rate_limit,
+        "mechanism_count": fleet_state.base.mechanism_count,
+        "version_floor": fleet_state.base.weights_version_key,
+        "root_ip": int(ipaddress.IPv4Address("1.1.1.1")),
+        "root_port": 8081,
+        "root_protocol": 4,
+        "parent_by_hash": parent_by_hash,
+        "info_hotkeys": info_hotkeys,
+        "registration_blocks": registration_blocks,
+        "incentives": [0.0] * len(info_hotkeys),
+        "emissions": [0.0] * len(info_hotkeys),
+        "max_uids": 256,
+        "max_regs_per_block": 1,
+        "immunity_period": 100,
+        "min_nonimmune_uids": 1,
+        "owner_coldkey": "subnet-owner-coldkey",
+        "owned_hotkeys": [],
+        "immune_owner_uids_limit": 1,
+        "hotkey_swap_interval": 100,
+        "coldkey_swap_delay": 100,
+        "finalized_block": latest_block,
+        "finalized_hash": latest_hash,
+    }
+
+    class Substrate:
+        def get_chain_finalised_head(self) -> str:
+            return world["finalized_hash"]  # type: ignore[return-value]
+
+        def get_block_number(self, block_hash: str) -> int:
+            if block_hash == world["finalized_hash"]:
+                return world["finalized_block"]  # type: ignore[return-value]
+            raise AssertionError(block_hash)
+
+        def get_block_hash(self, block: int) -> str:
+            if block == EVIDENCE_BLOCK:
+                return EVIDENCE_HASH
+            if block == original_block:
+                return original_hash
+            if block == latest_block:
+                return latest_hash
+            if drift == 2 and block == original_block + 1:
+                return intermediate_hash
+            if block == world["finalized_block"]:
+                return world["finalized_hash"]  # type: ignore[return-value]
+            raise AssertionError(block)
+
+        def get_constant(
+            self,
+            *,
+            module_name: str,
+            constant_name: str,
+            block_hash: str,
+        ) -> object:
+            assert module_name == "SubtensorModule"
+            assert constant_name == "HotkeySwapOnSubnetInterval"
+            assert block_hash == latest_hash
+            return world["hotkey_swap_interval"]
+
+        def get_block_header(self, *, block_hash: str) -> dict[str, object]:
+            return {
+                "header": {
+                    "parentHash": world["parent_by_hash"][block_hash],  # type: ignore[index]
+                }
+            }
+
+        def query(
+            self,
+            *,
+            module: str,
+            storage_function: str,
+            params: list[object],
+            block_hash: str,
+        ) -> SimpleNamespace:
+            assert module == "SubtensorModule"
+            assert block_hash == latest_hash
+            if storage_function == "Uids":
+                return SimpleNamespace(value=world["hotkey_to_uid"].get(params[1]))  # type: ignore[union-attr]
+            if storage_function == "Keys":
+                return SimpleNamespace(value=world["uid_to_hotkey"].get(params[1]))  # type: ignore[union-attr]
+            if storage_function == "Weights":
+                return SimpleNamespace(value=world["weights"])
+            if storage_function == "WeightsVersionKey":
+                return SimpleNamespace(value=world["version_floor"])
+            if storage_function == "StakeThreshold":
+                return SimpleNamespace(value=world["stake_threshold_rao"])
+            raise AssertionError(storage_function)
+
+    class Subtensor:
+        substrate = Substrate()
+
+        @staticmethod
+        def query_subtensor(
+            *,
+            name: str,
+            params: list[object],
+            block: int,
+        ) -> object:
+            assert block == latest_block
+            if name == "MinNonImmuneUids":
+                return world["min_nonimmune_uids"]
+            if name == "SubnetOwner":
+                return world["owner_coldkey"]
+            if name == "OwnedHotkeys":
+                return world["owned_hotkeys"]
+            if name == "ImmuneOwnerUidsLimit":
+                return world["immune_owner_uids_limit"]
+            if name == "ColdkeySwapAnnouncementDelay":
+                return world["coldkey_swap_delay"]
+            if name == "Owner":
+                hotkey = params[0]
+                uid = world["hotkey_to_uid"][hotkey]  # type: ignore[index]
+                return f"coldkey-{uid}"
+            if name == "LastHotkeySwapOnNetuid":
+                return 0
+            if name == "ColdkeySwapAnnouncements":
+                return None
+            raise AssertionError(name)
+
+        @staticmethod
+        def commit_reveal_enabled(*, netuid: int, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["commit_reveal"]
+
+        @staticmethod
+        def get_subnet_owner_hotkey(netuid: int, *, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["owner"]
+
+        @staticmethod
+        def min_allowed_weights(*, netuid: int, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["min_weights"]
+
+        @staticmethod
+        def max_weight_limit(*, netuid: int, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["max_weight"]
+
+        @staticmethod
+        def get_next_epoch_start_block(netuid: int, *, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["next_epoch"]
+
+        @staticmethod
+        def weights_rate_limit(netuid: int, *, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["rate_limit"]
+
+        @staticmethod
+        def get_mechanism_count(netuid: int, *, block: int) -> object:
+            assert (netuid, block) == (39, latest_block)
+            return world["mechanism_count"]
+
+        @staticmethod
+        def get_metagraph_info(
+            netuid: int,
+            mechanism_id: int,
+            *,
+            block: int,
+        ) -> SimpleNamespace:
+            assert (netuid, mechanism_id, block) == (39, 0, latest_block)
+            size = 125
+            hotkeys = list(world["info_hotkeys"])
+            for uid, hotkey in world["uid_to_hotkey"].items():  # type: ignore[union-attr]
+                if uid < size:
+                    hotkeys[uid] = hotkey
+            permits = [False] * size
+            permits[30] = world["permit"]  # type: ignore[assignment]
+            last_updates = [0] * size
+            last_updates[30] = world["last_update"]  # type: ignore[assignment]
+            stakes = [SimpleNamespace(rao=0, tao=0.0) for _ in range(size)]
+            stakes[30] = SimpleNamespace(
+                rao=world["stake_rao"],
+                tao=float(world["stake_rao"]) / 1_000_000_000,
+            )
+            axons: list[dict[str, object]] = [{} for _ in range(size)]
+            axons[124] = {
+                "ip": world["root_ip"],
+                "ip_type": 4,
+                "port": world["root_port"],
+                "protocol": world["root_protocol"],
+            }
+            return SimpleNamespace(
+                block=latest_block,
+                hotkeys=hotkeys,
+                validator_permit=permits,
+                last_update=last_updates,
+                total_stake=stakes,
+                axons=axons,
+                block_at_registration=world["registration_blocks"],
+                max_uids=world["max_uids"],
+                max_regs_per_block=world["max_regs_per_block"],
+                immunity_period=world["immunity_period"],
+                incentives=world["incentives"],
+                emission=world["emissions"],
+            )
+
+    preflight = SimpleNamespace(
+        subtensor=Subtensor(),
+        wallet=SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address=submit.UID30_HOTKEY)
+        ),
+        hotkey_to_uid={hotkey: uid for uid, hotkey in expected_hotkeys.items()},
+        validator_hotkey=submit.UID30_HOTKEY,
+        validator_uid=30,
+        block=original_block,
+        finalized_hash=original_hash,
+        genesis_hash=submit.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey=canonical.SN39_BURN_HOTKEY,
+        next_epoch_start_block=fleet_state.base.next_epoch_start_block,
+        replacement_safe_hotkeys=frozenset(
+            {submit.PREDECESSOR_HOTKEY, submit.MINER_HOTKEY}
+        ),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_strict_uid30_successor_unsigned_rollback",
+        lambda *_args, **_kwargs: b"exact-predecessor",
+    )
+    return (
+        world,
+        identity,
+        args,
+        preflight,
+        attempt_id,
+        (state, identity, contract),
+    )
+
+
+@pytest.mark.parametrize("drift", [1, 2])
+def test_fleet_descendant_accepts_only_one_or_two_exact_child_heads(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: int,
+) -> None:
+    world, _identity, args, preflight, attempt_id, pending = _fleet_descendant_case(
+        monkeypatch,
+        drift=drift,
+    )
+    latest_block = preflight.block + drift
+    latest_hash = "0x" + "d" * 64
+
+    canonical._require_reviewed_uid30_fleet_finalized_descendant(
+        preflight,
+        runtime_contract=args,
+        attempt_id=attempt_id,
+        latest_finalized_block=latest_block,
+        latest_finalized_hash=latest_hash,
+        wire_uids=[124],
+        wire_weights=[W],
+        version_key=VERSION_KEY,
+        mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+        pending=pending,
+    )
+
+    assert world["weights"] == [[8, W], [124, W]]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "uid124_mapping",
+        "predecessor_row",
+        "partial_safety",
+        "root_axon",
+        "validator_permit",
+        "validator_cooldown",
+        "non_ancestry",
+        "excessive_drift",
+        "registration_hparams",
+        "head_advanced",
+    ],
+)
+def test_fleet_descendant_fails_closed_on_changed_chain_fact(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    drift = 3 if mutation == "excessive_drift" else 1
+    world, identity, args, preflight, attempt_id, pending = _fleet_descendant_case(
+        monkeypatch,
+        drift=drift,
+    )
+    if mutation == "uid124_mapping":
+        world["hotkey_to_uid"][submit.MINER_HOTKEY] = 125  # type: ignore[index]
+        world["uid_to_hotkey"][124] = "changed-hotkey"  # type: ignore[index]
+    elif mutation == "predecessor_row":
+        world["weights"] = [[124, W]]
+    elif mutation == "partial_safety":
+        identity["uid_safety"]["rotation"]["targets"][1][  # type: ignore[index]
+            "registration_replacement_safe"
+        ] = False
+        identity["uid_safety"]["excluded_hotkeys"] = [submit.MINER_HOTKEY]  # type: ignore[index]
+        identity["uid_safety_sha256"] = canonical._sha256_document(
+            identity["uid_safety"]
+        ).removeprefix("sha256:")
+    elif mutation == "root_axon":
+        world["root_ip"] = int(ipaddress.IPv4Address("8.8.8.8"))
+    elif mutation == "validator_permit":
+        world["permit"] = False
+    elif mutation == "validator_cooldown":
+        world["last_update"] = preflight.block + drift
+    elif mutation == "non_ancestry":
+        world["parent_by_hash"]["0x" + "d" * 64] = "0x" + "f" * 64  # type: ignore[index]
+    elif mutation == "registration_hparams":
+        world["max_regs_per_block"] = 2
+    elif mutation == "head_advanced":
+        world["finalized_block"] = preflight.block + drift + 1
+        world["finalized_hash"] = "0x" + "f" * 64
+
+    with pytest.raises(Exception):
+        canonical._require_reviewed_uid30_fleet_finalized_descendant(
+            preflight,
+            runtime_contract=args,
+            attempt_id=attempt_id,
+            latest_finalized_block=preflight.block + drift,
+            latest_finalized_hash="0x" + "d" * 64,
+            wire_uids=[124],
+            wire_weights=[W],
+            version_key=VERSION_KEY,
+            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            pending=pending,
+        )
+
+
+def test_unlock_head_advance_refuses_before_signature_intent_or_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bittensor.core.types import ExtrinsicResponse
+
+    original_block = RECHECK_BLOCK + 10
+    descendant_block = original_block + 1
+    original_hash = "0x" + "a" * 64
+    descendant_hash = "0x" + "b" * 64
+    advanced_hash = "0x" + "c" * 64
+    live_head = {"block": descendant_block, "hash": descendant_hash}
+    signed: list[object] = []
+    intents: list[dict[str, object]] = []
+    broadcasts: list[object] = []
+    unlocks: list[str] = []
+
+    class Substrate:
+        @staticmethod
+        def get_account_next_index(hotkey: str) -> int:
+            assert hotkey == submit.UID30_HOTKEY
+            return 7
+
+        @staticmethod
+        def create_signed_extrinsic(**kwargs: object) -> object:
+            signed.append(kwargs)
+            raise AssertionError("stale descendant must not be signed")
+
+        @staticmethod
+        def submit_extrinsic(signed_extrinsic: object, **kwargs: object) -> object:
+            broadcasts.append((signed_extrinsic, kwargs))
+            raise AssertionError("stale descendant must not be broadcast")
+
+    preflight = SimpleNamespace(
+        block=original_block,
+        finalized_hash=original_hash,
+        subtensor=SimpleNamespace(substrate=Substrate()),
+        wallet=SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address=submit.UID30_HOTKEY)
+        ),
+    )
+    now = datetime.now(UTC)
+    identity = {
+        "next_epoch_start_block": original_block + 200,
+        "inclusion_policy": {
+            "valid_from_block": original_block - 1,
+            "valid_until_block": original_block + 100,
+            "valid_from_time": launch._canonical_utc(now - timedelta(minutes=1)),
+            "valid_until_time": launch._canonical_utc(now + timedelta(minutes=10)),
+            "require_commit_reveal_disabled": True,
+            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "expected_next_epoch_start_block": original_block + 200,
+        },
+    }
+    pending_state = {
+        "submission_pending_phase": "unsigned_reserved",
+        "submission_pending_broadcast_intent": None,
+    }
+    pristine_pending = copy.deepcopy(pending_state)
+    pending = (
+        pending_state,
+        identity,
+        {"kind": "same_uid_fleet_consolidation"},
+    )
+    runtime_contract = SimpleNamespace(
+        _uid30_fleet_consolidation_preview_sha256="d" * 64,
+        require_full_provenance_for_broadcast=False,
+    )
+
+    monkeypatch.setattr(
+        canonical,
+        "_finalized_chain_head",
+        lambda _subtensor: (live_head["block"], live_head["hash"]),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_require_reviewed_uid30_finalized_descendant",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_pending_reviewed_uid30_contract",
+        lambda *_args, **_kwargs: pending,
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_authorize_reviewed_uid30_submission",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_continuous_transition_required",
+        lambda _runtime: True,
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **kwargs: intents.append(kwargs),
+    )
+
+    def unlock(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        unlocks.append("success")
+        live_head.update(
+            {
+                "block": descendant_block + 1,
+                "hash": advanced_hash,
+            }
+        )
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr(ExtrinsicResponse, "unlock_wallet", unlock)
+
+    with pytest.raises(
+        canonical._RetryablePreSignHeadDrift,
+        match="advanced after bounded descendant validation",
+    ):
+        canonical._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime_contract,
+            attempt_id="sha256:" + "e" * 64,
+            netuid=39,
+            version_key=VERSION_KEY,
+            wire_uids=[124],
+            wire_weights=[W],
+            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+    assert unlocks == ["success"]
+    assert signed == []
+    assert intents == []
+    assert broadcasts == []
+    assert pending_state == pristine_pending
 
 
 def test_unsigned_reservation_restores_exact_predecessor_bytes(
@@ -1108,7 +1706,7 @@ def _prepare_submit_harness(
     return sequence, observed
 
 
-def test_submit_calls_exact_singleton_once_and_requires_exact_head(
+def test_submit_calls_exact_singleton_once_and_requests_bounded_descendant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sequence, observed = _prepare_submit_harness(monkeypatch)
@@ -1134,7 +1732,7 @@ def test_submit_calls_exact_singleton_once_and_requires_exact_head(
     ]
     assert observed["wire_uids"] == [124]
     assert observed["wire_weights"] == [W]
-    assert observed["allow_reviewed_uid30_finalized_descendant"] is False
+    assert observed["allow_reviewed_uid30_finalized_descendant"] is True
     assert result.wire_uids == (124,)
     assert result.wire_weights == (W,)
 
