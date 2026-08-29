@@ -257,7 +257,7 @@ def run_contract_cli(
 def main(argv: Sequence[str] | None = None) -> int:
     return run_contract_cli(
         argv,
-        prog="cathedral-miner-axon-recover",
+        prog="python -m cathedral_thin.independent_runtime.miner_axon_cli",
         wallet_hotkey=WALLET_HOTKEY,
         contract=UID124_AXON_CONTRACT,
         recovery_only=True,

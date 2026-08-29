@@ -1,4 +1,4 @@
-# SN39 relay validator image. Build context is the repo root (see docker-compose.yml).
+# SN39 no-write validator preview. Build context is the repo root.
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,11 +19,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 RUN chmod +x deploy/sn39/docker/entrypoint.sh
 
-# Safe defaults: mainnet SN39, SHADOW (never broadcasts unless the operator opts in).
+# The supported entrypoint is no-write and always selects dry-run.
 ENV CATHEDRAL_NETWORK=finney \
     CATHEDRAL_NETUID=39 \
-    BT_WALLET_PATH=/root/.bittensor/wallets \
-    CATHEDRAL_BROADCAST=0
+    BT_WALLET_PATH=/root/.bittensor/wallets
 
 ENTRYPOINT ["/opt/cathedral-validator/deploy/sn39/docker/entrypoint.sh"]
 CMD ["validator"]

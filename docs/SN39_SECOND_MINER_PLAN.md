@@ -55,10 +55,16 @@ identity for physical-machine credit.
 
 ## Recovery boundary
 
-`cathedral-uid30-recover successor-recover` remains available only for an exact
+`python -m cathedral_thin.uid30_launch successor-recover` remains available
+from a source checkout only for an exact
 existing two-UID successor journal carrying a signed ambiguous attempt. It must
 not create a new intent, sign, retry, or submit. Do not invoke it against a
 pristine journal or use it to start a new launch.
+
+An exact historical UID124 axon intent has one equivalent source-only reader:
+`python -m cathedral_thin.independent_runtime.miner_axon_cli recover`. Use
+`--help` for its required journal and proof inputs. It reads finalized state and
+never announces or resubmits.
 
 No retired preview, announce, or successor-submit command is supported. Git
 history preserves their implementation and earlier operator text. The active

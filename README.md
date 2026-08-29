@@ -23,6 +23,21 @@ Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
 path, and broadcast gates.
 
+## Installed commands
+
+The package installs six commands:
+
+- `cathedral-validator`, the recurring relay. Production writes use only the
+  immutable systemd launcher below.
+- `cathedral-publisher-serve` and `cathedral-candidate-snapshot`, used by the
+  Cathedral origin.
+- `cathedral-uid30-fleet-preview` and `cathedral-uid30-fleet-submit`, the current
+  bounded UID30 fleet workflow.
+- `cathedral-amd-sev-snp-dev-preview`, the requested no-write friend preview.
+
+Legacy, generic-preview, independent, test, and old recovery modules remain in
+source for evidence and recovery testing. They do not install console commands.
+
 ## Compute fleet truth, 2026-08-29
 
 The original bounded UID30 launch finalized `[[124, 65535]]`. Later launch
@@ -59,21 +74,6 @@ attestation without verified work contribute zero. Normalization happens only
 after raw units are aggregated. One UID with two distinct machines at 20 units
 each has raw score 40. The UID still occupies one destination in the weight
 row.
-
-The generic no-write fleet preview is:
-
-```bash
-install -d -m 0700 "$HOME/.cathedral/multicompute-preview"
-cathedral-multicompute-preview \
-  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
-  --wallet-name cathedral \
-  --wallet-hotkey default \
-  --output "$HOME/.cathedral/multicompute-preview/scoring.json"
-```
-
-It signs worker requests with the pinned UID30 hotkey, but it has no chain
-write authority. The dedicated command has no Worker rental, canary,
-confirmation, Cloud, journal, nonce, extrinsic, or submission mode.
 
 The consolidation target is the canonical launch miner hotkey
 `5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G`, currently UID124 with
@@ -129,7 +129,8 @@ has no chain writer.
 
 The former dedicated second-hotkey, UID8/UID124 axon, and two-UID successor
 commands are retired. Their implementations remain only where historical
-journal recovery needs them. Do not use them for a new launch. See the
+journal recovery needs them, with no installed console commands. Do not use
+them for a new launch. See the
 [current fleet runbook](docs/SN39_MULTICOMPUTE.md) and the
 [historical second-miner record](docs/SN39_SECOND_MINER_PLAN.md).
 
@@ -143,11 +144,11 @@ here, and pick up where this leaves off.
 Everything below runs as an ordinary user. No root, no systemd, no chain
 write. Use Python 3.11 or 3.12 on Linux x86-64.
 
-> **Shortcuts (optional).** This native path is canonical and auditable. For a one-shot
-> native onboarding, `deploy/sn39/wallet-host-quickstart.sh` runs exactly these steps plus
-> a validator-candidate check. For a cross-platform Docker option (macOS/Windows/Linux, 3
-> commands), see [`deploy/sn39/docker/`](deploy/sn39/docker/README.md). Neither replaces the
-> production staged-systemd model in `deploy/sn39/`.
+> **No-write helpers.** `deploy/sn39/wallet-host-quickstart.sh` runs these preview
+> steps plus a validator-candidate check. `deploy/sn39/docker/` provides the same
+> read-only evaluation on macOS, Windows, or Linux. Docker always passes
+> `--dry-run` and has no broadcast setting. The immutable staged systemd release
+> below is the only production path.
 
 ```bash
 git clone https://github.com/cathedralai/cathedral-validator.git

@@ -63,7 +63,8 @@ accepted proof sidecar. Put that exact object under
 - `cybergym_epoch_state_path` to a durable SQLite path for the authoritative
   receipt-consumption pass.
 
-Run `cathedral-validator-integration-preview` first without
+From a validator source checkout with the integration extra installed, run
+`python -m cathedral_thin.integration_cli` first without
 `--consume-receipts`. Review the feed, audit, and gates. A second stateful E2E
 pass may add `--consume-receipts` against temporary ledger and epoch-state files
 to prove once-only behavior. The runtime labels this mode `authoritative`, but in

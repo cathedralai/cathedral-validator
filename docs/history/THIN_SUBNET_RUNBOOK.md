@@ -1,4 +1,11 @@
-# Cathedral Thin Subnet Runbook
+# Historical Cathedral Thin Subnet Runbook
+
+> [!CAUTION]
+> Historical record only. The `cathedral-thin-validator` console command and
+> all `deploy/thin` services were retired from the install surface in 2026-08.
+> Do not follow the chain-write commands below. The supported recurring command
+> is `cathedral-validator serve`; production runs only through the immutable
+> systemd launcher documented in the repository root.
 
 This is the direct Bittensor path. The subnet owner does not operate an API,
 database, object store, queue, scorer, or solver farm.
@@ -55,10 +62,10 @@ units, composes fixed 60/40 budgets, writes the decision record, and binds that
 record into the retried vector.
 
 The focused inference-receipt flow is documented in
-[`VERIFYML.md`](VERIFYML.md). `cathedral-verifyml run-local` exercises the
-model/receipt plumbing without pretending that a local run is attested;
-production `verified_work_units` require a genuine quote and a
-validator-pinned verifier.
+[`VERIFYML.md`](../VERIFYML.md).
+`python -m cathedral_thin.verifyml_cli run-local` exercises the model/receipt
+plumbing without pretending that a local run is attested; production
+`verified_work_units` require a genuine quote and a validator-pinned verifier.
 
 ## 2. Create wallets and register
 
@@ -136,13 +143,9 @@ digest per declared round, and receives a cached response when it retries the
 same formula with a refreshed envelope. These are miner protection limits, not
 scoring inputs.
 
-The example systemd unit is
-[`deploy/thin/cathedral-thin-miner.service`](../deploy/thin/cathedral-thin-miner.service).
-Copy
-[`deploy/thin/miner.env.example`](../deploy/thin/miner.env.example) to
-`/etc/cathedral-thin/miner.env`, replace every placeholder, and restrict the
-file to the service account. `BT_WALLET_PATH` must point to the existing wallet
-directory because the hardened unit gives the service a private writable home.
+This historical release shipped `deploy/thin/cathedral-thin-miner.service` and
+`deploy/thin/miner.env.example`. Those deploy assets are retired and no longer
+ship.
 
 ## 4. Run a validator safely
 
@@ -214,7 +217,7 @@ evidence references; it never contains a wallet key or chain transaction.
 Cathedral Compute must export `verified_work_units` and exact assurance
 receipt IDs/digests rather than wrap its older normalized HMAC score stream.
 The complete schema, key rotation, source compromise, and residual-trust rules
-are in [`THIN_SCORE_CLASSES.md`](THIN_SCORE_CLASSES.md).
+are in [`THIN_SCORE_CLASSES.md`](../THIN_SCORE_CLASSES.md).
 
 ### Admit a testnet subnet owner
 
@@ -255,7 +258,7 @@ The contributor command only reads chain state and writes a signed file. It
 does not register the hotkey, submit weights, or contact a Cathedral owner
 service. Publish the artifact at the URL locally admitted by each validator.
 Each validator copies
-[`config/thin-score-policy.registered-owner.example.json`](../config/thin-score-policy.registered-owner.example.json),
+[`config/thin-score-policy.registered-owner.example.json`](../../config/thin-score-policy.registered-owner.example.json),
 sets the source and target netuids, source ID, registration URL, allocation,
 exact report URL, assignment, and evidence requirements, and accepts the config
 change in dry-run before enabling broadcast. The signed registration must name
@@ -268,15 +271,9 @@ source, use a different allocation, or admit different classes. This is the
 decentralization boundary: common provenance, independent judgment, and
 independent on-chain signatures.
 
-The example systemd unit is
-[`deploy/thin/cathedral-thin-validator.service`](../deploy/thin/cathedral-thin-validator.service).
-Copy
-[`deploy/thin/validator.env.example`](../deploy/thin/validator.env.example) to
-`/etc/cathedral-thin/validator.env`, replace every placeholder, and use mode
-`0600`. On Linux, run `systemd-analyze verify` on both units before enabling
-them. Keep the validator in dry-run outside systemd until its output is sane;
-the example validator unit intentionally includes `--broadcast` for the final
-operator-approved service.
+This historical release shipped a broadcast-capable
+`deploy/thin/cathedral-thin-validator.service` and its environment example.
+Both deploy assets are retired and no longer ship.
 
 ## 5. Commit-reveal and subnet parameters
 
@@ -333,7 +330,7 @@ Before increasing dimensions or subnet size:
 > It does **not** apply to `cathedral-validator serve`, the SN39 relay. That
 > one keeps different durable state and has its own procedure: [Recovering from
 > a refused or fenced
-> write](../VALIDATOR.md#recovering-from-a-refused-or-fenced-write).
+> write](../../VALIDATOR.md#recovering-from-a-refused-or-fenced-write).
 
 The validator state file contains the private challenge master secret, EMA
 scores, last completed round, external source high-water checkpoints, and

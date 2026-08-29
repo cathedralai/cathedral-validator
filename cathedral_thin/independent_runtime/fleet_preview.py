@@ -314,7 +314,8 @@ def collect_preview(options: argparse.Namespace) -> dict[str, Any]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cathedral-multicompute-preview", allow_abbrev=False
+        prog="python -m cathedral_thin.independent_runtime.fleet_preview",
+        allow_abbrev=False,
     )
     parser.add_argument("--qvl", required=True)
     parser.add_argument("--output", required=True)

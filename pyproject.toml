@@ -5,12 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cathedral-scaffold"
 version = "4.0.0-rc.4"
-description = "Cathedral SN39 - thin validator for verifiable ML inference and integrity canaries"
+description = "Cathedral SN39 signed-vector relay validator"
 requires-python = ">=3.11"
-# Validator-runtime deps only. The thin validator generates challenges, scores
-# miners locally, and sets weights through Bittensor. The publisher's server
-# stack (FastAPI, psycopg2, boto3) remains optional so this path needs no owner
-# API, database, queue, object store, or solver farm.
+# Validator-runtime deps only. The supported validator verifies and relays the
+# signed Cathedral vector through Bittensor. The publisher's server stack
+# (FastAPI, psycopg2, boto3) remains optional.
 dependencies = [
     "cryptography>=42",
     "bittensor>=10.4,<11",
@@ -118,28 +117,17 @@ cathedral-validator = "scaffold.cli:main"
 # '.[publisher]' extra). A thin uvicorn.run wrapper; the deploy image and the
 # deploy/publisher/*.service units may also invoke uvicorn directly.
 cathedral-publisher-serve = "scaffold.publisher.server:_serve_cli"
-# Non-writing Compute+Distill integration preview (needs the '.[integration]' extra).
-cathedral-validator-integration-preview = "cathedral_thin.integration_cli:main"
+# Publisher evidence snapshot used by the live origin release.
 cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
-cathedral-thin-validator = "cathedral_thin.validator:main"
-cathedral-thin-e2e = "cathedral_thin.e2e:main"
-cathedral-thin-preflight = "cathedral_thin.preflight:main"
-cathedral-thin-score-report = "cathedral_thin.report_cli:main"
-cathedral-verified-policy = "cathedral_thin.policy_cli:main"
-# Dry-run independent composer (independent_v1). Validates config, identity,
-# and genesis pin. Ships no chain writer and has no --broadcast or --canary flag.
-cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
-cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
-# Dedicated signed-fleet preview. Its import graph contains no Cloud client,
-# canary writer, journal, account nonce, extrinsic, or submission transport.
-cathedral-multicompute-preview = "cathedral_thin.independent_runtime.fleet_preview:main"
+# The former `cathedral-thin-validator` chain-writer entry point is retired.
+# Legacy, integration, independent, generic-preview, and recovery modules stay
+# importable for tests and historical recovery but do not install operator
+# commands. The live package intentionally exposes only the recurring relay,
+# publisher origin, candidate snapshot, current UID30 fleet workflow, and the
+# requested AMD friend preview.
 # Development-only AMD SEV-SNP preview. It has no writer mode and loads the
 # exact Compute verifier/client dependency lazily.
 cathedral-amd-sev-snp-dev-preview = "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
-# Historical launch implementations remain only behind recovery-only commands.
-# Stale old console-script shims import the same fail-closed source mains.
-cathedral-miner-axon-recover = "cathedral_thin.independent_runtime.miner_axon_cli:main"
-cathedral-uid30-recover = "cathedral_thin.uid30_launch:main"
 # Preview-only proof for two distinct physical machines behind the pinned miner
 # UID. This entry point has no submit, recover, confirm, or chain-writer mode.
 cathedral-uid30-fleet-preview = "cathedral_thin.uid30_fleet_preview:main"

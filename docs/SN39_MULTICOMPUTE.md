@@ -94,40 +94,16 @@ snapshot.
    its finalized chain axon.
 3. Reconfigure the second machine under the same worker hotkey before claiming
    same-UID credit.
-4. Run the generic preview and resolve all infrastructure blockers.
-5. Run the exact UID30 no-write proof. Review the owner-only JSON and detached
+4. Run the exact UID30 no-write proof. Review the owner-only JSON and detached
    SHA-256.
-6. Review the complete JSON and detached SHA-256. Do not submit a
+5. Review the complete JSON and detached SHA-256. Do not submit a
    `NOT_PROVEN_NO_WRITE` artifact.
-7. If the bounded consolidation is approved, stop every other UID30 writer and
+6. If the bounded consolidation is approved, stop every other UID30 writer and
    use the separate digest-bound command below.
 
 The presently published worker image does not expose the signed fleet access
 contract. Until the worker rollout completes, a same-UID two-machine proof is
 expected to remain NOT PROVEN.
-
-## Generic no-write preview
-
-```bash
-install -d -m 0700 "$HOME/.cathedral/multicompute-preview"
-cathedral-multicompute-preview \
-  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
-  --wallet-name cathedral \
-  --wallet-hotkey default \
-  --output "$HOME/.cathedral/multicompute-preview/scoring.json"
-```
-
-This dedicated command imports no Cloud client or chain writer. It has no rent,
-canary, confirmation, journal, nonce, extrinsic, or submission option. A
-complete preview exits 0 even when individual invalid candidates appear as exclusions.
-Whole-preview failures remain blockers. The output always includes:
-
-```json
-{
-  "authorized_for_chain_write": false,
-  "chain_write_submitted": false
-}
-```
 
 ## Exact UID30 consolidation proof
 

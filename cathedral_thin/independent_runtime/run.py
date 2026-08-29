@@ -806,7 +806,9 @@ class _RejectingVerifier:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-independent-live")
+    parser = argparse.ArgumentParser(
+        prog="python -m cathedral_thin.independent_runtime.run"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("profiles", help="public GET /v1/profiles")

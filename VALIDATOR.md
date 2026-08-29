@@ -963,6 +963,6 @@ applied.
 - [Score-class contract](docs/THIN_SCORE_CLASSES.md)
 - [Threat model](docs/THIN_SUBNET_DESIGN.md)
 - [Evidence record](docs/history/THIN_SUBNET_EVIDENCE.md)
-- [Operator runbook for the experimental owner-independent path](docs/THIN_SUBNET_RUNBOOK.md)
-  — a **different binary** (`cathedral-thin-validator`) with its own flags and
-  its own state file. Nothing in it applies to `cathedral-validator serve`.
+- [Historical owner-independent validator record](docs/history/THIN_SUBNET_RUNBOOK.md).
+  Its console command and deploy units are retired. The source remains only for
+  historical evidence and recovery-test coverage.

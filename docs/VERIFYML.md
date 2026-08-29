@@ -123,7 +123,7 @@ Install the thin package, then inspect the CLI:
 
 ```bash
 python -m pip install -e ".[test]"
-cathedral-verifyml --help
+python -m cathedral_thin.verifyml_cli --help
 ```
 
 ### 1. Plumbing test with a real local model runner
@@ -133,7 +133,7 @@ The runner command receives the input on stdin. `{input_path}` and
 an unattested receipt and prints `creditable_as_verified_work=false`.
 
 ```bash
-cathedral-verifyml run-local \
+python -m cathedral_thin.verifyml_cli run-local \
   --network finney --netuid 39 \
   --source-epoch <EPOCH> \
   --wallet-name miner --wallet-hotkey default \
@@ -147,7 +147,7 @@ cathedral-verifyml run-local \
   --output-file output.txt --receipt receipt.json \
   -- /usr/local/bin/llama-cli -m '{model_path}' -f '{input_path}' -n 64
 
-cathedral-verifyml verify \
+python -m cathedral_thin.verifyml_cli verify \
   --network finney --netuid 39 --current-block <BLOCK> \
   --receipt receipt.json --allow-unattested \
   --input-reveal prompt.txt --parameters-reveal parameters.json \
@@ -161,7 +161,7 @@ runtime, nonce, and block window. The command prints the nonce, issue time, and
 validator hotkey that the miner must use unchanged:
 
 ```bash
-cathedral-verifyml authorize \
+python -m cathedral_thin.verifyml_cli authorize \
   --network finney --netuid 39 \
   --source-epoch <EPOCH> \
   --wallet-name validator --wallet-hotkey default \
@@ -178,7 +178,7 @@ The attested runner then generates a genuine quote whose report data is the
 artifact using the values printed above:
 
 ```bash
-cathedral-verifyml issue \
+python -m cathedral_thin.verifyml_cli issue \
   --network finney --netuid 39 \
   --source-epoch <SAME_EPOCH> \
   --wallet-name miner --wallet-hotkey default \
@@ -202,7 +202,7 @@ policy, model/runtime allowlists, and locally hashed verifier executable all
 match:
 
 ```bash
-cathedral-verifyml verify \
+python -m cathedral_thin.verifyml_cli verify \
   --network finney --netuid 39 --current-block <BLOCK> \
   --expected-validator-hotkey <VALIDATOR_HOTKEY> \
   --receipt receipt.json --attestation-evidence quote.bin \
@@ -222,14 +222,14 @@ its result must bind the exact report data and policy digest.
 ### 3. Bundle and derive score facts
 
 ```bash
-cathedral-verifyml bundle \
+python -m cathedral_thin.verifyml_cli bundle \
   --network finney --netuid 39 --source-epoch 1 \
   --valid-from-block <FIRST> --valid-until-block <EXCLUSIVE_LAST> \
   --valid-until 2026-07-19T13:00:00.000000Z \
   --receipt receipt-a.json --receipt receipt-b.json \
   --output inference-bundle.json
 
-cathedral-verifyml score-body \
+python -m cathedral_thin.verifyml_cli score-body \
   --network finney --netuid 39 --current-block <BLOCK> \
   --bundle inference-bundle.json \
   --checkpoint state/verifyml-bundle-checkpoint.json \
@@ -250,7 +250,7 @@ cathedral-verifyml score-body \
     '/usr/local/bin/verify-tdx {evidence_path} {report_data_hex} {policy_digest} {result_path}' \
   --output score-body.json
 
-cathedral-thin-score-report sign \
+python -m cathedral_thin.report_cli sign \
   --key-file /run/secrets/validator-receipt-score.seed \
   --body score-body.json --output verified-inference-report.json
 ```

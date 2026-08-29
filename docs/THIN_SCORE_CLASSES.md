@@ -58,7 +58,7 @@ deterministic assignment rule.
 The owner creates the artifact after its delegate registration is finalized:
 
 ```bash
-cathedral-thin-contributor \
+python -m cathedral_thin.contributor_cli \
   --network test \
   --source-netuid <SOURCE_NETUID> \
   --target-netuid <TARGET_NETUID> \
@@ -215,7 +215,7 @@ epoch transaction, with:
 Then sign the immutable body:
 
 ```bash
-cathedral-thin-score-report sign \
+python -m cathedral_thin.report_cli sign \
   --key-file /run/secrets/confidential-score.seed \
   --body /var/lib/cathedral/score-class-body.json \
   --output /var/lib/cathedral/score-class-latest.json \

@@ -218,12 +218,9 @@ def test_generic_cli_writes_create_once_artifact_and_never_exposes_writer_flags(
     assert refusal["status"] == "REFUSED_NO_CHAIN_WRITE"
 
 
-def test_packaged_generic_preview_is_not_the_mixed_live_console():
+def test_generic_preview_remains_importable_but_is_not_packaged():
     source = (Path(__file__).parents[2] / "pyproject.toml").read_text()
-    assert (
-        'cathedral-multicompute-preview = "cathedral_thin.independent_runtime.fleet_preview:main"'
-        in source
-    )
+    assert "cathedral-multicompute-preview =" not in source
     run_source = (
         Path(__file__).parents[2] / "cathedral_thin/independent_runtime/run.py"
     ).read_text()

@@ -1,4 +1,4 @@
-"""The non-writing `cathedral-validator-integration-preview` CLI.
+"""The non-writing integration preview module CLI.
 
 Builds a preview bundle (signed config + CPU/Distill receipts anchored to a
 hardware-free key registry) and proves the CLI verifies it, composes the feed, and

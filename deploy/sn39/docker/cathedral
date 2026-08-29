@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cathedral SN39 validator — 3 commands, from a cathedral-validator checkout.
+# Cathedral SN39 validator no-write preview, from a repository checkout.
 #
 #   ./cathedral config      set wallet / hotkey / network (writes .env)
 #   ./cathedral up          build (first time) + run the validator
@@ -27,32 +27,33 @@ set_kv() {
   if grep -qE "^${k}=" .env; then sed -i.bak "s|^${k}=.*|${k}=${v}|" .env && rm -f .env.bak
   else printf '%s=%s\n' "$k" "$v" >> .env; fi
 }
+drop_kv() {
+  local k="$1"; [ -f .env ] || return 0
+  sed -i.bak "/^${k}=/d" .env && rm -f .env.bak
+}
 ask() { local var="$1" prompt="$2" def="${3:-}" ans; read -r -p "$prompt${def:+ [$def]}: " ans || true; printf '%s' "${ans:-$def}"; }
 
 cmd_build() { need_docker; echo ">> building $IMAGE (pulls bittensor 10.5 + pinned compute — a few minutes)…"; docker compose build; }
 
 cmd_config() {
-  local wname hotkey wpath net bcast
+  local wname hotkey wpath net
   wname="$(ask BT_WALLET_NAME "Coldkey (wallet) name" "${BT_WALLET_NAME:-}")"
   hotkey="$(ask HOTKEY "Registered VALIDATOR hotkey (not your miner)" "${CATHEDRAL_VALIDATOR_HOTKEY:-validator}")"
   wpath="$(ask WPATH "Path to your wallets" "${HOST_WALLET_PATH:-$HOME/.bittensor/wallets}")"
   net="$(ask NET "Network" "${CATHEDRAL_NETWORK:-finney}")"
-  echo; echo "Broadcast weights ON-CHAIN? Only 'yes' with a registered + STAKED validator hotkey."
-  bcast="$(ask BCAST "Type 'yes' to broadcast, anything else = shadow (safe)" "no")"
   [ -n "$wname" ] || die "a coldkey name is required"
   set_kv BT_WALLET_NAME "$wname"
   set_kv CATHEDRAL_VALIDATOR_HOTKEY "$hotkey"
   set_kv HOST_WALLET_PATH "$wpath"
   set_kv CATHEDRAL_NETWORK "$net"
-  set_kv CATHEDRAL_BROADCAST "$([ "$bcast" = yes ] && echo 1 || echo 0)"
-  echo ">> wrote .env. Check your hotkey:  ./cathedral candidate    then start:  ./cathedral up"
+  drop_kv CATHEDRAL_BROADCAST
+  echo ">> wrote .env for a no-write preview. Check your hotkey:  ./cathedral candidate    then start:  ./cathedral up"
 }
 
 cmd_up() {
   need_docker; load_env
   docker image inspect "$IMAGE" >/dev/null 2>&1 || cmd_build
-  local mode; mode="$([ "${CATHEDRAL_BROADCAST:-0}" = 1 ] && echo 'BROADCAST (on-chain)' || echo 'SHADOW (no writes)')"
-  echo ">> starting the validator — mode: $mode"
+  echo ">> starting the validator preview, no chain writes"
   docker compose up -d
   echo ">> up. Watch it:  ./cathedral logs"
 }
@@ -71,7 +72,7 @@ case "${1:-}" in
   status)        cmd_status ;;
   down|stop)     cmd_down ;;
   *) cat <<EOF
-Cathedral SN39 validator — 3 commands.
+Cathedral SN39 validator no-write preview.
 
   ./cathedral config      set wallet / hotkey / network (writes .env)
   ./cathedral up          build (first time) + run the validator

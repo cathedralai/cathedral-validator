@@ -74,10 +74,21 @@ def test_axon_recovery_parser_has_no_announce_surface() -> None:
     assert set(commands) == {"recover"}
 
 
-def test_packaged_scripts_expose_recovery_preview_and_one_bounded_fleet_write() -> None:
+def test_packaged_scripts_expose_only_current_live_and_friend_workflows() -> None:
     project = Path(__file__).parents[2] / "pyproject.toml"
     source = project.read_text(encoding="utf-8")
     for retired in (
+        "cathedral-validator-integration-preview =",
+        "cathedral-thin-validator =",
+        "cathedral-thin-e2e =",
+        "cathedral-thin-preflight =",
+        "cathedral-thin-score-report =",
+        "cathedral-verified-policy =",
+        "cathedral-independent-validator =",
+        "cathedral-independent-live =",
+        "cathedral-multicompute-preview =",
+        "cathedral-miner-axon-recover =",
+        "cathedral-uid30-recover =",
         "cathedral-independent-miner-announce =",
         "cathedral-second-miner-announce =",
         "cathedral-second-miner-plan =",
@@ -85,9 +96,6 @@ def test_packaged_scripts_expose_recovery_preview_and_one_bounded_fleet_write() 
         "cathedral-uid30-launch =",
     ):
         assert retired not in source
-    assert "cathedral-miner-axon-recover =" in source
-    assert "cathedral-uid30-recover =" in source
-    assert "cathedral-multicompute-preview =" in source
     assert "cathedral-uid30-fleet-preview =" in source
     assert (
         'cathedral-uid30-fleet-submit = "cathedral_thin.uid30_fleet_submit:main"'
