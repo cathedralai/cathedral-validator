@@ -57,7 +57,10 @@ result. Multi-machine credit requires all of these exact QVL fields:
 
 The internal machine ID is SHA-256 over that validated domain-tagged identity.
 The scorer has a profile-neutral aggregation boundary, but the live verifier is
-TDX-only. AMD SEV-SNP fleet identity remains NOT PROVEN and disabled.
+TDX-only. AMD SEV-SNP fleet identity remains NOT PROVEN and disabled for
+production scoring and chain writes. The separate
+[AMD SEV-SNP development preview](AMD_SEV_SNP_DEV_PREVIEW.md) has no writer and
+does not alter this production boundary.
 
 ## Signed worker access
 

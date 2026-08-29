@@ -1,0 +1,35 @@
+{
+  "schema": "cathedral_amd_sev_snp_development_preview_config_v1",
+  "environment": "development",
+  "network": "finney",
+  "netuid": 39,
+  "validator_hotkey": "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw",
+  "validator_wallet": {
+    "name": "cathedral",
+    "hotkey": "default",
+    "path": null
+  },
+  "scoring_window": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "review_challenge_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "snpguest_path": "/opt/cathedral/bin/snpguest",
+  "processor_generation": "milan",
+  "allowed_measurements": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "minimum_reported_tcb": "0x0101000000000101",
+  "timeout_seconds": 30,
+  "targets": [
+    {
+      "uid": 124,
+      "miner_hotkey": "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G",
+      "endpoint": "https://1.1.1.1:8081",
+      "tls_ca_cert": "/etc/cathedral/miner-1-tls.pem"
+    },
+    {
+      "uid": 124,
+      "miner_hotkey": "5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G",
+      "endpoint": "https://8.8.8.8:8081",
+      "tls_ca_cert": "/etc/cathedral/miner-2-tls.pem"
+    }
+  ]
+}

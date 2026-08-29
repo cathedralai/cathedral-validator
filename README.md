@@ -122,7 +122,10 @@ never signs or submits. See the current fleet runbook for the full gates and
 outcome targets.
 
 TDX is the only enabled fleet identity profile. AMD SEV-SNP fleet identity
-remains NOT PROVEN and disabled.
+remains NOT PROVEN and disabled for production scoring and chain writes. A
+separate [AMD SEV-SNP development preview](docs/AMD_SEV_SNP_DEV_PREVIEW.md)
+supports bounded friend testing. It produces a local, zero-burn artifact and
+has no chain writer.
 
 The former dedicated second-hotkey, UID8/UID124 axon, and two-UID successor
 commands are retired. Their implementations remain only where historical
