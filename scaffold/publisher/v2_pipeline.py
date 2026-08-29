@@ -68,7 +68,9 @@ _ENV_TRUTHY = {"1", "true", "yes", "on"}
 _V2_PM_ENV_MAP = {
     "CATHEDRAL_PERMINER_ENABLED": "CATHEDRAL_V2_PERMINER_ENABLED",
     "CATHEDRAL_PERMINER_SEED_SECRET": "CATHEDRAL_V2_PERMINER_SEED_SECRET",
-    "CATHEDRAL_PERMINER_EPOCH_HOURS": "CATHEDRAL_V2_PERMINER_EPOCH_HOURS",
+    "CATHEDRAL_PERMINER_EPOCH_BUCKET_HOURS": (
+        "CATHEDRAL_V2_PERMINER_EPOCH_BUCKET_HOURS"
+    ),
     "CATHEDRAL_PERMINER_MAX_PAGE_LIMIT": "CATHEDRAL_V2_PERMINER_MAX_PAGE_LIMIT",
     "CATHEDRAL_PERMINER_ALLOTMENT_T1": "CATHEDRAL_V2_PERMINER_ALLOTMENT_T1",
     "CATHEDRAL_PERMINER_ALLOTMENT_T2": "CATHEDRAL_V2_PERMINER_ALLOTMENT_T2",
@@ -81,6 +83,11 @@ _V2_PM_ENV_MAP = {
     "CATHEDRAL_PERMINER_NCLAUSES_T1": "CATHEDRAL_V2_PERMINER_NCLAUSES_T1",
     "CATHEDRAL_PERMINER_NCLAUSES_T2": "CATHEDRAL_V2_PERMINER_NCLAUSES_T2",
 }
+
+
+def v2_pm_env_pinned() -> bool:
+    """Return whether this process injected the V2 per-miner env bridge."""
+    return _PM_ENV_PINNED
 
 
 def _scoring_identity(store: Store, hotkey: str) -> str:
@@ -182,6 +189,14 @@ def pin_v2_pm_env() -> bool:
                     f"differs from {v2_name}"
                 )
                 return False
+        if launch_profile.production():
+            # The named production profile owns challenge identity and scoring.
+            # Validation has already rejected every legacy or V2 tier override,
+            # so every replica receives the same exact generator contract here.
+            for legacy, value in (
+                launch_profile.V2_CONVERGED_PERMINER_LEGACY_ENV.items()
+            ):
+                os.environ[legacy] = value
         for legacy, v2_name in _V2_PM_ENV_MAP.items():
             if legacy == "CATHEDRAL_PERMINER_ENABLED":
                 continue
@@ -412,7 +427,7 @@ def verify_one(store: Store, row: dict[str, Any], blob_store, *, max_blob_bytes:
     """Verify one V2 manifest row and finalize it."""
     rid = str(row["id"])
     try:
-        manifest = json.loads(row["manifest_json"])
+        json.loads(row["manifest_json"])
     except Exception:
         _finish_rejected(store, rid, "invalid_manifest_json")
         return {"id": rid, "status": STATUS_REJECTED, "reason": "invalid_manifest_json"}
@@ -685,7 +700,6 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
     import hashlib as _h
     from . import per_miner as pm
     from ..dimacs import parse_cnf
-    from . import real_corpus
     from . import v2_cnf_store
 
     rid = str(row["id"])
@@ -800,15 +814,20 @@ def verify_bitset_one(store: Store, row: dict[str, Any]) -> dict[str, Any]:
                 "miner_hotkey": hk, "challenge_id": cid,
                 "pm_payout_bridged": pm_payout_bridge_enabled()}
     except Exception as exc:  # keep it claimable next tick rather than lost
+        error_name = type(exc).__name__
+        error_reason = str(exc)[:120]
+
         def _unlock(conn):
             conn.execute(
                 "UPDATE v2_submit_events SET locked_by=NULL, locked_until_iso=NULL, "
-                "last_error=? WHERE id=?", (f"bitset_verify_error:{type(exc).__name__}", rid))
+                "last_error=? WHERE id=?",
+                (f"bitset_verify_error:{error_name}", rid),
+            )
         try:
             store.write(_unlock)
         except Exception:
             pass
-        return {"id": rid, "status": "error", "reason": str(exc)[:120]}
+        return {"id": rid, "status": "error", "reason": error_reason}
 
 
 def process_bitset_batch(store: Store, *, worker_id: str | None = None,

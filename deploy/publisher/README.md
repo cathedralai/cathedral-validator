@@ -23,9 +23,8 @@ uvicorn scaffold.publisher.server:app --host 127.0.0.1 --port 8012 --workers 1 -
 A console-script convenience wrapper is also installed by `.[publisher]`.
 `cathedral-publisher-serve` calls `scaffold.publisher.server:_serve_cli` and
 reads `PORT` and `CATHEDRAL_PUBLISHER_HOST` from the environment. Every shipped
-entrypoint fixes the worker count at one. SQLite does not provide a
-cross-process singleton lock for the in-memory signed-vector cache, so a
-multi-worker origin is unsupported.
+entrypoint fixes the worker count at one. The in-memory signed-vector cache is
+process-local, so a multi-worker origin is unsupported.
 
 ## Venv
 
@@ -50,6 +49,29 @@ The unit reads
 `cathedral-scorer-sn39.env.example`. Install it with mode 0600 and owner
 `cathedral-publisher`. Commit no signing key, database credential, or bucket
 credential.
+
+The unit declares `CATHEDRAL_ENV=production`. Production has one supported
+profile: `CATHEDRAL_LAUNCH_PROFILE=v2-converged`. An unset or unknown profile
+is a startup error. The unset posture exists only for local development and
+compatibility tests. Production fixes `CATHEDRAL_SERVICE_ROLE=all` and enables
+the V2 verification worker, so admitted submissions are drained into scoring.
+
+The shipped EnvironmentFile pins the canonical recurring `validated_supply_v1`
+producer and relay contract: 90% validated Intel TDX and 10% fixed burn.
+Invalid scoring, per-miner, payable-hotkey, challenge-source, tier-map, and
+registered numeric values stop startup. Development bypasses and public example
+placeholders stop startup. Production also requires the shared Postgres store
+used by both V2 verification and scoring, plus a signing key whose derived public
+key matches the canonical relay pin. Startup verifies the store opened as
+Postgres and requires registered-hotkey filtering before signing.
+
+Startup prints one `cathedral_publisher_effective_config_v1` JSON record. It
+contains the selected posture, protocol, accepted storage backend, signer
+identity, and economic modes.
+Secret values and the database URL are represented only as `<redacted:set>`.
+Compare this record across every origin process before enabling the service.
+The complete operator-facing contract is in
+[`docs/PUBLISHER_CONFIGURATION.md`](../../docs/PUBLISHER_CONFIGURATION.md).
 
 The loopback endpoint is not a supported validator source. The immutable SN39
 runtime requires `https://api.cathedral.computer`.
@@ -117,10 +139,11 @@ active.
 
 ## Allocation contract
 
-v2 (90% TDX / 10% burn) is the byte-identical default — leave
-`CATHEDRAL_ALLOCATION_CONTRACT` unset. v3 (70% TDX / 30% CyberGym / 0% burn) is
-enabled only in the coordinated Phase 5 cutover and only after CyberGym is
-confirmed healthy. See the cutover runbook and `../../config/`.
+The shipped file explicitly selects v2, the existing 90% TDX / 10% burn
+contract. v3 (70% TDX / 30% CyberGym / 0% fixed burn) remains a coordinated
+cutover and requires its separate gates. Do not edit the production file to
+v3 as an ordinary configuration change. See the cutover runbook and
+`../../config/`.
 
 ## Validator journal boundary
 

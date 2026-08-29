@@ -214,15 +214,9 @@ def configured_intel_verifier() -> IntelCollateralVerifier | None:
 
 
 def _production_mode() -> bool:
-    env = (
-        os.environ.get("CATHEDRAL_ENV", "")
-        or os.environ.get("ENV", "")
-        or os.environ.get("APP_ENV", "")
-    ).strip().lower()
-    if env in {"prod", "production", "mainnet"}:
-        return True
-    return os.environ.get("CATHEDRAL_PRODUCTION", "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    from . import launch_profile
+
+    return launch_profile.production()
 
 
 # --------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 """Proof that the validator tree stands alone without the SAT lane's game/ package.
 
 This repo copies scaffold/publisher/app.py byte-identically from upstream, and
-that file contains two `from game.arena import ...` statements (:3764 and
-:4211). Both are function-local and sit behind an environment-variable feature
+that file contains two `from game.arena import ...` statements (:3830 and
+:4277). Both are function-local and sit behind an environment-variable feature
 gate, so they never execute on the validator paths this repo ships. These tests
 hold that claim to account rather than asserting it in prose.
 
@@ -115,12 +115,13 @@ def test_the_only_lazy_game_edges_are_the_two_known_publisher_call_sites():
 
     # Line numbers move whenever app.py is re-mirrored from upstream; the invariant is
     # the SET: exactly these two lazy call sites, both game.arena, both inside
-    # scaffold/publisher/app.py. Updated for the 5c38016 mirror (3764 -> 3775,
-    # 4211 -> 4222); the count and the identity are unchanged, which is what this test
-    # exists to protect.
+    # scaffold/publisher/app.py. Updated after strict startup added finite-float
+    # checks, storage-source enforcement, and production pinning (3787 -> 3939,
+    # 4234 -> 4386); the count
+    # and identity are unchanged, which is what this test protects.
     assert edges == {
-        ("scaffold/publisher/app.py", 3775, "game.arena"),
-        ("scaffold/publisher/app.py", 4222, "game.arena"),
+        ("scaffold/publisher/app.py", 3939, "game.arena"),
+        ("scaffold/publisher/app.py", 4386, "game.arena"),
     }, f"the set of SAT-lane import sites changed: {sorted(edges)}"
 
 

@@ -80,6 +80,31 @@ def test_converged_profile_pins_canonical_env_without_extra_flag(monkeypatch):
     assert v2_pipeline.v2_perminer_enabled() is True
 
 
+def test_production_profile_pins_code_owned_tier_contract(monkeypatch):
+    monkeypatch.setenv("CATHEDRAL_ENV", "production")
+    monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
+    monkeypatch.setenv("CATHEDRAL_V2_PERMINER_SEED_SECRET", "canonical-seed")
+
+    assert v2_pipeline.pin_v2_pm_env() is True
+    assert pm.epoch_bucket_hours() == 1
+    assert pm.assignment_page_limit_max() == 50
+    assert pm.allotment_for(1) == 10_000
+    assert pm.allotment_for(2) == 10_000
+    assert pm.weight_for(1) == 1.0
+    assert pm.weight_for(2) == 2.0
+    assert pm.method_for(1) == "biased"
+    assert pm.method_for(2) == "ajm"
+    assert pm.shape_for(1) == (400, 1704)
+    assert pm.shape_for(2) == (400, 1704)
+
+
+def test_v2_epoch_alias_targets_the_live_bucket_key():
+    assert v2_pipeline._V2_PM_ENV_MAP[
+        "CATHEDRAL_PERMINER_EPOCH_BUCKET_HOURS"
+    ] == "CATHEDRAL_V2_PERMINER_EPOCH_BUCKET_HOURS"
+    assert "CATHEDRAL_PERMINER_EPOCH_HOURS" not in v2_pipeline._V2_PM_ENV_MAP
+
+
 def test_converged_profile_pinned_v2_pm_env_is_lock_free(monkeypatch):
     monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
     monkeypatch.setenv("CATHEDRAL_PERMINER_SEED_SECRET", "canonical-seed")

@@ -6,8 +6,8 @@
 # StateDirectory=/LogsDirectory= the publisher units declare; declaring them
 # here converges a fresh host and is a no-op on an established one.
 #
-# The DB directory (/data or a DATABASE_URL Postgres backend) is provisioned out
-# of band and is deliberately NOT declared here.
+# The required Postgres database is provisioned out of band and has no local
+# data directory to declare here.
 d /var/lib/cathedral-publisher :0700 :cathedral-publisher :cathedral-publisher -
 d /var/log/cathedral-publisher :0750 :cathedral-publisher :cathedral-publisher -
 # The per-role EnvironmentFile directory. Files inside carry the signing key and

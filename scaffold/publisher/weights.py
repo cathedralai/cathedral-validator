@@ -285,9 +285,19 @@ def _persist_vector(store: Store, vec: dict[str, Any]) -> dict[str, Any]:
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.environ.get(name, "") or default)
+        value = float(os.environ.get(name, "") or default)
     except ValueError:
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise VectorError(f"invalid numeric {name}={os.environ.get(name)!r}")
         return default
+    if not math.isfinite(value):
+        from . import launch_profile
+
+        if launch_profile.strict():
+            raise VectorError(f"invalid finite numeric {name}={os.environ.get(name)!r}")
+    return value
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -302,12 +312,17 @@ def window_hours() -> float:
 
 
 def mode() -> str:
-    m = os.environ.get(MODE_ENV, "proportional").strip().lower()
-    return (
-        m
-        if m in ("flat_recent", "proportional", "row_score_recent")
-        else "proportional"
-    )
+    m = os.environ.get(MODE_ENV, "proportional").strip().lower() or "proportional"
+    if m in ("flat_recent", "proportional", "row_score_recent"):
+        return m
+    from . import launch_profile
+
+    if launch_profile.strict():
+        raise VectorError(
+            f"unknown {MODE_ENV}={m!r}; expected flat_recent, proportional, "
+            "or row_score_recent"
+        )
+    return "proportional"
 
 
 def row_score_task_types() -> set[str]:
@@ -519,8 +534,17 @@ def perminer_scoring_mode() -> str:
     pm_primary: make assigned solves primary. Public-board baseline is zero.
     assigned_only: replace shared scoring with the assigned-only vector.
     """
-    raw = os.environ.get(PERMINER_SCORING_MODE_ENV, "bonus").strip().lower()
-    return raw if raw in {"bonus", "pm_primary", "assigned_only"} else "bonus"
+    raw = os.environ.get(PERMINER_SCORING_MODE_ENV, "bonus").strip().lower() or "bonus"
+    if raw in {"bonus", "pm_primary", "assigned_only"}:
+        return raw
+    from . import launch_profile
+
+    if launch_profile.strict():
+        raise VectorError(
+            f"unknown {PERMINER_SCORING_MODE_ENV}={raw!r}; expected bonus, "
+            "pm_primary, or assigned_only"
+        )
+    return "bonus"
 
 
 def perminer_public_baseline() -> float:
@@ -571,8 +595,16 @@ def _perminer_scoring_shadow() -> bool:
 
 
 def payable_hotkeys_mode() -> str:
-    raw = os.environ.get(PAYABLE_HOTKEYS_ENV, "off").strip().lower()
-    return raw if raw in {"off", "mark", "filter"} else "off"
+    raw = os.environ.get(PAYABLE_HOTKEYS_ENV, "off").strip().lower() or "off"
+    if raw in {"off", "mark", "filter"}:
+        return raw
+    from . import launch_profile
+
+    if launch_profile.strict():
+        raise VectorError(
+            f"unknown {PAYABLE_HOTKEYS_ENV}={raw!r}; expected off, mark, or filter"
+        )
+    return "off"
 
 
 def payable_hotkeys_max_age_secs() -> float:
@@ -1709,6 +1741,10 @@ def _perminer_policy_status(
 def _effective_mode(store: Store, since: str) -> str:
     requested = mode()
     if requested == "proportional" and not _proportional_ledger_has_rows(store, since):
+        from . import launch_profile
+
+        if launch_profile.strict():
+            return "proportional_empty"
         return "flat_recent_fallback"
     return requested
 
@@ -2072,7 +2108,16 @@ def compose_scores(
                 for hk in hks[idk]:
                     base[hk] = per
             return finish_base(base)
-        # no in-window claim rows -> fall through to flat
+        # Compatibility historically substituted the legacy eval_runs feed
+        # when the proportional ledger was empty. A named launch profile must
+        # not pay a different source silently: retain an empty proportional
+        # base and let explicitly configured PM/external lanes or burn policy
+        # handle it.
+        from . import launch_profile
+
+        if launch_profile.strict():
+            return finish_base({})
+        # no in-window claim rows -> compatibility-only flat fallback
 
     feed = store.query(
         "SELECT DISTINCT miner_hotkey FROM eval_runs WHERE ran_at > ?", (since,)
@@ -2258,7 +2303,8 @@ def build_signed_vector(
     requested_mode = mode()
     effective_mode = _effective_mode(store, since)
     proportional_ledger_empty = (
-        requested_mode == "proportional" and effective_mode == "flat_recent_fallback"
+        requested_mode == "proportional"
+        and effective_mode in {"flat_recent_fallback", "proportional_empty"}
     )
     pm_status = _perminer_policy_status(store, now=now, coldkey_of=coldkey_of)
     external_status = _external_scores_policy_status(store, now=now)

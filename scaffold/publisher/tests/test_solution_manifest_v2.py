@@ -438,6 +438,8 @@ def test_solution_manifest_v2_submit_bitset_e2e_scores_shadow_weights(tmp_path, 
     assert second.status_code == 200
     received = first.json()
     assert received["schema"] == "cathedral.v2.submit_bitset_receipt.v1"
+    assert "results_path" not in received
+    assert "results_path" not in second.json()
     assert received["status"] == "received"
     assert received["open"] is True
     assert received["terminal"] is False

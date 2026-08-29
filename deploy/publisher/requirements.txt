@@ -31,8 +31,8 @@ bittensor-wallet==4.1.0
 blake3==1.0.8
 
 # --- Postgres backend (MVCC kills the single-lock wedge) ---
-# The store flips to the Postgres pool when DATABASE_URL=postgres[ql]://… is
-# set; absent it, the SQLite backend runs.
+# The production profile requires DATABASE_URL=postgres[ql]://… and verifies
+# the opened store uses this pool before serving.
 psycopg2-binary==2.9.10
 
 # --- broadcast tier: optional S3-compatible CNF bucket backend ---
