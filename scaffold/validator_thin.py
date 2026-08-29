@@ -177,6 +177,34 @@ SN39_UID30_SUCCESSOR_PREDECESSOR_SOURCE_EPOCH = 8_945_366
 SN39_UID30_SUCCESSOR_PREDECESSOR_UID = 124
 SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES = 1_048_576
 SN39_UID30_SUCCESSOR_ROLLBACK_B64_MAX_BYTES = 262_144
+SN39_UID30_FLEET_SCHEMA = "cathedral_sn39_uid30_same_uid_fleet_consolidation_v1"
+SN39_UID30_FLEET_POLICY = "uid30_two_verified_machines_one_uid_100_v1"
+SN39_UID30_FLEET_PREDECESSOR_ID = (
+    "sha256:852b5a6b607d1f1d13100b9990af720fd213ab187868eb799f02031264faaf05"
+)
+SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256 = (
+    "f9d0f506777b2f54227ba7398c5c34bae9f76d3765badb3f08912a38a78c3d89"
+)
+SN39_UID30_FLEET_PREDECESSOR_IDENTITY_SHA256 = (
+    "d1537df911ef280cf3583b615acb36c3f3caef0b3442c96b9987afc0b420c105"
+)
+SN39_UID30_FLEET_PREDECESSOR_INTENT_SHA256 = (
+    "189e72cc874baaac42bc661848669ae5c991dd4f629e4c29eab6a5054546eb65"
+)
+SN39_UID30_FLEET_PREDECESSOR_RECEIPT_SHA256 = (
+    "6e040c668388bb1b03ec8921d2df559471b7aed66e456d574d820a4efb7a19f8"
+)
+SN39_UID30_FLEET_PREDECESSOR_EXTRINSIC_HASH = (
+    "0x11b95b5316ac73453e38a5cf428b822f2552611d9f0783fb47db9d3e8afcff6b"
+)
+SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH = (
+    "0xa715a5778304f098b906d7acd064c91ca08f7f07e011b65f4b3f8f50a6dac104"
+)
+SN39_UID30_FLEET_PREDECESSOR_BLOCK = 8_948_273
+SN39_UID30_FLEET_PREDECESSOR_SOURCE_EPOCH = 8_948_269
+SN39_UID30_FLEET_PREDECESSOR_SECOND_UID = 8
+SN39_UID30_FLEET_TARGET_UID = 124
+SN39_UID30_FLEET_BUDGET_SCOPE = "uid30_fleet_consolidation"
 # The one reviewed UID30 launch performs a complete finalized-state and TDX
 # revalidation immediately before signing.  That read is slightly longer than
 # one Finney block, so requiring the finalized head to remain byte-for-byte
@@ -3694,6 +3722,7 @@ class ChainPreflight:
     subnet_worst_case_evictions: int | None = None
     subnet_eviction_depth: tuple[tuple[str, int], ...] = ()
     finalized_hash: str = ""
+    connection_target: str = ""
 
 
 @dataclass(frozen=True)
@@ -3786,6 +3815,19 @@ def _uid30_successor_marked(identity: dict[str, Any]) -> bool:
     )
 
 
+def _uid30_fleet_marked(identity: dict[str, Any]) -> bool:
+    """Recognize any fragment of the one-UID fleet consolidation contract."""
+
+    return bool(
+        {
+            "fleet_consolidation_schema",
+            "fleet_consolidation_contract",
+            "fleet_preview_sha256",
+            "predecessor_uid_hotkeys",
+        }.intersection(identity)
+    )
+
+
 def _reviewed_uid30_attempt_id(identity: dict[str, Any]) -> str:
     """Hash the historical newline-terminated reviewed-UID30 identity."""
 
@@ -3865,6 +3907,282 @@ def _strict_uid30_successor_proofs(
             f"UID30 successor {label} does not prove two distinct machines"
         )
     return tuple(sorted(expected_by_hotkey.items()))
+
+
+def _strict_uid30_fleet_machine_proofs(
+    rows: object,
+    *,
+    mapping_block: int,
+    label: str,
+) -> tuple[str, str]:
+    """Validate two distinct QVL-bound machines serving the one pinned UID."""
+
+    required = {
+        "uid",
+        "hotkey",
+        "endpoint",
+        "channel_id",
+        "stable_platform_id",
+        "machine_id",
+        "quote_sha256",
+        "report_data_sha256",
+        "qvl_status",
+        "qvl_digest",
+        "sat_rule",
+        "verified_work_units",
+        "anchor_number",
+        "anchor_hash",
+    }
+    if (
+        not isinstance(rows, list)
+        or len(rows) != 2
+        or any(not isinstance(row, dict) or set(row) != required for row in rows)
+    ):
+        raise wire.VectorError(f"UID30 fleet {label} has no two exact machine proofs")
+
+    distinct: dict[str, set[str]] = {
+        "endpoint": set(),
+        "channel_id": set(),
+        "stable_platform_id": set(),
+        "machine_id": set(),
+        "quote_sha256": set(),
+        "report_data_sha256": set(),
+    }
+    for row in rows:
+        endpoint = row.get("endpoint")
+        parsed = urlsplit(str(endpoint or ""))
+        try:
+            address = ipaddress.ip_address(parsed.hostname or "")
+            port = parsed.port
+        except ValueError as exc:
+            raise wire.VectorError(
+                f"UID30 fleet {label} endpoint is malformed"
+            ) from exc
+        stable = row.get("stable_platform_id")
+        machine = row.get("machine_id")
+        if (
+            row.get("uid") != SN39_UID30_FLEET_TARGET_UID
+            or row.get("hotkey") != SN39_UID30_LAUNCH_MINER_HOTKEY
+            or parsed.scheme != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or port != 8081
+            or not isinstance(address, ipaddress.IPv4Address)
+            or not address.is_global
+            or stable is None
+            or re.fullmatch(r"tdx-platform-sha256:[0-9a-f]{64}", str(stable)) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(machine or "")) is None
+            or machine != hashlib.sha256(str(stable).encode("ascii")).hexdigest()
+            or row.get("qvl_status") != PASS
+            or row.get("qvl_digest") != SN39_UID30_SUCCESSOR_QVL_SHA256
+            or row.get("sat_rule") != SN39_UID30_SUCCESSOR_SAT_RULE
+            or row.get("verified_work_units") != 20
+            or type(row.get("anchor_number")) is not int
+            or row["anchor_number"] <= 0
+            or row["anchor_number"] > mapping_block
+            or re.fullmatch(r"0x[0-9a-f]{64}", str(row.get("anchor_hash", ""))) is None
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(row.get(field, ""))) is None
+                for field in (
+                    "channel_id",
+                    "quote_sha256",
+                    "report_data_sha256",
+                )
+            )
+        ):
+            raise wire.VectorError(f"UID30 fleet {label} machine proof is malformed")
+        for field in distinct:
+            distinct[field].add(str(row[field]))
+    if any(len(values) != 2 for values in distinct.values()):
+        raise wire.VectorError(
+            f"UID30 fleet {label} does not prove two distinct physical machines"
+        )
+    return tuple(sorted(str(row["endpoint"]) for row in rows))  # type: ignore[return-value]
+
+
+def _strict_zero_burn_uid30_fleet_contract(
+    identity: dict[str, Any], *, lane: object
+) -> dict[str, Any]:
+    """Validate the one immutable two-machine, one-UID consolidation contract."""
+
+    raw_weights = identity.get("uid_weights")
+    raw_hotkeys = identity.get("uid_hotkeys")
+    predecessor_hotkeys = identity.get("predecessor_uid_hotkeys")
+    if (
+        raw_weights != [[SN39_UID30_FLEET_TARGET_UID, 1.0]]
+        or raw_hotkeys
+        != [[SN39_UID30_FLEET_TARGET_UID, SN39_UID30_LAUNCH_MINER_HOTKEY]]
+        or predecessor_hotkeys
+        != [
+            [
+                SN39_UID30_FLEET_PREDECESSOR_SECOND_UID,
+                SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+            ],
+            [SN39_UID30_FLEET_TARGET_UID, SN39_UID30_LAUNCH_MINER_HOTKEY],
+        ]
+    ):
+        raise wire.VectorError("UID30 fleet consolidation rows are not exact")
+
+    mapping_block = identity.get("mapping_block")
+    source_epoch = identity.get("source_epoch")
+    preview_digest = identity.get("fleet_preview_sha256")
+    owner = identity.get("subnet_owner_hotkey")
+    safety = identity.get("uid_safety")
+    eligibility = identity.get("validator_eligibility")
+    fresh = identity.get("fresh_miner_evidence")
+    reviewed = identity.get("reviewed_preview")
+    predecessor = identity.get("predecessor")
+    if type(mapping_block) is not int or mapping_block <= 0:
+        raise wire.VectorError("UID30 fleet mapping block is malformed")
+    _strict_uid30_fleet_machine_proofs(
+        fresh,
+        mapping_block=mapping_block,
+        label="fresh evidence",
+    )
+    if not isinstance(reviewed, dict):
+        raise wire.VectorError("UID30 fleet reviewed preview is missing")
+    _strict_uid30_fleet_machine_proofs(
+        reviewed.get("machines"),
+        mapping_block=mapping_block,
+        label="reviewed evidence",
+    )
+
+    predecessor_body = {
+        "attempt_id": SN39_UID30_FLEET_PREDECESSOR_ID,
+        "identity_sha256": SN39_UID30_FLEET_PREDECESSOR_IDENTITY_SHA256,
+        "intent_sha256": SN39_UID30_FLEET_PREDECESSOR_INTENT_SHA256,
+        "receipt_sha256": SN39_UID30_FLEET_PREDECESSOR_RECEIPT_SHA256,
+        "canonical_journal_filename": SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME,
+        "journal_identity_sha256": SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_IDENTITY,
+        "original_journal_sha256": SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256,
+        "extrinsic_hash": SN39_UID30_FLEET_PREDECESSOR_EXTRINSIC_HASH,
+        "block_hash": SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
+        "block_number": SN39_UID30_FLEET_PREDECESSOR_BLOCK,
+        "version_key": SN39_UID30_LAUNCH_VERSION_KEY,
+        "wire": [
+            [SN39_UID30_FLEET_PREDECESSOR_SECOND_UID, 65535],
+            [SN39_UID30_FLEET_TARGET_UID, 65535],
+        ],
+    }
+    exact_predecessor = {
+        **predecessor_body,
+        "sha256": _sha256_document(predecessor_body),
+    }
+    expected_reviewed_keys = {
+        "schema",
+        "status",
+        "evidence_anchor",
+        "finalized_recheck",
+        "current_uid30_storage",
+        "target_hotkey",
+        "target_uid",
+        "root_axon",
+        "fleet_endpoints",
+        "machines",
+        "raw_uid_units",
+        "target_wire_row",
+        "qvl_digest",
+        "burn_destination",
+        "burn_weight",
+    }
+    if (
+        lane != "authority"
+        or identity.get("network") != "finney"
+        or identity.get("netuid") != 39
+        or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or identity.get("validator_hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or identity.get("fleet_consolidation_schema") != SN39_UID30_FLEET_SCHEMA
+        or identity.get("fleet_consolidation_contract") != SN39_UID30_FLEET_POLICY
+        or identity.get("allocation_contract") != SN39_UID30_FLEET_POLICY
+        or not isinstance(preview_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", preview_digest) is None
+        or identity.get("report_id") != preview_digest
+        or source_epoch != mapping_block
+        or not _canonical_uid30_launch_ss58(owner)
+        or owner
+        in {
+            SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+            SN39_UID30_LAUNCH_MINER_HOTKEY,
+            SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+        }
+        or identity.get("burn_destination") is not None
+        or identity.get("burn_share") != 0.0
+        or "burn_hotkey" in identity
+        or not isinstance(safety, dict)
+        or not safety
+        or not isinstance(eligibility, dict)
+        or set(eligibility)
+        != {
+            "uid",
+            "hotkey",
+            "validator_permit",
+            "stake_rao",
+            "stake_threshold_rao",
+            "last_update",
+            "blocks_since_last_update",
+            "weights_rate_limit",
+            "commit_reveal_enabled",
+            "mechanism_count",
+            "weights_version_key",
+            "min_allowed_weights",
+            "max_weight_limit",
+        }
+        or eligibility.get("uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or eligibility.get("hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or eligibility.get("validator_permit") is not True
+        or type(eligibility.get("stake_rao")) is not int
+        or type(eligibility.get("stake_threshold_rao")) is not int
+        or eligibility["stake_rao"] < eligibility["stake_threshold_rao"]
+        or eligibility.get("last_update") != SN39_UID30_FLEET_PREDECESSOR_BLOCK
+        or type(eligibility.get("blocks_since_last_update")) is not int
+        or type(eligibility.get("weights_rate_limit")) is not int
+        or eligibility["blocks_since_last_update"] <= eligibility["weights_rate_limit"]
+        or eligibility.get("commit_reveal_enabled") is not False
+        or eligibility.get("mechanism_count") != 1
+        or type(eligibility.get("weights_version_key")) is not int
+        or eligibility["weights_version_key"] < 0
+        or eligibility.get("min_allowed_weights") != 1
+        or eligibility.get("max_weight_limit") != 1.0
+        or identity.get("uid_safety_sha256")
+        != _sha256_document(safety).removeprefix("sha256:")
+        or identity.get("fresh_evidence_sha256")
+        != _sha256_document({"proofs": fresh}).removeprefix("sha256:")
+        or not isinstance(reviewed, dict)
+        or set(reviewed) != expected_reviewed_keys
+        or reviewed.get("schema") != "cathedral_uid30_same_uid_fleet_preview_v1"
+        or reviewed.get("status") != "PROVEN_TWO_MACHINE_NO_WRITE_PREVIEW"
+        or reviewed.get("current_uid30_storage")
+        != [
+            [SN39_UID30_FLEET_PREDECESSOR_SECOND_UID, 65535],
+            [SN39_UID30_FLEET_TARGET_UID, 65535],
+        ]
+        or reviewed.get("target_hotkey") != SN39_UID30_LAUNCH_MINER_HOTKEY
+        or reviewed.get("target_uid") != SN39_UID30_FLEET_TARGET_UID
+        or reviewed.get("raw_uid_units") != 40
+        or reviewed.get("target_wire_row") != [[SN39_UID30_FLEET_TARGET_UID, 65535]]
+        or reviewed.get("qvl_digest") != SN39_UID30_SUCCESSOR_QVL_SHA256
+        or reviewed.get("burn_destination") is not None
+        or reviewed.get("burn_weight") != 0
+        or predecessor != exact_predecessor
+        or identity.get("operator_declared_authority") is not True
+        or identity.get("exclusive_writer_assertion")
+        != {
+            "asserted": True,
+            "scope": "all_other_uid30_processes_and_hosts_stopped",
+        }
+    ):
+        raise wire.VectorError(
+            "zero-burn UID30 fleet consolidation differs from the reviewed contract"
+        )
+    return {
+        "kind": "same_uid_fleet_consolidation",
+        "owner": owner,
+        "uid_weights": ((SN39_UID30_FLEET_TARGET_UID, 1.0),),
+        "uid_hotkeys": ((SN39_UID30_FLEET_TARGET_UID, SN39_UID30_LAUNCH_MINER_HOTKEY),),
+    }
 
 
 def _strict_zero_burn_uid30_successor_contract(
@@ -4029,6 +4347,8 @@ def _strict_zero_burn_uid30_contract(
 ) -> dict[str, Any] | None:
     """Strictly classify either source-owned zero-burn UID30 contract."""
 
+    if _uid30_fleet_marked(identity):
+        return _strict_zero_burn_uid30_fleet_contract(identity, lane=lane)
     if _uid30_successor_marked(identity):
         return _strict_zero_burn_uid30_successor_contract(identity, lane=lane)
     owner = _strict_zero_burn_uid30_owner_legacy(identity, lane=lane)
@@ -4997,6 +5317,52 @@ def _require_uid_mapping_stability(
     }
 
 
+def _require_exact_uid30_fleet_safety(safety: object) -> dict[str, Any]:
+    """Refuse the fixed fleet write unless both predecessor UIDs remain safe."""
+
+    if not isinstance(safety, dict):
+        raise wire.VectorError("UID30 fleet safety artifact is not an object")
+    rotation = safety.get("rotation")
+    targets = rotation.get("targets") if isinstance(rotation, Mapping) else None
+    expected = [
+        (
+            SN39_UID30_FLEET_PREDECESSOR_SECOND_UID,
+            SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+            True,
+        ),
+        (
+            SN39_UID30_FLEET_TARGET_UID,
+            SN39_UID30_LAUNCH_MINER_HOTKEY,
+            True,
+        ),
+    ]
+    observed: list[tuple[object, object, object]] = []
+    if isinstance(targets, list):
+        for row in targets:
+            if not isinstance(row, Mapping):
+                break
+            observed.append(
+                (
+                    row.get("uid"),
+                    row.get("hotkey"),
+                    row.get("registration_replacement_safe") is True,
+                )
+            )
+    if (
+        safety.get("schema") != "cathedral_sn39_uid_safety_v2"
+        or safety.get("excluded_hotkeys") != []
+        or not isinstance(rotation, Mapping)
+        or rotation.get("status") != PASS
+        or type(rotation.get("mortal_period_blocks")) is not int
+        or rotation.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or observed != expected
+    ):
+        raise wire.VectorError(
+            "UID30 fleet safety does not prove both fixed UID mappings replacement-safe"
+        )
+    return safety
+
+
 def _eviction_depths(
     prunable_rows: list[tuple[int, str, int]],
     metric_by_hotkey: dict[str, tuple[float, float, float]],
@@ -5352,6 +5718,7 @@ def chain_preflight(
     wallet_name: str,
     wallet_hotkey: str,
     deadline_secs: float = CHAIN_OPERATION_DEADLINE_SECS,
+    connection_endpoint: str | None = None,
 ) -> ChainPreflight:
     """Resolve validator identity and constraints under one wall-clock bound."""
     with _chain_operation_deadline("chain preflight", deadline_secs):
@@ -5360,17 +5727,38 @@ def chain_preflight(
             netuid=netuid,
             wallet_name=wallet_name,
             wallet_hotkey=wallet_hotkey,
+            connection_endpoint=connection_endpoint,
         )
 
 
+def _chain_preflight_connection_target(
+    network: str, connection_endpoint: str | None
+) -> str:
+    """Resolve an explicit reviewed route without consulting the environment."""
+
+    if connection_endpoint is not None and (
+        not isinstance(connection_endpoint, str)
+        or not connection_endpoint.startswith(("ws://", "wss://"))
+        or connection_endpoint.strip() != connection_endpoint
+    ):
+        raise wire.VectorError("chain preflight connection endpoint is invalid")
+    return connection_endpoint or connection_target(network)
+
+
 def _chain_preflight_unbounded(
-    *, network: str, netuid: int, wallet_name: str, wallet_hotkey: str
+    *,
+    network: str,
+    netuid: int,
+    wallet_name: str,
+    wallet_hotkey: str,
+    connection_endpoint: str | None = None,
 ) -> ChainPreflight:
+    target = _chain_preflight_connection_target(network, connection_endpoint)
     with _isolated_argv():
         import bittensor as bt
 
         wallet = _bt_wallet(bt)(name=wallet_name, hotkey=wallet_hotkey)
-        subtensor = _bt_subtensor(bt)(network=connection_target(network))
+        subtensor = _bt_subtensor(bt)(network=target)
         finalized_block, _finalized_hash = _finalized_chain_head(subtensor)
         metagraph = subtensor.metagraph(netuid, block=finalized_block)
     raw_uids = (
@@ -5684,6 +6072,7 @@ def _chain_preflight_unbounded(
         ),
         subnet_owned_hotkeys=tuple(owned_hotkeys),
         finalized_hash=_finalized_hash,
+        connection_target=target,
     )
     _lifecycle(
         "PREFLIGHT complete",
@@ -6359,6 +6748,7 @@ def _pending_reviewed_uid30_contract(
     durable_kind = state.get("submission_pending_reviewed_uid30_contract")
     identity_marked = isinstance(identity, dict) and bool(
         _uid30_successor_marked(identity)
+        or _uid30_fleet_marked(identity)
         or {
             "uid30_launch_schema",
             "uid30_launch_policy",
@@ -6385,6 +6775,234 @@ def _pending_reviewed_uid30_contract(
             "reviewed UID30 durable marker and reservation identity disagree"
         )
     return state, identity, contract
+
+
+def _authorize_reviewed_uid30_fleet_submission(
+    runtime_contract: Any,
+    *,
+    preflight: ChainPreflight,
+    attempt_id: str,
+    version_key: int,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    state: dict[str, Any],
+    identity: dict[str, Any],
+    contract: dict[str, Any],
+) -> None:
+    """Re-prove the exact two-UID predecessor before one singleton write."""
+
+    inclusion = _policy_from_submission_identity(identity)
+    state_path = _submission_state_path(runtime_contract)
+    runtime_digest = getattr(
+        runtime_contract,
+        "_uid30_fleet_consolidation_preview_sha256",
+        None,
+    )
+    predecessor_hotkeys = {
+        SN39_UID30_FLEET_PREDECESSOR_SECOND_UID: SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+        SN39_UID30_FLEET_TARGET_UID: SN39_UID30_LAUNCH_MINER_HOTKEY,
+    }
+    target_hotkeys = dict(contract["uid_hotkeys"])
+    if (
+        _submission_runtime_root(runtime_contract) != _VALIDATOR_RUNTIME_ROOT
+        or state_path.parent != _VALIDATOR_RUNTIME_ROOT
+        or state_path.name != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+        or state.get("submission_pending_lane") != "authority"
+        or state.get("submission_pending_phase") != "unsigned_reserved"
+        or state.get("submission_pending_broadcast_intent") is not None
+        or state.get("submission_pending_receipt_candidate") is not None
+        or state.get("submission_pending_proof_status") is not None
+        or state.get("submission_active_lane") != "authority"
+        or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
+        or state.get("provenance_netuid") != 39
+        or state.get("submission_validator_hotkey")
+        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or state.get("submission_pending_reviewed_uid30_contract")
+        != "same_uid_fleet_consolidation"
+        or state.get("submission_pending_predecessor_journal_sha256")
+        != SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256
+        or state.get("submission_pending_launch_attempt") is not False
+        or state.get("submission_pending_launch_budget_limit") is not None
+        or state.get("submission_pending_budget_scope") != SN39_UID30_FLEET_BUDGET_SCOPE
+        or state.get("submission_pending_budget_limit") != 1
+        or state.get("submission_pending_source_epoch") != identity.get("source_epoch")
+        or preflight.genesis_hash != FINNEY_GENESIS_HASH
+        or preflight.validator_uid != SN39_UID30_LAUNCH_VALIDATOR_UID
+        or preflight.validator_hotkey != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or getattr(preflight.wallet.hotkey, "ss58_address", None)
+        != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+        or contract["owner"] != preflight.subnet_owner_hotkey
+        or version_key != SN39_UID30_LAUNCH_VERSION_KEY
+        or wire_uids != [SN39_UID30_FLEET_TARGET_UID]
+        or wire_weights != [65535]
+        or target_hotkeys
+        != {SN39_UID30_FLEET_TARGET_UID: SN39_UID30_LAUNCH_MINER_HOTKEY}
+        or runtime_digest
+        != identity.get("fleet_preview_sha256", "").removeprefix("sha256:")
+        or identity.get("mapping_block") != preflight.block
+        or identity.get("source_epoch") != preflight.block
+        or identity.get("next_epoch_start_block") != preflight.next_epoch_start_block
+        or preflight.min_allowed_weights != 1
+        or not math.isclose(
+            preflight.max_weight_limit,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+        or type(preflight.validator_blocks_since_last_update) is not int
+        or preflight.block - preflight.validator_blocks_since_last_update
+        != SN39_UID30_FLEET_PREDECESSOR_BLOCK
+        or state.get("submission_attempt_ids")
+        != [SN39_UID30_SUCCESSOR_PREDECESSOR_ID, SN39_UID30_FLEET_PREDECESSOR_ID]
+        or state.get("submission_attempt_count") != 2
+        or state.get("submission_finalized_count") != 2
+        or state.get("submission_highest_source_epoch")
+        != SN39_UID30_FLEET_PREDECESSOR_SOURCE_EPOCH
+        or state.get("submission_finalized_id") != SN39_UID30_FLEET_PREDECESSOR_ID
+        or state.get("submission_finalized_lane") != "authority"
+        or state.get("submission_finalized_reviewed_uid30_contract")
+        != "two_miner_successor"
+        or _sha256_document(
+            state.get("submission_finalized_identity", {})
+        ).removeprefix("sha256:")
+        != SN39_UID30_FLEET_PREDECESSOR_IDENTITY_SHA256
+        or _sha256_document(
+            state.get("submission_finalized_broadcast_intent", {})
+        ).removeprefix("sha256:")
+        != SN39_UID30_FLEET_PREDECESSOR_INTENT_SHA256
+        or _sha256_document(state.get("submission_finalized_receipt", {})).removeprefix(
+            "sha256:"
+        )
+        != SN39_UID30_FLEET_PREDECESSOR_RECEIPT_SHA256
+        or state.get("submission_attempt_budgets")
+        != {
+            "launch_full_gate": {
+                "limit": 1,
+                "ids": [SN39_UID30_SUCCESSOR_PREDECESSOR_ID],
+            },
+            "authority_bounded": {
+                "limit": 1,
+                "ids": [SN39_UID30_FLEET_PREDECESSOR_ID],
+            },
+        }
+    ):
+        raise wire.VectorError(
+            "reviewed UID30 fleet write differs from its exact reservation or predecessor"
+        )
+    _require_inclusion_policy_ready(inclusion, preflight)
+    reserved_safety = _require_exact_uid30_fleet_safety(identity.get("uid_safety"))
+    observed_safety = _require_exact_uid30_fleet_safety(
+        _require_uid_mapping_stability(
+            preflight,
+            predecessor_hotkeys,
+            mortal_period_blocks=inclusion.mortal_period_blocks,
+        )
+    )
+    if reserved_safety != observed_safety:
+        raise wire.VectorError(
+            "reviewed UID30 fleet hotkey mappings or safety changed before signing"
+        )
+    try:
+        _strict_uid30_successor_unsigned_rollback(
+            state,
+            attempt_id=attempt_id,
+            state_file=state_path,
+        )
+    except ValueError as exc:
+        raise wire.VectorError(
+            "reviewed UID30 fleet predecessor rollback lineage changed"
+        ) from exc
+
+    substrate = getattr(preflight.subtensor, "substrate", None)
+    if substrate is None or not preflight.finalized_hash:
+        raise wire.VectorError("reviewed UID30 fleet write has no finalized storage")
+    try:
+        current_hash = str(preflight.finalized_hash).lower()
+        if str(substrate.get_block_hash(preflight.block)).lower() != current_hash:
+            raise wire.VectorError("reviewed UID30 fleet head is not canonical")
+        for proof in identity["fresh_miner_evidence"]:
+            if (
+                proof["anchor_number"] < inclusion.valid_from_block
+                or proof["anchor_number"] > preflight.block
+                or str(substrate.get_block_hash(proof["anchor_number"])).lower()
+                != proof["anchor_hash"]
+            ):
+                raise wire.VectorError(
+                    "reviewed UID30 fleet evidence anchor is not canonical"
+                )
+        version_floor = substrate.query(
+            module="SubtensorModule",
+            storage_function="WeightsVersionKey",
+            params=[39],
+            block_hash=current_hash,
+        )
+        current = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[get_mechid_storage_index(39, 0), 30],
+            block_hash=current_hash,
+        )
+        historical_hash = str(
+            substrate.get_block_hash(SN39_UID30_FLEET_PREDECESSOR_BLOCK)
+        ).lower()
+        historical = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[get_mechid_storage_index(39, 0), 30],
+            block_hash=SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
+        )
+    except wire.VectorError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - archive absence is a refusal
+        raise wire.VectorError(
+            "reviewed UID30 fleet predecessor storage cannot be re-proven"
+        ) from exc
+    version_floor = getattr(version_floor, "value", version_floor)
+    current_rows = getattr(current, "value", current)
+    historical_rows = getattr(historical, "value", historical)
+    predecessor_rows = [
+        [SN39_UID30_FLEET_PREDECESSOR_SECOND_UID, 65535],
+        [SN39_UID30_FLEET_TARGET_UID, 65535],
+    ]
+    predecessor_identity = state["submission_finalized_identity"]
+    historical_reason: list[str] = []
+    historical_proof = _classify_finalized_receipt(
+        preflight.subtensor,
+        receipt=None,
+        extrinsic_hash=SN39_UID30_FLEET_PREDECESSOR_EXTRINSIC_HASH,
+        block_hash=SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
+        block_number=SN39_UID30_FLEET_PREDECESSOR_BLOCK,
+        validator_hotkey=SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        netuid=39,
+        version_key=SN39_UID30_LAUNCH_VERSION_KEY,
+        wire_uids=[
+            SN39_UID30_FLEET_PREDECESSOR_SECOND_UID,
+            SN39_UID30_FLEET_TARGET_UID,
+        ],
+        wire_weights=[65535, 65535],
+        uid_hotkeys={
+            SN39_UID30_LAUNCH_VALIDATOR_UID: SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+            **predecessor_hotkeys,
+        },
+        expected_subnet_owner_hotkey=str(predecessor_identity["subnet_owner_hotkey"]),
+        inclusion_policy=_policy_from_submission_identity(predecessor_identity),
+        require_receipt=False,
+        reason_out=historical_reason,
+    )
+    if (
+        type(version_floor) is not int
+        or (version_floor != 0 and version_key < version_floor)
+        or current_rows
+        not in (predecessor_rows, [tuple(row) for row in predecessor_rows])
+        or historical_hash != SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH
+        or historical_rows
+        not in (predecessor_rows, [tuple(row) for row in predecessor_rows])
+        or historical_proof != PASS
+    ):
+        raise wire.VectorError(
+            "reviewed UID30 fleet predecessor inclusion is not exact and canonical"
+            + _receipt_reason_suffix(historical_reason)
+        )
 
 
 def _authorize_reviewed_uid30_submission(
@@ -6416,17 +7034,34 @@ def _authorize_reviewed_uid30_submission(
     runtime_digest = getattr(
         runtime_contract,
         (
-            "_uid30_two_miner_successor_preview_sha256"
+            "_uid30_fleet_consolidation_preview_sha256"
+            if kind == "same_uid_fleet_consolidation"
+            else "_uid30_two_miner_successor_preview_sha256"
             if kind == "two_miner_successor"
             else "_uid30_reviewed_preview_sha256"
         ),
         None,
     )
     identity_digest = identity.get(
-        "successor_preview_sha256"
+        "fleet_preview_sha256"
+        if kind == "same_uid_fleet_consolidation"
+        else "successor_preview_sha256"
         if kind == "two_miner_successor"
         else "uid30_launch_preview_sha256"
     )
+    if kind == "same_uid_fleet_consolidation":
+        _authorize_reviewed_uid30_fleet_submission(
+            runtime_contract,
+            preflight=preflight,
+            attempt_id=attempt_id,
+            version_key=version_key,
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+            state=state,
+            identity=identity,
+            contract=contract,
+        )
+        return
     if kind == "one_miner_launch":
         target_uid = expected_uids[0] if len(expected_uids) == 1 else None
         if (
@@ -7772,6 +8407,7 @@ def _submit_exact_sn39_extrinsic(
         for name in (
             "_uid30_reviewed_preview_sha256",
             "_uid30_two_miner_successor_preview_sha256",
+            "_uid30_fleet_consolidation_preview_sha256",
         )
     )
     # Real validator runtimes always carry enough identity to locate the
@@ -7818,7 +8454,8 @@ def _submit_exact_sn39_extrinsic(
         and _continuous_transition_required(runtime_contract)
         and not (
             reviewed_uid30 is not None
-            and reviewed_uid30[2]["kind"] == "two_miner_successor"
+            and reviewed_uid30[2]["kind"]
+            in {"two_miner_successor", "same_uid_fleet_consolidation"}
         )
     ):
         authorization = getattr(
@@ -9195,7 +9832,15 @@ def _reserve_common_submission(
 ) -> None:
     reviewed_uid30 = _strict_zero_burn_uid30_contract(identity, lane=lane)
     reviewed_kind = None if reviewed_uid30 is None else reviewed_uid30["kind"]
-    successor = reviewed_kind == "two_miner_successor"
+    successor = reviewed_kind in {
+        "two_miner_successor",
+        "same_uid_fleet_consolidation",
+    }
+    predecessor_journal_sha256 = (
+        SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256
+        if reviewed_kind == "same_uid_fleet_consolidation"
+        else SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+    )
     lane_fence: dict[str, int]
     if lane == "thin":
         policy_version = identity.get("policy_version")
@@ -9229,7 +9874,7 @@ def _reserve_common_submission(
     predecessor_rollback_bytes = (
         _encode_uid30_successor_predecessor_bytes(
             _private_state_bytes(state_path),
-            expected_sha256=SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256,
+            expected_sha256=predecessor_journal_sha256,
         )
         if successor
         else None
@@ -9282,7 +9927,9 @@ def _reserve_common_submission(
             {
                 "_submission_budget_scope": (
                     "authority_bounded"
-                    if successor
+                    if reviewed_kind == "two_miner_successor"
+                    else SN39_UID30_FLEET_BUDGET_SCOPE
+                    if reviewed_kind == "same_uid_fleet_consolidation"
                     else "launch_full_gate"
                     if launch_attempt
                     else f"{lane}_bounded"
@@ -9299,6 +9946,8 @@ def _reserve_common_submission(
                 {
                     "_expected_state_sha256": (
                         SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+                        if reviewed_kind == "two_miner_successor"
+                        else SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256
                     )
                 }
                 if successor
@@ -9333,7 +9982,7 @@ def _reserve_common_submission(
             "submission_pending_identity": identity,
             "submission_pending_reviewed_uid30_contract": reviewed_kind,
             "submission_pending_predecessor_journal_sha256": (
-                SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256 if successor else None
+                predecessor_journal_sha256 if successor else None
             ),
             **(
                 {
@@ -9404,7 +10053,7 @@ def _strict_uid30_successor_unsigned_rollback(
     attempt_id: str,
     state_file: Path,
 ) -> bytes:
-    """Return the exact predecessor only for one pristine unsigned successor."""
+    """Return the exact predecessor for one pristine reviewed UID30 transition."""
 
     identity = current.get("submission_pending_identity")
     predecessor_sha256 = current.get("submission_pending_predecessor_journal_sha256")
@@ -9413,15 +10062,25 @@ def _strict_uid30_successor_unsigned_rollback(
         if isinstance(identity, dict)
         else None
     )
+    kind = None if contract is None else contract.get("kind")
+    expected_predecessor = (
+        SN39_UID30_FLEET_PREDECESSOR_JOURNAL_SHA256
+        if kind == "same_uid_fleet_consolidation"
+        else SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+    )
+    expected_budget_scope = (
+        SN39_UID30_FLEET_BUDGET_SCOPE
+        if kind == "same_uid_fleet_consolidation"
+        else "authority_bounded"
+    )
     if (
         state_file.parent != _VALIDATOR_RUNTIME_ROOT
         or state_file.name != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
-        or current.get("submission_pending_reviewed_uid30_contract")
-        != "two_miner_successor"
+        or current.get("submission_pending_reviewed_uid30_contract") != kind
         or contract is None
-        or contract.get("kind") != "two_miner_successor"
+        or kind not in {"two_miner_successor", "same_uid_fleet_consolidation"}
         or _reviewed_uid30_attempt_id(identity) != attempt_id
-        or predecessor_sha256 != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+        or predecessor_sha256 != expected_predecessor
     ):
         raise ValueError("unsigned UID30 successor rollback identity changed")
     predecessor_bytes = _decode_uid30_successor_predecessor_bytes(
@@ -9471,7 +10130,7 @@ def _strict_uid30_successor_unsigned_rollback(
         or current.get("submission_pending_phase") != "unsigned_reserved"
         or current.get("submission_pending_launch_attempt") is not False
         or current.get("submission_pending_launch_budget_limit") is not None
-        or current.get("submission_pending_budget_scope") != "authority_bounded"
+        or current.get("submission_pending_budget_scope") != expected_budget_scope
         or type(current.get("submission_pending_budget_limit")) is not int
         or current.get("submission_pending_budget_limit") != 1
         or current.get("submission_pending_policy_version") is not None
@@ -9489,19 +10148,30 @@ def _strict_uid30_successor_unsigned_rollback(
 
 
 def _uid30_successor_pending_fragment(current: dict[str, Any]) -> bool:
-    """Recognize every durable fragment of the sole bounded successor."""
+    """Recognize every durable fragment of a reviewed UID30 transition."""
 
     identity = current.get("submission_pending_identity")
     return bool(
         current.get("submission_pending_reviewed_uid30_contract")
-        == "two_miner_successor"
-        or (isinstance(identity, dict) and _uid30_successor_marked(identity))
+        in {"two_miner_successor", "same_uid_fleet_consolidation"}
+        or (
+            isinstance(identity, dict)
+            and (_uid30_successor_marked(identity) or _uid30_fleet_marked(identity))
+        )
         or "submission_pending_predecessor_journal_zlib_b64" in current
         or current.get("submission_pending_predecessor_journal_sha256") is not None
         or (
-            current.get("submission_pending_budget_scope") == "authority_bounded"
-            and current.get("submission_finalized_id")
-            == SN39_UID30_SUCCESSOR_PREDECESSOR_ID
+            (
+                current.get("submission_pending_budget_scope") == "authority_bounded"
+                and current.get("submission_finalized_id")
+                == SN39_UID30_SUCCESSOR_PREDECESSOR_ID
+            )
+            or (
+                current.get("submission_pending_budget_scope")
+                == SN39_UID30_FLEET_BUDGET_SCOPE
+                and current.get("submission_finalized_id")
+                == SN39_UID30_FLEET_PREDECESSOR_ID
+            )
         )
     )
 
@@ -9720,16 +10390,16 @@ def _abort_unsigned_common_submission(args: Any, *, attempt_id: str) -> bool:
         ):
             return False
         if _uid30_successor_pending_fragment(current):
+            predecessor_sha256 = current.get(
+                "submission_pending_predecessor_journal_sha256"
+            )
             predecessor_bytes = _strict_uid30_successor_unsigned_rollback(
                 current,
                 attempt_id=attempt_id,
                 state_file=state_file,
             )
             _replace_private_bytes(state_file, predecessor_bytes)
-            if (
-                _private_state_sha256(state_file)
-                != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
-            ):
+            if _private_state_sha256(state_file) != predecessor_sha256:
                 raise ValueError(
                     "unsigned UID30 successor predecessor restore did not persist"
                 )
@@ -10026,8 +10696,9 @@ def _recover_common_finalized_submission(
         )
     ) or (
         zero_burn_contract is not None
-        and zero_burn_contract["kind"] == "two_miner_successor"
-        and finalized_reviewed_kind != "two_miner_successor"
+        and zero_burn_contract["kind"]
+        in {"two_miner_successor", "same_uid_fleet_consolidation"}
+        and finalized_reviewed_kind != zero_burn_contract["kind"]
     ):
         raise _PostSignedSubmissionMismatch(
             "finalized reviewed UID30 marker and identity disagree"
@@ -10642,13 +11313,17 @@ def _recover_pending_launch_receipt(
             )
         ) or (
             zero_burn_contract is not None
-            and zero_burn_contract["kind"] == "two_miner_successor"
-            and durable_reviewed_kind != "two_miner_successor"
+            and zero_burn_contract["kind"]
+            in {"two_miner_successor", "same_uid_fleet_consolidation"}
+            and durable_reviewed_kind != zero_burn_contract["kind"]
         ):
             raise wire.VectorError(
                 "pending reviewed UID30 marker and identity disagree"
             )
-        if durable_reviewed_kind == "two_miner_successor":
+        if durable_reviewed_kind in {
+            "two_miner_successor",
+            "same_uid_fleet_consolidation",
+        }:
             # This generic restart path proves the exact historical call and
             # inclusion storage, but it does not own the successor's stronger
             # completion contract: both reviewed miner axons, mappings, UID30
@@ -10657,10 +11332,15 @@ def _recover_pending_launch_receipt(
             # performs those checks before finalization.  Keep the signed
             # attempt fenced here instead of creating a second, weaker
             # recovery mode.
+            command = (
+                "`cathedral-uid30-recover successor-recover`"
+                if durable_reviewed_kind == "two_miner_successor"
+                else "`cathedral-uid30-fleet-submit recover`"
+            )
             raise _PendingReceiptNotProven(
-                "pending two-miner UID30 successor requires "
-                "`cathedral-uid30-recover successor-recover`; generic validator "
-                "recovery cannot prove its two later finalized heads"
+                "pending reviewed UID30 transition requires "
+                f"{command}; generic validator recovery cannot prove its two "
+                "later finalized heads"
             )
         preflight = getattr(args, "_tick_preflight", None)
         if not isinstance(preflight, ChainPreflight):

@@ -133,6 +133,9 @@ cathedral-uid30-recover = "cathedral_thin.uid30_launch:main"
 # Preview-only proof for two distinct physical machines behind the pinned miner
 # UID. This entry point has no submit, recover, confirm, or chain-writer mode.
 cathedral-uid30-fleet-preview = "cathedral_thin.uid30_fleet_preview:main"
+# One immutable transition from the finalized two-UID predecessor to UID124.
+# Submit has one signed-attempt budget. Recovery never signs or resubmits.
+cathedral-uid30-fleet-submit = "cathedral_thin.uid30_fleet_submit:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]

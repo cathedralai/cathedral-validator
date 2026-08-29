@@ -74,7 +74,7 @@ def test_axon_recovery_parser_has_no_announce_surface() -> None:
     assert set(commands) == {"recover"}
 
 
-def test_packaged_scripts_expose_recovery_and_fleet_preview_only() -> None:
+def test_packaged_scripts_expose_recovery_preview_and_one_bounded_fleet_write() -> None:
     project = Path(__file__).parents[2] / "pyproject.toml"
     source = project.read_text(encoding="utf-8")
     for retired in (
@@ -89,3 +89,7 @@ def test_packaged_scripts_expose_recovery_and_fleet_preview_only() -> None:
     assert "cathedral-uid30-recover =" in source
     assert "cathedral-multicompute-preview =" in source
     assert "cathedral-uid30-fleet-preview =" in source
+    assert (
+        'cathedral-uid30-fleet-submit = "cathedral_thin.uid30_fleet_submit:main"'
+        in source
+    )

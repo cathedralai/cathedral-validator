@@ -309,7 +309,11 @@ def test_collect_rechecks_chain_fleet_and_current_row(monkeypatch):
             del quote, expected_report_data
             raise AssertionError("scorer is stubbed")
 
-    monkeypatch.setattr(preview, "read_uid30_chain_state", lambda: next(states))
+    monkeypatch.setattr(
+        preview,
+        "read_uid30_chain_state",
+        lambda **_kwargs: next(states),
+    )
     monkeypatch.setattr(preview, "load_verifier", lambda _path: _Qvl())
     monkeypatch.setattr(
         preview,

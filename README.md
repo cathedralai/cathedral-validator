@@ -15,8 +15,9 @@ relay.
 
 There is no recurring authority/full operator mode. The old profiles and
 `--mode`/`--provenance` switches were removed. Authority-labelled internals
-remain only to recover bounded launch journals, including the finalized UID30
-launch, without submitting a replacement transaction.
+remain only for bounded launch journals. The sole new write surface is one
+digest-bound UID30 fleet consolidation with a one-attempt budget. It is not a
+recurring mode and accepts no arbitrary UID, weight, burn, or retry input.
 
 Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
@@ -99,10 +100,29 @@ second finalized chain read. If those gates pass, the proposed target row is
 `NOT_PROVEN_NO_WRITE` artifact and exits 2. If the target differs from the
 current two-UID row, the artifact says `changes_current_chain_row: true`.
 
-Every artifact states `authorized_for_chain_write: false` and
-`chain_write_submitted: false`. The command has no submit, recover, confirm,
-nonce, extrinsic, or journal mode. TDX is the only enabled fleet identity
-profile. AMD SEV-SNP fleet identity remains NOT PROVEN and disabled.
+Every preview artifact states `authorized_for_chain_write: false` and
+`chain_write_submitted: false`. The preview command has no submit, recover,
+confirm, nonce, extrinsic, or journal mode. A separate bounded command consumes
+only the exact reviewed preview digest, repeats the complete proof, and fixes
+the chain call to `[[124, 65535]]` with zero burn:
+
+```bash
+cathedral-uid30-fleet-submit submit \
+  --preview "$HOME/.cathedral/uid30-fleet/two-machine-proof.json" \
+  --reviewed-sha256 <reviewed-64-character-sha256> \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --confirm-uid30-fleet-consolidation \
+  --assert-exclusive-writer
+```
+
+It signs at most once. If it prints `AMBIGUOUS_DO_NOT_RETRY`, do not run submit
+again. Use the same preview and digest with
+`cathedral-uid30-fleet-submit recover --assert-exclusive-writer`. Recovery
+never signs or submits. See the current fleet runbook for the full gates and
+outcome targets.
+
+TDX is the only enabled fleet identity profile. AMD SEV-SNP fleet identity
+remains NOT PROVEN and disabled.
 
 The former dedicated second-hotkey, UID8/UID124 axon, and two-UID successor
 commands are retired. Their implementations remain only where historical

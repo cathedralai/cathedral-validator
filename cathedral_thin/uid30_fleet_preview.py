@@ -497,8 +497,10 @@ def build_preview_document(
     }
 
 
-def collect_preview(qvl_path: str) -> dict[str, Any]:
-    evidence_state = read_uid30_chain_state()
+def collect_preview(
+    qvl_path: str, *, chain_endpoint: str | None = None
+) -> dict[str, Any]:
+    evidence_state = read_uid30_chain_state(chain_endpoint=chain_endpoint)
     keypair = _keypair(evidence_state)
     evidence_weights = read_current_uid30_weights(evidence_state)
     evidence_axons = read_weighted_serving_axons(evidence_state, evidence_weights)
@@ -515,7 +517,7 @@ def collect_preview(qvl_path: str) -> dict[str, Any]:
         verifier_adapter=adapter,
     )
 
-    fresh_state = read_uid30_chain_state()
+    fresh_state = read_uid30_chain_state(chain_endpoint=chain_endpoint)
     _require_chain_continuity(evidence_state, fresh_state)
     fresh_keypair = _keypair(fresh_state)
     current_weights = read_current_uid30_weights(fresh_state)
