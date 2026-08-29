@@ -41,14 +41,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import numpy as np
 from bittensor.utils import get_mechid_storage_index
-from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
     FINNEY_GENESIS_HASH,
+    INTEL_COLLATERAL,
     MAX_WEIGHT_LIMIT,
     MECID,
     MIN_ALLOWED_WEIGHTS,
@@ -60,23 +59,28 @@ from cathedral_thin.independent.constants import (
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime.chain import ServingAxon
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST, load_verifier
-from cathedral_thin.independent_runtime.run import (
-    INTEL_COLLATERAL,
-    _try_collect,
-    _units_after_quote,
-)
+from cathedral_thin.independent_runtime.run import _try_collect, _units_after_quote
 from cathedral_thin import second_miner_plan
+from cathedral_thin.uid30_state import (
+    MINER_HOTKEY,
+    NETWORK,
+    UID30,
+    UID30_HOTKEY,
+    WALLET_HOTKEY,
+    WALLET_NAME,
+    UID30ChainState,
+    UID30LaunchError,
+    _balance_rao,
+    _canonical_hash,
+    _raw_value,
+    _require_ss58,
+    _strict_nonnegative_int,
+)
 from scaffold import validator_thin as canonical_validator
 
 PREVIEW_SCHEMA = canonical_validator.SN39_UID30_LAUNCH_SCHEMA
 PREVIEW_STATUS = "READY_FOR_OPERATOR_REVIEW"
 POLICY_ID = canonical_validator.SN39_UID30_LAUNCH_POLICY
-NETWORK = "finney"
-WALLET_NAME = "cathedral"
-WALLET_HOTKEY = "default"
-UID30 = canonical_validator.SN39_UID30_LAUNCH_VALIDATOR_UID
-UID30_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
-MINER_HOTKEY = canonical_validator.SN39_UID30_LAUNCH_MINER_HOTKEY
 DEFAULT_RUNTIME_ROOT = Path("/var/lib/cathedral-validator")
 DEFAULT_PREVIEW = DEFAULT_RUNTIME_ROOT / "uid30-launch-preview.json"
 DEFAULT_SUCCESSOR_PREVIEW = (
@@ -88,65 +92,12 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _CHAIN_HASH_RE = re.compile(r"0x[0-9a-f]{64}")
 
 
-class UID30LaunchError(Exception):
-    """The launch refused before an ambiguous chain boundary."""
-
-
 class UID30LaunchAmbiguous(UID30LaunchError):
     """A signed intent or receipt exists and no replacement is authorized."""
 
 
 class UID30LaunchContradiction(UID30LaunchAmbiguous):
     """The exact signed attempt has a positive historical mismatch."""
-
-
-@dataclass(frozen=True)
-class UID30ChainState:
-    """Finalized chain facts used by both preview and sign-time revalidation."""
-
-    preflight: Any
-    block_number: int
-    block_hash: str
-    genesis_hash: str
-    subnet_owner_hotkey: str
-    validator_hotkey: str
-    validator_uid: int
-    validator_permit: bool
-    validator_stake_rao: int
-    stake_threshold_rao: int
-    last_update: int
-    blocks_since_last_update: int
-    weights_rate_limit: int
-    mechanism_count: int
-    weights_version_key: int
-    min_allowed_weights: int
-    max_weight_limit: float
-    commit_reveal_enabled: bool
-    miner_hotkey: str
-    miner_uid: int
-    serving_axon: ServingAxon
-    next_epoch_start_block: int
-    blocks_until_next_epoch: int
-    uid_safety: Mapping[str, Any]
-
-    def artifact(self) -> dict[str, Any]:
-        return {
-            "wallet_name": WALLET_NAME,
-            "wallet_hotkey": WALLET_HOTKEY,
-            "hotkey": self.validator_hotkey,
-            "uid": self.validator_uid,
-            "validator_permit": self.validator_permit,
-            "stake_rao": self.validator_stake_rao,
-            "stake_threshold_rao": self.stake_threshold_rao,
-            "last_update": self.last_update,
-            "blocks_since_last_update": self.blocks_since_last_update,
-            "weights_rate_limit": self.weights_rate_limit,
-            "mechanism_count": self.mechanism_count,
-            "weights_version_key": self.weights_version_key,
-            "min_allowed_weights": self.min_allowed_weights,
-            "max_weight_limit": self.max_weight_limit,
-            "commit_reveal_enabled": self.commit_reveal_enabled,
-        }
 
 
 @dataclass(frozen=True)
@@ -274,38 +225,6 @@ class UID30SuccessorRecoveryResult:
     later_finalized_heads: tuple[tuple[int, str], tuple[int, str]] | None
 
 
-def _raw_value(value: Any) -> Any:
-    return getattr(value, "value", value)
-
-
-def _strict_nonnegative_int(value: Any, *, label: str) -> int:
-    raw = _raw_value(value)
-    # Bittensor 10.5 returns ``Metagraph.block`` as a zero-dimensional NumPy
-    # integer array even when the requested block is a normal Python integer.
-    # Accept only that lossless integer-scalar representation.  Floats, bools,
-    # and non-scalar arrays remain invalid rather than being coerced.
-    if isinstance(raw, np.ndarray):
-        if raw.ndim != 0 or not np.issubdtype(raw.dtype, np.integer):
-            raise UID30LaunchError(f"{label} is not a non-negative integer")
-        raw = raw.item()
-    elif isinstance(raw, np.integer):
-        raw = raw.item()
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-        raise UID30LaunchError(f"{label} is not a non-negative integer")
-    return raw
-
-
-def _balance_rao(value: Any, *, label: str) -> int:
-    return _strict_nonnegative_int(getattr(value, "rao", value), label=label)
-
-
-def _canonical_hash(value: Any, *, label: str) -> str:
-    text = str(value).lower()
-    if _CHAIN_HASH_RE.fullmatch(text) is None:
-        raise UID30LaunchError(f"{label} is not a canonical chain hash")
-    return text
-
-
 def _parse_utc(value: object, *, label: str) -> datetime:
     text = str(value or "")
     if not text.endswith("Z"):
@@ -356,17 +275,6 @@ def _digest_text(value: object, *, label: str) -> str:
     if _DIGEST_RE.fullmatch(text) is None:
         raise UID30LaunchError(f"{label} is not one lowercase SHA256")
     return text
-
-
-def _require_ss58(value: object, *, label: str) -> str:
-    address = str(value or "")
-    try:
-        parsed = str(Keypair(ss58_address=address).ss58_address)
-    except Exception as exc:
-        raise UID30LaunchError(f"{label} is not a valid SS58 address") from exc
-    if parsed != address:
-        raise UID30LaunchError(f"{label} is not a canonical SS58 address")
-    return address
 
 
 def _require_public_ip(value: object) -> str:
@@ -3861,23 +3769,11 @@ def recover_reviewed_successor(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-uid30-launch")
+    parser = argparse.ArgumentParser(prog="cathedral-uid30-recover")
     sub = parser.add_subparsers(dest="command", required=True)
-    preview = sub.add_parser("preview", help="write the no-chain-write UID30 artifact")
-    preview.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
-    preview.add_argument("--output", default=str(DEFAULT_PREVIEW))
-    submit = sub.add_parser("submit", help="submit the reviewed one-shot vector")
-    submit.add_argument("--preview", required=True)
-    submit.add_argument("--reviewed-sha256", required=True)
-    submit.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
-    submit.add_argument("--confirm-uid30-launch", action="store_true")
-    submit.add_argument(
-        "--assert-exclusive-writer",
-        action="store_true",
-        help="assert every other process or host able to write UID30 is stopped",
-    )
     recover = sub.add_parser(
-        "recover", help="read-only recovery of one journaled signed attempt"
+        "recover",
+        help="read-only recovery of the historical one-miner signed attempt",
     )
     recover.add_argument("--preview", required=True)
     recover.add_argument("--reviewed-sha256", required=True)
@@ -3886,36 +3782,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="assert every other process or host able to write UID30 is stopped",
     )
-    successor_preview = sub.add_parser(
-        "successor-preview",
-        help="write the fixed no-chain-write two-miner successor artifact",
-    )
-    successor_preview.add_argument(
-        "--qvl",
-        required=True,
-        help="pinned TDX QVL executable",
-    )
-    successor_preview.add_argument("--output", default=str(DEFAULT_SUCCESSOR_PREVIEW))
-    successor_submit = sub.add_parser(
-        "successor-submit",
-        help="submit the fixed reviewed two-miner successor once",
-    )
-    successor_submit.add_argument("--preview", required=True)
-    successor_submit.add_argument("--reviewed-sha256", required=True)
-    successor_submit.add_argument(
-        "--qvl",
-        required=True,
-        help="pinned TDX QVL executable",
-    )
-    successor_submit.add_argument("--confirm-uid30-successor", action="store_true")
-    successor_submit.add_argument(
-        "--assert-exclusive-writer",
-        action="store_true",
-        help="assert every other process or host able to write UID30 is stopped",
-    )
     successor_recover = sub.add_parser(
         "successor-recover",
-        help="recover only the fixed journaled successor without retrying it",
+        help="read-only recovery for a previously journaled retired successor",
     )
     successor_recover.add_argument("--preview", required=True)
     successor_recover.add_argument("--reviewed-sha256", required=True)
@@ -3930,89 +3799,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
-        if options.command == "preview":
-            evidence_state = read_uid30_chain_state()
-            miner = collect_verified_miner(evidence_state, qvl_path=options.qvl)
-            state = read_uid30_chain_state()
-            validate_miner_proof(miner, state=state)
-            _require_miner_on_finalized_head(miner, state=state)
-            document = build_preview(
-                state=state,
-                miner=miner,
-                runtime_root=DEFAULT_RUNTIME_ROOT,
-            )
-            path, digest_path, digest = write_preview(document, Path(options.output))
-            print(
-                json.dumps(
-                    {
-                        "status": PREVIEW_STATUS,
-                        "preview": str(path),
-                        "detached_sha256": str(digest_path),
-                        "sha256": digest,
-                        "weight_signed": False,
-                        "weight_submitted": False,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if options.command == "submit":
-            result = submit_reviewed_preview(
-                preview_path=Path(options.preview),
-                reviewed_sha256=options.reviewed_sha256,
-                qvl_path=options.qvl,
-                confirm=options.confirm_uid30_launch,
-                exclusive_writer_asserted=options.assert_exclusive_writer,
-            )
-            print(json.dumps(result.__dict__, indent=2, sort_keys=True))
-            return 0
         if options.command == "recover":
             result = recover_reviewed_preview(
                 preview_path=Path(options.preview),
                 reviewed_sha256=options.reviewed_sha256,
-                exclusive_writer_asserted=options.assert_exclusive_writer,
-            )
-            print(json.dumps(result.__dict__, indent=2, sort_keys=True))
-            return 0
-        if options.command == "successor-preview":
-            evidence_state = read_uid30_successor_state()
-            miners = collect_verified_successor_miners(
-                evidence_state,
-                qvl_path=options.qvl,
-            )
-            state = read_uid30_successor_state()
-            validate_successor_proofs(miners, state=state)
-            document = build_successor_preview(
-                state=state,
-                miners=miners,
-                runtime_root=DEFAULT_RUNTIME_ROOT,
-            )
-            path, digest_path, digest = write_successor_preview(
-                document,
-                Path(options.output),
-            )
-            print(
-                json.dumps(
-                    {
-                        "status": PREVIEW_STATUS,
-                        "preview": str(path),
-                        "detached_sha256": str(digest_path),
-                        "sha256": digest,
-                        "weight_signed": False,
-                        "weight_submitted": False,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if options.command == "successor-submit":
-            result = submit_reviewed_successor(
-                preview_path=Path(options.preview),
-                reviewed_sha256=options.reviewed_sha256,
-                qvl_path=options.qvl,
-                confirm=options.confirm_uid30_successor,
                 exclusive_writer_asserted=options.assert_exclusive_writer,
             )
             print(json.dumps(result.__dict__, indent=2, sort_keys=True))

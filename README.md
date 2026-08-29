@@ -22,12 +22,16 @@ Do not run a validator from another Cathedral repository. This repository owns
 the validator command, release bundle, systemd units, runtime policy, dry-run
 path, and broadcast gates.
 
-## Launch truth, 2026-08-28
+## Compute fleet truth, 2026-08-29
 
-The bounded UID30 launch tool finalized the exact wire vector
-`[[124, 65535]]`: all weight to miner UID124 and zero burn. This proves one
-finalized UID30 launch transaction. It does not activate the recurring relay,
-and SN39 subnet emission was `0`, so it does not prove TAO earnings.
+The original bounded UID30 launch finalized `[[124, 65535]]`. Later launch
+work added a second miner and the finalized read-only snapshot at block
+8,949,280 reports the current mechanism-0 row as
+`[[8, 65535], [124, 65535]]`. UID8 serves `34.46.19.69:8081`. UID124 serves
+`35.222.166.235:8081`. This is evidence for two weighted UIDs, not evidence for
+two machines behind one UID. SN39 subnet emission was `0`, so neither row
+proves TAO earnings. Chain state can change. Every preview reads it again from
+one finalized head.
 
 Do not start the shipped recurring relay blindly. Its configured signed-vector
 policy is not the consumed UID30 100/0 launch vector. Before any future
@@ -35,34 +39,76 @@ policy is not the consumed UID30 100/0 launch vector. Before any future
 and burn allocation. A different preview is a stop condition, not permission to
 overwrite the finalized launch vector.
 
-A dedicated second miner requires a separate bounded chain change, not an
-extension of the existing UID124 machine. The read-only
-[second-miner plan](docs/SN39_SECOND_MINER_PLAN.md) pins the intended hotkey,
-checks one finalized snapshot, and derives the exact equal-score row without
-loading a wallet or exposing a write path. The separate
-`cathedral-second-miner-announce` command is a bounded first-time axon writer.
-It has its own hotkey, fixed endpoint, runtime root, preview schema, lock, and
-one-attempt journal. It refuses until registration has assigned the second
-hotkey a finalized UID. Neither command registers a miner or replaces UID30's
-complete row.
+One miner UID may now expose a bounded fleet of up to 32 HTTPS candidates.
+Every candidate must pass fresh evidence, quote-bound channel verification,
+the pinned TDX QVL, and canonical SAT replay. Physical-machine credit uses only
+the QVL-verified `stable_platform_id`. TLS SPKI identifies the channel, not the
+physical machine. Duplicate verified endpoints, SPKIs, or platform identities
+earn zero for every claimant.
 
-After both axons and machine proofs pass, `cathedral-uid30-launch` exposes only
-the fixed `successor-preview`, `successor-submit`, and `successor-recover`
-commands for the two-miner row. They reuse UID30's canonical lock and consumed
-launch journal, authorize one `authority_bounded` attempt, resolve both UIDs
-from the two pinned hotkeys, require zero burn, and finalize only after exact
-inclusion plus two later finalized reads. Shipping these commands is not proof
-that the successor ran. The full commands, outcomes, and stop conditions are
-in the [second-miner plan](docs/SN39_SECOND_MINER_PLAN.md).
+The score is exercised work only:
 
-The separate `cathedral-uid124-axon-generation2` command bounds one replacement
-of UID124's consumed generation-1 axon. It pins the exact predecessor preview
-and journal digests, reuses their canonical lock and journal, fixes the target
-to `35.222.166.235:8081`, requires a new reviewed preview and fresh endpoint
-proof, and permits one no-retry generation-2 attempt. It has no UID8, weight,
-registration, rent, or daemon path. Shipping the command is not proof that the
-replacement announcement ran. See the same plan for its exact pins and live
-gates.
+```text
+raw_uid_units = sum(independently re-derived work_units for each unique admitted platform)
+```
+
+One machine contributes at most 20 units in one scoring window. A UID
+contributes at most 640 units. Machine count, declared capacity, uptime, and
+attestation without verified work contribute zero. Normalization happens only
+after raw units are aggregated. One UID with two distinct machines at 20 units
+each has raw score 40. The UID still occupies one destination in the weight
+row.
+
+The generic no-write fleet preview is:
+
+```bash
+install -d -m 0700 "$HOME/.cathedral/multicompute-preview"
+cathedral-multicompute-preview \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --wallet-name cathedral \
+  --wallet-hotkey default \
+  --output "$HOME/.cathedral/multicompute-preview/scoring.json"
+```
+
+It signs worker requests with the pinned UID30 hotkey, but it has no chain
+write authority. The dedicated command has no Worker rental, canary,
+confirmation, Cloud, journal, nonce, extrinsic, or submission mode.
+
+The consolidation target is the canonical launch miner hotkey
+`5CJTD6znKPfsQFjPQtTvRiHHcLtpXJr7P16dF4VuEtx9qn7G`, currently UID124 with
+root axon `35.222.166.235:8081`. The other machine does not qualify for the
+same-UID target while it still serves under the UID8 hotkey. Reconfigure it
+deliberately as a UID124 fleet worker before expecting a complete proof.
+
+The exact no-write proof command is:
+
+```bash
+install -d -m 0700 "$HOME/.cathedral/uid30-fleet"
+cathedral-uid30-fleet-preview \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --output "$HOME/.cathedral/uid30-fleet/two-machine-proof.json"
+```
+
+The artifact records the full current UID30 row and every weighted serving UID
+as evidence. It separately evaluates a non-authorizing consolidation target.
+Target proof requires exactly two UID124-owned fleet endpoints, distinct TLS
+SPKIs, distinct QVL-verified stable platform identities, 20 verified SAT units
+from each machine, raw UID score 40, and an unchanged signed fleet after a
+second finalized chain read. If those gates pass, the proposed target row is
+`[[124, 65535]]` with zero burn. Until they pass, the command writes a
+`NOT_PROVEN_NO_WRITE` artifact and exits 2. If the target differs from the
+current two-UID row, the artifact says `changes_current_chain_row: true`.
+
+Every artifact states `authorized_for_chain_write: false` and
+`chain_write_submitted: false`. The command has no submit, recover, confirm,
+nonce, extrinsic, or journal mode. TDX is the only enabled fleet identity
+profile. AMD SEV-SNP fleet identity remains NOT PROVEN and disabled.
+
+The former dedicated second-hotkey, UID8/UID124 axon, and two-UID successor
+commands are retired. Their implementations remain only where historical
+journal recovery needs them. Do not use them for a new launch. See the
+[current fleet runbook](docs/SN39_MULTICOMPUTE.md) and the
+[historical second-miner record](docs/SN39_SECOND_MINER_PLAN.md).
 
 ## Quickstart
 

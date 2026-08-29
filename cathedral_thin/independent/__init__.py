@@ -37,154 +37,182 @@ opens no socket.
 
 from __future__ import annotations
 
-from .canonical import canonical_bytes, parse_strict_json
-from .canary import (
-    CanaryReceipt,
-    CanaryTransport,
-    load_canary_state,
-    require_canary_hotkey,
-    submit_canary_once,
-)
-from .collect import (
-    EVIDENCE_V2_REQUEST_KEYS,
-    EVIDENCE_V2_RESPONSE_KEYS,
-    ChannelBinding,
-    CollectedEvidence,
-    EvidenceTransport,
-    FleetTarget,
-    collect_evidence,
-    collect_miner_fleet,
-    evidence_url,
-    mint_nonce,
-    report_data_v2,
-    verify_collected,
-)
-from .compose import (
-    STATUS_BROADCAST_BLOCKED,
-    STATUS_COMPOSED,
-    STATUS_DEGRADED,
-    ComposeResult,
-    EpochAnchor,
-    LaneAdapter,
-    LaneBlock,
-    compose_dry_run,
-    last_good_is_usable,
-    mass_map,
-    require_last_good,
-)
-from .compute import (
-    COMPUTE_BLOCK_REASON,
-    COMPUTE_LANE,
-    INTEL_PCS_HOSTS,
-    ComputeAdapter,
-    QuoteVerdict,
-    QuoteVerifier,
-    assert_machine_identity,
-    canonical_seed_material,
-    fleet_over_cap,
-    machine_id_from_key,
-    require_compute_adapter,
-    require_verified_mass,
-    validate_collateral_url,
-)
-from .constants import (
-    BURN_HOTKEY,
-    CANARY_HOTKEY,
-    COMPUTE_FLEET_CAP,
-    COMMITMENT_LENGTH,
-    COMMITMENT_MAGIC,
-    FINNEY_GENESIS_HASH,
-    H,
-    INDEPENDENT_CANARY_FILE,
-    INDEPENDENT_STATE_FILE,
-    LINEAGE,
-    MAX_POLICY_BUNDLE_BYTES,
-    MECID,
-    NETUID,
-    REFUSE_HOTKEYS,
-    SN39_MORTAL_PERIOD_BLOCKS,
-    TEMPO_BLOCKS,
-    VERSION_KEY,
-    W,
-)
-from .errors import (
-    AdapterUnavailable,
-    BroadcastBlocked,
-    BroadcastDisabled,
-    CanaryIneligible,
-    CanarySpent,
-    CanaryStateError,
-    CanaryTransportError,
-    CollateralSourceError,
-    CollectError,
-    CommitmentError,
-    ComputeEvidenceError,
-    ConfigError,
-    GenesisPinError,
-    HamiltonError,
-    IndependentValidatorError,
-    InclusionHalt,
-    JournalError,
-    MachineIdentityConflict,
-    PolicyBundleError,
-    PolicyFetchError,
-    PolicyLineageError,
-    RefuseListError,
-    SatWorkError,
-)
-from .fetch_policy import fetch_policy_bytes, validate_policy_url
-from .hamilton import Dest, HamiltonResult, apportion
-from .inclusion import (
-    FORFEIT_REFUSED,
-    FORFEIT_REMAPPED,
-    Forfeit,
-    InclusionOutcome,
-    MetagraphView,
-    apply_inclusion_forfeit,
-    resolve_burn_uid,
-)
-from .journal import load_journal, write_journal
-from .launcher import IndependentConfig, check_genesis_pin, load_config, refuse_wallet
-from .policy import (
-    Allocation,
-    BurnTarget,
-    EconomicsSet,
-    LaneContractId,
-    PolicyBundle,
-    PolicySignature,
-    bundle_digest,
-    decode_commitment,
-    encode_commitment,
-    load_policy_bundle,
-    parse_policy_bundle,
-    require_commitment,
-    require_lineage,
-    signing_payload,
-    verify_signatures,
-)
-from .refuse import is_refused, is_refused_destination, require_permitted_hotkey
-from .sat import (
-    MAX_SAT_RESPONSE_BYTES,
-    SAT_REQUEST_KEYS,
-    SAT_RESPONSE_KEYS,
-    SAT_WORK_PATH,
-    SAT_WORK_UNIT_RULE,
-    SatInstance,
-    SatWorkItem,
-    canonical_instance,
-    canonical_work_item,
-    collect_sat_work,
-    compute_challenge_id,
-    derived_work_units,
-    instance_equals_canonical,
-    sat_work_url,
-    seed_from_material,
-)
-from .submit import (
-    MECHANISM_WEIGHTS_CALL,
-    build_mechanism_weights_kwargs,
-    prepare_mechanism_weights,
-)
+from importlib import import_module
+
+# Historical convenience exports are lazy. Importing a read-only submodule must
+# not import the journal, one-write canary, or mechanism-weight preparation
+# modules as a side effect of Python loading this package first.
+_MODULE_EXPORTS = {
+    ".canonical": {"canonical_bytes", "parse_strict_json"},
+    ".canary": {
+        "CanaryReceipt",
+        "CanaryTransport",
+        "load_canary_state",
+        "require_canary_hotkey",
+        "submit_canary_once",
+    },
+    ".collect": {
+        "EVIDENCE_V2_REQUEST_KEYS",
+        "EVIDENCE_V2_RESPONSE_KEYS",
+        "ChannelBinding",
+        "CollectedEvidence",
+        "EvidenceTransport",
+        "FleetTarget",
+        "collect_evidence",
+        "collect_miner_fleet",
+        "evidence_url",
+        "mint_nonce",
+        "report_data_v2",
+        "verify_collected",
+    },
+    ".compose": {
+        "STATUS_BROADCAST_BLOCKED",
+        "STATUS_COMPOSED",
+        "STATUS_DEGRADED",
+        "ComposeResult",
+        "EpochAnchor",
+        "LaneAdapter",
+        "LaneBlock",
+        "compose_dry_run",
+        "last_good_is_usable",
+        "mass_map",
+        "require_last_good",
+    },
+    ".compute": {
+        "COMPUTE_BLOCK_REASON",
+        "COMPUTE_LANE",
+        "INTEL_PCS_HOSTS",
+        "ComputeAdapter",
+        "QuoteVerdict",
+        "QuoteVerifier",
+        "assert_machine_identity",
+        "canonical_seed_material",
+        "fleet_over_cap",
+        "machine_id_from_key",
+        "require_compute_adapter",
+        "require_verified_mass",
+        "validate_collateral_url",
+    },
+    ".constants": {
+        "BURN_HOTKEY",
+        "CANARY_HOTKEY",
+        "COMPUTE_FLEET_CAP",
+        "COMMITMENT_LENGTH",
+        "COMMITMENT_MAGIC",
+        "FINNEY_GENESIS_HASH",
+        "H",
+        "INDEPENDENT_CANARY_FILE",
+        "INDEPENDENT_STATE_FILE",
+        "LINEAGE",
+        "MAX_POLICY_BUNDLE_BYTES",
+        "MECID",
+        "NETUID",
+        "REFUSE_HOTKEYS",
+        "SN39_MORTAL_PERIOD_BLOCKS",
+        "TEMPO_BLOCKS",
+        "VERSION_KEY",
+        "W",
+    },
+    ".errors": {
+        "AdapterUnavailable",
+        "BroadcastBlocked",
+        "BroadcastDisabled",
+        "CanaryIneligible",
+        "CanarySpent",
+        "CanaryStateError",
+        "CanaryTransportError",
+        "CollateralSourceError",
+        "CollectError",
+        "CommitmentError",
+        "ComputeEvidenceError",
+        "ConfigError",
+        "GenesisPinError",
+        "HamiltonError",
+        "IndependentValidatorError",
+        "InclusionHalt",
+        "JournalError",
+        "MachineIdentityConflict",
+        "PolicyBundleError",
+        "PolicyFetchError",
+        "PolicyLineageError",
+        "RefuseListError",
+        "SatWorkError",
+    },
+    ".fetch_policy": {"fetch_policy_bytes", "validate_policy_url"},
+    ".hamilton": {"Dest", "HamiltonResult", "apportion"},
+    ".inclusion": {
+        "FORFEIT_REFUSED",
+        "FORFEIT_REMAPPED",
+        "Forfeit",
+        "InclusionOutcome",
+        "MetagraphView",
+        "apply_inclusion_forfeit",
+        "resolve_burn_uid",
+    },
+    ".journal": {"load_journal", "write_journal"},
+    ".launcher": {
+        "IndependentConfig",
+        "check_genesis_pin",
+        "load_config",
+        "refuse_wallet",
+    },
+    ".policy": {
+        "Allocation",
+        "BurnTarget",
+        "EconomicsSet",
+        "LaneContractId",
+        "PolicyBundle",
+        "PolicySignature",
+        "bundle_digest",
+        "decode_commitment",
+        "encode_commitment",
+        "load_policy_bundle",
+        "parse_policy_bundle",
+        "require_commitment",
+        "require_lineage",
+        "signing_payload",
+        "verify_signatures",
+    },
+    ".refuse": {"is_refused", "is_refused_destination", "require_permitted_hotkey"},
+    ".sat": {
+        "MAX_SAT_RESPONSE_BYTES",
+        "SAT_REQUEST_KEYS",
+        "SAT_RESPONSE_KEYS",
+        "SAT_WORK_PATH",
+        "SAT_WORK_UNIT_RULE",
+        "SatInstance",
+        "SatWorkItem",
+        "canonical_instance",
+        "canonical_work_item",
+        "collect_sat_work",
+        "compute_challenge_id",
+        "derived_work_units",
+        "instance_equals_canonical",
+        "sat_work_url",
+        "seed_from_material",
+    },
+    ".submit": {
+        "MECHANISM_WEIGHTS_CALL",
+        "build_mechanism_weights_kwargs",
+        "prepare_mechanism_weights",
+    },
+}
+_LAZY_EXPORTS = {
+    name: (module_name, name)
+    for module_name, names in _MODULE_EXPORTS.items()
+    for name in names
+}
+
+
+def __getattr__(name: str):
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    module_name, attribute = target
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "BURN_HOTKEY",

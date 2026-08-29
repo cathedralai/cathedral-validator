@@ -39,6 +39,9 @@ publisher = [
 ]
 test = [
     "pytest>=8",
+    # Cross-library fixture: requests signed by bittensor-wallet must verify
+    # with the primitive used inside the measured worker.
+    "py-sr25519-bindings>=0.2,<1",
     # Ruff 0.16 expands the default rule set against the pre-existing thin
     # subnet tree. Keep required CI reproducible at the reviewed baseline until
     # that separate migration is performed deliberately.
@@ -120,15 +123,16 @@ cathedral-verified-policy = "cathedral_thin.policy_cli:main"
 # and genesis pin. Ships no chain writer and has no --broadcast or --canary flag.
 cathedral-independent-validator = "cathedral_thin.independent.launcher:main"
 cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
-cathedral-independent-miner-announce = "cathedral_thin.independent_runtime.miner_axon_cli:main"
-cathedral-second-miner-announce = "cathedral_thin.independent_runtime.second_miner_axon_cli:main"
-cathedral-uid124-axon-generation2 = "cathedral_thin.independent_runtime.uid124_axon_generation2_cli:main"
-# Finalized read-only planning for a dedicated second miner. This command has no
-# wallet loader, registration, axon announcement, or weight-submission path.
-cathedral-second-miner-plan = "cathedral_thin.second_miner_plan:main"
-# One reviewed UID30 launch. Preview writes only owner-controlled local files;
-# submission requires the reviewed detached digest and an explicit confirm flag.
-cathedral-uid30-launch = "cathedral_thin.uid30_launch:main"
+# Dedicated signed-fleet preview. Its import graph contains no Cloud client,
+# canary writer, journal, account nonce, extrinsic, or submission transport.
+cathedral-multicompute-preview = "cathedral_thin.independent_runtime.fleet_preview:main"
+# Historical launch implementations remain only behind recovery-only commands.
+# Stale old console-script shims import the same fail-closed source mains.
+cathedral-miner-axon-recover = "cathedral_thin.independent_runtime.miner_axon_cli:main"
+cathedral-uid30-recover = "cathedral_thin.uid30_launch:main"
+# Preview-only proof for two distinct physical machines behind the pinned miner
+# UID. This entry point has no submit, recover, confirm, or chain-writer mode.
+cathedral-uid30-fleet-preview = "cathedral_thin.uid30_fleet_preview:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]

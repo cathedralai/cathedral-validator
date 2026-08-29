@@ -52,6 +52,7 @@ from cathedral_thin.independent.compute import (
     MAX_QUOTE_BYTES,
     REPORT_DATA_BYTES,
     ComputeAdapter,
+    QuoteIdentityVerdict,
     QuoteVerdict,
     assert_machine_identity,
     canonical_seed_material,
@@ -295,6 +296,60 @@ def test_a_verifier_that_answers_nonsense_is_infra_not_a_pass():
     confused = ComputeAdapter(ConfusedVerifier(), collateral_base_url=INTEL_COLLATERAL)
     verdict = confused.verify_quote(QUOTE, expected_report_data=REPORT_DATA)
     assert verdict is QuoteVerdict.INFRA
+
+
+def test_multicompute_requires_qvl_verified_stable_platform_identity():
+    class IdentityVerifier:
+        def verify(self, quote, *, expected_report_data):
+            del quote, expected_report_data
+            return QuoteVerdict.PASS
+
+        def verify_with_identity(self, quote, *, expected_report_data):
+            del quote, expected_report_data
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS,
+                "tdx-platform-sha256:" + "a" * 64,
+                True,
+            )
+
+    identity_adapter = ComputeAdapter(
+        IdentityVerifier(), collateral_base_url=INTEL_COLLATERAL
+    )
+    result = identity_adapter.verify_quote_with_identity(
+        QUOTE, expected_report_data=REPORT_DATA
+    )
+    assert result.stable_platform_id == "tdx-platform-sha256:" + "a" * 64
+    assert result.platform_identity_verified is True
+
+    legacy, _verifier = adapter()
+    with pytest.raises(AdapterUnavailable, match="stable platform identity"):
+        legacy.verify_quote_with_identity(QUOTE, expected_report_data=REPORT_DATA)
+
+
+@pytest.mark.parametrize(
+    "identity,verified",
+    [
+        (None, False),
+        ("a" * 64, True),
+        ("tdx-platform-sha256:" + "A" * 64, True),
+        ("tdx-platform-sha256:" + "a" * 64, False),
+    ],
+)
+def test_multicompute_never_falls_back_to_tls_spki(identity, verified):
+    class BadIdentityVerifier:
+        def verify(self, quote, *, expected_report_data):
+            del quote, expected_report_data
+            return QuoteVerdict.PASS
+
+        def verify_with_identity(self, quote, *, expected_report_data):
+            del quote, expected_report_data
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, verified)
+
+    gated = ComputeAdapter(BadIdentityVerifier(), collateral_base_url=INTEL_COLLATERAL)
+    result = gated.verify_quote_with_identity(QUOTE, expected_report_data=REPORT_DATA)
+    assert result.verdict is QuoteVerdict.PASS
+    assert result.stable_platform_id is None
+    assert result.platform_identity_verified is False
 
 
 def test_a_funded_compute_row_with_a_qvl_adapter_names_its_blockers(tmp_path):

@@ -320,21 +320,36 @@ def test_plan_writer_refuses_a_group_accessible_parent(tmp_path: Path) -> None:
         plan.write_plan(parent / "plan.json", plan.build_plan(_snapshot()))
 
 
-def test_cli_writes_no_authority_summary(tmp_path: Path, capsys) -> None:
+def test_retired_cli_refuses_without_read_or_write(tmp_path: Path, capsys) -> None:
     output = tmp_path / "plan.json"
 
     assert (
         plan.main(
             ["preview", "--output", str(output)],
-            reader=lambda: _snapshot(),
+            reader=lambda: pytest.fail("retired planner reached chain state"),
+            writer=lambda *_args, **_kwargs: pytest.fail(
+                "retired planner wrote an artifact"
+            ),
         )
-        == 0
+        == 2
     )
 
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["status"] == plan.STATUS_UNREGISTERED
+    summary = json.loads(capsys.readouterr().err)
+    assert summary["status"] == "RETIRED_NO_CHAIN_WRITE"
     assert summary["authorized_for_chain_write"] is False
-    assert output.exists()
+    assert summary["chain_write_submitted"] is False
+    assert not output.exists()
+
+
+def test_retired_cli_help_does_not_advertise_the_old_preview(capsys) -> None:
+    with pytest.raises(SystemExit) as result:
+        plan._parser().parse_args(["--help"])
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "RETIRED" in help_text
+    assert "cathedral-uid30-fleet-preview" in help_text
+    assert "{preview}" not in help_text
+    assert "read finalized SN39 state" not in help_text
 
 
 def test_module_has_no_chain_mutation_call_site() -> None:

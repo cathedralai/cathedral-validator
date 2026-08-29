@@ -10659,7 +10659,7 @@ def _recover_pending_launch_receipt(
             # recovery mode.
             raise _PendingReceiptNotProven(
                 "pending two-miner UID30 successor requires "
-                "`cathedral-uid30-launch successor-recover`; generic validator "
+                "`cathedral-uid30-recover successor-recover`; generic validator "
                 "recovery cannot prove its two later finalized heads"
             )
         preflight = getattr(args, "_tick_preflight", None)

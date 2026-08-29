@@ -1,4 +1,9 @@
-"""No-write preview, digest-authorized announcement, and no-submit recovery."""
+"""Historical miner-axon recovery.
+
+The preview and announcement implementation remains importable for exact
+journal recovery tests, but every shipped command selects the recovery-only
+parser. This keeps stale installed console-script shims fail closed.
+"""
 
 from __future__ import annotations
 
@@ -34,46 +39,54 @@ WALLET_HOTKEY = "serge_sat_test"
 MappingResult = dict[str, Any]
 
 
-def _parser(*, prog: str, contract: MinerAxonContract) -> argparse.ArgumentParser:
+def _parser(
+    *,
+    prog: str,
+    contract: MinerAxonContract,
+    recovery_only: bool = False,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    preview = sub.add_parser(
-        "preview", help="write the default no-chain-write announcement artifact"
-    )
-    preview.add_argument("--ip", required=True, help="verified public miner IPv4")
-    preview.add_argument("--port", type=int, default=SN39_HTTPS_PORT)
-    preview.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
-    preview.add_argument("--output", default=str(_contract_preview_path(contract)))
-    preview.add_argument("--wallet-path", default=None)
+    if not recovery_only:
+        preview = sub.add_parser(
+            "preview", help="write the default no-chain-write announcement artifact"
+        )
+        preview.add_argument("--ip", required=True, help="verified public miner IPv4")
+        preview.add_argument("--port", type=int, default=SN39_HTTPS_PORT)
+        preview.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
+        preview.add_argument("--output", default=str(_contract_preview_path(contract)))
+        preview.add_argument("--wallet-path", default=None)
 
-    announce = sub.add_parser(
-        "announce", help="make one digest-authorized serve_axon attempt"
-    )
-    announce.add_argument("--preview", default=str(_contract_preview_path(contract)))
-    announce.add_argument("--reviewed-sha256", required=True)
-    announce.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
-    announce.add_argument("--wallet-path", default=None)
-    announce.add_argument("--confirm-miner-announce", action="store_true")
-    announce.add_argument(
-        "--assert-exclusive-announcer",
-        action="store_true",
-        help="assert every other process or host able to announce this miner is stopped",
-    )
-    if contract.supports_legacy_successor and contract.successor_generation is None:
+        announce = sub.add_parser(
+            "announce", help="make one digest-authorized serve_axon attempt"
+        )
         announce.add_argument(
-            "--allow-finalized-successor",
+            "--preview", default=str(_contract_preview_path(contract))
+        )
+        announce.add_argument("--reviewed-sha256", required=True)
+        announce.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
+        announce.add_argument("--wallet-path", default=None)
+        announce.add_argument("--confirm-miner-announce", action="store_true")
+        announce.add_argument(
+            "--assert-exclusive-announcer",
             action="store_true",
-            help="allow the one reviewed successor to a strictly proven final journal",
+            help="assert every other process or host able to announce this miner is stopped",
         )
-        announce.add_argument(
-            "--predecessor-preview",
-            help="owner-only reviewed preview for the finalized predecessor",
-        )
-        announce.add_argument(
-            "--predecessor-reviewed-sha256",
-            help="exact reviewed SHA256 for the finalized predecessor preview",
-        )
+        if contract.supports_legacy_successor and contract.successor_generation is None:
+            announce.add_argument(
+                "--allow-finalized-successor",
+                action="store_true",
+                help="allow the one reviewed successor to a strictly proven final journal",
+            )
+            announce.add_argument(
+                "--predecessor-preview",
+                help="owner-only reviewed preview for the finalized predecessor",
+            )
+            announce.add_argument(
+                "--predecessor-reviewed-sha256",
+                help="exact reviewed SHA256 for the finalized predecessor preview",
+            )
 
     recover = sub.add_parser(
         "recover",
@@ -149,10 +162,11 @@ def run_contract_cli(
     prog: str,
     wallet_hotkey: str,
     contract: MinerAxonContract,
+    recovery_only: bool = False,
 ) -> int:
-    options = _parser(prog=prog, contract=contract).parse_args(
-        list(sys.argv[1:] if argv is None else argv)
-    )
+    options = _parser(
+        prog=prog, contract=contract, recovery_only=recovery_only
+    ).parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         if options.command == "preview":
             result = _preview(options, contract=contract, wallet_hotkey=wallet_hotkey)
@@ -243,9 +257,10 @@ def run_contract_cli(
 def main(argv: Sequence[str] | None = None) -> int:
     return run_contract_cli(
         argv,
-        prog="cathedral-independent-miner-announce",
+        prog="cathedral-miner-axon-recover",
         wallet_hotkey=WALLET_HOTKEY,
         contract=UID124_AXON_CONTRACT,
+        recovery_only=True,
     )
 
 
