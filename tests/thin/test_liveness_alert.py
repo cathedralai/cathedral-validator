@@ -488,7 +488,7 @@ def test_status_never_touches_the_chain_or_the_wallet(tmp_path, monkeypatch):
 
 
 def test_status_is_listed_in_the_command_surface(capsys):
-    """README names one command for "is it working?"; it has to be findable."""
+    """The read-only status command has to be findable from CLI help."""
     with pytest.raises(SystemExit) as excinfo:
         cli_main(["--help"])
     assert excinfo.value.code == 0
@@ -498,8 +498,8 @@ def test_status_is_listed_in_the_command_surface(capsys):
 def test_the_tick_row_never_denies_a_tick_the_write_row_names(tmp_path):
     """The two rows on one screen must not contradict each other.
 
-    The documented quickstart reaches this exactly: step 1 completes a dry run,
-    step 2 restarts and fails without a wallet. That leaves a STARTUP newer
+    A dry run followed by a restart without a wallet reaches this exactly.
+    That leaves a STARTUP newer
     than the last completed tick, so the run is warming up — but a tick HAS
     completed, and the `write` row says so. Claiming "the first tick has not
     completed" beside it is the contradiction the row exists to avoid.

@@ -177,9 +177,9 @@ class ProvenanceSettings:
         if missing:
             raise ProvenanceUnavailable(
                 "provenance pins are not configured: missing " + ", ".join(missing),
-                "Configure the trusted key files and verifier digest from "
-                "VALIDATOR.md. The recurring validator has no unaudited or "
-                "off submission mode.",
+                "Use the trusted key files and verifier digest from the reviewed "
+                "release. The recurring validator has no unaudited or off "
+                "submission mode.",
             )
         if self.mode == "authority":
             if self.allow_private_hosts:

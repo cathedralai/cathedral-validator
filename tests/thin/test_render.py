@@ -98,7 +98,7 @@ def test_a_value_the_writer_meant_to_hold_spaces_tokenizes_whole():
 
 
 def test_the_dry_run_line_never_prints_list_repr_debris(capsys):
-    # The exact detail the quickstart produces. Its last line used to end
+    # The exact detail a dry run produces. Its last line used to end
     # "dry run, nothing written 1]  7282]" -- the tails of the two list
     # literals -- which is the first thing a new operator ever reads.
     _emit(

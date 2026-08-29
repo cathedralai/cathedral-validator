@@ -176,14 +176,14 @@ fi
 #
 # Recovery is "the next audit completed with any outcome other than FAIL", NOT
 # "a PASS". PROVENANCE_AUDIT_PASS is emitted only when the audit reaches the
-# configured min_assurance (default rewarded_set_proven). A third-party relay
+# configured min_assurance (default rewarded_set_proven). An authorized relay
 # (config/validator-thin-sn39-relay.toml) ships no controlled raw-evidence
 # package and no evidence group, so its audit is receipts_only and its steady
 # state is PROVENANCE_AUDIT_NOT_PROVEN on EVERY tick, permanently, by design —
 # it never emits a PASS at all. Keying recovery on PASS therefore reduced this
 # rule to "one FAIL in 90 minutes alerts" on every relay, so a single
 # publisher-side blip paged the operator with a claim ("failing for 90m") that
-# was not true. See VALIDATOR.md, "Shadow-audit mismatch alert".
+# was not true.
 CUTOFF90=$(cutoff 5400)
 # One "<ts-to-the-minute> <OUTCOME>" line per completed audit in the window, in
 # journal order. Matches the event FIELD for the same reason rule 4 does.

@@ -1,145 +1,30 @@
 # Cathedral Validator boundary
 
-## Authority
+This repository is the sole source for Cathedral SN39 validator behavior.
 
-`cathedralai/cathedral-validator` is the canonical source for Cathedral SN39
-validator behavior and operations.
+It owns:
 
-This repository owns:
+- signed score and evidence verification;
+- miner hotkey to UID resolution;
+- allocation and burn enforcement;
+- replay, rollback, and single-writer protection; and
+- the authorized Bittensor weight transaction.
 
-- the `cathedral-validator` command
-- signed-vector verification
-- provenance replay and evidence gates
-- miner hotkey to UID resolution
-- allocation and burn enforcement
-- one-writer and rollback protection
-- dry-run and broadcast controls
-- the immutable Linux release builder, launcher, configs, and systemd units
+Cathedral Compute supplies worker evidence. Cathedral Distill supplies receipt
+and lane contracts. Neither repository owns the validator wallet or submits
+SN39 weights.
 
-There is no upstream validator sync. No other Cathedral repository is a deploy
-source for the validator.
+Registration, uptime, hardware ownership, attestation, or a self-reported score
+does not earn weight. Only work which passes the active verification and policy
+checks is eligible.
 
-### Allocation contracts
+The recurring provenance audit is observational. It records findings but never
+changes or blocks the signed vector submitted by the recurring relay.
 
-This repository is the sole owner of the signed allocation contracts, both the
-v2 (90% Intel TDX / 10% fixed burn) contract and the v3 (70% Intel TDX / 30%
-CyberGym / 0% fixed burn) contract. That ownership covers both halves of the
-v3 CyberGym lane, the composition in `scaffold/publisher/weights.py` and the
-admission in `scaffold/validator_thin.py`.
+The v3 CyberGym lane shape is shared through
+`V3_CYBERGYM_LANE_FIELDS`. Every value is independently derived by this
+repository. `cathedralai/cathedral` is not a v3 allocation source.
 
-The two halves are a producer and an independent verifier, so they share
-exactly one thing: `wire_vector.V3_CYBERGYM_LANE_FIELDS`, the lane's key set.
-Shape is a wire contract and is stated once; every VALUE inside the lane is
-still re-derived by the validator against its own metagraph read, including the
-UID-to-hotkey bindings that stop a recycled UID from collecting another miner's
-CyberGym share.
-
-A second implementation of the v3 lane in any other repository is a fork
-hazard, not a convenience: a vector composed against one copy and reproduced
-against the other can disagree, which is the one failure this contract exists
-to make impossible. `cathedralai/cathedral` is not a v3 allocation source.
-
-## Connected repositories
-
-The validator consumes contracts from two repositories without transferring
-authority to them.
-
-| Repository | What the validator consumes | What it cannot do |
-|---|---|---|
-| `cathedral-compute` | Compute worker evidence and provenance verification code | Claim the `cathedral-validator` command, sign with the validator wallet, or set weights |
-| `cathedral-distill` | Distill receipt, lane, replay, and composition contracts | Bypass admission, choose owner allocations, sign with the validator wallet, or set weights |
-
-Both dependencies are pinned to immutable reviewed commits. A dependency update
-must update its lock, tests, and release evidence together.
-
-## Decision boundary
-
-The validator accepts no weight because a miner is registered, online, or
-self-reports work. The active path checks:
-
-1. signature and independently pinned key
-2. Finney SN39 audience
-3. freshness, expiry, and rollback state
-4. the selected reward-policy contract
-5. evidence and receipt admission
-6. current hotkey to UID mapping
-7. owner-controlled allocation and burn policy
-8. the one-writer submission journal
-
-Any required failed gate stops the decision. `NOT_PROVEN` is not success.
-
-Customer sandbox execution is not a validator dependency. Seed-provider and
-miner-provider attempts finish, clean up, settle, and return a customer receipt
-before a bounded verified-work fact reaches a score-class producer. The exact
-separation and activation order are documented in
-[`docs/CUSTOMER_EXECUTION_SUPPLY_BOUNDARY.md`](docs/CUSTOMER_EXECUTION_SUPPLY_BOUNDARY.md).
-
-## Execution boundary
-
-The recurring shadow relay verifies the signed candidate and reads the live metagraph. It does
-not need Intel TDX on the validator host. It verifies that Cathedral signed the
-numbers; it does not verify the numbers. The provenance audit runs concurrently
-and its verdict arrives after the submission, so in thin mode a failed audit
-records a bad write rather than preventing one.
-
-There is no recurring authority/full operator mode or loopback self-compose
-profile. Losing the signed feed produces no write and no mode change. Internal
-authority-labelled journal types remain only for read-only recovery of
-historical bounded launch attempts. No launch preview or submit command remains
-in the supported operator surface.
-
-Workers provide hardware evidence. They never receive the validator wallet.
-The validator host stores only the registered validator hotkey needed for a
-permitted weight transaction. The validator coldkey is not installed there.
-
-## Write boundary
-
-`cathedral-validator serve` is non-writing by default.
-
-`--offline` performs no chain access. `--dry-run` reads current chain state and
-prints the exact candidate without writing. `--broadcast` permits one chain
-attempt only after the release, policy, evidence, vector, wallet, and
-single-writer gates pass.
-
-A publisher, miner, receipt, evidence bundle, CLI, or Compute service cannot
-bypass those gates or sign a weight transaction.
-
-## Release boundary
-
-Operators run `main` from a git checkout, installed editable. That is the
-supported path.
-
-It is not currently what SN39's own uid 30 runs. The live writer runs from a
-pinned checkout under `/opt`, selected by a systemd drop-in, at a revision that
-can sit behind `main`. That is deployment drift, not a second supported path,
-and it is recorded here rather than smoothed over because a boundary document
-that describes an intended state instead of the real one is worth nothing to
-the person reading it to decide what to trust.
-
-The hardened path below, an immutable content-addressed release on Linux,
-remains available for operators who want it, and is documented under "Supported
-systemd install (relay)" in [README](README.md). Where it is used, the release
-manifest binds:
-
-- the exact Validator commit
-- the locked Python environment
-- the pinned Compute source archive
-- validator configs and policy keys
-- launcher and systemd units
-- the verifier binary
-- the bootstrap Python interpreter
-
-The release builder rejects dirty source, mutable paths, unexpected packages,
-installed configs or keys that differ from the reviewed release, and a Compute
-package that claims the `cathedral-validator` console script. It binds the
-installed dependency files into the manifest. The launcher rejects later
-changes to those bound files.
-
-## Logging boundary
-
-The raw validator journal is private operator data. The public status stream is
-a separate allowlisted projection. Neither stream includes wallet seeds,
-private keys, bearer tokens, cloud credentials, or controlled raw evidence.
-
-Historical release documents under `docs/history/` describe earlier states and
-are not operator routing.
+Public validator operation is not self-service during live testing. Historical
+documents, tests, previews, and local runs do not authorize a chain write or
+prove current deployment state.
