@@ -1,12 +1,11 @@
-# SN39 validator — Docker (3 commands)
+# SN39 validator no-write preview — Docker
 
-A cross-platform way (macOS / Linux / Windows) to run the relay validator without a
-native Python setup. It builds **this repo** into an image and runs the shipped
-`cathedral-validator serve`. Same trust profile as the native quickstart — just packaged.
+A cross-platform way to inspect the signed-vector relay without a native Python
+setup. It builds this repository and runs `cathedral-validator serve` with a
+fixed `--dry-run`. The shipped Docker surface exposes no submission selector.
 
-> For the **canonical, auditable wallet-host install**, use the native path in the repo
-> README quickstart (or `../wallet-host-quickstart.sh`). Containers are the fast
-> cross-platform option; the native path is the one an auditor reads line by line.
+Production has one path: the immutable native systemd release documented in the
+root README. Docker is only a no-write evaluation surface.
 
 ## Run it
 
@@ -14,8 +13,8 @@ native Python setup. It builds **this repo** into an image and runs the shipped
 git clone https://github.com/cathedralai/cathedral-validator.git
 cd cathedral-validator/deploy/sn39/docker
 
-./cathedral config      # 4 prompts: coldkey, validator hotkey, network, broadcast?
-./cathedral up          # builds the image the first time, then runs the validator
+./cathedral config      # wallet, validator hotkey, wallet path, and network
+./cathedral up          # builds the image, then starts a no-write preview
 ```
 
 Watch it: `./cathedral logs` · stop it: `./cathedral down`.
@@ -26,27 +25,24 @@ Watch it: `./cathedral logs` · stop it: `./cathedral down`.
 - A **registered SN39 validator hotkey** (not your miner hotkey). Check with
   `./cathedral candidate` — it reads the live chain and tells you if a hotkey qualifies.
 
-## Shadow vs on-chain
-`./cathedral config` asks *"Broadcast weights on-chain?"*
-- **no** (default) → shadow: reads chain, composes, **writes nothing** (`--dry-run`).
-- **yes** → sets weights on mainnet. Only with a **registered + staked** validator hotkey
-  (an unstaked one's weights are ignored by consensus).
+## No-write boundary
 
-Re-run `./cathedral config` to change it, then `./cathedral up`.
+The entrypoint always passes `--dry-run`, accepts no extra validator arguments,
+and refuses the retired `CATHEDRAL_BROADCAST` setting. Re-run
+`./cathedral config` once to remove that setting from an older `.env`.
 
 ## Notes
 - Your wallet is mounted **read-only**; validator state is a **forward-only** volume
   (a rebuild never rewinds a spent submission fence).
 - The image installs `.[provenance]`, which version-couples a **pinned** cathedral-compute
   — the image is a coherent release set, not a floating checkout.
-- **Production single-host lifecycle** (staged upgrades + rollback) is the systemd model in
-  `..` (`deploy/sn39`) + [`#102`](https://github.com/cathedralai/cathedral-validator/pull/102),
-  not this container. Use this to stand up + prove; use that to operate 24/7.
+- Production chain writes use the root-owned systemd launcher in `deploy/sn39`.
+  This container is not a production alternative.
 
 ## Commands
 | | |
 |---|---|
-| `./cathedral config` | set coldkey / hotkey / network / broadcast → `.env` |
-| `./cathedral up` | build (first time) + run |
+| `./cathedral config` | set wallet, hotkey, wallet path, and network in `.env` |
+| `./cathedral up` | build and run the no-write preview |
 | `./cathedral candidate` | which hotkey can validate (live chain) |
 | `./cathedral logs` \| `status` \| `down` | manage it |

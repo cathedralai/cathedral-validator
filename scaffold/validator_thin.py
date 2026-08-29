@@ -577,7 +577,7 @@ def fetch_vector(publisher_url: str, timeout: float = 30.0) -> dict[str, Any]:
             connection.request(
                 "GET",
                 target_path,
-                headers={"Host": host, "User-Agent": "cathedral-thin-validator/1.0"},
+                headers={"Host": host, "User-Agent": "cathedral-validator/4.0"},
             )
             connection.sock.settimeout(_phase_timeout())
             response = connection.getresponse()

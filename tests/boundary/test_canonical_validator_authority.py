@@ -24,6 +24,7 @@ def test_validator_console_script_belongs_to_this_repository() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = project["project"]["scripts"]
     assert scripts["cathedral-validator"] == "scaffold.cli:main"
+    assert "cathedral-thin-validator" not in scripts
 
 
 def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
@@ -34,7 +35,6 @@ def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
         "BOUNDARY.md",
         "REVIEW.md",
         "docs/PROVENANCE.md",
-        "docs/THIN_SUBNET_RUNBOOK.md",
         "docs/history/SN39_MAINNET_RELEASE_20260724.md",
     ):
         text = (ROOT / name).read_text(encoding="utf-8")
@@ -55,6 +55,36 @@ def test_legacy_validator_sync_assets_are_absent() -> None:
         "tools/upstream-manifest.txt",
     ):
         assert not (ROOT / relative).exists(), relative
+
+
+def test_legacy_thin_operator_surface_is_archived_not_installed() -> None:
+    assert not (ROOT / "docs" / "THIN_SUBNET_RUNBOOK.md").exists()
+    assert not (ROOT / "deploy" / "thin").exists()
+
+    historical = (ROOT / "docs" / "history" / "THIN_SUBNET_RUNBOOK.md").read_text(
+        encoding="utf-8"
+    )
+    words = " ".join(historical.split())
+    assert "Historical record only" in words
+    assert "all `deploy/thin` services were retired" in words
+    assert "The `cathedral-thin-validator` console command" in words
+
+
+def test_shipped_docker_entrypoint_is_no_write() -> None:
+    docker = ROOT / "deploy" / "sn39" / "docker"
+    entrypoint = (docker / "entrypoint.sh").read_text(encoding="utf-8")
+    validator_case = entrypoint.split("  validator)", 1)[1].split("    ;;", 1)[0]
+    helper = (docker / "cathedral").read_text(encoding="utf-8")
+    env_example = (docker / ".env.example").read_text(encoding="utf-8")
+
+    assert "--dry-run" in validator_case
+    assert "--broadcast" not in validator_case
+    assert '"$@"' not in validator_case
+    assert "CATHEDRAL_BROADCAST is retired" in validator_case
+    assert "shell)" not in entrypoint
+    assert "set_kv CATHEDRAL_BROADCAST" not in helper
+    assert "Broadcast weights" not in helper
+    assert "CATHEDRAL_BROADCAST=" not in env_example
 
 
 def test_compute_pin_reserves_the_validator_command() -> None:

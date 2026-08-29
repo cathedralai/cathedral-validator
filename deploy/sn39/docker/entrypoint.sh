@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# In-container role dispatcher for the SN39 relay validator. The image is the
-# cathedral-validator relay (`.[provenance]`); this generates the wallet config from
-# env and runs the shipped `cathedral-validator serve`.
+# In-container role dispatcher for the SN39 no-write preview. It generates the
+# wallet config from env and runs the shipped `cathedral-validator serve` with
+# a fixed dry-run posture. The container has no chain-writing selector.
 set -euo pipefail
 
 ROLE="${1:-validator}"; shift || true
@@ -37,26 +37,27 @@ case "$ROLE" in
     ;;
 
   validator)
+    if [ "$#" -ne 0 ]; then
+      echo ">> Docker preview accepts no validator arguments; use the native immutable systemd release for production." >&2
+      exit 64
+    fi
+    if [ "${CATHEDRAL_BROADCAST+x}" = "x" ]; then
+      echo ">> CATHEDRAL_BROADCAST is retired. Remove it from .env; Docker is no-write only." >&2
+      exit 64
+    fi
     if ! _detect; then
       echo ">> No valid validator candidate for this wallet — see guidance above. Not starting." >&2
       exit 2
     fi
     CFG=/state/my-validator.toml
     _gen_config "$CFG"
-    if [ "${CATHEDRAL_BROADCAST:-0}" = "1" ]; then
-      FLAG=--broadcast
-      echo ">> CATHEDRAL_BROADCAST=1 — this validator WILL set weights on mainnet." >&2
-    else
-      FLAG=--dry-run
-      echo ">> SHADOW (default): reads chain, composes, writes NOTHING (dry-run)." >&2
-    fi
+    echo ">> NO-WRITE PREVIEW: reads chain, verifies, and writes nothing." >&2
     exec cathedral-validator serve --config "$CFG" \
       --runtime-root /state \
       --state-file /state/thin-state.json \
       --jsonl /state/validator-events.jsonl \
-      "$FLAG" "$@"
+      --dry-run
     ;;
 
-  shell) exec /bin/bash "$@" ;;
-  *) echo "unknown role: $ROLE (validator | candidate | shell)" >&2; exit 64 ;;
+  *) echo "unknown role: $ROLE (validator | candidate)" >&2; exit 64 ;;
 esac
