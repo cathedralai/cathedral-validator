@@ -12,11 +12,17 @@ def test_false_launch_design_page_is_not_active() -> None:
     assert not (ROOT / "deploy" / "publisher" / "init-clean-journal.sh").exists()
 
 
-def test_readme_is_a_small_product_front_door() -> None:
+def test_readme_is_a_small_centered_product_front_door() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert readme.count("\n") == 5
-    assert "https://cathedral.computer/" in readme
+    assert readme.count("\n") == 7
+    assert '<div align="center">' in readme
+    assert "<strong>Bittensor SN39</strong>" in readme
+    assert (
+        "<strong>Racing to build the fastest sandbox fleet on earth</strong>" in readme
+    )
+    assert "<strong>With machines that prove what they run</strong>" in readme
     assert "cathedralai/cathedral-sandbox/blob/main/MINING.md" in readme
     assert "cathedralai/cathedral-validator/blob/main/VALIDATOR.md" in readme
-    assert "cathedralai/cathedral-distill" in readme
+    assert "cathedral.computer" not in readme
+    assert "cathedral-distill" not in readme
     assert "--broadcast" not in readme
