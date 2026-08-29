@@ -57,6 +57,11 @@ CATHEDRAL_COLDKEY = (
     "5G6mgvL59o6AM8rFRYbbUpbzjjGwcVLUidpQ1vsz5UkZyw2o"  # pragma: allowlist secret
 )
 
+SECOND_MINER_HOTKEY = (
+    "5Ct2DBJPULeQxGmFiKrpGvvWuYVxgYEX8tRfNjWYRga8VRbq"  # pragma: allowlist secret
+)
+SECOND_MINER_ENDPOINT_IP = "34.46.19.69"
+
 PREVIEW_SCHEMA = "cathedral_sn39_miner_axon_preview_v1"
 JOURNAL_SCHEMA = "cathedral_sn39_miner_axon_journal_v1"
 SUCCESSOR_JOURNAL_SCHEMA = "cathedral_sn39_miner_axon_successor_journal_v1"
@@ -79,6 +84,69 @@ JOURNAL_NAME = "miner-axon-announcement.json"
 LOCK_NAME = ".miner-axon-announcement.lock"
 MAX_DOCUMENT_BYTES = 1_048_576
 
+
+@dataclass(frozen=True)
+class MinerAxonContract:
+    """Immutable identity and local lineage for one bounded axon writer.
+
+    The old UID124 launch remains the default contract for compatibility. A
+    second miner must use a different contract rather than changing module
+    globals, sharing a journal, or inheriting UID124's consumed attempt fence.
+    """
+
+    contract_id: str
+    miner_hotkey: str
+    coldkey: str
+    validator_hotkey: str
+    runtime_root: Path
+    preview_name: str
+    journal_name: str
+    lock_name: str
+    preview_schema: str
+    journal_schema: str
+    endpoint_ip: str | None = None
+    endpoint_port: int = SN39_HTTPS_PORT
+    fixed_uid: int | None = None
+    supports_legacy_successor: bool = False
+    first_announcement_only: bool = False
+    require_proven_success_receipt: bool = False
+
+    @property
+    def preview_path(self) -> Path:
+        return self.runtime_root / self.preview_name
+
+
+UID124_AXON_CONTRACT = MinerAxonContract(
+    contract_id="cathedral_sn39_uid124_axon_v1",
+    miner_hotkey=MINER_HOTKEY,
+    coldkey=CATHEDRAL_COLDKEY,
+    validator_hotkey=VALIDATOR_HOTKEY,
+    runtime_root=DEFAULT_RUNTIME_ROOT,
+    preview_name=DEFAULT_PREVIEW.name,
+    journal_name=JOURNAL_NAME,
+    lock_name=LOCK_NAME,
+    preview_schema=PREVIEW_SCHEMA,
+    journal_schema=JOURNAL_SCHEMA,
+    supports_legacy_successor=True,
+)
+
+SECOND_MINER_RUNTIME_ROOT = Path("/var/lib/cathedral-validator/second-miner-axon")
+SECOND_MINER_AXON_CONTRACT = MinerAxonContract(
+    contract_id="cathedral_sn39_second_miner_first_axon_v1",
+    miner_hotkey=SECOND_MINER_HOTKEY,
+    coldkey=CATHEDRAL_COLDKEY,
+    validator_hotkey=VALIDATOR_HOTKEY,
+    runtime_root=SECOND_MINER_RUNTIME_ROOT,
+    preview_name="second-miner-axon-preview.json",
+    journal_name="second-miner-axon-announcement.json",
+    lock_name=".second-miner-axon-announcement.lock",
+    preview_schema="cathedral_sn39_second_miner_axon_preview_v1",
+    journal_schema="cathedral_sn39_second_miner_axon_journal_v1",
+    endpoint_ip=SECOND_MINER_ENDPOINT_IP,
+    first_announcement_only=True,
+    require_proven_success_receipt=True,
+)
+
 _CHAIN_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LOCAL_LOCKS_GUARD = threading.Lock()
@@ -91,6 +159,18 @@ class MinerAxonError(IndependentLiveError):
 
 class MinerAxonAmbiguous(MinerAxonError):
     """A serve intent exists and must not be retried without reconciliation."""
+
+
+def _contract_runtime_root(contract: MinerAxonContract) -> Path:
+    """Honor the historical test/runtime override only for the UID124 path."""
+
+    if contract is UID124_AXON_CONTRACT:
+        return Path(DEFAULT_RUNTIME_ROOT)
+    return Path(contract.runtime_root)
+
+
+def _contract_preview_path(contract: MinerAxonContract) -> Path:
+    return _contract_runtime_root(contract) / contract.preview_name
 
 
 @dataclass(frozen=True)
@@ -234,7 +314,9 @@ def _require_ss58(value: object, *, label: str) -> str:
     return address
 
 
-def _global_ipv4(value: object) -> str:
+def _global_ipv4(
+    value: object, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> str:
     if not isinstance(value, str) or not value:
         raise MinerAxonError("miner service IP must be a non-empty string")
     try:
@@ -243,14 +325,20 @@ def _global_ipv4(value: object) -> str:
         raise MinerAxonError("miner service IP is invalid") from exc
     if parsed.version != 4 or not parsed.is_global or str(parsed) != value:
         raise MinerAxonError("miner service IP must be one canonical global IPv4")
+    if contract.endpoint_ip is not None and value != contract.endpoint_ip:
+        raise MinerAxonError(
+            f"miner service IP differs from the bounded {contract.contract_id} endpoint"
+        )
     return value
 
 
-def _service_port(value: object) -> int:
+def _service_port(
+    value: object, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise MinerAxonError("miner service port must be an integer")
-    if value != SN39_HTTPS_PORT:
-        raise MinerAxonError(f"miner service port must be {SN39_HTTPS_PORT}")
+    if value != contract.endpoint_port:
+        raise MinerAxonError(f"miner service port must be {contract.endpoint_port}")
     return value
 
 
@@ -277,7 +365,9 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _wallet_public_identity(wallet: Any) -> tuple[str, str]:
+def _wallet_public_identity(
+    wallet: Any, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> tuple[str, str]:
     public_hotkey = getattr(wallet, "hotkeypub", None)
     if public_hotkey is None:
         public_hotkey = getattr(wallet, "hotkey", None)
@@ -287,16 +377,18 @@ def _wallet_public_identity(wallet: Any) -> tuple[str, str]:
     )
     _require_ss58(hotkey, label="announcement wallet public hotkey")
     _require_ss58(coldkey, label="announcement wallet coldkey")
-    if hotkey != MINER_HOTKEY:
+    if hotkey != contract.miner_hotkey:
         raise MinerAxonError("announcement wallet is not the pinned Cathedral miner")
-    if coldkey != CATHEDRAL_COLDKEY:
+    if coldkey != contract.coldkey:
         raise MinerAxonError(
             "announcement wallet coldkey is not the pinned Cathedral coldkey"
         )
     return hotkey, coldkey
 
 
-def _wallet_identity(wallet: Any) -> tuple[str, str]:
+def _wallet_identity(
+    wallet: Any, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> tuple[str, str]:
     """Require the signing hotkey only on the explicitly confirmed live path."""
 
     hotkey = str(getattr(getattr(wallet, "hotkey", None), "ss58_address", "") or "")
@@ -305,9 +397,9 @@ def _wallet_identity(wallet: Any) -> tuple[str, str]:
     )
     _require_ss58(hotkey, label="announcement signing hotkey")
     _require_ss58(coldkey, label="announcement wallet coldkey")
-    if hotkey != MINER_HOTKEY:
+    if hotkey != contract.miner_hotkey:
         raise MinerAxonError("announcement wallet is not the pinned Cathedral miner")
-    if coldkey != CATHEDRAL_COLDKEY:
+    if coldkey != contract.coldkey:
         raise MinerAxonError(
             "announcement wallet coldkey is not the pinned Cathedral coldkey"
         )
@@ -342,7 +434,9 @@ def _strict_axon_endpoint(axon: Any) -> tuple[str, int, bool]:
     return raw_ip, raw_port, serving
 
 
-def _registered_row(metagraph: Any) -> tuple[int, str, str, Any]:
+def _registered_row(
+    metagraph: Any, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> tuple[int, str, str, Any]:
     try:
         uids = [
             _strict_nonnegative_int(value, label="miner UID")
@@ -360,7 +454,7 @@ def _registered_row(metagraph: Any) -> tuple[int, str, str, Any]:
     matches = [
         (uid, hotkey, coldkey, axon)
         for uid, hotkey, coldkey, axon in zip(uids, hotkeys, coldkeys, axons)
-        if hotkey == MINER_HOTKEY
+        if hotkey == contract.miner_hotkey
     ]
     if len(matches) != 1:
         raise MinerAxonError(
@@ -369,14 +463,20 @@ def _registered_row(metagraph: Any) -> tuple[int, str, str, Any]:
     uid, hotkey, coldkey, axon = matches[0]
     _require_ss58(hotkey, label="registered miner hotkey")
     _require_ss58(coldkey, label="registered miner coldkey")
-    if coldkey != CATHEDRAL_COLDKEY:
+    if coldkey != contract.coldkey:
         raise MinerAxonError(
             "the registered miner is not owned by the pinned Cathedral coldkey"
+        )
+    if contract.fixed_uid is not None and uid != contract.fixed_uid:
+        raise MinerAxonError(
+            f"the registered miner UID differs from the {contract.contract_id} pin"
         )
     return uid, hotkey, coldkey, axon
 
 
-def finalized_miner_state(subtensor: Any) -> FinalizedMinerState:
+def finalized_miner_state(
+    subtensor: Any, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> FinalizedMinerState:
     """Read the pinned miner registration and axon at one finalized head."""
 
     observed_genesis_hash(subtensor)
@@ -395,7 +495,7 @@ def finalized_miner_state(subtensor: Any) -> FinalizedMinerState:
         raise MinerAxonError(
             f"finalized SN39 metagraph is unavailable: {type(exc).__name__}"
         ) from exc
-    uid, hotkey, coldkey, axon = _registered_row(metagraph)
+    uid, hotkey, coldkey, axon = _registered_row(metagraph, contract=contract)
     ip, port, serving = _strict_axon_endpoint(axon)
     return FinalizedMinerState(
         block_number=block_number,
@@ -410,7 +510,12 @@ def finalized_miner_state(subtensor: Any) -> FinalizedMinerState:
 
 
 def collect_endpoint_proof(
-    subtensor: Any, *, qvl_path: str, ip: str, port: int
+    subtensor: Any,
+    *,
+    qvl_path: str,
+    ip: str,
+    port: int,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> EndpointProof:
     """Collect through the reviewed attested-SPKI transport and replay SAT.
 
@@ -421,16 +526,16 @@ def collect_endpoint_proof(
     compatibility with an ordinary CA/hostname RemoteMiner client.
     """
 
-    service_ip = _global_ipv4(ip)
-    service_port = _service_port(port)
+    service_ip = _global_ipv4(ip, contract=contract)
+    service_port = _service_port(port, contract=contract)
     observed_genesis_hash(subtensor)
     snapshot = snapshot_epoch(subtensor)
     evidence_url = axon_evidence_url(service_ip, service_port)
     sat_url = axon_sat_work_url(service_ip, service_port)
     collected_row = _try_collect(
         evidence_url,
-        MINER_HOTKEY,
-        VALIDATOR_HOTKEY,
+        contract.miner_hotkey,
+        contract.validator_hotkey,
         sat_url,
     )
     collected = collected_row.get("collected")
@@ -438,7 +543,7 @@ def collect_endpoint_proof(
         raise MinerAxonError(
             f"miner evidence collection failed: {collected_row.get('error')}"
         )
-    if collected.assigned_hotkey != MINER_HOTKEY:
+    if collected.assigned_hotkey != contract.miner_hotkey:
         raise MinerAxonError("collected quote is assigned to a different miner")
     verifier = load_verifier(qvl_path)
     verdict = ComputeAdapter(
@@ -463,8 +568,8 @@ def collect_endpoint_proof(
             "the pinned miner returned no positive canonical SAT units"
         )
     proof = EndpointProof(
-        hotkey=MINER_HOTKEY,
-        validator_hotkey=VALIDATOR_HOTKEY,
+        hotkey=contract.miner_hotkey,
+        validator_hotkey=contract.validator_hotkey,
         ip=service_ip,
         port=service_port,
         qvl=verdict.value,
@@ -478,18 +583,22 @@ def collect_endpoint_proof(
         anchor_number=snapshot.anchor.anchor_number,
         anchor_hash=snapshot.anchor.anchor_hash,
     )
-    validate_endpoint_proof(proof, ip=service_ip, port=service_port)
+    validate_endpoint_proof(proof, ip=service_ip, port=service_port, contract=contract)
     return proof
 
 
 def validate_endpoint_proof(
-    proof: EndpointProof, *, ip: str, port: int
+    proof: EndpointProof,
+    *,
+    ip: str,
+    port: int,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> EndpointProof:
-    service_ip = _global_ipv4(ip)
-    service_port = _service_port(port)
-    if proof.hotkey != MINER_HOTKEY:
+    service_ip = _global_ipv4(ip, contract=contract)
+    service_port = _service_port(port, contract=contract)
+    if proof.hotkey != contract.miner_hotkey:
         raise MinerAxonError("endpoint proof is assigned to the wrong miner")
-    if proof.validator_hotkey != VALIDATOR_HOTKEY:
+    if proof.validator_hotkey != contract.validator_hotkey:
         raise MinerAxonError("endpoint proof nonce is not attributed to UID30")
     if proof.ip != service_ip or proof.port != service_port:
         raise MinerAxonError("endpoint proof does not match the requested endpoint")
@@ -520,29 +629,58 @@ def _same_endpoint(state: FinalizedMinerState, *, ip: str, port: int) -> bool:
     return (state.ip, state.port, state.is_serving) == (ip, port, True)
 
 
-def _announcement_paths(runtime_root: Path) -> tuple[Path, Path]:
+def _require_first_announcement_posture(
+    state: FinalizedMinerState,
+    *,
+    ip: str,
+    port: int,
+    contract: MinerAxonContract,
+) -> None:
+    """Refuse to turn a first-time contract into an unjournaled successor."""
+
+    if not contract.first_announcement_only or _same_endpoint(state, ip=ip, port=port):
+        return
+    if (state.ip, state.port, state.is_serving) != ("0.0.0.0", 0, False):
+        raise MinerAxonError(
+            "first-time axon contract requires a canonical unannounced row; "
+            "a different existing axon needs an explicit successor lineage"
+        )
+
+
+def _announcement_paths(
+    runtime_root: Path, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> tuple[Path, Path]:
     root = Path(runtime_root)
     if not root.is_absolute():
         raise MinerAxonError("runtime root must be absolute")
-    return root / LOCK_NAME, root / JOURNAL_NAME
+    return root / contract.lock_name, root / contract.journal_name
 
 
 def build_preview(
     *,
     state: FinalizedMinerState,
     proof: EndpointProof,
-    runtime_root: Path = DEFAULT_RUNTIME_ROOT,
+    runtime_root: Path | None = None,
     created_at: str | None = None,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> dict[str, Any]:
     """Build the review artifact. This function signs and submits nothing."""
 
-    if state.hotkey != MINER_HOTKEY or state.coldkey != CATHEDRAL_COLDKEY:
+    root = (
+        _contract_runtime_root(contract) if runtime_root is None else Path(runtime_root)
+    )
+    if state.hotkey != contract.miner_hotkey or state.coldkey != contract.coldkey:
         raise MinerAxonError("finalized miner identity differs from the launch pins")
-    validate_endpoint_proof(proof, ip=proof.ip, port=proof.port)
-    lock_path, journal_path = _announcement_paths(Path(runtime_root))
+    if contract.fixed_uid is not None and state.uid != contract.fixed_uid:
+        raise MinerAxonError("finalized miner UID differs from the launch pin")
+    validate_endpoint_proof(proof, ip=proof.ip, port=proof.port, contract=contract)
+    lock_path, journal_path = _announcement_paths(root, contract=contract)
+    _require_first_announcement_posture(
+        state, ip=proof.ip, port=proof.port, contract=contract
+    )
     already = _same_endpoint(state, ip=proof.ip, port=proof.port)
     document: dict[str, Any] = {
-        "schema": PREVIEW_SCHEMA,
+        "schema": contract.preview_schema,
         "status": PREVIEW_ALREADY if already else PREVIEW_READY,
         "created_at": created_at
         or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -553,8 +691,8 @@ def build_preview(
         },
         "miner": {
             "uid": state.uid,
-            "hotkey": MINER_HOTKEY,
-            "coldkey": CATHEDRAL_COLDKEY,
+            "hotkey": contract.miner_hotkey,
+            "coldkey": contract.coldkey,
         },
         "requested_endpoint": {
             "ip": proof.ip,
@@ -580,7 +718,7 @@ def build_preview(
             "transaction_fee": "NOT_ESTIMATED_BY_THIS_ARTIFACT",
         },
         "local_state": {
-            "runtime_root": str(Path(runtime_root)),
+            "runtime_root": str(root),
             "announcement_lock": str(lock_path),
             "ambiguity_journal": str(journal_path),
             "remote_exclusivity": "operator_assertion_required",
@@ -588,7 +726,7 @@ def build_preview(
         "trust_boundary": {
             "qvl_binary_sha256": LAUNCH_QVL_DIGEST,
             "quote_binds": ["fresh_nonce", "miner_hotkey", "tls_spki"],
-            "collector_validator_hotkey": VALIDATOR_HOTKEY,
+            "collector_validator_hotkey": contract.validator_hotkey,
             "sat_rule": SAT_WORK_UNIT_RULE,
             "fresh_evidence_recollected_before_submission": True,
             "tls_authentication": "tdx_report_data_binds_observed_spki",
@@ -599,10 +737,14 @@ def build_preview(
             "coldkey_check": "public_ownership_only",
         },
     }
-    return validate_preview(document)
+    return validate_preview(document, contract=contract)
 
 
-def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
+def validate_preview(
+    document: Mapping[str, Any],
+    *,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
+) -> dict[str, Any]:
     preview = dict(document)
     expected_top = {
         "schema",
@@ -619,7 +761,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     }
     if set(preview) != expected_top:
         raise MinerAxonError("preview top-level fields differ from the launch schema")
-    if preview.get("schema") != PREVIEW_SCHEMA:
+    if preview.get("schema") != contract.preview_schema:
         raise MinerAxonError("preview schema differs from the launch pin")
     if preview.get("status") not in {PREVIEW_READY, PREVIEW_ALREADY}:
         raise MinerAxonError("preview status differs from the launch contract")
@@ -657,18 +799,20 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     uid = _strict_nonnegative_int(miner.get("uid"), label="preview miner UID")
     if dict(miner) != {
         "uid": uid,
-        "hotkey": MINER_HOTKEY,
-        "coldkey": CATHEDRAL_COLDKEY,
+        "hotkey": contract.miner_hotkey,
+        "coldkey": contract.coldkey,
     }:
         raise MinerAxonError("preview miner identity differs from the Cathedral pins")
-    ip = _global_ipv4(requested.get("ip"))
-    port = _service_port(requested.get("port"))
+    if contract.fixed_uid is not None and uid != contract.fixed_uid:
+        raise MinerAxonError("preview miner UID differs from the launch pin")
+    ip = _global_ipv4(requested.get("ip"), contract=contract)
+    port = _service_port(requested.get("port"), contract=contract)
     if dict(requested) != {"ip": ip, "port": port, "protocol": "https"}:
         raise MinerAxonError("preview endpoint differs from the HTTPS launch contract")
     if (
         chain.get("uid") != uid
-        or chain.get("hotkey") != MINER_HOTKEY
-        or chain.get("coldkey") != CATHEDRAL_COLDKEY
+        or chain.get("hotkey") != contract.miner_hotkey
+        or chain.get("coldkey") != contract.coldkey
     ):
         raise MinerAxonError("preview finalized registration differs from the pins")
     if set(chain) != {
@@ -702,6 +846,23 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     )
     if current_port > 65535 or not isinstance(current_axon.get("is_serving"), bool):
         raise MinerAxonError("preview finalized axon row is malformed")
+    current_state = FinalizedMinerState(
+        block_number=_strict_nonnegative_int(
+            chain.get("finalized_block_number"), label="preview finalized block"
+        ),
+        block_hash=_canonical_hash(
+            chain.get("finalized_block_hash"), label="preview finalized block hash"
+        ),
+        uid=uid,
+        hotkey=contract.miner_hotkey,
+        coldkey=contract.coldkey,
+        ip=current_ip,
+        port=current_port,
+        is_serving=current_axon["is_serving"],
+    )
+    _require_first_announcement_posture(
+        current_state, ip=ip, port=port, contract=contract
+    )
     proof_object = EndpointProof(
         hotkey=str(proof.get("hotkey", "")),
         validator_hotkey=str(proof.get("validator_hotkey", "")),
@@ -718,7 +879,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         anchor_number=proof.get("anchor_number"),  # type: ignore[arg-type]
         anchor_hash=str(proof.get("anchor_hash", "")),
     )
-    validate_endpoint_proof(proof_object, ip=ip, port=port)
+    validate_endpoint_proof(proof_object, ip=ip, port=port, contract=contract)
     if set(proof) != set(proof_object.artifact()):
         raise MinerAxonError("preview endpoint proof fields differ from the schema")
     already = (current_ip, current_port, current_axon["is_serving"]) == (
@@ -746,7 +907,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     }:
         raise MinerAxonError("preview does not prove the exact no-write posture")
     runtime_root = Path(str(local.get("runtime_root", "")))
-    lock_path, journal_path = _announcement_paths(runtime_root)
+    lock_path, journal_path = _announcement_paths(runtime_root, contract=contract)
     if dict(local) != {
         "runtime_root": str(runtime_root),
         "announcement_lock": str(lock_path),
@@ -757,7 +918,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     if dict(trust) != {
         "qvl_binary_sha256": LAUNCH_QVL_DIGEST,
         "quote_binds": ["fresh_nonce", "miner_hotkey", "tls_spki"],
-        "collector_validator_hotkey": VALIDATOR_HOTKEY,
+        "collector_validator_hotkey": contract.validator_hotkey,
         "sat_rule": SAT_WORK_UNIT_RULE,
         "fresh_evidence_recollected_before_submission": True,
         "tls_authentication": "tdx_report_data_binds_observed_spki",
@@ -863,11 +1024,14 @@ def _write_exclusive_owner_only(path: Path, data: bytes) -> None:
 
 
 def write_preview(
-    document: Mapping[str, Any], path: Path | str
+    document: Mapping[str, Any],
+    path: Path | str,
+    *,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> tuple[Path, Path, str]:
     """Create immutable owner-only canonical JSON plus a detached SHA256."""
 
-    validated = validate_preview(document)
+    validated = validate_preview(document, contract=contract)
     target = Path(path)
     if not target.is_absolute():
         raise MinerAxonError("preview output path must be absolute")
@@ -900,7 +1064,10 @@ def _strict_json(raw: bytes, *, label: str) -> dict[str, Any]:
 
 
 def load_reviewed_preview(
-    path: Path | str, *, reviewed_sha256: str
+    path: Path | str,
+    *,
+    reviewed_sha256: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> tuple[dict[str, Any], str]:
     target = Path(path)
     supplied = _digest(reviewed_sha256, label="reviewed preview digest")
@@ -917,7 +1084,7 @@ def load_reviewed_preview(
         raise MinerAxonError("detached preview digest is not ASCII") from exc
     if detached != supplied:
         raise MinerAxonError("detached preview digest differs from reviewed digest")
-    preview = validate_preview(_strict_json(raw, label="preview"))
+    preview = validate_preview(_strict_json(raw, label="preview"), contract=contract)
     return preview, supplied
 
 
@@ -965,7 +1132,9 @@ def _write_state(path: Path, document: Mapping[str, Any], *, exclusive: bool) ->
             pass
 
 
-def _load_journal(path: Path) -> dict[str, Any] | None:
+def _load_journal(
+    path: Path, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> dict[str, Any] | None:
     try:
         path.lstat()
     except FileNotFoundError:
@@ -981,7 +1150,10 @@ def _load_journal(path: Path) -> dict[str, Any] | None:
         raise MinerAxonAmbiguous(
             "existing announcement journal is unreadable; preserve it and do not retry"
         ) from exc
-    if journal.get("schema") not in {JOURNAL_SCHEMA, SUCCESSOR_JOURNAL_SCHEMA}:
+    accepted_schemas = {contract.journal_schema}
+    if contract.supports_legacy_successor:
+        accepted_schemas.add(SUCCESSOR_JOURNAL_SCHEMA)
+    if journal.get("schema") not in accepted_schemas:
         raise MinerAxonAmbiguous(
             "existing announcement journal schema is unrecognized; preserve it and do not retry"
         )
@@ -995,8 +1167,10 @@ def _local_lock(path: Path) -> threading.Lock:
 
 
 @contextmanager
-def _announcement_lock(runtime_root: Path) -> Iterator[None]:
-    lock_path, _ = _announcement_paths(runtime_root)
+def _announcement_lock(
+    runtime_root: Path, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> Iterator[None]:
+    lock_path, _ = _announcement_paths(runtime_root, contract=contract)
     _check_owner_parent(lock_path.parent, create=False)
     local = _local_lock(lock_path)
     if not local.acquire(blocking=False):
@@ -1035,7 +1209,10 @@ def _announcement_lock(runtime_root: Path) -> Iterator[None]:
 
 
 def _current_matches_preview(
-    state: FinalizedMinerState, preview: Mapping[str, Any]
+    state: FinalizedMinerState,
+    preview: Mapping[str, Any],
+    *,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> None:
     miner = preview["miner"]
     chain = preview["chain_at_preview"]
@@ -1048,8 +1225,8 @@ def _current_matches_preview(
         raise MinerAxonError("finalized chain head is older than the reviewed preview")
     if (
         state.uid != miner["uid"]
-        or state.hotkey != MINER_HOTKEY
-        or state.coldkey != CATHEDRAL_COLDKEY
+        or state.hotkey != contract.miner_hotkey
+        or state.coldkey != contract.coldkey
     ):
         raise MinerAxonError("finalized miner registration changed after preview")
     current = chain["axon"]
@@ -1062,12 +1239,22 @@ def _current_matches_preview(
         raise MinerAxonError("finalized miner axon changed after preview")
 
 
-def _fresh_matches_preview(fresh: EndpointProof, preview: Mapping[str, Any]) -> None:
+def _fresh_matches_preview(
+    fresh: EndpointProof,
+    preview: Mapping[str, Any],
+    *,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
+) -> None:
     requested = preview["requested_endpoint"]
     reviewed = preview["endpoint_proof"]
     assert isinstance(requested, Mapping)
     assert isinstance(reviewed, Mapping)
-    validate_endpoint_proof(fresh, ip=str(requested["ip"]), port=int(requested["port"]))
+    validate_endpoint_proof(
+        fresh,
+        ip=str(requested["ip"]),
+        port=int(requested["port"]),
+        contract=contract,
+    )
     for key in (
         "hotkey",
         "validator_hotkey",
@@ -1172,7 +1359,10 @@ def _finalized_readback(
 
 
 def _journal_identity(
-    *, preview: Mapping[str, Any], preview_sha256: str
+    *,
+    preview: Mapping[str, Any],
+    preview_sha256: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> dict[str, Any]:
     requested = preview["requested_endpoint"]
     miner = preview["miner"]
@@ -1183,15 +1373,19 @@ def _journal_identity(
         "netuid": NETUID,
         "preview_sha256": "sha256:" + preview_sha256,
         "uid": miner["uid"],
-        "hotkey": MINER_HOTKEY,
-        "coldkey": CATHEDRAL_COLDKEY,
+        "hotkey": contract.miner_hotkey,
+        "coldkey": contract.coldkey,
         "ip": requested["ip"],
         "port": requested["port"],
     }
 
 
 def _state_from_artifact(
-    value: object, *, label: str, require_serving: bool = False
+    value: object,
+    *,
+    label: str,
+    require_serving: bool = False,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> FinalizedMinerState:
     """Parse one exact finalized miner artifact without trusting journal fields."""
 
@@ -1209,7 +1403,11 @@ def _state_from_artifact(
     uid = _strict_nonnegative_int(value.get("uid"), label=f"{label} UID")
     hotkey = _require_ss58(value.get("hotkey"), label=f"{label} hotkey")
     coldkey = _require_ss58(value.get("coldkey"), label=f"{label} coldkey")
-    if uid < 0 or hotkey != MINER_HOTKEY or coldkey != CATHEDRAL_COLDKEY:
+    if (
+        hotkey != contract.miner_hotkey
+        or coldkey != contract.coldkey
+        or (contract.fixed_uid is not None and uid != contract.fixed_uid)
+    ):
         raise MinerAxonError(f"{label} identity differs from the Cathedral pins")
     axon = value.get("axon")
     if not isinstance(axon, Mapping) or set(axon) != {"ip", "port", "is_serving"}:
@@ -1243,7 +1441,12 @@ def _state_from_artifact(
     )
 
 
-def _endpoint_proof_from_artifact(value: object, *, label: str) -> EndpointProof:
+def _endpoint_proof_from_artifact(
+    value: object,
+    *,
+    label: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
+) -> EndpointProof:
     if not isinstance(value, Mapping):
         raise MinerAxonError(f"{label} is not an endpoint proof")
     proof = EndpointProof(
@@ -1264,7 +1467,9 @@ def _endpoint_proof_from_artifact(value: object, *, label: str) -> EndpointProof
     )
     if set(value) != set(proof.artifact()):
         raise MinerAxonError(f"{label} fields differ from the endpoint-proof schema")
-    return validate_endpoint_proof(proof, ip=proof.ip, port=proof.port)
+    return validate_endpoint_proof(
+        proof, ip=proof.ip, port=proof.port, contract=contract
+    )
 
 
 def _validated_receipt(
@@ -1289,6 +1494,28 @@ def _validated_receipt(
     if required_success and value["success"] is not True:
         raise MinerAxonError(f"finalized {label} receipt is not successful")
     return value
+
+
+def _validated_first_announcement_receipt(
+    value: object, *, preflight: FinalizedMinerState
+) -> Mapping[str, Any]:
+    receipt = _validated_receipt(
+        value, required_success=True, label="first-announcement"
+    )
+    if any(
+        receipt[key] is None for key in ("extrinsic_hash", "block_hash", "block_number")
+    ):
+        raise MinerAxonError(
+            "successful first-announcement receipt lacks finalized inclusion fields"
+        )
+    block_number = _strict_nonnegative_int(
+        receipt["block_number"], label="first-announcement receipt block number"
+    )
+    if block_number <= preflight.block_number:
+        raise MinerAxonError(
+            "successful first-announcement receipt does not postdate preflight"
+        )
+    return receipt
 
 
 def _validated_final_predecessor(
@@ -1703,9 +1930,16 @@ def _journal_for_attempt(
     fresh: EndpointProof,
     state: FinalizedMinerState,
     predecessor_lineage: Mapping[str, Any] | None = None,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> dict[str, Any]:
-    identity = _journal_identity(preview=preview, preview_sha256=preview_sha256)
+    identity = _journal_identity(
+        preview=preview, preview_sha256=preview_sha256, contract=contract
+    )
     successor = predecessor_lineage is not None
+    if successor and not contract.supports_legacy_successor:
+        raise MinerAxonError(
+            "this axon contract does not permit a legacy successor lineage"
+        )
     attempt_id = (
         _successor_attempt_id(
             identity=identity,
@@ -1717,7 +1951,7 @@ def _journal_for_attempt(
         else "sha256:" + _sha256(_canonical_json_bytes(identity))
     )
     journal = {
-        "schema": SUCCESSOR_JOURNAL_SCHEMA if successor else JOURNAL_SCHEMA,
+        "schema": SUCCESSOR_JOURNAL_SCHEMA if successor else contract.journal_schema,
         "status": "submission_started",
         "attempt_id": attempt_id,
         "identity": identity,
@@ -1769,10 +2003,14 @@ def _validated_serve_axon_call(
 
 
 def _journal_matches(
-    journal: Mapping[str, Any], *, preview: Mapping[str, Any], digest: str
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    digest: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> None:
     if journal.get("identity") != _journal_identity(
-        preview=preview, preview_sha256=digest
+        preview=preview, preview_sha256=digest, contract=contract
     ):
         raise MinerAxonError(
             "announcement journal belongs to a different reviewed preview"
@@ -1782,12 +2020,16 @@ def _journal_matches(
 
 
 def _recoverable_successor_validation(
-    journal: Mapping[str, Any], *, preview: Mapping[str, Any], digest: str
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    digest: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> _ValidatedSuccessorJournal | None:
     """Keep every malformed successor intent behind the ambiguity fence."""
 
     if not _looks_like_successor_journal(journal):
-        _journal_matches(journal, preview=preview, digest=digest)
+        _journal_matches(journal, preview=preview, digest=digest, contract=contract)
         return None
     try:
         return _validated_successor_journal(
@@ -1814,6 +2056,31 @@ def _post_intent_successor_validation(
         ) from exc
 
 
+def _strict_baseline_preflight(
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    contract: MinerAxonContract,
+) -> FinalizedMinerState | None:
+    """Validate the stored first-attempt fence before trusting its readback."""
+
+    if not contract.require_proven_success_receipt:
+        return None
+    preflight = _state_from_artifact(
+        journal.get("preflight"),
+        label="first-announcement preflight",
+        contract=contract,
+    )
+    _current_matches_preview(preflight, preview, contract=contract)
+    proof = _endpoint_proof_from_artifact(
+        journal.get("fresh_endpoint_proof"),
+        label="first-announcement fresh endpoint proof",
+        contract=contract,
+    )
+    _fresh_matches_preview(proof, preview, contract=contract)
+    return preflight
+
+
 def _recover_existing_journal(
     *,
     journal: dict[str, Any],
@@ -1822,14 +2089,45 @@ def _recover_existing_journal(
     digest: str,
     subtensor: Any,
     state_loader: Callable[[Any], FinalizedMinerState],
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     successor_validation = _recoverable_successor_validation(
-        journal, preview=preview, digest=digest
+        journal, preview=preview, digest=digest, contract=contract
     )
     successor_minimum = (
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent journal is contradictory; do not retry"
+        ) from exc
+    if baseline_preflight is not None:
+        try:
+            _canonical_state_block(
+                subtensor,
+                baseline_preflight,
+                label="first-announcement stored preflight",
+            )
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "first-announcement preflight is no longer canonical; do not retry"
+            ) from exc
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         try:
@@ -1854,9 +2152,9 @@ def _recover_existing_journal(
     port = int(requested["port"])
     status = journal.get("status")
     if status not in AMBIGUOUS_STATUSES | FINAL_STATUSES:
-        if successor_minimum is not None:
+        if minimum_readback is not None:
             raise MinerAxonAmbiguous(
-                "successor intent status is contradictory; preserve it and do not retry"
+                "announcement intent status is contradictory; preserve it and do not retry"
             )
         raise MinerAxonError(
             f"announcement journal status is not recognized: {status!r}"
@@ -1868,13 +2166,17 @@ def _recover_existing_journal(
             port=port,
             receipt=journal.get("receipt"),
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception as exc:
         if status in FINAL_STATUSES:
@@ -1909,9 +2211,9 @@ def _recover_existing_journal(
     try:
         _write_state(journal_path, recovered, exclusive=False)
     except Exception as exc:
-        if successor_minimum is not None:
+        if minimum_readback is not None:
             raise MinerAxonAmbiguous(
-                "successor endpoint was read back but recovery persistence failed; do not retry"
+                "endpoint was read back but recovery persistence failed; do not retry"
             ) from exc
         raise
     return recovered
@@ -1926,6 +2228,7 @@ def _resolve_after_call(
     state_loader: Callable[[Any], FinalizedMinerState],
     receipt: Mapping[str, Any] | None,
     failure_kind: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
@@ -1934,6 +2237,31 @@ def _resolve_after_call(
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+        if baseline_preflight is not None:
+            _canonical_state_block(
+                subtensor,
+                baseline_preflight,
+                label="first-announcement preflight",
+            )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent validation failed after persistence; do not retry"
+        ) from exc
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         expected_success = {
@@ -1966,13 +2294,17 @@ def _resolve_after_call(
             port=int(requested["port"]),
             receipt=receipt,
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception as exc:
         ambiguous = dict(journal)
@@ -2139,6 +2471,7 @@ def _submit_journaled_axon(
     state_loader: Callable[[Any], FinalizedMinerState],
     call: Callable[..., Any],
     call_kwargs: Mapping[str, Any],
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     """Persist one no-retry intent, call once, and resolve only by final state."""
 
@@ -2158,6 +2491,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=None,
             failure_kind="SDK_EXCEPTION",
+            contract=contract,
         )
     try:
         receipt = _receipt_fields(response)
@@ -2170,6 +2504,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=None,
             failure_kind="SDK_RESPONSE_UNPROVEN",
+            contract=contract,
         )
     if receipt["success"] is not True:
         return _resolve_after_call(
@@ -2180,6 +2515,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=receipt,
             failure_kind="SDK_UNSUCCESSFUL",
+            contract=contract,
         )
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
@@ -2188,6 +2524,39 @@ def _submit_journaled_axon(
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent validation failed after persistence; do not retry"
+        ) from exc
+    if baseline_preflight is not None:
+        try:
+            _validated_first_announcement_receipt(receipt, preflight=baseline_preflight)
+        except Exception:
+            return _resolve_after_call(
+                journal=journal,
+                journal_path=journal_path,
+                preview=preview,
+                subtensor=subtensor,
+                state_loader=state_loader,
+                receipt=None,
+                failure_kind="SDK_RESPONSE_UNPROVEN",
+                contract=contract,
+            )
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         try:
@@ -2206,6 +2575,7 @@ def _submit_journaled_axon(
                 state_loader=state_loader,
                 receipt=None,
                 failure_kind="SDK_RESPONSE_UNPROVEN",
+                contract=contract,
             )
     try:
         readback = _finalized_readback(
@@ -2214,13 +2584,17 @@ def _submit_journaled_axon(
             port=int(requested["port"]),
             receipt=receipt,
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception:
         return _resolve_after_call(
@@ -2231,6 +2605,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=receipt,
             failure_kind="FINALIZED_READBACK_UNPROVEN",
+            contract=contract,
         )
     finalized = dict(journal)
     finalized.update(
@@ -2405,13 +2780,14 @@ def announce_reviewed_preview(
     qvl_path: str,
     confirm: bool,
     exclusive_announcer_asserted: bool,
-    state_loader: Callable[[Any], FinalizedMinerState] = finalized_miner_state,
-    proof_loader: Callable[..., EndpointProof] = collect_endpoint_proof,
+    state_loader: Callable[[Any], FinalizedMinerState] | None = None,
+    proof_loader: Callable[..., EndpointProof] | None = None,
     serve_call: Callable[..., Any] | None = None,
     runtime_root: Path | None = None,
     allow_finalized_successor: bool = False,
     predecessor_preview_path: Path | str | None = None,
     predecessor_reviewed_sha256: str | None = None,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     """Authorize at most one serve_axon call from an exact reviewed preview."""
 
@@ -2427,6 +2803,10 @@ def announce_reviewed_preview(
         predecessor_preview_path is not None or predecessor_reviewed_sha256 is not None
     )
     if allow_finalized_successor is True:
+        if not contract.supports_legacy_successor:
+            raise MinerAxonError(
+                "this axon contract has no legacy successor authorization"
+            )
         if predecessor_preview_path is None or predecessor_reviewed_sha256 is None:
             raise MinerAxonError(
                 "--allow-finalized-successor requires the reviewed predecessor preview and digest"
@@ -2436,12 +2816,13 @@ def announce_reviewed_preview(
             "predecessor arguments require --allow-finalized-successor"
         )
     preview, digest = load_reviewed_preview(
-        preview_path, reviewed_sha256=reviewed_sha256
+        preview_path, reviewed_sha256=reviewed_sha256, contract=contract
     )
-    root = Path(DEFAULT_RUNTIME_ROOT if runtime_root is None else runtime_root)
-    if root.resolve(strict=False) != DEFAULT_RUNTIME_ROOT.resolve(strict=False):
+    canonical_root = _contract_runtime_root(contract)
+    root = Path(canonical_root if runtime_root is None else runtime_root)
+    if root.resolve(strict=False) != canonical_root.resolve(strict=False):
         raise MinerAxonError(
-            f"live announcement requires canonical runtime root {DEFAULT_RUNTIME_ROOT}"
+            f"live announcement requires canonical runtime root {canonical_root}"
         )
     local = preview["local_state"]
     assert isinstance(local, Mapping)
@@ -2451,13 +2832,21 @@ def announce_reviewed_preview(
         raise MinerAxonError("reviewed preview names a different runtime root")
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
-    ip = _global_ipv4(requested["ip"])
-    port = _service_port(requested["port"])
-    _, journal_path = _announcement_paths(root)
+    ip = _global_ipv4(requested["ip"], contract=contract)
+    port = _service_port(requested["port"], contract=contract)
+    _, journal_path = _announcement_paths(root, contract=contract)
+    state_reader = state_loader or (
+        lambda selected: finalized_miner_state(selected, contract=contract)
+    )
+    proof_reader = proof_loader or (
+        lambda selected, **kwargs: collect_endpoint_proof(
+            selected, contract=contract, **kwargs
+        )
+    )
     if allow_finalized_successor is True:
         assert predecessor_preview_path is not None
         assert predecessor_reviewed_sha256 is not None
-        with _announcement_lock(root):
+        with _announcement_lock(root, contract=contract):
             return _announce_finalized_successor_locked(
                 bt_module=bt_module,
                 subtensor=subtensor,
@@ -2467,16 +2856,16 @@ def announce_reviewed_preview(
                 predecessor_preview_path=predecessor_preview_path,
                 predecessor_reviewed_sha256=predecessor_reviewed_sha256,
                 qvl_path=qvl_path,
-                state_loader=state_loader,
-                proof_loader=proof_loader,
+                state_loader=state_reader,
+                proof_loader=proof_reader,
                 serve_call=serve_call,
                 runtime_root=root,
                 journal_path=journal_path,
-                existing=_load_journal(journal_path),
+                existing=_load_journal(journal_path, contract=contract),
             )
 
-    with _announcement_lock(root):
-        existing = _load_journal(journal_path)
+    with _announcement_lock(root, contract=contract):
+        existing = _load_journal(journal_path, contract=contract)
         if existing is not None:
             return _recover_existing_journal(
                 journal=existing,
@@ -2484,23 +2873,28 @@ def announce_reviewed_preview(
                 preview=preview,
                 digest=digest,
                 subtensor=subtensor,
-                state_loader=state_loader,
+                state_loader=state_reader,
+                contract=contract,
             )
-        before = state_loader(subtensor)
+        before = state_reader(subtensor)
+        _require_first_announcement_posture(before, ip=ip, port=port, contract=contract)
         if _same_endpoint(before, ip=ip, port=port):
             return {
-                "schema": JOURNAL_SCHEMA,
+                "schema": contract.journal_schema,
                 "status": "already_announced_no_write",
-                "identity": _journal_identity(preview=preview, preview_sha256=digest),
+                "identity": _journal_identity(
+                    preview=preview, preview_sha256=digest, contract=contract
+                ),
                 "readback": before.artifact(),
                 "remote_exclusive_announcer_asserted": True,
                 "serve_axon_called": False,
                 "retry_allowed": False,
             }
-        _current_matches_preview(before, preview)
-        fresh = proof_loader(subtensor, qvl_path=qvl_path, ip=ip, port=port)
-        _fresh_matches_preview(fresh, preview)
-        after = state_loader(subtensor)
+        _current_matches_preview(before, preview, contract=contract)
+        fresh = proof_reader(subtensor, qvl_path=qvl_path, ip=ip, port=port)
+        _fresh_matches_preview(fresh, preview, contract=contract)
+        after = state_reader(subtensor)
+        _require_first_announcement_posture(after, ip=ip, port=port, contract=contract)
         if (
             after.uid != before.uid
             or after.hotkey != before.hotkey
@@ -2511,10 +2905,12 @@ def announce_reviewed_preview(
         ):
             if _same_endpoint(after, ip=ip, port=port):
                 return {
-                    "schema": JOURNAL_SCHEMA,
+                    "schema": contract.journal_schema,
                     "status": "already_announced_no_write",
                     "identity": _journal_identity(
-                        preview=preview, preview_sha256=digest
+                        preview=preview,
+                        preview_sha256=digest,
+                        contract=contract,
                     ),
                     "readback": after.artifact(),
                     "remote_exclusive_announcer_asserted": True,
@@ -2542,17 +2938,19 @@ def announce_reviewed_preview(
             preview_sha256=digest,
             fresh=fresh,
             state=after,
+            contract=contract,
         )
-        _wallet_identity(wallet)
+        _wallet_identity(wallet, contract=contract)
         return _submit_journaled_axon(
             journal=journal,
             journal_path=journal_path,
             replace_finalized_predecessor=False,
             preview=preview,
             subtensor=subtensor,
-            state_loader=state_loader,
+            state_loader=state_reader,
             call=call,
             call_kwargs=call_kwargs,
+            contract=contract,
         )
 
 
@@ -2561,22 +2959,27 @@ def recover_ambiguous_preview(
     subtensor: Any,
     preview_path: Path | str,
     reviewed_sha256: str,
-    state_loader: Callable[[Any], FinalizedMinerState] = finalized_miner_state,
+    state_loader: Callable[[Any], FinalizedMinerState] | None = None,
     runtime_root: Path | None = None,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     """Read finalized state for an existing intent. Never signs or resubmits."""
 
     preview, digest = load_reviewed_preview(
-        preview_path, reviewed_sha256=reviewed_sha256
+        preview_path, reviewed_sha256=reviewed_sha256, contract=contract
     )
-    root = Path(DEFAULT_RUNTIME_ROOT if runtime_root is None else runtime_root)
-    if root.resolve(strict=False) != DEFAULT_RUNTIME_ROOT.resolve(strict=False):
+    canonical_root = _contract_runtime_root(contract)
+    root = Path(canonical_root if runtime_root is None else runtime_root)
+    if root.resolve(strict=False) != canonical_root.resolve(strict=False):
         raise MinerAxonError(
-            f"recovery requires canonical runtime root {DEFAULT_RUNTIME_ROOT}"
+            f"recovery requires canonical runtime root {canonical_root}"
         )
-    _, journal_path = _announcement_paths(root)
-    with _announcement_lock(root):
-        journal = _load_journal(journal_path)
+    _, journal_path = _announcement_paths(root, contract=contract)
+    state_reader = state_loader or (
+        lambda selected: finalized_miner_state(selected, contract=contract)
+    )
+    with _announcement_lock(root, contract=contract):
+        journal = _load_journal(journal_path, contract=contract)
         if journal is None:
             raise MinerAxonError("no announcement journal exists to recover")
         return _recover_existing_journal(
@@ -2585,7 +2988,8 @@ def recover_ambiguous_preview(
             preview=preview,
             digest=digest,
             subtensor=subtensor,
-            state_loader=state_loader,
+            state_loader=state_reader,
+            contract=contract,
         )
 
 
@@ -2600,6 +3004,7 @@ __all__ = [
     "FinalizedMinerState",
     "JOURNAL_SCHEMA",
     "MINER_HOTKEY",
+    "MinerAxonContract",
     "MinerAxonAmbiguous",
     "MinerAxonError",
     "NETWORK",
@@ -2608,6 +3013,11 @@ __all__ = [
     "PREVIEW_READY",
     "PREVIEW_SCHEMA",
     "SN39_HTTPS_PORT",
+    "SECOND_MINER_AXON_CONTRACT",
+    "SECOND_MINER_ENDPOINT_IP",
+    "SECOND_MINER_HOTKEY",
+    "SECOND_MINER_RUNTIME_ROOT",
+    "UID124_AXON_CONTRACT",
     "VALIDATOR_HOTKEY",
     "announce_reviewed_preview",
     "build_preview",
