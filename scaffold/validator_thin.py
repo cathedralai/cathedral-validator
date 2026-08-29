@@ -23,6 +23,8 @@ publisher cannot re-serve an older policy_version after a restart.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import hashlib
 import ipaddress
@@ -34,6 +36,7 @@ import re
 import sys
 import threading
 import time
+import zlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -171,6 +174,8 @@ SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH = (
 SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK = 8_945_370
 SN39_UID30_SUCCESSOR_PREDECESSOR_SOURCE_EPOCH = 8_945_366
 SN39_UID30_SUCCESSOR_PREDECESSOR_UID = 124
+SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES = 1_048_576
+SN39_UID30_SUCCESSOR_ROLLBACK_B64_MAX_BYTES = 262_144
 # The one reviewed UID30 launch performs a complete finalized-state and TDX
 # revalidation immediately before signing.  That read is slightly longer than
 # one Finney block, so requiring the finalized head to remain byte-for-byte
@@ -925,8 +930,8 @@ def _read_state(state_file: Path) -> dict[str, Any]:
         os.close(parent)
 
 
-def _private_state_sha256(state_file: Path) -> str:
-    """Hash exact owner-only state bytes without following the final path."""
+def _private_state_bytes(state_file: Path) -> bytes:
+    """Read exact bounded owner-only state bytes without following the path."""
 
     import stat as stat_module
 
@@ -944,23 +949,99 @@ def _private_state_sha256(state_file: Path) -> str:
                 or info.st_uid != os.geteuid()
                 or stat_module.S_IMODE(info.st_mode) != 0o600
                 or info.st_size <= 0
-                or info.st_size > 1_048_576
+                or info.st_size > SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES
             ):
                 raise ValueError(
                     "validator predecessor state must be owner-only mode 0600 "
                     "and at most 1 MiB"
                 )
-            digest = hashlib.sha256()
+            payload = bytearray()
             while True:
                 chunk = os.read(descriptor, 65_536)
                 if not chunk:
                     break
-                digest.update(chunk)
-            return digest.hexdigest()
+                payload.extend(chunk)
+                if len(payload) > SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES:
+                    raise ValueError(
+                        "validator predecessor state grew beyond the 1 MiB cap"
+                    )
+            return bytes(payload)
         finally:
             os.close(descriptor)
     finally:
         os.close(parent)
+
+
+def _private_state_sha256(state_file: Path) -> str:
+    """Hash exact owner-only state bytes without following the final path."""
+
+    return hashlib.sha256(_private_state_bytes(state_file)).hexdigest()
+
+
+def _encode_uid30_successor_predecessor_bytes(
+    payload: bytes,
+    *,
+    expected_sha256: str,
+) -> str:
+    """Bound and compress the exact unsigned-rollback preimage."""
+
+    if (
+        not payload
+        or len(payload) > SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise ValueError("UID30 successor predecessor bytes differ from their pin")
+    encoded = base64.b64encode(zlib.compress(payload, level=9)).decode("ascii")
+    if len(encoded) > SN39_UID30_SUCCESSOR_ROLLBACK_B64_MAX_BYTES:
+        raise ValueError("UID30 successor predecessor rollback bytes exceed their cap")
+    return encoded
+
+
+def _decode_uid30_successor_predecessor_bytes(
+    encoded: Any,
+    *,
+    expected_sha256: str,
+) -> bytes:
+    """Recover only the bounded exact predecessor preimage."""
+
+    if (
+        not isinstance(encoded, str)
+        or not encoded
+        or len(encoded) > SN39_UID30_SUCCESSOR_ROLLBACK_B64_MAX_BYTES
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+    ):
+        raise ValueError("UID30 successor predecessor rollback bytes are malformed")
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        inflater = zlib.decompressobj()
+        payload = inflater.decompress(
+            compressed,
+            SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES + 1,
+        )
+        if inflater.unconsumed_tail or not inflater.eof or inflater.unused_data:
+            raise ValueError("UID30 successor predecessor rollback bytes exceed 1 MiB")
+        remaining = SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES + 1 - len(payload)
+        if remaining <= 0:
+            raise ValueError("UID30 successor predecessor rollback bytes exceed 1 MiB")
+        payload += inflater.flush(remaining)
+    except (binascii.Error, ValueError, zlib.error) as exc:
+        raise ValueError(
+            "UID30 successor predecessor rollback bytes are malformed"
+        ) from exc
+    if (
+        not payload
+        or len(payload) > SN39_UID30_SUCCESSOR_ROLLBACK_MAX_BYTES
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise ValueError("UID30 successor predecessor rollback bytes differ from pin")
+    try:
+        _strict_state_document(payload.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "UID30 successor predecessor rollback bytes are not strict state JSON"
+        ) from exc
+    return payload
 
 
 def _read_state_without_mutation(state_file: Path) -> dict[str, Any]:
@@ -1017,6 +1098,50 @@ def _read_state_without_mutation(state_file: Path) -> dict[str, Any]:
         os.close(parent)
 
 
+def _replace_private_bytes(state_file: Path, payload: bytes) -> None:
+    """Atomically replace one owner-only file with exact bytes."""
+
+    if not payload:
+        raise ValueError("validator state bytes are empty")
+    parent = _open_private_state_dir(state_file.parent)
+    tmp_name = state_file.name + ".tmp"
+    try:
+        try:
+            os.unlink(tmp_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(tmp_name, flags, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        os.replace(
+            tmp_name,
+            state_file.name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+        )
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(tmp_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
 def _replace_private_state(state_file: Path, document: dict[str, Any]) -> None:
     """Atomically replace state relative to one verified directory descriptor.
 
@@ -1040,43 +1165,10 @@ def _replace_private_state(state_file: Path, document: dict[str, Any]) -> None:
     is left to propagate. In the tick loop it reaches the generic handler,
     which fails the tick closed — no reservation, no signature, no submission.
     """
-    parent = _open_private_state_dir(state_file.parent)
-    tmp_name = state_file.name + ".tmp"
-    try:
-        try:
-            os.unlink(tmp_name, dir_fd=parent)
-        except FileNotFoundError:
-            pass
-        flags = (
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
-        descriptor = os.open(tmp_name, flags, 0o600, dir_fd=parent)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                descriptor = -1
-                handle.write(json.dumps(document, indent=2, allow_nan=False))
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-        os.replace(
-            tmp_name,
-            state_file.name,
-            src_dir_fd=parent,
-            dst_dir_fd=parent,
-        )
-        os.fsync(parent)
-    finally:
-        try:
-            os.unlink(tmp_name, dir_fd=parent)
-        except FileNotFoundError:
-            pass
-        os.close(parent)
+    _replace_private_bytes(
+        state_file,
+        json.dumps(document, indent=2, allow_nan=False).encode("utf-8"),
+    )
 
 
 def _state_policy_fence(document: dict[str, Any]) -> int:
@@ -3691,6 +3783,17 @@ def _uid30_successor_marked(identity: dict[str, Any]) -> bool:
             "predecessor",
         }.intersection(identity)
     )
+
+
+def _reviewed_uid30_attempt_id(identity: dict[str, Any]) -> str:
+    """Hash the historical newline-terminated reviewed-UID30 identity."""
+
+    dedup = {
+        key: value
+        for key, value in identity.items()
+        if key not in {"mapping_block", "uid_safety", "fresh_miner_evidence"}
+    }
+    return "sha256:" + hashlib.sha256(_canonical_json_bytes(dedup) + b"\n").hexdigest()
 
 
 def _strict_uid30_successor_proofs(
@@ -6512,6 +6615,16 @@ def _authorize_reviewed_uid30_submission(
         or state.get("submission_attempt_budgets") != exact_launch_budget
     ):
         raise wire.VectorError("reviewed UID30 predecessor lineage changed")
+    try:
+        _strict_uid30_successor_unsigned_rollback(
+            state,
+            attempt_id=attempt_id,
+            state_file=state_path,
+        )
+    except ValueError as exc:
+        raise wire.VectorError(
+            "reviewed UID30 predecessor rollback lineage changed"
+        ) from exc
 
     substrate = getattr(preflight.subtensor, "substrate", None)
     if substrate is None or preflight.finalized_hash is None:
@@ -8719,6 +8832,14 @@ def _reserve_common_submission(
         raise ValueError(
             "UID30 successor requires the canonical one-shot authority journal"
         )
+    predecessor_rollback_bytes = (
+        _encode_uid30_successor_predecessor_bytes(
+            _private_state_bytes(state_path),
+            expected_sha256=SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256,
+        )
+        if successor
+        else None
+    )
     # `_continuous_transition_required` is the single source of truth. Keeping
     # a separate config conjunct here let a historical full-replay lane reserve
     # without the signed authorization already demanded by the launch gate.
@@ -8820,6 +8941,15 @@ def _reserve_common_submission(
             "submission_pending_predecessor_journal_sha256": (
                 SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256 if successor else None
             ),
+            **(
+                {
+                    "submission_pending_predecessor_journal_zlib_b64": (
+                        predecessor_rollback_bytes
+                    )
+                }
+                if successor
+                else {}
+            ),
             "submission_pending_at": _ms_iso_now(),
             **lane_fence,
         },
@@ -8871,6 +9001,114 @@ def _record_pending_submission_receipt(
             "submission_pending_proof_status": "pending",
             "submission_pending_receipt_recorded_at": _ms_iso_now(),
         },
+    )
+
+
+def _strict_uid30_successor_unsigned_rollback(
+    current: dict[str, Any],
+    *,
+    attempt_id: str,
+    state_file: Path,
+) -> bytes:
+    """Return the exact predecessor only for one pristine unsigned successor."""
+
+    identity = current.get("submission_pending_identity")
+    predecessor_sha256 = current.get("submission_pending_predecessor_journal_sha256")
+    contract = (
+        _strict_zero_burn_uid30_contract(identity, lane="authority")
+        if isinstance(identity, dict)
+        else None
+    )
+    if (
+        state_file.parent != _VALIDATOR_RUNTIME_ROOT
+        or state_file.name != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+        or current.get("submission_pending_reviewed_uid30_contract")
+        != "two_miner_successor"
+        or contract is None
+        or contract.get("kind") != "two_miner_successor"
+        or _reviewed_uid30_attempt_id(identity) != attempt_id
+        or predecessor_sha256 != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+    ):
+        raise ValueError("unsigned UID30 successor rollback identity changed")
+    predecessor_bytes = _decode_uid30_successor_predecessor_bytes(
+        current.get("submission_pending_predecessor_journal_zlib_b64"),
+        expected_sha256=predecessor_sha256,
+    )
+    try:
+        predecessor = _strict_state_document(predecessor_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "UID30 successor predecessor rollback state is malformed"
+        ) from exc
+    current_nonpending = {
+        key: value
+        for key, value in current.items()
+        if not key.startswith("submission_pending_")
+    }
+    predecessor_nonpending = {
+        key: value
+        for key, value in predecessor.items()
+        if not key.startswith("submission_pending_")
+    }
+    pending_keys = {key for key in current if key.startswith("submission_pending_")}
+    expected_pending_keys = {
+        "submission_pending_id",
+        "submission_pending_lane",
+        "submission_pending_identity",
+        "submission_pending_reviewed_uid30_contract",
+        "submission_pending_predecessor_journal_sha256",
+        "submission_pending_predecessor_journal_zlib_b64",
+        "submission_pending_at",
+        "submission_pending_phase",
+        "submission_pending_launch_attempt",
+        "submission_pending_launch_budget_limit",
+        "submission_pending_budget_scope",
+        "submission_pending_budget_limit",
+        "submission_pending_policy_version",
+        "submission_pending_source_epoch",
+        "submission_pending_lane_transition_from",
+    }
+    if (
+        _canonical_json_bytes(current_nonpending)
+        != _canonical_json_bytes(predecessor_nonpending)
+        or pending_keys != expected_pending_keys
+        or current.get("submission_pending_id") != attempt_id
+        or current.get("submission_pending_lane") != "authority"
+        or current.get("submission_pending_phase") != "unsigned_reserved"
+        or current.get("submission_pending_launch_attempt") is not False
+        or current.get("submission_pending_launch_budget_limit") is not None
+        or current.get("submission_pending_budget_scope") != "authority_bounded"
+        or type(current.get("submission_pending_budget_limit")) is not int
+        or current.get("submission_pending_budget_limit") != 1
+        or current.get("submission_pending_policy_version") is not None
+        or type(current.get("submission_pending_source_epoch")) is not int
+        or current.get("submission_pending_source_epoch")
+        != identity.get("source_epoch")
+        or current.get("submission_pending_lane_transition_from") is not None
+        or not isinstance(current.get("submission_pending_at"), str)
+        or not current.get("submission_pending_at")
+    ):
+        raise ValueError(
+            "unsigned UID30 successor no longer has pristine predecessor lineage"
+        )
+    return predecessor_bytes
+
+
+def _uid30_successor_pending_fragment(current: dict[str, Any]) -> bool:
+    """Recognize every durable fragment of the sole bounded successor."""
+
+    identity = current.get("submission_pending_identity")
+    return bool(
+        current.get("submission_pending_reviewed_uid30_contract")
+        == "two_miner_successor"
+        or (isinstance(identity, dict) and _uid30_successor_marked(identity))
+        or "submission_pending_predecessor_journal_zlib_b64" in current
+        or current.get("submission_pending_predecessor_journal_sha256") is not None
+        or (
+            current.get("submission_pending_budget_scope") == "authority_bounded"
+            and current.get("submission_finalized_id")
+            == SN39_UID30_SUCCESSOR_PREDECESSOR_ID
+        )
     )
 
 
@@ -9018,6 +9256,13 @@ def _commit_pending_signed_attempt(
                 raise ValueError("common authority epoch fence changed before signing")
             lane_updates = {"submission_highest_source_epoch": source_epoch}
 
+        if _uid30_successor_pending_fragment(current):
+            _strict_uid30_successor_unsigned_rollback(
+                current,
+                attempt_id=attempt_id,
+                state_file=state_file,
+            )
+
         # `submission_attempt_count` is the LIFETIME total, not the retained
         # length, so it stays truthful once the window starts evicting and
         # `count - len(ids)` names exactly how many were dropped. A stored
@@ -9035,6 +9280,7 @@ def _commit_pending_signed_attempt(
             stored_count = len(history)
 
         document = dict(current)
+        document.pop("submission_pending_predecessor_journal_zlib_b64", None)
         document.update(
             {
                 "submission_pending_phase": "signed_intent",
@@ -9079,6 +9325,21 @@ def _abort_unsigned_common_submission(args: Any, *, attempt_id: str) -> bool:
             or current.get("submission_pending_receipt_candidate") is not None
         ):
             return False
+        if _uid30_successor_pending_fragment(current):
+            predecessor_bytes = _strict_uid30_successor_unsigned_rollback(
+                current,
+                attempt_id=attempt_id,
+                state_file=state_file,
+            )
+            _replace_private_bytes(state_file, predecessor_bytes)
+            if (
+                _private_state_sha256(state_file)
+                != SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+            ):
+                raise ValueError(
+                    "unsigned UID30 successor predecessor restore did not persist"
+                )
+            return True
         document = dict(current)
         for key in tuple(document):
             if key.startswith("submission_pending_"):
@@ -9992,6 +10253,20 @@ def _recover_pending_launch_receipt(
         ):
             raise wire.VectorError(
                 "pending reviewed UID30 marker and identity disagree"
+            )
+        if durable_reviewed_kind == "two_miner_successor":
+            # This generic restart path proves the exact historical call and
+            # inclusion storage, but it does not own the successor's stronger
+            # completion contract: both reviewed miner axons, mappings, UID30
+            # permit, and the complete row must remain exact at two strictly
+            # later finalized heads.  Only the fixed successor recovery path
+            # performs those checks before finalization.  Keep the signed
+            # attempt fenced here instead of creating a second, weaker
+            # recovery mode.
+            raise _PendingReceiptNotProven(
+                "pending two-miner UID30 successor requires "
+                "`cathedral-uid30-launch successor-recover`; generic validator "
+                "recovery cannot prove its two later finalized heads"
             )
         preflight = getattr(args, "_tick_preflight", None)
         if not isinstance(preflight, ChainPreflight):

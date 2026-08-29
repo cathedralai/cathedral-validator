@@ -299,10 +299,13 @@ cathedral-uid30-launch successor-submit \
 ```
 
 Exit status 2 means the command refused before a chain write. Correct the named
-condition and create a new immutable preview at a new path. Exit status 3 means
-a signed intent or receipt is ambiguous. Preserve the canonical journal, keep
-all UID30 writers stopped, and never run `successor-submit` again. Recover only
-the exact journaled transaction:
+condition and create a new immutable preview at a new path. Running
+`successor-recover` against the exact pristine predecessor also exits 2 with
+`REFUSED_NO_CHAIN_WRITE` and states that no successor attempt exists. It does
+not read chain state or change the journal. Exit status 3 is reserved for a
+signed intent or receipt whose outcome is ambiguous. Preserve the canonical
+journal, keep all UID30 writers stopped, and never run `successor-submit` again.
+Recover only the exact journaled transaction:
 
 ```bash
 cathedral-uid30-launch successor-recover \

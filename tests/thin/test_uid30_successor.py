@@ -42,13 +42,17 @@ class _Substrate:
         raise AssertionError(block)
 
 
-def _base_state() -> launch.UID30ChainState:
+def _base_state(
+    *,
+    second_uid: int = 8,
+    primary_uid: int = 124,
+) -> launch.UID30ChainState:
     preflight = SimpleNamespace(
         subtensor=SimpleNamespace(substrate=_Substrate()),
         hotkey_to_uid={
             launch.UID30_HOTKEY: launch.UID30,
-            launch.MINER_HOTKEY: 124,
-            canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY: 8,
+            launch.MINER_HOTKEY: primary_uid,
+            canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY: second_uid,
         },
     )
     return launch.UID30ChainState(
@@ -73,9 +77,9 @@ def _base_state() -> launch.UID30ChainState:
         max_weight_limit=MAX_WEIGHT_LIMIT,
         commit_reveal_enabled=COMMIT_REVEAL_ENABLED,
         miner_hotkey=launch.MINER_HOTKEY,
-        miner_uid=124,
+        miner_uid=primary_uid,
         serving_axon=launch.ServingAxon(
-            uid=124,
+            uid=primary_uid,
             hotkey=launch.MINER_HOTKEY,
             ip="35.222.166.235",
             port=8081,
@@ -100,22 +104,30 @@ def _target(*, uid: int, hotkey: str, ip: str) -> second_miner_plan.Neuron:
     )
 
 
-def _successor_state() -> launch.UID30SuccessorState:
+def _successor_state(
+    *,
+    second_uid: int = 8,
+    primary_uid: int = 124,
+) -> launch.UID30SuccessorState:
     return launch.UID30SuccessorState(
-        base=_base_state(),
+        base=_base_state(second_uid=second_uid, primary_uid=primary_uid),
         targets=(
             _target(
-                uid=8,
+                uid=second_uid,
                 hotkey=canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
                 ip="34.46.19.69",
             ),
-            _target(uid=124, hotkey=launch.MINER_HOTKEY, ip="35.222.166.235"),
+            _target(
+                uid=primary_uid,
+                hotkey=launch.MINER_HOTKEY,
+                ip="35.222.166.235",
+            ),
         ),
         uid_safety={
             "schema": "cathedral_sn39_uid_safety_v2",
             "targets": [
-                [8, canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY],
-                [124, launch.MINER_HOTKEY],
+                [second_uid, canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY],
+                [primary_uid, launch.MINER_HOTKEY],
             ],
         },
         current_weights=((canonical.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, W),),
@@ -131,8 +143,14 @@ def _proof(
         ip=ip,
         port=8081,
         qvl_digest=LAUNCH_QVL_DIGEST,
-        quote_sha256=("2" if uid == 8 else "3") * 64,
-        report_data_sha256=("4" if uid == 8 else "5") * 64,
+        quote_sha256=(
+            "2" if hotkey == canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY else "3"
+        )
+        * 64,
+        report_data_sha256=(
+            "4" if hotkey == canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY else "5"
+        )
+        * 64,
         tls_spki_sha256=spki,
         sat_units=20,
         sat_rule=SAT_WORK_UNIT_RULE,
@@ -141,11 +159,15 @@ def _proof(
     )
 
 
-def _proofs() -> tuple[launch.VerifiedMinerProof, launch.VerifiedMinerProof]:
+def _proofs(
+    *,
+    second_uid: int = 8,
+    primary_uid: int = 124,
+) -> tuple[launch.VerifiedMinerProof, launch.VerifiedMinerProof]:
     return (
         _proof(
             hotkey=canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
-            uid=8,
+            uid=second_uid,
             ip="34.46.19.69",
             spki="6" * 64,
             anchor=BLOCK - 2,
@@ -153,7 +175,7 @@ def _proofs() -> tuple[launch.VerifiedMinerProof, launch.VerifiedMinerProof]:
         ),
         _proof(
             hotkey=launch.MINER_HOTKEY,
-            uid=124,
+            uid=primary_uid,
             ip="35.222.166.235",
             spki="7" * 64,
             anchor=BLOCK - 1,
@@ -342,7 +364,12 @@ def test_successor_preview_write_and_load_is_owner_only_and_digest_bound(
 
 
 def _later_snapshot(
-    *, block: int, block_hash: str, case: str | None = None
+    *,
+    block: int,
+    block_hash: str,
+    case: str | None = None,
+    second_uid: int = 8,
+    primary_uid: int = 124,
 ) -> second_miner_plan.FinalizedSnapshot:
     validator_row = second_miner_plan.Neuron(
         uid=30,
@@ -355,9 +382,9 @@ def _later_snapshot(
         protocol=0,
         serving=False,
     )
-    second_uid = 9 if case == "mapping" else 8
+    observed_second_uid = second_uid + 1 if case == "mapping" else second_uid
     second = _target(
-        uid=second_uid,
+        uid=observed_second_uid,
         hotkey=canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
         ip="34.46.19.69",
     )
@@ -376,9 +403,17 @@ def _later_snapshot(
         neurons=(
             validator_row,
             second,
-            _target(uid=124, hotkey=launch.MINER_HOTKEY, ip="35.222.166.235"),
+            _target(
+                uid=primary_uid,
+                hotkey=launch.MINER_HOTKEY,
+                ip="35.222.166.235",
+            ),
         ),
-        uid30_weights=(((124, W),) if case == "row" else ((8, W), (124, W))),
+        uid30_weights=(
+            ((canonical.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, W),)
+            if case == "row"
+            else ((second_uid, W), (primary_uid, W))
+        ),
     )
 
 
@@ -387,6 +422,8 @@ def _later_head_state(
     monkeypatch: pytest.MonkeyPatch,
     latest_number: int,
     case: str | None = None,
+    second_uid: int = 8,
+    primary_uid: int = 124,
 ) -> tuple[launch.UID30SuccessorState, list[tuple[int, str]]]:
     latest_hash = "0x" + "d" * 64
     hashes = {
@@ -406,8 +443,8 @@ def _later_head_state(
         ),
         get_block_hash=get_block_hash,
     )
-    base = _base_state()
-    state = _successor_state()
+    base = _base_state(second_uid=second_uid, primary_uid=primary_uid)
+    state = _successor_state(second_uid=second_uid, primary_uid=primary_uid)
     state = launch.UID30SuccessorState(
         base=replace(
             base,
@@ -431,7 +468,13 @@ def _later_head_state(
             "block_hash": block_hash,
             "genesis_hash": FINNEY_GENESIS_HASH,
         }
-        return _later_snapshot(block=block, block_hash=block_hash, case=case)
+        return _later_snapshot(
+            block=block,
+            block_hash=block_hash,
+            case=case,
+            second_uid=second_uid,
+            primary_uid=primary_uid,
+        )
 
     monkeypatch.setattr(second_miner_plan, "read_snapshot_at", read_snapshot_at)
     return state, calls
@@ -573,16 +616,19 @@ def test_successor_later_heads_reject_noncanonical_input_vector(
 def _written_successor_preview(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    second_uid: int = 8,
+    primary_uid: int = 124,
 ) -> tuple[Path, str, launch.UID30SuccessorState]:
     runtime_root = tmp_path / "runtime"
     monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
     monkeypatch.setattr(
         launch, "_assert_successor_writer_available", lambda _args: None
     )
-    state = _successor_state()
+    state = _successor_state(second_uid=second_uid, primary_uid=primary_uid)
     preview = launch.build_successor_preview(
         state=state,
-        miners=_proofs(),
+        miners=_proofs(second_uid=second_uid, primary_uid=primary_uid),
         runtime_root=runtime_root,
         created_at="2026-08-28T12:00:00Z",
     )
@@ -591,6 +637,130 @@ def _written_successor_preview(
         runtime_root / "successor.json",
     )
     return path, digest, state
+
+
+def _written_preview_with_pristine_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, str, Path]:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    state_path = (
+        runtime_root / canonical.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+    )
+    state_path.write_bytes(
+        canonical._canonical_json_bytes(
+            {
+                "submission_pending_id": None,
+                "fixture": "exact-pristine-predecessor",
+            }
+        )
+    )
+    state_path.chmod(0o600)
+    monkeypatch.setattr(launch, "DEFAULT_RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(canonical, "_VALIDATOR_RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(
+        canonical,
+        "SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256",
+        canonical._private_state_sha256(state_path),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_submission_state_path",
+        lambda _args: state_path,
+    )
+    monkeypatch.setattr(
+        launch,
+        "_assert_successor_writer_available",
+        lambda _args: None,
+    )
+    preview = launch.build_successor_preview(
+        state=_successor_state(),
+        miners=_proofs(),
+        runtime_root=runtime_root,
+        created_at="2026-08-28T12:00:00Z",
+    )
+    path, _digest_path, digest = launch.write_successor_preview(
+        preview,
+        runtime_root / "successor.json",
+    )
+    return path, digest, state_path
+
+
+def test_pristine_successor_recovery_refuses_without_chain_read_or_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, digest, state_path = _written_preview_with_pristine_predecessor(
+        tmp_path,
+        monkeypatch,
+    )
+    before = state_path.read_bytes()
+    monkeypatch.setattr(
+        canonical,
+        "_submission_tick_lock",
+        lambda _args, *, lane: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        launch,
+        "_recovery_preflight",
+        lambda: pytest.fail("pristine recovery must not read chain state"),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_abort_unsigned_common_submission",
+        lambda *_args, **_kwargs: pytest.fail("pristine recovery must not mutate"),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_submit_exact_sn39_extrinsic",
+        lambda *_args, **_kwargs: pytest.fail("recovery must never submit"),
+    )
+
+    with pytest.raises(
+        launch.UID30LaunchError,
+        match="exact predecessor is pristine.*no successor attempt.*no state changed",
+    ):
+        launch.recover_reviewed_successor(
+            preview_path=path,
+            reviewed_sha256=digest,
+            exclusive_writer_asserted=True,
+        )
+
+    assert state_path.read_bytes() == before
+
+
+def test_nonmatching_no_pending_journal_remains_ambiguous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, digest, state_path = _written_preview_with_pristine_predecessor(
+        tmp_path,
+        monkeypatch,
+    )
+    changed = canonical._read_state(state_path)
+    changed["fixture"] = "different-no-pending-journal"
+    canonical._replace_private_state(state_path, changed)
+    before = state_path.read_bytes()
+    monkeypatch.setattr(
+        canonical,
+        "_submission_tick_lock",
+        lambda _args, *, lane: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        launch,
+        "_recovery_preflight",
+        lambda: pytest.fail("unrecognized journal must fail before chain reads"),
+    )
+
+    with pytest.raises(launch.UID30LaunchAmbiguous, match="no exact finalized"):
+        launch.recover_reviewed_successor(
+            preview_path=path,
+            reviewed_sha256=digest,
+            exclusive_writer_asserted=True,
+        )
+
+    assert state_path.read_bytes() == before
 
 
 def test_successor_submit_exposes_no_pluggable_authority_callbacks() -> None:
@@ -855,3 +1025,123 @@ def test_finalized_successor_recovery_is_read_only_and_returns_exact_two_rows(
     assert recovered.wire_uids == (8, 124)
     assert recovered.wire_weights == (W, W)
     assert recovered.later_finalized_heads == later_heads
+
+
+def test_uid_churn_flows_through_preview_and_fixed_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second_uid = 17
+    primary_uid = 201
+    path, digest, state = _written_successor_preview(
+        tmp_path,
+        monkeypatch,
+        second_uid=second_uid,
+        primary_uid=primary_uid,
+    )
+    preview, _loaded_digest = launch.load_reviewed_successor_preview(
+        path,
+        reviewed_sha256=digest,
+    )
+    assert preview["proposed_vector"]["dests"] == [second_uid, primary_uid]
+    assert preview["proposed_vector"]["weights_u16"] == [W, W]
+    assert state.current_weights == (
+        (canonical.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, W),
+    )
+
+    proofs = _proofs(second_uid=second_uid, primary_uid=primary_uid)
+    identity = launch._successor_attempt_identity(
+        preview=preview,
+        preview_sha256=digest,
+        state=state,
+        fresh_miners=proofs,
+    )
+    attempt_id = launch._attempt_id(identity)
+    intent = {
+        "extrinsic_hash": "0x" + "8" * 64,
+        "nonce": 11,
+        "era_reference_block": BLOCK,
+        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "version_key": VERSION_KEY,
+        "wire_uids": [second_uid, primary_uid],
+        "wire_weights": [W, W],
+    }
+    inclusion = BLOCK + 2
+    receipt = {
+        "extrinsic_hash": intent["extrinsic_hash"],
+        "block_hash": "0x" + "9" * 64,
+        "block_number": inclusion,
+        "version_key": VERSION_KEY,
+        "wire_uids": [second_uid, primary_uid],
+        "wire_weights": [W, W],
+    }
+    journal = {
+        "submission_pending_id": None,
+        "submission_finalized_id": attempt_id,
+        "submission_finalized_lane": "authority",
+        "submission_finalized_identity": identity,
+        "submission_finalized_broadcast_intent": intent,
+        "submission_finalized_receipt": receipt,
+        "submission_finalized_reviewed_uid30_contract": "two_miner_successor",
+    }
+    latest = inclusion + 2
+    proof_state, calls = _later_head_state(
+        monkeypatch=monkeypatch,
+        latest_number=latest,
+        second_uid=second_uid,
+        primary_uid=primary_uid,
+    )
+    preflight = SimpleNamespace(
+        genesis_hash=FINNEY_GENESIS_HASH,
+        validator_hotkey=launch.UID30_HOTKEY,
+        validator_uid=launch.UID30,
+        validator_permit=True,
+        hotkey_to_uid={
+            launch.UID30_HOTKEY: launch.UID30,
+            canonical.SN39_UID30_SUCCESSOR_SECOND_HOTKEY: second_uid,
+            launch.MINER_HOTKEY: primary_uid,
+        },
+        subtensor=proof_state.preflight.subtensor,
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_submission_tick_lock",
+        lambda _args, *, lane: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(canonical, "_read_state", lambda _path: journal)
+    monkeypatch.setattr(launch, "_recovery_preflight", lambda: preflight)
+    monkeypatch.setattr(
+        launch,
+        "_finalized_readback",
+        lambda **_kwargs: {
+            "dests": [second_uid, primary_uid],
+            "weights_u16": [W, W],
+        },
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_submit_exact_sn39_extrinsic",
+        lambda *_args, **_kwargs: pytest.fail("recovery must never submit"),
+    )
+    monkeypatch.setattr(
+        canonical,
+        "_finalize_common_submission",
+        lambda *_args, **_kwargs: pytest.fail(
+            "already-finalized recovery must not finalize"
+        ),
+    )
+
+    recovered = launch.recover_reviewed_successor(
+        preview_path=path,
+        reviewed_sha256=digest,
+        exclusive_writer_asserted=True,
+    )
+
+    assert recovered.status == "ALREADY_FINALIZED"
+    assert recovered.wire_uids == (second_uid, primary_uid)
+    assert recovered.wire_weights == (W, W)
+    assert recovered.later_finalized_heads == (
+        (latest - 1, "0x" + "c" * 64),
+        (latest, "0x" + "d" * 64),
+    )
+    assert calls == list(recovered.later_finalized_heads)

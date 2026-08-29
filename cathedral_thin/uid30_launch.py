@@ -2355,12 +2355,7 @@ def _attempt_identity(
 
 
 def _attempt_id(identity: Mapping[str, Any]) -> str:
-    dedup = {
-        key: value
-        for key, value in identity.items()
-        if key not in {"mapping_block", "uid_safety", "fresh_miner_evidence"}
-    }
-    return "sha256:" + _sha256(_canonical_json_bytes(dedup))
+    return canonical_validator._reviewed_uid30_attempt_id(dict(identity))
 
 
 def _receipt_submission(receipt: Any, *, state: UID30ChainState) -> Any:
@@ -3609,9 +3604,26 @@ def recover_reviewed_successor(
     )
     try:
         with canonical_validator._submission_tick_lock(args, lane="authority"):
-            journal = canonical_validator._read_state(
-                canonical_validator._submission_state_path(args)
-            )
+            journal_path = canonical_validator._submission_state_path(args)
+            journal = canonical_validator._read_state(journal_path)
+            pristine_predecessor = False
+            if (
+                journal.get("submission_pending_id") is None
+                and journal_path.name
+                == canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME
+            ):
+                try:
+                    pristine_predecessor = (
+                        canonical_validator._private_state_sha256(journal_path)
+                        == canonical_validator.SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_SHA256
+                    )
+                except OSError:
+                    pristine_predecessor = False
+            if pristine_predecessor:
+                raise UID30LaunchError(
+                    "exact predecessor is pristine; no successor attempt exists; "
+                    "no state changed"
+                )
             finalized = journal.get("submission_pending_id") is None
             prefix = "finalized" if finalized else "pending"
             if not finalized and journal.get("submission_pending_phase") == (
