@@ -101,9 +101,14 @@ snapshot.
 6. If the bounded consolidation is approved, stop every other UID30 writer and
    use the separate digest-bound command below.
 
-The presently published worker image does not expose the signed fleet access
-contract. Until the worker rollout completes, a same-UID two-machine proof is
-expected to remain NOT PROVEN.
+The signed-fleet worker image exposing this contract is published from Compute
+source `78e588eeb8ad4d9fa5c7c23bba0205c08fc28ba8` as
+`ghcr.io/cathedralai/cathedral-sn39-audit-miner@sha256:c73070da9bef25d1fad1769c8f14878a5537964663545deaf377bf34f2644d99`.
+Publication is not deployment. The digest is an operator-enforced launch pin,
+not a value automatically covered by TDX evidence. Until the pin is confirmed
+on both guests and both endpoints pass fresh signed access, fleet discovery,
+QVL, same-SPKI SAT, hardware deduplication, and the no-write preview, a same-UID
+two-machine result remains `NOT_PROVEN`.
 
 ## Exact UID30 consolidation proof
 
