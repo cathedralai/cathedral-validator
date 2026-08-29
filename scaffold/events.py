@@ -9,7 +9,7 @@ stage, the emitting validator mode, a PASS/FAIL/NOT_PROVEN/INFO status, and
 optionally: miner hotkey, duration, an evidence/artifact reference, and
 remediation guidance. Credential-shaped values are redacted defensively.
 
-Watch commands (documented in VALIDATOR.md):
+Useful local watch commands:
 
     journalctl -fu cathedral-validator -o cat        # TTY view
     tail -f ~/.cathedral/validator-events.jsonl | jq  # JSONL view

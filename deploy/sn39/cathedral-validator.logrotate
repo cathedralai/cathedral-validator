@@ -1,7 +1,6 @@
-# Bound /var/log/cathedral-validator. Installed as
-# /etc/logrotate.d/cathedral-validator by README's "Supported systemd install
-# (relay)"; picked up by the host's own logrotate timer/cron, so nothing here
-# needs a unit of its own.
+# Bound /var/log/cathedral-validator. An authorized reviewed release installs
+# this as /etc/logrotate.d/cathedral-validator. The host's existing logrotate
+# timer or cron job picks it up, so this file needs no unit of its own.
 #
 # Both files this covers are append-only and neither had any cap: on the live
 # SN39 box validator-events.jsonl reached 888 KB in nine days and would have

@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > **Release-candidate status.** The public evidence surface is deployed, but
-> endpoint availability alone is not `FULL` assurance. A public validator
+> endpoint availability alone is not `FULL` assurance. An authorized validator
 > still needs the supported immutable release, independent key and digest
 > pins, historical chain access, and—where raw replay is required—the
 > controlled-disclosure package. Commands below are a verification contract,

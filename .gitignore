@@ -43,8 +43,5 @@ publisher.db
 # agent worktrees — never part of the tree
 .claude/
 
-# The operator config README's quickstart tells you to create at the repo
-# root (`cp config/validator-thin-sn39-relay.toml my-validator.toml`). It is
-# yours, not the repository's, and a `git pull` upgrade must not see it as
-# untracked noise.
+# Local operator copies are not repository state. Keep them out of commits.
 my-validator.toml

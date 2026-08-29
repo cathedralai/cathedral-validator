@@ -1,12 +1,12 @@
 # Installed as /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf.
 #
-# The third-party counterpart to cathedral-sn39-validator.tmpfiles. That file
+# The authorized-relay counterpart to cathedral-sn39-validator.tmpfiles. That file
 # provisions the evidence PRODUCER's published tree under
 # /var/lib/cathedral-public-evidence, including a logs/ directory owned by
 # polaris. A relay host runs no producer and has no polaris account, so those
 # lines describe a tree it never writes and name an identity it never creates:
 # systemd-tmpfiles refuses a line whose user does not resolve. Shipping the
-# producer contract to a third party therefore produced errors on every boot
+# producer contract to a relay host therefore produced errors on every boot
 # for directories nothing on that host uses.
 #
 # What a relay host actually needs is the pair of runtime directories the

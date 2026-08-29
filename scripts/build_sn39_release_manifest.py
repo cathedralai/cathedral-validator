@@ -105,7 +105,7 @@ class InstallProfile(NamedTuple):
     Two postures install this release. The ORIGIN host holds the
     controlled-disclosure TDX evidence package and the pinned verifier binary,
     so its manifest pins the verifier bytes and the producer-side status
-    publisher. A third-party RELAY holds neither: the raw evidence package is
+    publisher. An authorized RELAY holds neither: the raw evidence package is
     Cathedral's, its shadow audit is receipts-only by design
     (`config/validator-thin-sn39-relay.toml` omits `controlled_dir` and
     `verifier_binary`, and `scaffold/provenance_audit.py` requires both only for
@@ -552,7 +552,7 @@ def main() -> int:
         "--relay",
         action="store_true",
         help=(
-            "build the third-party relay manifest: no controlled verifier "
+            "build the authorized relay manifest: no controlled verifier "
             "binary pin, the relay unit and tmpfiles, the shadow-audit "
             "mismatch alert, and no producer-side status publisher"
         ),

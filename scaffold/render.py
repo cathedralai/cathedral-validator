@@ -480,12 +480,12 @@ def _r_map_offline(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
 
 
 def _r_dry_run(s: _Stream, kv: dict[str, str], rest: str, ts: str) -> None:
-    """The last line of the first command a new operator ever runs.
+    """Render a dry-run result without leaking list-representation debris.
 
     It is assembled from named fields only. The detail carries Python list
     reprs (``wire_uids=[0, 1] wire_weights=[58982, 7282]``), and echoing the
     unparsed remainder printed their tails -- ``1]  7282]`` -- as the closing
-    words of the quickstart. ``leftover`` is deliberately unused here: any
+    words of the dry-run line. ``leftover`` is deliberately unused here: any
     detail whose fields this row cannot name is debris, and the wire encoding
     it came from is in the journal for anyone who needs it.
 

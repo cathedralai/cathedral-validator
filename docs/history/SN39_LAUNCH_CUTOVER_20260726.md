@@ -11,9 +11,8 @@ Nothing here authorizes a chain write, infrastructure spend, or a public claim.
 > are kept in this record because they were pin sites at the time.
 > `config/validator-selfcompose-sn39.toml` was subsequently retired with the
 > recurring authority/fallback posture. As of 2026-08-28, the only shipped SN39
-> recurring profile is `config/validator-thin-sn39-relay.toml`. To install and
-> run a validator today, follow [README's
-> quickstart](../../README.md#quickstart).
+> recurring profile is `config/validator-thin-sn39-relay.toml`. Public validator
+> operation is not self-service during live testing.
 
 ## 1. Producer revision reconciliation
 

@@ -1,7 +1,6 @@
-# Cathedral SN39 validator config (v4) — an ANNOTATED REFERENCE, not the
-# profile to run. A third-party validator copies
-# config/validator-thin-sn39-relay.toml; see README's quickstart, which is the
-# one install-and-run path in this repository.
+# Cathedral SN39 validator config (v4) — an annotated reference, not a public
+# onboarding profile. Public validator operation is not self-service during
+# live testing.
 #
 # Security-critical SN39 launch and journal settings cannot be weakened by
 # ambient environment variables. Non-security settings CAN be: environment
@@ -12,7 +11,7 @@
 [network]
 name = "finney"
 netuid = 39
-wallet_name = "validator"        # your coldkey wallet name
+wallet_name = "validator"        # local wallet label; never install coldkey secrets
 validator_hotkey = "default"     # your validator hotkey
 # Connect to your own subtensor RPC node instead of the public finney
 # entrypoint. Set via env var (redirects only the connection — the "finney"

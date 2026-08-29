@@ -11951,7 +11951,7 @@ def _recover_pending_launch_receipt(
     # about a fenced attempt yet — and its ~8 sequential chain calls under one
     # 180s deadline fail for reasons that are mostly the operator's to fix, not
     # the chain's to resolve. Collapsing all of them into one "temporarily
-    # unavailable" sentence is what made a third-party unit restart-loop 20
+    # unavailable" sentence is what made a relay unit restart-loop 20
     # times on a message nobody could act on.
     try:
         _prepare_tick_preflight(args)
@@ -12904,7 +12904,7 @@ def _sn39_launch_obligation(args: Any) -> bool:
     """Does THIS runtime owe SN39 its own completed one-shot launch?
 
     The mainnet launch is a subnet-level event, not a per-validator one. A
-    third-party validator that only relays Cathedral's signed vector can never
+    authorized relay that only relays Cathedral's signed vector can never
     satisfy a per-validator launch gate, so an unconditional gate locks every
     operator except Cathedral out of SN39 entirely. The obligation therefore
     tracks the things an operator cannot simply restate in a config file:

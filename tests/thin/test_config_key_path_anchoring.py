@@ -140,11 +140,11 @@ def test_the_shipped_profile_resolves_in_place_from_a_foreign_directory(
         assert resolved.is_file(), pin
 
 
-def test_the_quickstart_copy_resolves_from_a_foreign_directory(tmp_path, monkeypatch):
-    """The shape README's quickstart actually produces.
+def test_a_relay_profile_copy_resolves_from_a_foreign_directory(tmp_path, monkeypatch):
+    """A copied release profile still resolves its pinned key files.
 
-    `cp config/validator-thin-sn39-relay.toml my-validator.toml` at the
-    repository root puts the operator's copy one level ABOVE ``config/``, so
+    Copying the relay profile to the repository root puts the copy one level
+    above ``config/``, so
     the pins resolve beside it.
     """
     checkout = tmp_path / "cathedral-validator"

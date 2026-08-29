@@ -720,7 +720,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="refuse continuous writes until reconcile-launch proves the finalized "
         "launch; on by default and mandatory for any host holding the controlled "
-        "launch material. A third-party "
+        "launch material. An authorized relay "
         "validator that only relays Cathedral's signed vector opts out in its "
         "config file (see config/validator-thin-sn39-relay.toml)",
     )

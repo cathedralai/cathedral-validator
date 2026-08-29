@@ -85,7 +85,7 @@ AUDIT_OUTCOME_EVENTS: tuple[str, ...] = (
 JOURNAL_STALE_TICKS = 3.0
 LIVENESS_TICKS = 4.0
 # The two shadow-audit windows are fixed by the audit's own cadence, not the
-# write cadence, so they stay absolute (see VALIDATOR.md).
+# write cadence, so they stay absolute.
 MISMATCH_WINDOW_SECS = 30 * 60.0
 AUDIT_FAILURE_WINDOW_SECS = 90 * 60.0
 # How long the trailing run of FAILs has to be before rule 5 alerts.
@@ -467,8 +467,7 @@ def _rows(
         # A tick HAS completed, just not since the most recent start. Saying
         # "the first tick has not completed" while the `write` row on the same
         # screen names a completed tick is the contradiction this row exists to
-        # avoid — and the documented quickstart reaches it, because step 2
-        # restarts and fails after step 1 completed a dry run.
+        # avoid. A dry run followed by a failed restart reaches this state.
         rows.append(
             (
                 "tick",

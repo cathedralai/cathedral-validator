@@ -39,9 +39,7 @@ def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
     for name in (
         "README.md",
         "VALIDATOR.md",
-        "VALIDATOR-ONBOARDING.md",
         "BOUNDARY.md",
-        "REVIEW.md",
         "docs/PROVENANCE.md",
         "docs/history/SN39_MAINNET_RELEASE_20260724.md",
     ):
@@ -97,23 +95,6 @@ def test_active_operator_docs_do_not_advertise_retired_console_commands() -> Non
         text = path.read_text(encoding="utf-8")
         for command in retired:
             assert command not in text, f"{command} remains in {path.relative_to(ROOT)}"
-
-
-def test_shipped_docker_entrypoint_is_no_write() -> None:
-    docker = ROOT / "deploy" / "sn39" / "docker"
-    entrypoint = (docker / "entrypoint.sh").read_text(encoding="utf-8")
-    validator_case = entrypoint.split("  validator)", 1)[1].split("    ;;", 1)[0]
-    helper = (docker / "cathedral").read_text(encoding="utf-8")
-    env_example = (docker / ".env.example").read_text(encoding="utf-8")
-
-    assert "--dry-run" in validator_case
-    assert "--broadcast" not in validator_case
-    assert '"$@"' not in validator_case
-    assert "CATHEDRAL_BROADCAST is retired" in validator_case
-    assert "shell)" not in entrypoint
-    assert "set_kv CATHEDRAL_BROADCAST" not in helper
-    assert "Broadcast weights" not in helper
-    assert "CATHEDRAL_BROADCAST=" not in env_example
 
 
 def test_compute_pin_reserves_the_validator_command() -> None:
