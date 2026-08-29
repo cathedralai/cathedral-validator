@@ -165,8 +165,10 @@ def test_finalized_reader_uses_only_pinned_public_chain_queries() -> None:
 
     class Substrate:
         def get_block_hash(self, block: int) -> str:
-            assert block == 0
-            return FINNEY_GENESIS_HASH
+            if block == 0:
+                return FINNEY_GENESIS_HASH
+            assert block == 8_946_847
+            return finalized_hash
 
         def get_chain_finalised_head(self) -> str:
             return finalized_hash
@@ -219,8 +221,10 @@ def test_finalized_reader_rejects_mixed_head_metagraph() -> None:
 
     class Substrate:
         def get_block_hash(self, block: int) -> str:
-            assert block == 0
-            return FINNEY_GENESIS_HASH
+            if block == 0:
+                return FINNEY_GENESIS_HASH
+            assert block == 8_946_847
+            return finalized_hash
 
         def get_chain_finalised_head(self) -> str:
             return finalized_hash
@@ -235,11 +239,34 @@ def test_finalized_reader_rejects_mixed_head_metagraph() -> None:
         def metagraph(self, *_args, **_kwargs):
             return SimpleNamespace(block=8_946_846)
 
-    with pytest.raises(plan.SecondMinerPlanError, match="finalized head"):
+    with pytest.raises(plan.SecondMinerPlanError, match="requested snapshot block"):
         plan.read_finalized_snapshot(
             subtensor_factory=lambda *, network: (
                 Subtensor() if network == plan.NETWORK else pytest.fail(network)
             )
+        )
+
+
+def test_snapshot_reader_rejects_mismatched_block_number_and_hash() -> None:
+    requested_hash = "0x" + "c" * 64
+    canonical_hash = "0x" + "d" * 64
+
+    substrate = SimpleNamespace(
+        get_block_hash=lambda block: (
+            FINNEY_GENESIS_HASH if block == 0 else canonical_hash
+        )
+    )
+    subtensor = SimpleNamespace(substrate=substrate)
+
+    with pytest.raises(
+        plan.SecondMinerPlanError,
+        match="block number and hash do not match",
+    ):
+        plan.read_snapshot_at(
+            subtensor=subtensor,
+            block_number=8_946_847,
+            block_hash=requested_hash,
+            genesis_hash=FINNEY_GENESIS_HASH,
         )
 
 
