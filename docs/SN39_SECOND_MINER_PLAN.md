@@ -69,6 +69,23 @@ performs finalized readback without signing or resubmitting.
 
 The command has no registration, rent, daemon, weight, or retry path. It does
 not share the consumed UID124 journal and it rejects the UID124 successor flags.
+It permits a write only from the canonical unannounced row `0.0.0.0:0`, serving
+false. The exact target is a no-write success. Every other existing axon is a
+hard refusal that requires a separately reviewed successor lineage.
+
+Run the reviewed command only in a Linux x86-64 environment. The pinned QVL is
+a Linux x86-64 ELF executable with SHA-256
+`35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb`.
+Native macOS execution reports infrastructure failure and is a stop condition.
+Do not replace the verifier, skip QVL, or treat macOS incompatibility as a quote
+result.
+
+If the command runs in a container, mount only the reviewed source, pinned QVL,
+the `cathedral` wallet needed for `serge_sat_test_2`, and the dedicated runtime
+root. Keep the wallet mount read-only. Keep the runtime root writable only by
+the container user, mode 0700, with preview, digest, lock, and journal files at
+0600. Do not print, copy, or capture a mnemonic, private key, wallet password,
+raw keyfile, or decrypted signing material in terminal output or logs.
 
 After registration has finalized, create the no-write review artifact:
 
@@ -91,16 +108,39 @@ cathedral-second-miner-announce announce \
 
 Exit status 3 means the intent is ambiguous. Preserve the journal and run the
 read-only recovery command. Never repeat `announce` after an ambiguous result.
+Only a complete successful receipt that postdates preflight plus canonical
+finalized readback is `finalized_proven`. If the SDK success receipt is missing
+inclusion fields or is stale, exact later readback is recorded as
+`finalized_recovered`, not proof of the inclusion receipt.
 
 ## Current boundary
 
-The existing standby VM uses the first miner's UID124 public hotkey. It is a
-second machine behind the same on-chain identity. It is not a second listed
-miner and does not satisfy this plan's outcome target.
+The original UID124 VM has stopped. Its replacement machine is available at
+`35.222.166.235:8081`, but UID124 still advertises the predecessor endpoint
+`34.68.36.156:8081`. Repointing UID124 is a separate generation-2 successor
+operation. The second machine at `34.46.19.69:8081` uses the dedicated second
+hotkey and is the only endpoint in scope for this first-announcement command.
 
-The dedicated `serge_sat_test_2` public hotkey was not registered at finalized
-block 8,946,847 on 2026-08-28. The planner must therefore return
-`BLOCKED_SECOND_MINER_UNREGISTERED` and omit a wire row for the present state.
+The unregistered result at finalized block 8,946,847 on 2026-08-28 is a
+historical pre-registration snapshot, not current authority. After registration,
+the planner and axon preview must derive the assigned UID again from one current
+finalized head. Never copy a UID from this document into a chain write.
+
+The registration was included at block 8,947,050,
+`0xad3028f451ac5a4b10644368183d8f1ca1511b85ab2212736599c73f872f6093`.
+Two later finalized reads reproduced the dedicated hotkey, Cathedral coldkey,
+and UID8 mapping:
+
+- Block 8,947,052,
+  `0xead9481536e22462492eaea827d50f1dbc3dd8b8c485f6ba4ac5ca3995e21576`.
+- Block 8,947,053,
+  `0xbad83ca212baddb7a421974374be2f1e8f50de8be80774c47119985924b9b310`.
+
+At both reads, UID8 was canonically unannounced: `0.0.0.0:0`, protocol 0,
+serving false. UID124 remained mapped to the first hotkey and the same Cathedral
+coldkey. UID30's mechanism-0 row remained `[[124, 65535]]`. These reads prove
+registration and unchanged prior allocation. They do not prove an axon
+announcement, a two-miner weight row, subnet emission, or TAO earnings.
 
 Both previous one-shot launch tools are consumed artifacts. The UID124 axon
 announcement tool is pinned to the first hotkey and exact endpoint. The UID30
@@ -121,15 +161,14 @@ change provides only the bounded axon writer in steps 5 and 6. It does not
 perform registration, submit an announcement by itself, or expose a weight
 writer.
 
-1. Bootstrap or restart the second machine with the dedicated second public
-   hotkey. Keep the immutable miner image and its reviewed startup contract.
-2. Prove the second machine has fresh QVL PASS, canonical SAT success, and a TLS
-   SPKI different from the first machine.
-3. Register `serge_sat_test_2` once. SN39 is full, so registration replaces an
-   incumbent UID. Registration has no rollback and incurs the live chain fee or
-   burn even though the future weight vector has zero burn allocation.
-4. Confirm the second public hotkey, Cathedral coldkey ownership, and assigned
-   UID at a finalized head. Repeat at a later finalized head.
+1. Completed outside this change. Bootstrap the second machine with the
+   dedicated second public hotkey and verify its immutable startup contract.
+2. Completed outside this change. Obtain fresh QVL PASS, canonical SAT success,
+   and a TLS SPKI distinct from the first machine.
+3. Completed outside this change. Register `serge_sat_test_2` once. The
+   registration inclusion and later finalized reads are recorded above.
+4. Completed by the finalized reads above. Confirm the dedicated public hotkey,
+   Cathedral coldkey ownership, assigned UID8, and canonical unannounced row.
 5. Run `cathedral-second-miner-announce preview`. Review the assigned UID,
    second public hotkey, external IP, HTTPS port 8081, genesis, fresh endpoint
    proof, local lineage paths, and detached digest.

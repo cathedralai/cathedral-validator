@@ -108,6 +108,8 @@ class MinerAxonContract:
     endpoint_port: int = SN39_HTTPS_PORT
     fixed_uid: int | None = None
     supports_legacy_successor: bool = False
+    first_announcement_only: bool = False
+    require_proven_success_receipt: bool = False
 
     @property
     def preview_path(self) -> Path:
@@ -141,6 +143,8 @@ SECOND_MINER_AXON_CONTRACT = MinerAxonContract(
     preview_schema="cathedral_sn39_second_miner_axon_preview_v1",
     journal_schema="cathedral_sn39_second_miner_axon_journal_v1",
     endpoint_ip=SECOND_MINER_ENDPOINT_IP,
+    first_announcement_only=True,
+    require_proven_success_receipt=True,
 )
 
 _CHAIN_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -625,6 +629,24 @@ def _same_endpoint(state: FinalizedMinerState, *, ip: str, port: int) -> bool:
     return (state.ip, state.port, state.is_serving) == (ip, port, True)
 
 
+def _require_first_announcement_posture(
+    state: FinalizedMinerState,
+    *,
+    ip: str,
+    port: int,
+    contract: MinerAxonContract,
+) -> None:
+    """Refuse to turn a first-time contract into an unjournaled successor."""
+
+    if not contract.first_announcement_only or _same_endpoint(state, ip=ip, port=port):
+        return
+    if (state.ip, state.port, state.is_serving) != ("0.0.0.0", 0, False):
+        raise MinerAxonError(
+            "first-time axon contract requires a canonical unannounced row; "
+            "a different existing axon needs an explicit successor lineage"
+        )
+
+
 def _announcement_paths(
     runtime_root: Path, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
 ) -> tuple[Path, Path]:
@@ -653,6 +675,9 @@ def build_preview(
         raise MinerAxonError("finalized miner UID differs from the launch pin")
     validate_endpoint_proof(proof, ip=proof.ip, port=proof.port, contract=contract)
     lock_path, journal_path = _announcement_paths(root, contract=contract)
+    _require_first_announcement_posture(
+        state, ip=proof.ip, port=proof.port, contract=contract
+    )
     already = _same_endpoint(state, ip=proof.ip, port=proof.port)
     document: dict[str, Any] = {
         "schema": contract.preview_schema,
@@ -821,6 +846,23 @@ def validate_preview(
     )
     if current_port > 65535 or not isinstance(current_axon.get("is_serving"), bool):
         raise MinerAxonError("preview finalized axon row is malformed")
+    current_state = FinalizedMinerState(
+        block_number=_strict_nonnegative_int(
+            chain.get("finalized_block_number"), label="preview finalized block"
+        ),
+        block_hash=_canonical_hash(
+            chain.get("finalized_block_hash"), label="preview finalized block hash"
+        ),
+        uid=uid,
+        hotkey=contract.miner_hotkey,
+        coldkey=contract.coldkey,
+        ip=current_ip,
+        port=current_port,
+        is_serving=current_axon["is_serving"],
+    )
+    _require_first_announcement_posture(
+        current_state, ip=ip, port=port, contract=contract
+    )
     proof_object = EndpointProof(
         hotkey=str(proof.get("hotkey", "")),
         validator_hotkey=str(proof.get("validator_hotkey", "")),
@@ -1454,6 +1496,28 @@ def _validated_receipt(
     return value
 
 
+def _validated_first_announcement_receipt(
+    value: object, *, preflight: FinalizedMinerState
+) -> Mapping[str, Any]:
+    receipt = _validated_receipt(
+        value, required_success=True, label="first-announcement"
+    )
+    if any(
+        receipt[key] is None for key in ("extrinsic_hash", "block_hash", "block_number")
+    ):
+        raise MinerAxonError(
+            "successful first-announcement receipt lacks finalized inclusion fields"
+        )
+    block_number = _strict_nonnegative_int(
+        receipt["block_number"], label="first-announcement receipt block number"
+    )
+    if block_number <= preflight.block_number:
+        raise MinerAxonError(
+            "successful first-announcement receipt does not postdate preflight"
+        )
+    return receipt
+
+
 def _validated_final_predecessor(
     journal: Mapping[str, Any],
     *,
@@ -1992,6 +2056,31 @@ def _post_intent_successor_validation(
         ) from exc
 
 
+def _strict_baseline_preflight(
+    journal: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    contract: MinerAxonContract,
+) -> FinalizedMinerState | None:
+    """Validate the stored first-attempt fence before trusting its readback."""
+
+    if not contract.require_proven_success_receipt:
+        return None
+    preflight = _state_from_artifact(
+        journal.get("preflight"),
+        label="first-announcement preflight",
+        contract=contract,
+    )
+    _current_matches_preview(preflight, preview, contract=contract)
+    proof = _endpoint_proof_from_artifact(
+        journal.get("fresh_endpoint_proof"),
+        label="first-announcement fresh endpoint proof",
+        contract=contract,
+    )
+    _fresh_matches_preview(proof, preview, contract=contract)
+    return preflight
+
+
 def _recover_existing_journal(
     *,
     journal: dict[str, Any],
@@ -2009,6 +2098,36 @@ def _recover_existing_journal(
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent journal is contradictory; do not retry"
+        ) from exc
+    if baseline_preflight is not None:
+        try:
+            _canonical_state_block(
+                subtensor,
+                baseline_preflight,
+                label="first-announcement stored preflight",
+            )
+        except Exception as exc:
+            raise MinerAxonAmbiguous(
+                "first-announcement preflight is no longer canonical; do not retry"
+            ) from exc
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         try:
@@ -2033,9 +2152,9 @@ def _recover_existing_journal(
     port = int(requested["port"])
     status = journal.get("status")
     if status not in AMBIGUOUS_STATUSES | FINAL_STATUSES:
-        if successor_minimum is not None:
+        if minimum_readback is not None:
             raise MinerAxonAmbiguous(
-                "successor intent status is contradictory; preserve it and do not retry"
+                "announcement intent status is contradictory; preserve it and do not retry"
             )
         raise MinerAxonError(
             f"announcement journal status is not recognized: {status!r}"
@@ -2047,13 +2166,17 @@ def _recover_existing_journal(
             port=port,
             receipt=journal.get("receipt"),
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception as exc:
         if status in FINAL_STATUSES:
@@ -2088,9 +2211,9 @@ def _recover_existing_journal(
     try:
         _write_state(journal_path, recovered, exclusive=False)
     except Exception as exc:
-        if successor_minimum is not None:
+        if minimum_readback is not None:
             raise MinerAxonAmbiguous(
-                "successor endpoint was read back but recovery persistence failed; do not retry"
+                "endpoint was read back but recovery persistence failed; do not retry"
             ) from exc
         raise
     return recovered
@@ -2105,6 +2228,7 @@ def _resolve_after_call(
     state_loader: Callable[[Any], FinalizedMinerState],
     receipt: Mapping[str, Any] | None,
     failure_kind: str,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
@@ -2113,6 +2237,31 @@ def _resolve_after_call(
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+        if baseline_preflight is not None:
+            _canonical_state_block(
+                subtensor,
+                baseline_preflight,
+                label="first-announcement preflight",
+            )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent validation failed after persistence; do not retry"
+        ) from exc
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         expected_success = {
@@ -2145,13 +2294,17 @@ def _resolve_after_call(
             port=int(requested["port"]),
             receipt=receipt,
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception as exc:
         ambiguous = dict(journal)
@@ -2318,6 +2471,7 @@ def _submit_journaled_axon(
     state_loader: Callable[[Any], FinalizedMinerState],
     call: Callable[..., Any],
     call_kwargs: Mapping[str, Any],
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
     """Persist one no-retry intent, call once, and resolve only by final state."""
 
@@ -2337,6 +2491,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=None,
             failure_kind="SDK_EXCEPTION",
+            contract=contract,
         )
     try:
         receipt = _receipt_fields(response)
@@ -2349,6 +2504,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=None,
             failure_kind="SDK_RESPONSE_UNPROVEN",
+            contract=contract,
         )
     if receipt["success"] is not True:
         return _resolve_after_call(
@@ -2359,6 +2515,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=receipt,
             failure_kind="SDK_UNSUCCESSFUL",
+            contract=contract,
         )
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
@@ -2367,6 +2524,39 @@ def _submit_journaled_axon(
         successor_validation.minimum_readback_block
         if successor_validation is not None
         else None
+    )
+    try:
+        baseline_preflight = (
+            None
+            if successor_validation is not None
+            else _strict_baseline_preflight(journal, preview=preview, contract=contract)
+        )
+    except Exception as exc:
+        raise MinerAxonAmbiguous(
+            "first-announcement intent validation failed after persistence; do not retry"
+        ) from exc
+    if baseline_preflight is not None:
+        try:
+            _validated_first_announcement_receipt(receipt, preflight=baseline_preflight)
+        except Exception:
+            return _resolve_after_call(
+                journal=journal,
+                journal_path=journal_path,
+                preview=preview,
+                subtensor=subtensor,
+                state_loader=state_loader,
+                receipt=None,
+                failure_kind="SDK_RESPONSE_UNPROVEN",
+                contract=contract,
+            )
+    minimum_readback = (
+        successor_minimum
+        if successor_minimum is not None
+        else (
+            baseline_preflight.block_number + 1
+            if baseline_preflight is not None
+            else None
+        )
     )
     if successor_validation is not None:
         try:
@@ -2385,6 +2575,7 @@ def _submit_journaled_axon(
                 state_loader=state_loader,
                 receipt=None,
                 failure_kind="SDK_RESPONSE_UNPROVEN",
+                contract=contract,
             )
     try:
         readback = _finalized_readback(
@@ -2393,13 +2584,17 @@ def _submit_journaled_axon(
             port=int(requested["port"]),
             receipt=receipt,
             state_loader=state_loader,
-            minimum_block_number=successor_minimum,
+            minimum_block_number=minimum_readback,
             receipt_after_block_number=(
                 successor_validation.preflight.block_number
                 if successor_validation is not None
-                else None
+                else (
+                    baseline_preflight.block_number
+                    if baseline_preflight is not None
+                    else None
+                )
             ),
-            require_canonical_state=successor_minimum is not None,
+            require_canonical_state=minimum_readback is not None,
         )
     except Exception:
         return _resolve_after_call(
@@ -2410,6 +2605,7 @@ def _submit_journaled_axon(
             state_loader=state_loader,
             receipt=receipt,
             failure_kind="FINALIZED_READBACK_UNPROVEN",
+            contract=contract,
         )
     finalized = dict(journal)
     finalized.update(
@@ -2681,6 +2877,7 @@ def announce_reviewed_preview(
                 contract=contract,
             )
         before = state_reader(subtensor)
+        _require_first_announcement_posture(before, ip=ip, port=port, contract=contract)
         if _same_endpoint(before, ip=ip, port=port):
             return {
                 "schema": contract.journal_schema,
@@ -2697,6 +2894,7 @@ def announce_reviewed_preview(
         fresh = proof_reader(subtensor, qvl_path=qvl_path, ip=ip, port=port)
         _fresh_matches_preview(fresh, preview, contract=contract)
         after = state_reader(subtensor)
+        _require_first_announcement_posture(after, ip=ip, port=port, contract=contract)
         if (
             after.uid != before.uid
             or after.hotkey != before.hotkey
@@ -2752,6 +2950,7 @@ def announce_reviewed_preview(
             state_loader=state_reader,
             call=call,
             call_kwargs=call_kwargs,
+            contract=contract,
         )
 
 

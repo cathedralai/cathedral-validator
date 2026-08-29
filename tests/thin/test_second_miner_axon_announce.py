@@ -176,6 +176,8 @@ def test_second_contract_has_distinct_identity_schema_and_local_lineage():
     assert second.preview_schema != first.preview_schema
     assert second.journal_schema != first.journal_schema
     assert second.supports_legacy_successor is False
+    assert second.first_announcement_only is True
+    assert second.require_proven_success_receipt is True
     assert second.fixed_uid is None
     assert cli.WALLET_HOTKEY == "serge_sat_test_2"
 
@@ -214,6 +216,26 @@ def test_preview_refuses_any_endpoint_other_than_the_bounded_machine(tmp_path):
         axon.build_preview(
             state=miner_state(),
             proof=endpoint_proof(ip="8.8.8.8"),
+            contract=contract,
+        )
+
+
+@pytest.mark.parametrize(
+    ("ip", "port", "serving"),
+    [
+        ("1.1.1.1", 8081, True),
+        ("1.1.1.1", 0, False),
+        (SECOND_IP, 0, False),
+    ],
+)
+def test_first_time_preview_refuses_every_noncanonical_existing_axon(
+    tmp_path, ip, port, serving
+):
+    contract = isolated_contract(tmp_path)
+    with pytest.raises(axon.MinerAxonError, match="successor lineage"):
+        axon.build_preview(
+            state=miner_state(ip=ip, port=port, serving=serving),
+            proof=endpoint_proof(),
             contract=contract,
         )
 
@@ -259,6 +281,25 @@ def test_wrong_signing_hotkey_refuses_before_journal_or_serve(tmp_path):
         )
 
     assert called == []
+    assert not (tmp_path / contract.journal_name).exists()
+
+
+def test_exact_target_is_a_no_write_result_without_a_journal(tmp_path):
+    contract = isolated_contract(tmp_path)
+    served = miner_state(ip=SECOND_IP, port=8081, serving=True)
+    path, digest, document = write_review(tmp_path, contract=contract, state=served)
+    assert document["status"] == axon.PREVIEW_ALREADY
+
+    result = announce(
+        contract=contract,
+        preview_path=path,
+        digest=digest,
+        state_loader=StateSequence(served),
+        serve_call=lambda **_kwargs: pytest.fail("exact target must not resubmit"),
+    )
+
+    assert result["status"] == "already_announced_no_write"
+    assert result["serve_axon_called"] is False
     assert not (tmp_path / contract.journal_name).exists()
 
 
@@ -375,6 +416,51 @@ def test_one_attempt_uses_exact_bittensor_10_5_contract_and_finalized_readback(
     assert not (tmp_path / axon.JOURNAL_NAME).exists()
 
 
+def test_incomplete_success_receipt_is_recovered_by_readback_not_proven(tmp_path):
+    contract = isolated_contract(tmp_path)
+    path, digest, _ = write_review(tmp_path, contract=contract)
+    served = miner_state(block=102, ip=SECOND_IP, port=8081, serving=True)
+    incomplete = SimpleNamespace(
+        success=True,
+        extrinsic_receipt=SimpleNamespace(
+            extrinsic_hash=None,
+            block_hash=None,
+            block_number=None,
+        ),
+    )
+
+    result = announce(
+        contract=contract,
+        preview_path=path,
+        digest=digest,
+        state_loader=StateSequence(miner_state(), miner_state(), served),
+        serve_call=lambda **_kwargs: incomplete,
+    )
+
+    assert result["status"] == "finalized_recovered"
+    assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert result["receipt"] is None
+    assert result["retry_allowed"] is False
+
+
+def test_success_receipt_at_preflight_block_is_not_finalized_proof(tmp_path):
+    contract = isolated_contract(tmp_path)
+    path, digest, _ = write_review(tmp_path, contract=contract)
+    served = miner_state(block=102, ip=SECOND_IP, port=8081, serving=True)
+
+    result = announce(
+        contract=contract,
+        preview_path=path,
+        digest=digest,
+        state_loader=StateSequence(miner_state(), miner_state(), served),
+        serve_call=lambda **_kwargs: response_at(block=100),
+    )
+
+    assert result["status"] == "finalized_recovered"
+    assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert result["receipt"] is None
+
+
 def test_sdk_exception_is_ambiguous_and_persistently_fenced(tmp_path):
     contract = isolated_contract(tmp_path)
     path, digest, _ = write_review(tmp_path, contract=contract)
@@ -460,6 +546,33 @@ def test_unregistered_second_hotkey_has_no_previewable_uid():
 
     with pytest.raises(axon.MinerAxonError, match="registered exactly once"):
         axon.finalized_miner_state(subtensor, contract=axon.SECOND_MINER_AXON_CONTRACT)
+
+
+def test_registered_second_hotkey_normalizes_chain_ip_zero_to_canonical_unannounced():
+    class Substrate(FakeSubstrate):
+        def get_chain_finalised_head(self):
+            return chain_hash(100)
+
+        def get_block_number(self, block_hash):
+            return int(block_hash, 16)
+
+    metagraph = SimpleNamespace(
+        uids=[8],
+        hotkeys=[axon.SECOND_MINER_HOTKEY],
+        coldkeys=[axon.CATHEDRAL_COLDKEY],
+        axons=[SimpleNamespace(ip=0, port=0, is_serving=False)],
+    )
+    subtensor = SimpleNamespace(
+        substrate=Substrate(),
+        metagraph=lambda *_args, **_kwargs: metagraph,
+    )
+
+    state = axon.finalized_miner_state(
+        subtensor, contract=axon.SECOND_MINER_AXON_CONTRACT
+    )
+
+    assert state.uid == 8
+    assert (state.ip, state.port, state.is_serving) == ("0.0.0.0", 0, False)
 
 
 def test_second_contract_rejects_legacy_successor_switch_before_loading_files(tmp_path):
