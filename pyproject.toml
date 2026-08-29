@@ -102,6 +102,13 @@ provenance = [
 integration = [
     "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b2ad1eddf9235921f8f680342605d5c8a84a8d87",
 ]
+# Development-only AMD SEV-SNP verifier/client contract. This is the exact
+# reviewed cathedral-compute merge commit from cathedral-sandbox#181. The
+# command also verifies PEP 610 VCS provenance at runtime and refuses a local,
+# wheel-only, mutable, or different tree.
+snp-dev = [
+    "cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@5268443104fd7717b95ce4c398ddf6229ec4f461",
+]
 
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for
 # its worker-side score publisher and must not claim `cathedral-validator`.
@@ -126,6 +133,9 @@ cathedral-independent-live = "cathedral_thin.independent_runtime.run:main"
 # Dedicated signed-fleet preview. Its import graph contains no Cloud client,
 # canary writer, journal, account nonce, extrinsic, or submission transport.
 cathedral-multicompute-preview = "cathedral_thin.independent_runtime.fleet_preview:main"
+# Development-only AMD SEV-SNP preview. It has no writer mode and loads the
+# exact Compute verifier/client dependency lazily.
+cathedral-amd-sev-snp-dev-preview = "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
 # Historical launch implementations remain only behind recovery-only commands.
 # Stale old console-script shims import the same fail-closed source mains.
 cathedral-miner-axon-recover = "cathedral_thin.independent_runtime.miner_axon_cli:main"
