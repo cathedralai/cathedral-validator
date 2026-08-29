@@ -874,6 +874,7 @@ def test_successor_submit_uses_only_fixed_canonical_write_and_proof_seams(
     assert observed_submit["wire_weights"] == [W, W]
     assert observed_submit["netuid"] == 39
     assert observed_submit["version_key"] == VERSION_KEY
+    assert observed_submit["allow_reviewed_uid30_finalized_descendant"] is True
     assert result.wire_uids == (8, 124)
     assert result.wire_weights == (W, W)
     assert result.later_finalized_heads == later_heads

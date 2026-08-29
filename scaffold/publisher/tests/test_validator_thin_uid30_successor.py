@@ -1024,6 +1024,474 @@ def _authorization_substrate(*, current_rows: object | None = None) -> object:
     )
 
 
+def _descendant_preflight(
+    *,
+    second_uid: int = 8,
+    primary_uid: int = 124,
+    drift: int = 1,
+    case: str = "ok",
+) -> tuple[validator.ChainPreflight, dict[str, object]]:
+    latest_block = MAPPING_BLOCK + drift
+    latest_hash = "0x" + "e" * 64
+    intermediate_hash = "0x" + "9" * 64
+    unrelated_hash = "0x" + "7" * 64
+    signed_hash = "0x" + "6" * 64
+    calls: dict[str, object] = {
+        "nonce": 0,
+        "sign": 0,
+        "submit": 0,
+        "era_current": None,
+    }
+    uid_by_hotkey = {
+        validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY: 30,
+        validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY: second_uid,
+        validator.SN39_UID30_LAUNCH_MINER_HOTKEY: primary_uid,
+    }
+    hotkey_by_uid = {uid: hotkey for hotkey, uid in uid_by_hotkey.items()}
+
+    def get_block_hash(block: int) -> str:
+        if block == MAPPING_BLOCK:
+            return FINALIZED_HASH
+        if block == latest_block:
+            return latest_hash
+        if block == validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK:
+            return validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH
+        if block == MAPPING_BLOCK - 2:
+            return "0x" + "a" * 64
+        if block == MAPPING_BLOCK - 1:
+            return "0x" + "b" * 64
+        raise AssertionError(block)
+
+    parents = {
+        latest_hash: (
+            unrelated_hash
+            if case == "ancestry"
+            else FINALIZED_HASH
+            if drift == 1
+            else intermediate_hash
+        ),
+        intermediate_hash: FINALIZED_HASH,
+    }
+
+    def query(
+        *, storage_function: str, params: list[object], block_hash: str, **_kwargs
+    ):
+        if storage_function == "Uids":
+            hotkey = str(params[1])
+            if case == "second_mapping" and hotkey == (
+                validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY
+            ):
+                return second_uid + 1
+            return uid_by_hotkey[hotkey]
+        if storage_function == "Keys":
+            uid = int(params[1])
+            if case == "primary_mapping" and uid == primary_uid:
+                return validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY
+            return hotkey_by_uid[uid]
+        if storage_function == "WeightsVersionKey":
+            return (
+                validator.SN39_UID30_LAUNCH_VERSION_KEY + 1
+                if case == "version" and block_hash == latest_hash
+                else 0
+            )
+        if storage_function == "StakeThreshold":
+            assert params == [] and block_hash == latest_hash
+            return 1_000
+        if storage_function == "Weights":
+            if block_hash == latest_hash:
+                return (
+                    [[second_uid, 65535], [primary_uid, 65535]]
+                    if case == "row"
+                    else [[validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, 65535]]
+                )
+            if block_hash == FINALIZED_HASH:
+                return [[validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, 65535]]
+            assert block_hash == validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH
+            return [[validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID, 65535]]
+        raise AssertionError(storage_function)
+
+    def nonce(_hotkey: str) -> int:
+        calls["nonce"] = int(calls["nonce"]) + 1
+        return 17
+
+    signed = SimpleNamespace(extrinsic_hash=bytes.fromhex("6" * 64))
+
+    def sign(**kwargs):
+        calls["sign"] = int(calls["sign"]) + 1
+        calls["era_current"] = kwargs["era"]["current"]
+        return signed
+
+    def submit(*_args, **_kwargs):
+        calls["submit"] = int(calls["submit"]) + 1
+        return SimpleNamespace(extrinsic_hash=signed_hash, is_success=True)
+
+    substrate = SimpleNamespace(
+        get_chain_finalised_head=lambda: latest_hash,
+        get_block_number=lambda block_hash: (
+            latest_block if block_hash == latest_hash else pytest.fail(block_hash)
+        ),
+        get_block_hash=get_block_hash,
+        get_block_header=lambda *, block_hash: {
+            "header": {"parentHash": parents[block_hash]}
+        },
+        query=query,
+        get_account_next_index=nonce,
+        create_signed_extrinsic=sign,
+        submit_extrinsic=submit,
+    )
+    second_axon: object = {
+        "ip": int.from_bytes(bytes((34, 46, 19, 69)), "big"),
+        "ip_type": 6 if case == "axon_ip_type" else 4,
+        "port": 8082 if case == "second_axon" else 8081,
+        "protocol": 4,
+    }
+    if case == "axon_shape":
+        second_axon = SimpleNamespace(ip="34.46.19.69", port=8081, protocol=4)
+    primary_axon = {
+        "ip": int.from_bytes(bytes((35, 222, 166, 235)), "big"),
+        "ip_type": 4,
+        "port": 8081,
+        "protocol": 3 if case == "primary_axon" else 4,
+    }
+    info_size = max(30, second_uid, primary_uid) + 1
+    hotkeys = [f"unused-{index}" for index in range(info_size)]
+    permits: list[object] = [False] * info_size
+    last_update = [0] * info_size
+    total_stake = [SimpleNamespace(rao=0) for _ in range(info_size)]
+    axons: list[object] = [{} for _ in range(info_size)]
+    for hotkey, uid in uid_by_hotkey.items():
+        hotkeys[uid] = hotkey
+    permits[30] = "False" if case == "permit_type" else case != "permit"
+    last_update[30] = (
+        validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK + 1
+        if case == "last_update"
+        else validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK
+    )
+    total_stake[30] = SimpleNamespace(rao=999 if case == "stake" else 1_001)
+    axons[30] = {}
+    axons[second_uid] = second_axon
+    axons[primary_uid] = primary_axon
+    info = SimpleNamespace(
+        block=latest_block,
+        hotkeys=hotkeys,
+        validator_permit=permits,
+        last_update=last_update,
+        total_stake=total_stake,
+        axons=axons,
+    )
+    subtensor = SimpleNamespace(
+        substrate=substrate,
+        commit_reveal_enabled=lambda *, netuid, block: (
+            False
+            if netuid == 39 and block == latest_block and case != "commit"
+            else True
+        ),
+        get_subnet_owner_hotkey=lambda netuid, *, block: (
+            validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY
+            if case == "owner"
+            else validator.SN39_BURN_HOTKEY
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        min_allowed_weights=lambda *, netuid, block: (
+            2
+            if case == "min_weights"
+            else 1
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        max_weight_limit=lambda *, netuid, block: (
+            0.5
+            if case == "max_weight"
+            else 1.0
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        get_next_epoch_start_block=lambda netuid, *, block: (
+            MAPPING_BLOCK + 201
+            if case == "epoch"
+            else MAPPING_BLOCK + 200
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        weights_rate_limit=lambda netuid, *, block: (
+            validator.SN39_MORTAL_PERIOD_BLOCKS - 1
+            if case == "rate_limit"
+            else 100
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        get_mechanism_count=lambda netuid, *, block: (
+            0
+            if case == "mechanism"
+            else 1
+            if netuid == 39 and block == latest_block
+            else pytest.fail((netuid, block))
+        ),
+        get_metagraph_info=lambda netuid, mechid, *, block: (
+            info
+            if (netuid, mechid, block) == (39, 0, latest_block)
+            else pytest.fail((netuid, mechid, block))
+        ),
+    )
+    preflight = validator.ChainPreflight(
+        wallet=SimpleNamespace(
+            hotkey=SimpleNamespace(
+                ss58_address=validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
+            )
+        ),
+        subtensor=subtensor,
+        hotkey_to_uid=uid_by_hotkey,
+        validator_hotkey=validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        validator_uid=30,
+        block=MAPPING_BLOCK,
+        min_allowed_weights=1,
+        max_weight_limit=1.0,
+        commit_reveal_enabled=False,
+        genesis_hash=validator.FINNEY_GENESIS_HASH,
+        subnet_owner_hotkey=validator.SN39_BURN_HOTKEY,
+        blocks_until_next_epoch=200,
+        next_epoch_start_block=MAPPING_BLOCK + 200,
+        weights_rate_limit=100,
+        validator_blocks_since_last_update=(
+            MAPPING_BLOCK - validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK
+        ),
+        replacement_safe_hotkeys=frozenset(
+            {
+                validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY,
+                validator.SN39_UID30_LAUNCH_MINER_HOTKEY,
+                "5G6mgvL59o6AM8rFRYbbUpbzjjGwcVLUidpQ1vsz5UkZyw2o",
+            }
+        ),
+        finalized_hash=FINALIZED_HASH,
+    )
+    return preflight, calls
+
+
+@pytest.mark.parametrize(
+    ("drift", "second_uid", "primary_uid"),
+    [(1, 17, 201), (2, 8, 124)],
+)
+def test_exact_successor_signer_accepts_only_bounded_reviewed_descendants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: int,
+    second_uid: int,
+    primary_uid: int,
+) -> None:
+    _state_path, runtime = _write_predecessor_journal(tmp_path, monkeypatch)
+    identity = _successor_identity(
+        second_uid=second_uid,
+        primary_uid=primary_uid,
+    )
+    attempt_id = validator._reviewed_uid30_attempt_id(identity)
+    validator._reserve_common_submission(
+        runtime,
+        lane="authority",
+        attempt_id=attempt_id,
+        identity=identity,
+    )
+    preflight, calls = _descendant_preflight(
+        second_uid=second_uid,
+        primary_uid=primary_uid,
+        drift=drift,
+    )
+    monkeypatch.setattr(
+        validator,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: identity["uid_safety"],
+    )
+    monkeypatch.setattr(
+        validator,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: validator.PASS,
+    )
+    monkeypatch.setattr(
+        "bittensor.core.types.ExtrinsicResponse.unlock_wallet",
+        lambda *_args, **_kwargs: SimpleNamespace(success=True),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: SimpleNamespace(
+            set_mechanism_weights=lambda **_kwargs: "call"
+        ),
+    )
+    intents: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        validator,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **kwargs: intents.append(kwargs),
+    )
+
+    receipt = validator._submit_exact_sn39_extrinsic(
+        preflight,
+        runtime_contract=runtime,
+        attempt_id=attempt_id,
+        netuid=39,
+        version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
+        wire_uids=[second_uid, primary_uid],
+        wire_weights=[65535, 65535],
+        mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+        allow_reviewed_uid30_finalized_descendant=True,
+    )
+
+    assert receipt.is_success is True
+    assert calls == {
+        "nonce": 1,
+        "sign": 1,
+        "submit": 1,
+        "era_current": MAPPING_BLOCK,
+    }
+    assert intents[0]["wire_uids"] == [second_uid, primary_uid]
+    assert intents[0]["wire_weights"] == [65535, 65535]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "durable_kind",
+        "digest",
+        "second_mapping",
+        "primary_mapping",
+        "row",
+        "permit",
+        "permit_type",
+        "last_update",
+        "rate_limit",
+        "second_axon",
+        "primary_axon",
+        "axon_ip_type",
+        "axon_shape",
+        "version",
+        "commit",
+        "owner",
+        "min_weights",
+        "max_weight",
+        "stake",
+        "mechanism",
+        "epoch",
+        "too_far",
+        "ancestry",
+        "signed_pending",
+        "wire",
+    ],
+)
+def test_successor_descendant_counterexamples_refuse_before_irreversible_touch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    state_path, runtime = _write_predecessor_journal(tmp_path, monkeypatch)
+    predecessor_bytes = state_path.read_bytes()
+    identity = _successor_identity()
+    validator._reserve_common_submission(
+        runtime,
+        lane="authority",
+        attempt_id=SUCCESSOR_ATTEMPT_ID,
+        identity=identity,
+    )
+    journal = validator._read_state(state_path)
+    if case == "durable_kind":
+        journal["submission_pending_reviewed_uid30_contract"] = "one_miner_launch"
+        validator._replace_private_state(state_path, journal)
+    elif case == "digest":
+        runtime._uid30_two_miner_successor_preview_sha256 = "2" * 64
+    elif case == "signed_pending":
+        journal["submission_pending_phase"] = "signed_intent"
+        journal["submission_pending_broadcast_intent"] = {
+            "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH
+        }
+        validator._replace_private_state(state_path, journal)
+    drift = 3 if case == "too_far" else 1
+    preflight, calls = _descendant_preflight(
+        drift=drift,
+        case=case,
+    )
+    monkeypatch.setattr(
+        "bittensor.core.types.ExtrinsicResponse.unlock_wallet",
+        lambda *_args, **_kwargs: pytest.fail("refusal must precede wallet unlock"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: pytest.fail("refusal must precede call composition"),
+    )
+    monkeypatch.setattr(
+        validator,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **_kwargs: pytest.fail(
+            "refusal must precede signed-intent journaling"
+        ),
+    )
+
+    with pytest.raises(validator.wire.VectorError):
+        validator._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime,
+            attempt_id=SUCCESSOR_ATTEMPT_ID,
+            netuid=39,
+            version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
+            wire_uids=[8, 124],
+            wire_weights=[65535, 65534] if case == "wire" else [65535, 65535],
+            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+    assert calls == {
+        "nonce": 0,
+        "sign": 0,
+        "submit": 0,
+        "era_current": None,
+    }
+    if case not in {"durable_kind", "signed_pending"}:
+        assert validator._abort_unsigned_common_submission(
+            runtime,
+            attempt_id=SUCCESSOR_ATTEMPT_ID,
+        )
+        assert state_path.read_bytes() == predecessor_bytes
+
+
+def test_generic_descendant_flag_does_not_authorize_an_unreviewed_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preflight, calls = _descendant_preflight()
+    monkeypatch.setattr(validator, "_read_state", lambda _path: {})
+    monkeypatch.setattr(
+        validator,
+        "_submission_state_path",
+        lambda _args: Path("/not-read/generic.json"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.types.ExtrinsicResponse.unlock_wallet",
+        lambda *_args, **_kwargs: pytest.fail("refusal must precede wallet unlock"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: pytest.fail("refusal must precede call composition"),
+    )
+
+    with pytest.raises(validator.wire.VectorError):
+        validator._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=SimpleNamespace(
+                require_full_provenance_for_broadcast=False,
+            ),
+            attempt_id="sha256:" + "4" * 64,
+            netuid=39,
+            version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
+            wire_uids=[8, 124],
+            wire_weights=[65535, 65535],
+            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+    assert calls == {
+        "nonce": 0,
+        "sign": 0,
+        "submit": 0,
+        "era_current": None,
+    }
+
+
 def test_exact_successor_pre_sign_authorization_accepts_dynamic_mapping_and_lineage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
