@@ -190,11 +190,12 @@ checkout instead of hard-coding trust.
 ## Cathedral Confidential binding
 
 The policy artifact is ordinary canonical bytes. A generic Cathedral
-Confidential workload can emit those exact bytes; `cathedral-verifyml` commits
-them as the receipt output. The validator first verifies the receipt and any
-TDX evidence under its pinned policy, then passes the verified receipt into
-`evaluate_policy`. The evaluator rejects a receipt whose network, netuid,
-miner, or output commitment does not match the artifact.
+Confidential workload can emit those exact bytes;
+`python -m cathedral_thin.verifyml_cli` commits them as the receipt output. The
+validator first verifies the receipt and any TDX evidence under its pinned
+policy, then passes the verified receipt into `evaluate_policy`. The evaluator
+rejects a receipt whose network, netuid, miner, or output commitment does not
+match the artifact.
 
 The execution class remains zero unless attestation was independently verified.
 Signed but unattested receipts are retained as provenance and are never

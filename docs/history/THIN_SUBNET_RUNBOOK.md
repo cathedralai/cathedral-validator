@@ -62,10 +62,10 @@ units, composes fixed 60/40 budgets, writes the decision record, and binds that
 record into the retried vector.
 
 The focused inference-receipt flow is documented in
-[`VERIFYML.md`](../VERIFYML.md). `cathedral-verifyml run-local` exercises the
-model/receipt plumbing without pretending that a local run is attested;
-production `verified_work_units` require a genuine quote and a
-validator-pinned verifier.
+[`VERIFYML.md`](../VERIFYML.md).
+`python -m cathedral_thin.verifyml_cli run-local` exercises the model/receipt
+plumbing without pretending that a local run is attested; production
+`verified_work_units` require a genuine quote and a validator-pinned verifier.
 
 ## 2. Create wallets and register
 

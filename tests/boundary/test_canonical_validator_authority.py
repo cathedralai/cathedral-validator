@@ -90,6 +90,7 @@ def test_active_operator_docs_do_not_advertise_retired_console_commands() -> Non
         "cathedral-multicompute-preview",
         "cathedral-miner-axon-recover",
         "cathedral-uid30-recover",
+        "cathedral-verifyml",
     )
     active_docs = [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md")]
     for path in active_docs:
