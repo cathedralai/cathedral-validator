@@ -29,7 +29,8 @@ UID-aligned Bittensor weight decision. It supports two concurrent paths:
 | Signed vector, JWKS, and public evidence index | Deployed |
 | Validator thin-path checks | Implemented |
 | Concurrent shadow provenance audit | Implemented; the only recurring runtime |
-| Authority/full operator mode | Removed from profiles and command-line entrypoints |
+| Recurring authority/full operator mode | Removed from profiles and command-line entrypoints |
+| Bounded UID30 fleet consolidation | Implemented as one fixed digest-bound attempt, separate from the recurring runtime |
 | Current deployed vector vs independent verifier | `NOT PROVEN`: dated sources disagree, and no fresh live reproduction passed during this review. Re-derive against the live signed vector before any broadcast. |
 | General validator launch | Pending a scoreable corpus and final acceptance |
 
@@ -41,12 +42,19 @@ snapshot at finalized block 8,949,280 reports current mechanism-0 storage
 evidence for two weighted UIDs. It does not prove two machines behind one UID,
 activate the recurring relay, or prove TAO earnings. Subnet emission was zero.
 
-The supported fleet path is a no-write preview. It gives credit only for
+The supported fleet proof is a no-write preview. It gives credit only for
 independently verified work from distinct QVL-bound physical identities. The
 canonical consolidation target is the launch miner public hotkey, currently
 UID124. Its target `[[124, 65535]]` remains NOT PROVEN until its signed fleet
 contains two distinct verified machines with 20 SAT units each. See
 [`docs/SN39_MULTICOMPUTE.md`](docs/SN39_MULTICOMPUTE.md).
+
+After a successful preview is reviewed by exact SHA-256, the separate
+`cathedral-uid30-fleet-submit` command permits one fixed transition to
+`[[124, 65535]]` with no burn. It repeats the machine and chain proofs before
+signing, uses one durable attempt budget, and requires finalized inclusion plus
+two later finalized readbacks. It has no recurring, arbitrary-vector, or retry
+mode. An ambiguous signed result must go through its recovery subcommand.
 
 Do not start the shipped recurring relay with `--broadcast` until a separate
 review proves the exact intended UID row and burn allocation. The fleet
@@ -99,8 +107,8 @@ weight by themselves.
 `receipts_only` is reported as `NOT_PROVEN`; it is not accepted as `FULL`.
 There is no `--mode` or `--provenance` selector. A signed-feed failure writes
 nothing and leaves the process in shadow. Authority-labelled internal types and
-journal lanes remain only for read-only recovery of historical bounded launch
-attempts. They are not a recurring operator path.
+journal lanes remain only for bounded launch attempts and their recovery. They
+are not a recurring operator path.
 
 Read [the full provenance contract](docs/PROVENANCE.md) for the audit's evidence
 and assurance boundaries.

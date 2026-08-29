@@ -7,8 +7,10 @@ credit only for independently re-derived work from distinct verified physical
 platforms. It does not credit declared capacity, uptime, endpoint count, or an
 attestation without successful work.
 
-The current implementation is preview-only. It does not submit weights. It
-does not add a recurring authority mode.
+The scoring and proof commands are preview-only. A separate bounded command
+accepts one exact reviewed proof digest and performs one fixed transition from
+`[[8, 65535], [124, 65535]]` to `[[124, 65535]]`. It does not add a recurring
+authority mode.
 
 ## Current chain evidence
 
@@ -92,8 +94,10 @@ snapshot.
 4. Run the generic preview and resolve all infrastructure blockers.
 5. Run the exact UID30 no-write proof. Review the owner-only JSON and detached
    SHA-256.
-6. Treat any future chain-write design as a separate reviewed change. This
-   implementation supplies no such authority.
+6. Review the complete JSON and detached SHA-256. Do not submit a
+   `NOT_PROVEN_NO_WRITE` artifact.
+7. If the bounded consolidation is approved, stop every other UID30 writer and
+   use the separate digest-bound command below.
 
 The presently published worker image does not expose the signed fleet access
 contract. Until the worker rollout completes, a same-UID two-machine proof is
@@ -160,10 +164,75 @@ reports `NOT_PROVEN_NO_WRITE`, records exact reasons, and exits 2. When the
 target differs from current storage, it reports `changes_current_chain_row:
 true`.
 
-The artifact schema is not accepted by a writer. The command has no submit,
-recover, confirm, nonce, extrinsic, or journal mode. It always records zero
-target burn, `authorized_for_chain_write: false`, and
-`chain_write_submitted: false`.
+The preview command has no submit, recover, confirm, nonce, extrinsic, or
+journal mode. It always records zero target burn,
+`authorized_for_chain_write: false`, and `chain_write_submitted: false`. The
+separate one-shot command accepts the preview only after its exact canonical
+bytes match both the detached digest and the operator-supplied digest.
+
+## One-shot UID30 consolidation
+
+Outcome target:
+
+```text
+signer: UID30
+previous finalized row: [[8, 65535], [124, 65535]]
+submitted row: [[124, 65535]]
+burn destination: none
+burn weight: 0
+signed-attempt budget: 1
+```
+
+Run this only on the host containing the canonical Cathedral wallet and
+`/var/lib/cathedral-validator` journal. First inspect the JSON and copy the
+64-character digest from its `.sha256` file. Then run:
+
+```bash
+cathedral-uid30-fleet-submit submit \
+  --preview "$HOME/.cathedral/uid30-fleet/two-machine-proof.json" \
+  --reviewed-sha256 <reviewed-64-character-sha256> \
+  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
+  --confirm-uid30-fleet-consolidation \
+  --assert-exclusive-writer
+```
+
+The one-shot command is hard-pinned to the public Finney archive endpoint
+`wss://archive.chain.opentensor.ai:443`. There is no endpoint option. An
+existing `CATHEDRAL_CHAIN_ENDPOINT` setting does not redirect this path. The
+preview refresh, predecessor proof, write preflight, signing, submission,
+inclusion proof, recovery, and later finalized reads all reuse the pinned
+archive route. Before it loads QVL or reserves an attempt, the command requires
+that archive to reproduce the exact finalized predecessor call and
+`[[8, 65535], [124, 65535]]` storage row.
+
+Immediately before signing, the command:
+
+- repeats the two-machine QVL and SAT proof;
+- requires the same two reviewed physical identities and endpoints;
+- rechecks UID30 ownership, validator permit, stake, cooldown, mechanism, and
+  weight-version gates;
+- re-proves the exact finalized two-UID predecessor and its canonical journal;
+- reserves one attempt before signing;
+- submits only UID124 weight 65535; and
+- proves the exact call and storage at inclusion and two later finalized heads.
+
+The command has no UID, weight, burn, broadcast, or retry option. A refusal
+before a signed intent restores the predecessor journal byte for byte. Any
+uncertainty after signing prints `AMBIGUOUS_DO_NOT_RETRY` and leaves the attempt
+fenced.
+
+Do not run `submit` again after an ambiguous result. Recover the same attempt:
+
+```bash
+cathedral-uid30-fleet-submit recover \
+  --preview "$HOME/.cathedral/uid30-fleet/two-machine-proof.json" \
+  --reviewed-sha256 <reviewed-64-character-sha256> \
+  --assert-exclusive-writer
+```
+
+Recovery never signs or submits. It locates and proves only the journaled
+transaction. If the mortal transaction expired without inclusion, the one
+attempt remains consumed.
 
 ## Stop conditions
 
@@ -180,6 +249,8 @@ Stop and preserve the evidence when any of these occurs:
   fleet changes during the proof.
 - The pinned consolidation hotkey is absent from current storage.
 
-Do not turn a preview digest into chain authority. A UID30 allocation proves
-only that validator's weight row. Rewards remain NOT PROVEN until subnet
-emission is positive and a reward or balance delta is observed.
+Do not treat a preview digest as general chain authority. It authorizes only
+the fixed command above after the explicit confirmation and exclusivity gates.
+A UID30 allocation proves only that validator's weight row. Rewards remain NOT
+PROVEN until subnet emission is positive and a reward or balance delta is
+observed.

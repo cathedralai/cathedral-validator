@@ -118,6 +118,7 @@ class UID30ReadPreflight:
     next_epoch_start_block: int
     weights_rate_limit: int
     validator_blocks_since_last_update: int
+    connection_target: str = NETWORK
 
 
 def _raw_value(value: Any) -> Any:
@@ -269,12 +270,23 @@ def _finalized_head(subtensor: Any) -> tuple[int, str]:
     return block, block_hash
 
 
-def _read_preflight() -> UID30ReadPreflight:
+def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:
     """Read one finalized UID30 identity/policy snapshot without writer imports."""
 
     try:
         wallet = make_wallet(bt, name=WALLET_NAME, hotkey=WALLET_HOTKEY)
-        subtensor = make_subtensor(bt, network=NETWORK)
+        target = chain_endpoint or NETWORK
+        if (
+            not isinstance(target, str)
+            or not target
+            or target.strip() != target
+            or (
+                chain_endpoint is not None
+                and not target.startswith(("ws://", "wss://"))
+            )
+        ):
+            raise UID30LaunchError("UID30 chain endpoint is invalid")
+        subtensor = make_subtensor(bt, network=target)
         block, block_hash = _finalized_head(subtensor)
         genesis_hash = _canonical_hash(
             subtensor.substrate.get_block_hash(0), label="genesis hash"
@@ -358,6 +370,7 @@ def _read_preflight() -> UID30ReadPreflight:
             next_epoch_start_block=next_epoch_start_block,
             weights_rate_limit=weights_rate_limit,
             validator_blocks_since_last_update=blocks_since_update,
+            connection_target=target,
         )
     except UID30LaunchError:
         raise
@@ -366,16 +379,26 @@ def _read_preflight() -> UID30ReadPreflight:
     return preflight
 
 
-def read_uid30_chain_state() -> UID30ChainState:
+def read_uid30_chain_state(
+    *,
+    chain_endpoint: str | None = None,
+    preflight: UID30ReadPreflight | None = None,
+) -> UID30ChainState:
     """Read every mutable UID30 fact at one canonical finalized head."""
 
     try:
-        preflight = _read_preflight()
-        block = preflight.block
-        block_hash = preflight.finalized_hash
-        if preflight.genesis_hash != FINNEY_GENESIS_HASH:
+        if preflight is not None and chain_endpoint is not None:
+            raise UID30LaunchError(
+                "UID30 state cannot combine a prepared preflight and endpoint"
+            )
+        selected = preflight or _read_preflight(chain_endpoint=chain_endpoint)
+        if not isinstance(selected, UID30ReadPreflight):
+            raise UID30LaunchError("UID30 state received the wrong preflight type")
+        block = selected.block
+        block_hash = selected.finalized_hash
+        if selected.genesis_hash != FINNEY_GENESIS_HASH:
             raise UID30LaunchError("chain preflight resolved the wrong genesis")
-        info = preflight.subtensor.get_metagraph_info(NETUID, MECID, block=block)
+        info = selected.subtensor.get_metagraph_info(NETUID, MECID, block=block)
         if info is None:
             raise UID30LaunchError("SN39 metagraph info is unavailable")
         info_block = _strict_nonnegative_int(
@@ -399,12 +422,12 @@ def read_uid30_chain_state() -> UID30ChainState:
             == len(last_updates)
         ):
             raise UID30LaunchError("SN39 metagraph eligibility arrays are inconsistent")
-        if preflight.validator_uid < 0 or preflight.validator_uid >= len(hotkeys):
+        if selected.validator_uid < 0 or selected.validator_uid >= len(hotkeys):
             raise UID30LaunchError("UID30 index is outside the metagraph")
-        if hotkeys[preflight.validator_uid] != preflight.validator_hotkey:
+        if hotkeys[selected.validator_uid] != selected.validator_hotkey:
             raise UID30LaunchError("UID30 hotkey mapping changed during preflight")
         threshold = _strict_nonnegative_int(
-            preflight.subtensor.substrate.query(
+            selected.subtensor.substrate.query(
                 module="SubtensorModule",
                 storage_function="StakeThreshold",
                 params=[],
@@ -413,14 +436,14 @@ def read_uid30_chain_state() -> UID30ChainState:
             label="weight stake threshold",
         )
         stake = _balance_rao(
-            total_stakes[preflight.validator_uid], label="validator effective stake"
+            total_stakes[selected.validator_uid], label="validator effective stake"
         )
         mechanism_count = _strict_nonnegative_int(
-            preflight.subtensor.get_mechanism_count(NETUID, block=block),
+            selected.subtensor.get_mechanism_count(NETUID, block=block),
             label="SN39 mechanism count",
         )
         weights_version_key = _strict_nonnegative_int(
-            preflight.subtensor.substrate.query(
+            selected.subtensor.substrate.query(
                 module="SubtensorModule",
                 storage_function="WeightsVersionKey",
                 params=[NETUID],
@@ -428,7 +451,7 @@ def read_uid30_chain_state() -> UID30ChainState:
             ),
             label="SN39 weight version",
         )
-        miner_uid = preflight.hotkey_to_uid.get(MINER_HOTKEY)
+        miner_uid = selected.hotkey_to_uid.get(MINER_HOTKEY)
         if isinstance(miner_uid, bool) or not isinstance(miner_uid, int):
             raise UID30LaunchError(
                 "the pinned Cathedral miner is not registered on SN39"
@@ -436,7 +459,7 @@ def read_uid30_chain_state() -> UID30ChainState:
         # This proof is intentionally not chain-write authority.  It binds the
         # current finalized bidirectional mapping only and makes no mortal-era
         # replacement-safety claim.
-        if preflight.uid_to_hotkey.get(miner_uid) != MINER_HOTKEY:
+        if selected.uid_to_hotkey.get(miner_uid) != MINER_HOTKEY:
             raise UID30LaunchError("the pinned miner mapping is not bidirectional")
         uid_safety = {
             "status": "read_only_current_mapping_only",
@@ -447,41 +470,41 @@ def read_uid30_chain_state() -> UID30ChainState:
         serving_axon = _serving_axon_from_info_row(
             axons[miner_uid], uid=miner_uid, hotkey=MINER_HOTKEY
         )
-        last_update = last_updates[preflight.validator_uid]
+        last_update = last_updates[selected.validator_uid]
         state = UID30ChainState(
-            preflight=preflight,
+            preflight=selected,
             block_number=block,
             block_hash=block_hash,
-            genesis_hash=preflight.genesis_hash,
-            subnet_owner_hotkey=str(preflight.subnet_owner_hotkey),
-            validator_hotkey=preflight.validator_hotkey,
-            validator_uid=preflight.validator_uid,
+            genesis_hash=selected.genesis_hash,
+            subnet_owner_hotkey=str(selected.subnet_owner_hotkey),
+            validator_hotkey=selected.validator_hotkey,
+            validator_uid=selected.validator_uid,
             validator_permit=_strict_bool(
-                permits[preflight.validator_uid], label="UID30 validator permit"
+                permits[selected.validator_uid], label="UID30 validator permit"
             ),
             validator_stake_rao=stake,
             stake_threshold_rao=threshold,
             last_update=last_update,
             blocks_since_last_update=_strict_nonnegative_int(
-                preflight.validator_blocks_since_last_update,
+                selected.validator_blocks_since_last_update,
                 label="blocks since UID30 update",
             ),
             weights_rate_limit=_strict_nonnegative_int(
-                preflight.weights_rate_limit, label="SN39 weight cooldown"
+                selected.weights_rate_limit, label="SN39 weight cooldown"
             ),
             mechanism_count=mechanism_count,
             weights_version_key=weights_version_key,
-            min_allowed_weights=preflight.min_allowed_weights,
-            max_weight_limit=preflight.max_weight_limit,
-            commit_reveal_enabled=preflight.commit_reveal_enabled,
+            min_allowed_weights=selected.min_allowed_weights,
+            max_weight_limit=selected.max_weight_limit,
+            commit_reveal_enabled=selected.commit_reveal_enabled,
             miner_hotkey=MINER_HOTKEY,
             miner_uid=miner_uid,
             serving_axon=serving_axon,
             next_epoch_start_block=_strict_nonnegative_int(
-                preflight.next_epoch_start_block, label="next epoch start"
+                selected.next_epoch_start_block, label="next epoch start"
             ),
             blocks_until_next_epoch=_strict_nonnegative_int(
-                preflight.blocks_until_next_epoch, label="blocks until next epoch"
+                selected.blocks_until_next_epoch, label="blocks until next epoch"
             ),
             uid_safety=uid_safety,
         )
