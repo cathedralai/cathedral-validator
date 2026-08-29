@@ -2257,6 +2257,18 @@ def _recover_existing_journal(
     state_loader: Callable[[Any], FinalizedMinerState],
     contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
+    if contract.successor_generation == 2:
+        pinned_predecessor = contract.predecessor_journal_sha256
+        if pinned_predecessor is None:
+            raise MinerAxonError("generation-2 predecessor journal pin is missing")
+        if _sha256(_canonical_json_bytes(journal)) == _digest(
+            pinned_predecessor,
+            label="pinned predecessor journal digest",
+        ):
+            raise MinerAxonError(
+                "no generation-2 intent exists yet; run announce with the reviewed "
+                "generation-2 preview"
+            )
     successor_validation = _recoverable_successor_validation(
         journal, preview=preview, digest=digest, contract=contract
     )

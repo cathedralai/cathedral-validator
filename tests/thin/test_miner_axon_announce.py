@@ -2079,6 +2079,27 @@ def test_uid124_generation2_contract_pins_exact_live_predecessor_and_target():
     assert gen2_cli.WALLET_HOTKEY == "serge_sat_test"
 
 
+def test_generation2_recover_before_attempt_reports_no_intent_without_chain_or_rewrite(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    before = setup["journal_path"].read_bytes()
+
+    with pytest.raises(axon.MinerAxonError, match="no generation-2 intent exists yet"):
+        axon.recover_ambiguous_preview(
+            subtensor=FakeSubtensor(),
+            preview_path=setup["preview_path"],
+            reviewed_sha256=setup["preview_digest"],
+            state_loader=lambda _subtensor: pytest.fail(
+                "pre-attempt generation-2 recovery reached chain state"
+            ),
+            runtime_root=tmp_path,
+            contract=setup["contract"],
+        )
+
+    assert setup["journal_path"].read_bytes() == before
+
+
 def test_generation2_cli_injects_pinned_predecessor_without_generic_switches(
     tmp_path, monkeypatch, capsys
 ):
