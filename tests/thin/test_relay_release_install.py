@@ -91,21 +91,39 @@ _builder = _load(_BUILDER_PATH, "_sn39_release_manifest_relay")
 _launcher = _load(_LAUNCHER_PATH, "_sn39_release_launcher_relay")
 
 
-def _git(repo: pathlib.Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", f"safe.directory={repo}", *args],
+def _git(repo: pathlib.Path, *args: str) -> str:
+    """Run git against the fixture checkout without auto-maintenance.
+
+    Git 2.55 on ubuntu-latest can start maintenance after `commit` and leave a
+    0600 `objects/bitmap-ref-tips_*` tempfile. `immutable_tree_digest` then
+    refuses the tree as not service-readable. Isolate the fixture from system
+    gitconfig and keep gc/maintenance off so the later digest sees a settled
+    `.git` the way a real install does.
+    """
+    return subprocess.check_output(
+        [
+            "git",
+            "-c",
+            f"safe.directory={repo}",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            *args,
+        ],
         cwd=repo,
-        check=True,
-        capture_output=True,
+        text=True,
         env={
             "PATH": "/usr/bin:/bin",
             "HOME": str(repo),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
             "GIT_AUTHOR_NAME": "fixture",
             "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
             "GIT_COMMITTER_NAME": "fixture",
             "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
         },
-    )
+    ).strip()
 
 
 def _release_checkout(base: pathlib.Path) -> tuple[pathlib.Path, str]:
@@ -126,22 +144,15 @@ def _release_checkout(base: pathlib.Path) -> tuple[pathlib.Path, str]:
     _git(release, "add", "--all")
     _git(release, "commit", "--quiet", "--message=fixture")
     for path in [release, *release.rglob("*")]:
-        # Git 2.55 can create then unlink objects/maintenance.lock while this
-        # walk runs. Skip the private git dir: only tracked release files are
-        # mode-sensitive for the later porcelain check.
-        if ".git" in path.parts:
-            continue
+        # Include `.git`. Skipping it left Git 2.55's 0600 bitmap-ref-tips
+        # leftovers for `immutable_tree_digest`, which requires every regular
+        # file to be service-readable. Auto-maintenance is off above; still
+        # tolerate a path that vanishes between walk and chmod.
         try:
             path.chmod(0o755 if path.is_dir() else 0o644)
         except FileNotFoundError:
             continue
-    sha = subprocess.check_output(
-        ["git", "-c", f"safe.directory={release}", "rev-parse", "HEAD"],
-        cwd=release,
-        text=True,
-        env={"PATH": "/usr/bin:/bin"},
-    ).strip()
-    return release, sha
+    return release, _git(release, "rev-parse", "HEAD")
 
 
 def _venv(base: pathlib.Path) -> pathlib.Path:
