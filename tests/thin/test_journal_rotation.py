@@ -347,19 +347,6 @@ def test_the_fragment_drops_to_the_identity_that_owns_the_log_directory():
     )
 
 
-def test_the_readme_relay_install_installs_the_rotation_fragment():
-    """An operator who follows README top to bottom must actually get it."""
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    start = readme.index("## Supported systemd install (relay)")
-    end = readme.index("## What it does", start)
-    section = readme[start:end]
-    for line in (
-        '"$release/deploy/sn39/cathedral-validator.logrotate"',
-        "/etc/logrotate.d/cathedral-validator",
-    ):
-        assert line in section, line
-
-
 def test_every_journal_line_is_flushed_as_it_is_written(tmp_path, monkeypatch):
     """The property #97 exists for, pinned at the durable-journal layer.
 

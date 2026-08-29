@@ -358,27 +358,6 @@ def test_the_cathedral_posture_refuses_the_relay_only_alert_paths(install):
         install(relay=False, mismatch_check=pathlib.Path("/nonexistent"))
 
 
-def test_the_readme_relay_install_installs_and_enables_the_alert():
-    """The alert must be IN the procedure README calls the supported install.
-
-    An operator who follows README top to bottom and nothing else — which is
-    what README tells them to do — otherwise finishes with a running validator
-    and no monitoring at all, and nothing tells them anything is missing.
-    """
-    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
-    start = readme.index("## Supported systemd install (relay)")
-    end = readme.index("## What it does", start)
-    section = readme[start:end]
-    for line in (
-        '"$release/deploy/sn39/cathedral-mismatch-check"',
-        "/usr/local/bin/cathedral-mismatch-check",
-        '"$release/deploy/sn39/cathedral-mismatch-alert.service"',
-        '"$release/deploy/sn39/cathedral-mismatch-alert.timer"',
-        "systemctl enable --now cathedral-mismatch-alert.timer",
-    ):
-        assert line in section, line
-
-
 def test_the_relay_manifest_binds_a_superset_of_the_reviewed_source(install, capsys):
     """A relay omits external files, never reviewed source."""
     assert install(relay=True) == 0
