@@ -154,7 +154,7 @@ ruff check cathedral_thin tests/thin
 Create a task and keep the hidden suite private until evaluation:
 
 ```bash
-cathedral-verified-policy issue \
+python -m cathedral_thin.policy_cli issue \
   --network finney --netuid 39 --current-block BLOCK \
   --source-epoch EPOCH --miner-hotkey MINER_SS58 \
   --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY \
@@ -165,7 +165,7 @@ cathedral-verified-policy issue \
 On the miner:
 
 ```bash
-cathedral-verified-policy mine \
+python -m cathedral_thin.policy_cli mine \
   --network finney --netuid 39 --current-block BLOCK \
   --wallet-name MINER_WALLET --wallet-hotkey MINER_HOTKEY \
   --task task.json --output artifact.json
@@ -174,7 +174,7 @@ cathedral-verified-policy mine \
 Back on the validator:
 
 ```bash
-cathedral-verified-policy evaluate \
+python -m cathedral_thin.policy_cli evaluate \
   --network finney --netuid 39 --current-block BLOCK \
   --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY \
   --task task.json --artifact artifact.json \
@@ -184,7 +184,8 @@ cathedral-verified-policy evaluate \
 `config/thin-score-policy.verified-policy.example.json` shows how the four
 measurements become validator-owned classes. Replace the placeholder report
 key and locations. For a source subnet owner, use the existing
-`cathedral-thin-contributor` registration flow instead of hard-coding trust.
+`python -m cathedral_thin.contributor_cli` registration flow from a source
+checkout instead of hard-coding trust.
 
 ## Cathedral Confidential binding
 

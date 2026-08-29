@@ -250,7 +250,7 @@ cathedral-verifyml score-body \
     '/usr/local/bin/verify-tdx {evidence_path} {report_data_hex} {policy_digest} {result_path}' \
   --output score-body.json
 
-cathedral-thin-score-report sign \
+python -m cathedral_thin.report_cli sign \
   --key-file /run/secrets/validator-receipt-score.seed \
   --body score-body.json --output verified-inference-report.json
 ```

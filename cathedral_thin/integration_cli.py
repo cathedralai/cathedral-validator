@@ -1,4 +1,4 @@
-"""`cathedral-validator-integration-preview` — a NON-WRITING operator preview.
+"""Non-writing Compute and Distill integration preview.
 
 Runs the default-OFF Compute+Distill+CyberGym integration lane over inputs from one JSON
 bundle and prints the composed feed + audit trail. It verifies the signed burn +
@@ -7,7 +7,7 @@ missing/invalid lane's share goes to burn), and emits the audit — but it never
 opens a chain client and never calls set_weights. It is a preview, exactly as
 `cathedral_thin.integration` documents; activation is a separate owner decision.
 
-    cathedral-validator-integration-preview --bundle preview.json
+    python -m cathedral_thin.integration_cli --bundle preview.json
 
 Bundle shape:
 
@@ -375,7 +375,7 @@ def run_bundle(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="cathedral-validator-integration-preview",
+        prog="python -m cathedral_thin.integration_cli",
         description=(
             "Non-writing Compute+Distill+CyberGym integration preview "
             "(no chain writes)."

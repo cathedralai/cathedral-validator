@@ -23,8 +23,16 @@ COMPUTE_ARCHIVE_SHA256 = (
 def test_validator_console_script_belongs_to_this_repository() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = project["project"]["scripts"]
-    assert scripts["cathedral-validator"] == "scaffold.cli:main"
-    assert "cathedral-thin-validator" not in scripts
+    assert scripts == {
+        "cathedral-validator": "scaffold.cli:main",
+        "cathedral-publisher-serve": "scaffold.publisher.server:_serve_cli",
+        "cathedral-candidate-snapshot": "scaffold.snapshot_candidates:main",
+        "cathedral-amd-sev-snp-dev-preview": (
+            "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
+        ),
+        "cathedral-uid30-fleet-preview": "cathedral_thin.uid30_fleet_preview:main",
+        "cathedral-uid30-fleet-submit": "cathedral_thin.uid30_fleet_submit:main",
+    }
 
 
 def test_active_operator_docs_route_only_to_cathedral_validator() -> None:
@@ -68,6 +76,26 @@ def test_legacy_thin_operator_surface_is_archived_not_installed() -> None:
     assert "Historical record only" in words
     assert "all `deploy/thin` services were retired" in words
     assert "The `cathedral-thin-validator` console command" in words
+
+
+def test_active_operator_docs_do_not_advertise_retired_console_commands() -> None:
+    retired = (
+        "cathedral-validator-integration-preview",
+        "cathedral-thin-e2e",
+        "cathedral-thin-preflight",
+        "cathedral-thin-score-report",
+        "cathedral-verified-policy",
+        "cathedral-independent-validator",
+        "cathedral-independent-live",
+        "cathedral-multicompute-preview",
+        "cathedral-miner-axon-recover",
+        "cathedral-uid30-recover",
+    )
+    active_docs = [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md")]
+    for path in active_docs:
+        text = path.read_text(encoding="utf-8")
+        for command in retired:
+            assert command not in text, f"{command} remains in {path.relative_to(ROOT)}"
 
 
 def test_shipped_docker_entrypoint_is_no_write() -> None:

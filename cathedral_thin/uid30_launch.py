@@ -3769,7 +3769,7 @@ def recover_reviewed_successor(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-uid30-recover")
+    parser = argparse.ArgumentParser(prog="python -m cathedral_thin.uid30_launch")
     sub = parser.add_subparsers(dest="command", required=True)
     recover = sub.add_parser(
         "recover",
