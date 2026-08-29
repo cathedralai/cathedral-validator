@@ -12,6 +12,8 @@ from cathedral_thin.independent.compute import QuoteVerdict
 from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime import miner_axon as axon
+from cathedral_thin.independent_runtime import miner_axon_cli as axon_cli
+from cathedral_thin.independent_runtime import uid124_axon_generation2_cli as gen2_cli
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST
 
 SERVICE_IP = "8.8.8.8"
@@ -136,14 +138,16 @@ def write_review(
     state: axon.FinalizedMinerState | None = None,
     proof: axon.EndpointProof | None = None,
     name: str = "preview.json",
+    contract: axon.MinerAxonContract = axon.UID124_AXON_CONTRACT,
 ) -> tuple[Path, str, dict]:
     document = axon.build_preview(
         state=state or miner_state(),
         proof=proof or endpoint_proof(),
         runtime_root=tmp_path,
         created_at="2026-08-28T12:00:00Z",
+        contract=contract,
     )
-    path, _, digest = axon.write_preview(document, tmp_path / name)
+    path, _, digest = axon.write_preview(document, tmp_path / name, contract=contract)
     return path, digest, document
 
 
@@ -162,8 +166,10 @@ def announce(
     allow_finalized_successor=False,
     predecessor_preview_path=None,
     predecessor_reviewed_sha256=None,
+    contract: axon.MinerAxonContract = axon.UID124_AXON_CONTRACT,
 ):
-    monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
+    if contract is axon.UID124_AXON_CONTRACT:
+        monkeypatch.setattr(axon, "DEFAULT_RUNTIME_ROOT", tmp_path)
     return axon.announce_reviewed_preview(
         bt_module=FakeBt,
         subtensor=FakeSubtensor(),
@@ -180,6 +186,7 @@ def announce(
         allow_finalized_successor=allow_finalized_successor,
         predecessor_preview_path=predecessor_preview_path,
         predecessor_reviewed_sha256=predecessor_reviewed_sha256,
+        contract=contract,
     )
 
 
@@ -319,6 +326,63 @@ def persisted_finalized_successor(tmp_path: Path, monkeypatch):
         journal_path,
         result,
     )
+
+
+def generation2_review(tmp_path: Path, monkeypatch):
+    """Create a reviewed generation-2 target over an exact generation-1 journal."""
+
+    (
+        _,
+        _,
+        predecessor_preview_path,
+        predecessor_preview_digest,
+        _,
+        generation1_readback,
+        journal_path,
+        generation1_journal,
+    ) = persisted_finalized_successor(tmp_path, monkeypatch)
+    predecessor_bytes = journal_path.read_bytes()
+    contract = replace(
+        axon.UID124_GENERATION2_AXON_CONTRACT,
+        runtime_root=tmp_path,
+        predecessor_preview_name=predecessor_preview_path.name,
+        predecessor_preview_sha256=predecessor_preview_digest,
+        predecessor_journal_sha256=hashlib.sha256(predecessor_bytes).hexdigest(),
+    )
+    current = replace(
+        generation1_readback,
+        block_number=400,
+        block_hash=chain_hash(400),
+    )
+    proof = endpoint_proof(
+        ip=axon.UID124_GENERATION2_ENDPOINT_IP,
+        tls_spki_sha256="99" * 32,
+        nonce_sha256="aa" * 32,
+        quote_sha256="bb" * 32,
+        report_data_sha256="cc" * 32,
+        anchor_number=390,
+        anchor_hash=chain_hash(390),
+    )
+    preview_path, preview_digest, preview = write_review(
+        tmp_path,
+        state=current,
+        proof=proof,
+        name=contract.preview_name,
+        contract=contract,
+    )
+    return {
+        "contract": contract,
+        "predecessor_preview_path": predecessor_preview_path,
+        "predecessor_preview_digest": predecessor_preview_digest,
+        "predecessor_bytes": predecessor_bytes,
+        "generation1_journal": generation1_journal,
+        "journal_path": journal_path,
+        "current": current,
+        "proof": proof,
+        "preview_path": preview_path,
+        "preview_digest": preview_digest,
+        "preview": preview,
+    }
 
 
 class UnlockTrapWallet:
@@ -1990,6 +2054,438 @@ def test_corrupted_persisted_successor_intent_is_ambiguous_never_no_write(
         )
 
     assert journal_path.read_bytes() == before
+
+
+def test_uid124_generation2_contract_pins_exact_live_predecessor_and_target():
+    contract = axon.UID124_GENERATION2_AXON_CONTRACT
+
+    assert contract.successor_generation == 2
+    assert contract.fixed_uid == 124
+    assert contract.miner_hotkey == axon.MINER_HOTKEY
+    assert contract.endpoint_ip == "35.222.166.235"
+    assert contract.endpoint_port == 8081
+    assert contract.journal_name == axon.JOURNAL_NAME
+    assert contract.lock_name == axon.LOCK_NAME
+    assert contract.predecessor_preview_name == (
+        "miner-axon-preview-r2-20260828T1940Z.json"
+    )
+    assert contract.predecessor_preview_sha256 == (
+        "27ef74f1f1f9b2cecf762dd850ebe81aa8d0ab03e42c1dc9023961cc7a89ee29"
+    )
+    assert contract.predecessor_journal_sha256 == (
+        "b5b401ad8a1610471b15f2a75546f1ecba19c160d9cc35a361995a5274e48c8f"
+    )
+    assert contract.require_proven_success_receipt is True
+    assert gen2_cli.WALLET_HOTKEY == "serge_sat_test"
+
+
+def test_generation2_recover_before_attempt_reports_no_intent_without_chain_or_rewrite(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    before = setup["journal_path"].read_bytes()
+
+    with pytest.raises(axon.MinerAxonError, match="no generation-2 intent exists yet"):
+        axon.recover_ambiguous_preview(
+            subtensor=FakeSubtensor(),
+            preview_path=setup["preview_path"],
+            reviewed_sha256=setup["preview_digest"],
+            state_loader=lambda _subtensor: pytest.fail(
+                "pre-attempt generation-2 recovery reached chain state"
+            ),
+            runtime_root=tmp_path,
+            contract=setup["contract"],
+        )
+
+    assert setup["journal_path"].read_bytes() == before
+
+
+def test_generation2_cli_injects_pinned_predecessor_without_generic_switches(
+    tmp_path, monkeypatch, capsys
+):
+    contract = replace(
+        axon.UID124_GENERATION2_AXON_CONTRACT,
+        runtime_root=tmp_path,
+    )
+    parser = axon_cli._parser(prog="generation2-test", contract=contract)
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "announce",
+                "--reviewed-sha256",
+                "11" * 32,
+                "--qvl",
+                "/reviewed/qvl",
+                "--allow-finalized-successor",
+            ]
+        )
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+    captured = {}
+    monkeypatch.setattr(axon_cli, "make_subtensor", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(axon_cli, "_wallet", lambda *_args, **_kwargs: object())
+
+    def capture_announce(**kwargs):
+        captured.update(kwargs)
+        return {"status": "CAPTURED_NO_CHAIN_WRITE"}
+
+    monkeypatch.setattr(axon_cli, "announce_reviewed_preview", capture_announce)
+    status = axon_cli.run_contract_cli(
+        [
+            "announce",
+            "--preview",
+            str(tmp_path / contract.preview_name),
+            "--reviewed-sha256",
+            "22" * 32,
+            "--qvl",
+            "/reviewed/qvl",
+            "--confirm-miner-announce",
+            "--assert-exclusive-announcer",
+        ],
+        prog="generation2-test",
+        wallet_hotkey=gen2_cli.WALLET_HOTKEY,
+        contract=contract,
+    )
+
+    assert status == 0
+    assert captured["allow_finalized_successor"] is True
+    assert captured["predecessor_preview_path"] == (
+        tmp_path / axon.UID124_GENERATION1_PREVIEW_NAME
+    )
+    assert (
+        captured["predecessor_reviewed_sha256"]
+        == axon.UID124_GENERATION1_PREVIEW_SHA256
+    )
+    assert captured["contract"] == contract
+
+
+def test_generation2_preview_exposes_exact_lineage_and_no_unrelated_write(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    contract = setup["contract"]
+    preview = setup["preview"]
+
+    assert preview["schema"] == contract.preview_schema
+    assert preview["miner"] == {
+        "uid": 124,
+        "hotkey": axon.MINER_HOTKEY,
+        "coldkey": axon.CATHEDRAL_COLDKEY,
+    }
+    assert preview["requested_endpoint"] == {
+        "ip": axon.UID124_GENERATION2_ENDPOINT_IP,
+        "port": 8081,
+        "protocol": "https",
+    }
+    assert preview["successor_contract"] == {
+        "journal_generation": 2,
+        "predecessor_preview": str(setup["predecessor_preview_path"]),
+        "predecessor_preview_sha256": "sha256:" + setup["predecessor_preview_digest"],
+        "predecessor_journal": str(setup["journal_path"]),
+        "predecessor_journal_sha256": "sha256:"
+        + hashlib.sha256(setup["predecessor_bytes"]).hexdigest(),
+        "replacement_limit": "exactly_one_generation_2_attempt",
+    }
+    assert preview["chain_action"]["serve_axon_called"] is False
+    assert preview["chain_action"]["registration_called"] is False
+    assert preview["chain_action"]["weights_called"] is False
+
+
+def test_generation2_preserves_baseline_to_generation1_to_generation2_lineage(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    contract = setup["contract"]
+    current = setup["current"]
+    target = replace(
+        current,
+        block_number=402,
+        block_hash=chain_hash(402),
+        ip=axon.UID124_GENERATION2_ENDPOINT_IP,
+        port=axon.SN39_HTTPS_PORT,
+        is_serving=True,
+    )
+    calls = []
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=setup["preview_path"],
+        digest=setup["preview_digest"],
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=401, block_hash=chain_hash(401)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: setup["proof"],
+        serve_call=lambda **kwargs: (calls.append(kwargs), response_at(402))[1],
+        allow_finalized_successor=True,
+        predecessor_preview_path=setup["predecessor_preview_path"],
+        predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+        contract=contract,
+    )
+
+    assert result["status"] == "finalized_proven"
+    assert result["journal_generation"] == 2
+    assert result["predecessor_lineage"]["generation"] == 2
+    assert (
+        axon._canonical_json_bytes(result["predecessor_lineage"]["journal"])
+        == setup["predecessor_bytes"]
+    )
+    generation1 = result["predecessor_lineage"]["journal"]
+    assert generation1["journal_generation"] == 1
+    assert generation1["predecessor_lineage"]["generation"] == 1
+    baseline = generation1["predecessor_lineage"]["journal"]
+    assert baseline["schema"] == axon.JOURNAL_SCHEMA
+    assert "journal_generation" not in baseline
+    assert result["readback"]["axon"] == {
+        "ip": axon.UID124_GENERATION2_ENDPOINT_IP,
+        "port": 8081,
+        "is_serving": True,
+    }
+    assert len(calls) == 1
+    assert calls[0]["axon"].external_ip == axon.UID124_GENERATION2_ENDPOINT_IP
+    assert "weights" not in result
+    assert "registration" not in result
+
+    recovered = axon.recover_ambiguous_preview(
+        subtensor=FakeSubtensor(),
+        preview_path=setup["preview_path"],
+        reviewed_sha256=setup["preview_digest"],
+        state_loader=StateSequence(
+            replace(target, block_number=403, block_hash=chain_hash(403))
+        ),
+        runtime_root=tmp_path,
+        contract=contract,
+    )
+    assert recovered == result
+
+    trapped = UnlockTrapWallet()
+    replay = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=setup["preview_path"],
+        digest=setup["preview_digest"],
+        state_loader=StateSequence(
+            replace(target, block_number=404, block_hash=chain_hash(404))
+        ),
+        selected_wallet=trapped,
+        serve_call=lambda **_kwargs: pytest.fail(
+            "consumed generation-2 contract called serve_axon"
+        ),
+        allow_finalized_successor=True,
+        predecessor_preview_path=setup["predecessor_preview_path"],
+        predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+        contract=contract,
+    )
+    assert replay == result
+    assert trapped.hotkey_accesses == 0
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("generation", [1, 3])
+def test_generation2_rejects_swapped_lineage_marker(tmp_path, monkeypatch, generation):
+    setup = generation2_review(tmp_path, monkeypatch)
+    current = setup["current"]
+    lineage = {
+        "generation": 2,
+        "journal_sha256": "sha256:"
+        + hashlib.sha256(setup["predecessor_bytes"]).hexdigest(),
+        "journal": setup["generation1_journal"],
+    }
+    journal = axon._journal_for_attempt(
+        preview=setup["preview"],
+        preview_sha256=setup["preview_digest"],
+        fresh=setup["proof"],
+        state=current,
+        predecessor_lineage=lineage,
+        successor_generation=2,
+        contract=setup["contract"],
+    )
+    journal["predecessor_lineage"]["generation"] = generation
+
+    with pytest.raises(axon.MinerAxonError, match="generation"):
+        axon._validated_successor_journal(journal)
+
+
+def test_generation2_rejects_an_embedded_generation2_predecessor(tmp_path, monkeypatch):
+    setup = generation2_review(tmp_path, monkeypatch)
+    current = setup["current"]
+    nested_generation2 = axon._journal_for_attempt(
+        preview=setup["preview"],
+        preview_sha256=setup["preview_digest"],
+        fresh=setup["proof"],
+        state=current,
+        predecessor_lineage={
+            "generation": 2,
+            "journal_sha256": "sha256:"
+            + hashlib.sha256(setup["predecessor_bytes"]).hexdigest(),
+            "journal": setup["generation1_journal"],
+        },
+        successor_generation=2,
+        contract=setup["contract"],
+    )
+    nested_bytes = axon._canonical_json_bytes(nested_generation2)
+    outer = axon._journal_for_attempt(
+        preview=setup["preview"],
+        preview_sha256=setup["preview_digest"],
+        fresh=setup["proof"],
+        state=current,
+        predecessor_lineage={
+            "generation": 2,
+            "journal_sha256": "sha256:" + hashlib.sha256(nested_bytes).hexdigest(),
+            "journal": nested_generation2,
+        },
+        successor_generation=2,
+        contract=setup["contract"],
+    )
+
+    with pytest.raises(axon.MinerAxonError, match="generation-1 journal"):
+        axon._validated_successor_journal(outer)
+
+
+def test_generation2_refuses_wrong_exact_journal_pin_before_signing_or_chain(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    bad_contract = replace(setup["contract"], predecessor_journal_sha256="00" * 32)
+    bad_path, bad_digest, _ = write_review(
+        tmp_path,
+        state=setup["current"],
+        proof=setup["proof"],
+        name="bad-pin-generation2.json",
+        contract=bad_contract,
+    )
+    before = setup["journal_path"].read_bytes()
+    trapped = UnlockTrapWallet()
+
+    with pytest.raises(axon.MinerAxonError, match="journal differs"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=bad_path,
+            digest=bad_digest,
+            state_loader=lambda _subtensor: pytest.fail(
+                "bad journal pin reached chain state"
+            ),
+            selected_wallet=trapped,
+            serve_call=lambda **_kwargs: pytest.fail("bad journal pin called serve"),
+            allow_finalized_successor=True,
+            predecessor_preview_path=setup["predecessor_preview_path"],
+            predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+            contract=bad_contract,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert setup["journal_path"].read_bytes() == before
+
+
+def test_generation2_incomplete_success_receipt_is_recovered_not_proven(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    current = setup["current"]
+    target = replace(
+        current,
+        block_number=402,
+        block_hash=chain_hash(402),
+        ip=axon.UID124_GENERATION2_ENDPOINT_IP,
+        port=8081,
+        is_serving=True,
+    )
+
+    result = announce(
+        tmp_path,
+        monkeypatch,
+        preview_path=setup["preview_path"],
+        digest=setup["preview_digest"],
+        state_loader=StateSequence(
+            current,
+            replace(current, block_number=401, block_hash=chain_hash(401)),
+            target,
+        ),
+        proof_loader=lambda *_args, **_kwargs: setup["proof"],
+        serve_call=lambda **_kwargs: response_at(None),
+        allow_finalized_successor=True,
+        predecessor_preview_path=setup["predecessor_preview_path"],
+        predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+        contract=setup["contract"],
+    )
+
+    assert result["status"] == "finalized_recovered"
+    assert result["serve_axon_outcome"] == "FINALIZED_BY_READBACK"
+    assert result["receipt"] is None
+    assert result["readback"]["finalized_block_number"] == 402
+    assert result["retry_allowed"] is False
+
+
+def test_generation2_refuses_wrong_exact_predecessor_preview_pin_before_signing(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    bad_contract = replace(setup["contract"], predecessor_preview_sha256="00" * 32)
+    bad_path, bad_digest, _ = write_review(
+        tmp_path,
+        state=setup["current"],
+        proof=setup["proof"],
+        name="bad-preview-pin-generation2.json",
+        contract=bad_contract,
+    )
+    before = setup["journal_path"].read_bytes()
+    trapped = UnlockTrapWallet()
+
+    with pytest.raises(axon.MinerAxonError, match="preview digest differs"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=bad_path,
+            digest=bad_digest,
+            state_loader=lambda _subtensor: pytest.fail(
+                "bad predecessor preview pin reached chain state"
+            ),
+            selected_wallet=trapped,
+            serve_call=lambda **_kwargs: pytest.fail(
+                "bad predecessor preview pin called serve"
+            ),
+            allow_finalized_successor=True,
+            predecessor_preview_path=setup["predecessor_preview_path"],
+            predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+            contract=bad_contract,
+        )
+
+    assert trapped.hotkey_accesses == 0
+    assert setup["journal_path"].read_bytes() == before
+
+
+def test_generation2_refuses_wrong_signer_before_journal_replacement_or_call(
+    tmp_path, monkeypatch
+):
+    setup = generation2_review(tmp_path, monkeypatch)
+    current = setup["current"]
+    before = setup["journal_path"].read_bytes()
+    calls = []
+
+    with pytest.raises(axon.MinerAxonError, match="wallet"):
+        announce(
+            tmp_path,
+            monkeypatch,
+            preview_path=setup["preview_path"],
+            digest=setup["preview_digest"],
+            state_loader=StateSequence(
+                current,
+                replace(current, block_number=401, block_hash=chain_hash(401)),
+            ),
+            proof_loader=lambda *_args, **_kwargs: setup["proof"],
+            serve_call=lambda **kwargs: calls.append(kwargs),
+            selected_wallet=wallet(hotkey=axon.VALIDATOR_HOTKEY),
+            allow_finalized_successor=True,
+            predecessor_preview_path=setup["predecessor_preview_path"],
+            predecessor_reviewed_sha256=setup["predecessor_preview_digest"],
+            contract=setup["contract"],
+        )
+
+    assert calls == []
+    assert setup["journal_path"].read_bytes() == before
 
 
 @pytest.mark.parametrize(

@@ -46,6 +46,14 @@ NETUID = 39
 SN39_HTTPS_PORT = 8081
 ANNOUNCEMENT_PERIOD_BLOCKS = 128
 FINALIZED_SUCCESSOR_UID = 124
+UID124_GENERATION2_ENDPOINT_IP = "35.222.166.235"
+UID124_GENERATION1_PREVIEW_NAME = "miner-axon-preview-r2-20260828T1940Z.json"
+UID124_GENERATION1_PREVIEW_SHA256 = (
+    "27ef74f1f1f9b2cecf762dd850ebe81aa8d0ab03e42c1dc9023961cc7a89ee29"
+)
+UID124_GENERATION1_JOURNAL_SHA256 = (
+    "b5b401ad8a1610471b15f2a75546f1ecba19c160d9cc35a361995a5274e48c8f"
+)
 
 VALIDATOR_HOTKEY = (
     "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"  # pragma: allowlist secret
@@ -110,6 +118,10 @@ class MinerAxonContract:
     supports_legacy_successor: bool = False
     first_announcement_only: bool = False
     require_proven_success_receipt: bool = False
+    successor_generation: int | None = None
+    predecessor_preview_name: str | None = None
+    predecessor_preview_sha256: str | None = None
+    predecessor_journal_sha256: str | None = None
 
     @property
     def preview_path(self) -> Path:
@@ -128,6 +140,28 @@ UID124_AXON_CONTRACT = MinerAxonContract(
     preview_schema=PREVIEW_SCHEMA,
     journal_schema=JOURNAL_SCHEMA,
     supports_legacy_successor=True,
+)
+
+UID124_GENERATION2_AXON_CONTRACT = MinerAxonContract(
+    contract_id="cathedral_sn39_uid124_axon_generation2_v1",
+    miner_hotkey=MINER_HOTKEY,
+    coldkey=CATHEDRAL_COLDKEY,
+    validator_hotkey=VALIDATOR_HOTKEY,
+    runtime_root=DEFAULT_RUNTIME_ROOT,
+    preview_name="uid124-axon-generation2-preview.json",
+    journal_name=JOURNAL_NAME,
+    lock_name=LOCK_NAME,
+    preview_schema="cathedral_sn39_uid124_axon_generation2_preview_v1",
+    journal_schema=JOURNAL_SCHEMA,
+    endpoint_ip=UID124_GENERATION2_ENDPOINT_IP,
+    endpoint_port=SN39_HTTPS_PORT,
+    fixed_uid=FINALIZED_SUCCESSOR_UID,
+    supports_legacy_successor=True,
+    require_proven_success_receipt=True,
+    successor_generation=2,
+    predecessor_preview_name=UID124_GENERATION1_PREVIEW_NAME,
+    predecessor_preview_sha256=UID124_GENERATION1_PREVIEW_SHA256,
+    predecessor_journal_sha256=UID124_GENERATION1_JOURNAL_SHA256,
 )
 
 SECOND_MINER_RUNTIME_ROOT = Path("/var/lib/cathedral-validator/second-miner-axon")
@@ -656,6 +690,42 @@ def _announcement_paths(
     return root / contract.lock_name, root / contract.journal_name
 
 
+def _successor_contract_artifact(
+    runtime_root: Path, *, contract: MinerAxonContract
+) -> dict[str, Any] | None:
+    """Describe an exact pinned predecessor without making it configurable."""
+
+    generation = contract.successor_generation
+    if generation is None:
+        return None
+    if generation != 2:
+        raise MinerAxonError("dedicated successor generation is not bounded to two")
+    if (
+        contract.predecessor_preview_name is None
+        or contract.predecessor_preview_sha256 is None
+        or contract.predecessor_journal_sha256 is None
+    ):
+        raise MinerAxonError("dedicated successor predecessor pins are incomplete")
+    preview_digest = _digest(
+        contract.predecessor_preview_sha256,
+        label="pinned predecessor preview digest",
+    )
+    journal_digest = _digest(
+        contract.predecessor_journal_sha256,
+        label="pinned predecessor journal digest",
+    )
+    predecessor_preview = runtime_root / contract.predecessor_preview_name
+    _, predecessor_journal = _announcement_paths(runtime_root, contract=contract)
+    return {
+        "journal_generation": generation,
+        "predecessor_preview": str(predecessor_preview),
+        "predecessor_preview_sha256": "sha256:" + preview_digest,
+        "predecessor_journal": str(predecessor_journal),
+        "predecessor_journal_sha256": "sha256:" + journal_digest,
+        "replacement_limit": "exactly_one_generation_2_attempt",
+    }
+
+
 def build_preview(
     *,
     state: FinalizedMinerState,
@@ -737,6 +807,9 @@ def build_preview(
             "coldkey_check": "public_ownership_only",
         },
     }
+    successor_contract = _successor_contract_artifact(root, contract=contract)
+    if successor_contract is not None:
+        document["successor_contract"] = successor_contract
     return validate_preview(document, contract=contract)
 
 
@@ -759,6 +832,8 @@ def validate_preview(
         "local_state",
         "trust_boundary",
     }
+    if contract.successor_generation is not None:
+        expected_top.add("successor_contract")
     if set(preview) != expected_top:
         raise MinerAxonError("preview top-level fields differ from the launch schema")
     if preview.get("schema") != contract.preview_schema:
@@ -929,6 +1004,14 @@ def validate_preview(
         "coldkey_check": "public_ownership_only",
     }:
         raise MinerAxonError("preview trust boundary differs from the launch pin")
+    if contract.successor_generation is not None:
+        successor_contract = preview.get("successor_contract")
+        if not isinstance(successor_contract, Mapping) or dict(
+            successor_contract
+        ) != _successor_contract_artifact(runtime_root, contract=contract):
+            raise MinerAxonError(
+                "preview successor lineage differs from the exact predecessor pins"
+            )
     return preview
 
 
@@ -1648,9 +1731,18 @@ def _validated_final_predecessor(
     return readback, expected_attempt
 
 
-def _validated_predecessor_lineage(journal: Mapping[str, Any]) -> None:
+def _validated_predecessor_lineage(
+    journal: Mapping[str, Any],
+) -> FinalizedMinerState:
+    """Return the immediate finalized predecessor for generation one or two."""
+
     if "predecessor_lineage" not in journal:
-        return
+        raise MinerAxonError("successor predecessor lineage is missing")
+    generation = _strict_nonnegative_int(
+        journal.get("journal_generation"), label="successor journal generation"
+    )
+    if generation not in {1, 2}:
+        raise MinerAxonError("successor journal generation is outside the bounded set")
     lineage = journal.get("predecessor_lineage")
     if not isinstance(lineage, Mapping) or set(lineage) != {
         "generation",
@@ -1658,8 +1750,8 @@ def _validated_predecessor_lineage(journal: Mapping[str, Any]) -> None:
         "journal",
     }:
         raise MinerAxonError("successor predecessor lineage fields differ from schema")
-    if lineage.get("generation") != 1:
-        raise MinerAxonError("successor predecessor generation is not bounded to one")
+    if lineage.get("generation") != generation:
+        raise MinerAxonError("successor predecessor generation disagrees with journal")
     predecessor = lineage.get("journal")
     if not isinstance(predecessor, Mapping):
         raise MinerAxonError("successor predecessor journal is missing")
@@ -1668,11 +1760,24 @@ def _validated_predecessor_lineage(journal: Mapping[str, Any]) -> None:
     )
     if _sha256(_canonical_json_bytes(dict(predecessor))) != expected:
         raise MinerAxonError("embedded predecessor journal digest does not match")
-    _validated_final_predecessor(predecessor)
+    if generation == 1:
+        readback, _ = _validated_final_predecessor(predecessor)
+        return readback
+    if predecessor.get("journal_generation") != 1:
+        raise MinerAxonError(
+            "generation-2 predecessor is not the exact generation-1 journal"
+        )
+    validated = _validated_successor_journal(predecessor)
+    if predecessor.get("status") not in FINAL_STATUSES:
+        raise MinerAxonError("generation-2 predecessor is not finalized")
+    if validated.stored_readback is None:
+        raise MinerAxonError("generation-2 predecessor has no finalized readback")
+    return validated.stored_readback
 
 
 def _successor_attempt_id(
     *,
+    generation: int,
     identity: Mapping[str, Any],
     preflight: Mapping[str, Any],
     fresh_endpoint_proof: Mapping[str, Any],
@@ -1685,7 +1790,7 @@ def _successor_attempt_id(
         "domain": SUCCESSOR_ATTEMPT_DOMAIN,
         "schema": SUCCESSOR_JOURNAL_SCHEMA,
         "journal_kind": SUCCESSOR_JOURNAL_KIND,
-        "journal_generation": 1,
+        "journal_generation": generation,
         "identity": dict(identity),
         "preflight": dict(preflight),
         "fresh_endpoint_proof": dict(fresh_endpoint_proof),
@@ -1697,7 +1802,9 @@ def _successor_attempt_id(
     return "successor-sha256:" + _sha256(_canonical_json_bytes(material))
 
 
-def _validated_successor_identity(value: object) -> dict[str, Any]:
+def _validated_successor_identity(
+    value: object, *, contract: MinerAxonContract = UID124_AXON_CONTRACT
+) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
         "network",
         "netuid",
@@ -1710,18 +1817,21 @@ def _validated_successor_identity(value: object) -> dict[str, Any]:
     }:
         raise MinerAxonError("successor identity fields differ from schema")
     identity = dict(value)
+    expected_uid = (
+        FINALIZED_SUCCESSOR_UID if contract.fixed_uid is None else contract.fixed_uid
+    )
     if (
         identity["network"] != NETWORK
         or identity["netuid"] != NETUID
-        or identity["hotkey"] != MINER_HOTKEY
-        or identity["coldkey"] != CATHEDRAL_COLDKEY
+        or identity["hotkey"] != contract.miner_hotkey
+        or identity["coldkey"] != contract.coldkey
         or _strict_nonnegative_int(identity["uid"], label="successor UID")
-        != FINALIZED_SUCCESSOR_UID
+        != expected_uid
     ):
         raise MinerAxonError("successor identity differs from the UID124 launch pins")
     _digest(identity["preview_sha256"], label="successor preview digest")
-    _global_ipv4(identity["ip"])
-    _service_port(identity["port"])
+    _global_ipv4(identity["ip"], contract=contract)
+    _service_port(identity["port"], contract=contract)
     return identity
 
 
@@ -1731,10 +1841,17 @@ def _validated_successor_receipt(
     required_success: bool,
     preflight: FinalizedMinerState,
     readback: FinalizedMinerState | None,
+    require_inclusion_fields: bool = False,
 ) -> Mapping[str, Any]:
     receipt = _validated_receipt(
         value, required_success=required_success, label="successor"
     )
+    if require_inclusion_fields and any(
+        receipt[key] is None for key in ("extrinsic_hash", "block_hash", "block_number")
+    ):
+        raise MinerAxonError(
+            "successful generation-2 receipt lacks finalized inclusion fields"
+        )
     block_number = receipt["block_number"]
     if block_number is not None:
         if receipt["block_hash"] is None:
@@ -1751,6 +1868,8 @@ def _validated_successor_journal(
     *,
     preview: Mapping[str, Any] | None = None,
     preview_sha256: str | None = None,
+    require_complete_success_receipt: bool = False,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> _ValidatedSuccessorJournal:
     """Strictly validate every persisted field of one successor intent."""
 
@@ -1773,31 +1892,59 @@ def _validated_successor_journal(
     }
     if set(journal) != expected_fields:
         raise MinerAxonError("successor journal fields differ from schema")
+    generation = _strict_nonnegative_int(
+        journal.get("journal_generation"), label="successor journal generation"
+    )
+    expected_uid = (
+        FINALIZED_SUCCESSOR_UID if contract.fixed_uid is None else contract.fixed_uid
+    )
     if (
         journal.get("schema") != SUCCESSOR_JOURNAL_SCHEMA
         or journal.get("journal_kind") != SUCCESSOR_JOURNAL_KIND
-        or journal.get("journal_generation") != 1
+        or generation not in {1, 2}
     ):
         raise MinerAxonError("successor journal markers differ from the launch pin")
     if (preview is None) != (preview_sha256 is None):
         raise MinerAxonError("successor review identity is incomplete")
-    _validated_predecessor_lineage(journal)
+    predecessor = _validated_predecessor_lineage(journal)
     lineage = journal["predecessor_lineage"]
     if not isinstance(lineage, Mapping):
         raise MinerAxonError("successor predecessor lineage is missing")
-    identity = _validated_successor_identity(journal.get("identity"))
+    identity = _validated_successor_identity(journal.get("identity"), contract=contract)
     if preview is not None and preview_sha256 is not None:
         if identity != _journal_identity(
-            preview=preview, preview_sha256=preview_sha256
+            preview=preview,
+            preview_sha256=preview_sha256,
+            contract=contract,
         ):
             raise MinerAxonError("successor journal differs from its reviewed preview")
     predecessor_journal = lineage["journal"]
     if not isinstance(predecessor_journal, Mapping):
         raise MinerAxonError("successor embedded predecessor journal is missing")
-    predecessor, _ = _validated_final_predecessor(predecessor_journal)
     predecessor_identity = predecessor_journal.get("identity")
     if not isinstance(predecessor_identity, Mapping):
         raise MinerAxonError("successor embedded predecessor identity is missing")
+    if contract.successor_generation == 2 and generation == 2:
+        if contract.predecessor_journal_sha256 is None or _digest(
+            lineage.get("journal_sha256"),
+            label="generation-2 predecessor journal digest",
+        ) != _digest(
+            contract.predecessor_journal_sha256,
+            label="pinned predecessor journal digest",
+        ):
+            raise MinerAxonError(
+                "generation-2 journal does not embed the exact pinned predecessor"
+            )
+        if contract.predecessor_preview_sha256 is None or _digest(
+            predecessor_identity.get("preview_sha256"),
+            label="generation-1 reviewed preview digest",
+        ) != _digest(
+            contract.predecessor_preview_sha256,
+            label="pinned predecessor preview digest",
+        ):
+            raise MinerAxonError(
+                "generation-2 journal predecessor preview differs from the pin"
+            )
     if _digest(identity["preview_sha256"], label="successor preview digest") == _digest(
         predecessor_identity.get("preview_sha256"),
         label="embedded predecessor preview digest",
@@ -1806,21 +1953,25 @@ def _validated_successor_journal(
             "successor preview digest does not differ from predecessor"
         )
     preflight = _state_from_artifact(
-        journal.get("preflight"), label="successor journal preflight"
+        journal.get("preflight"),
+        label="successor journal preflight",
+        contract=contract,
     )
     _current_matches_predecessor(preflight, predecessor)
     if preflight.block_number - predecessor.block_number < ANNOUNCEMENT_PERIOD_BLOCKS:
         raise MinerAxonError("successor journal does not preserve the 128-block fence")
     proof = _endpoint_proof_from_artifact(
-        journal.get("fresh_endpoint_proof"), label="successor endpoint proof"
+        journal.get("fresh_endpoint_proof"),
+        label="successor endpoint proof",
+        contract=contract,
     )
     if (proof.ip, proof.port) != (identity["ip"], identity["port"]):
         raise MinerAxonError("successor proof endpoint differs from identity")
     if (proof.ip, proof.port) == (predecessor.ip, predecessor.port):
         raise MinerAxonError("successor endpoint does not differ from predecessor")
     if preview is not None:
-        _current_matches_preview(preflight, preview)
-        _fresh_matches_preview(proof, preview)
+        _current_matches_preview(preflight, preview, contract=contract)
+        _fresh_matches_preview(proof, preview, contract=contract)
     if (
         journal.get("remote_exclusive_announcer_asserted") is not True
         or journal.get("serve_axon_call_authorized") is not True
@@ -1832,6 +1983,7 @@ def _validated_successor_journal(
     if not isinstance(preflight_value, Mapping) or not isinstance(proof_value, Mapping):
         raise MinerAxonError("successor immutable intent artifacts are malformed")
     if journal.get("attempt_id") != _successor_attempt_id(
+        generation=generation,
         identity=identity,
         preflight=preflight_value,
         fresh_endpoint_proof=proof_value,
@@ -1878,12 +2030,13 @@ def _validated_successor_journal(
             readback_value,
             label="successor stored finalized readback",
             require_serving=True,
+            contract=contract,
         )
         if (
             stored_readback.block_number <= preflight.block_number
-            or stored_readback.uid != FINALIZED_SUCCESSOR_UID
-            or stored_readback.hotkey != MINER_HOTKEY
-            or stored_readback.coldkey != CATHEDRAL_COLDKEY
+            or stored_readback.uid != expected_uid
+            or stored_readback.hotkey != contract.miner_hotkey
+            or stored_readback.coldkey != contract.coldkey
             or (stored_readback.ip, stored_readback.port)
             != (identity["ip"], identity["port"])
         ):
@@ -1896,6 +2049,7 @@ def _validated_successor_journal(
                 required_success=True,
                 preflight=preflight,
                 readback=stored_readback,
+                require_inclusion_fields=require_complete_success_receipt,
             )
         else:
             if outcome != "FINALIZED_BY_READBACK":
@@ -1930,6 +2084,7 @@ def _journal_for_attempt(
     fresh: EndpointProof,
     state: FinalizedMinerState,
     predecessor_lineage: Mapping[str, Any] | None = None,
+    successor_generation: int = 1,
     contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> dict[str, Any]:
     identity = _journal_identity(
@@ -1940,8 +2095,11 @@ def _journal_for_attempt(
         raise MinerAxonError(
             "this axon contract does not permit a legacy successor lineage"
         )
+    if successor and successor_generation not in {1, 2}:
+        raise MinerAxonError("successor generation is outside the bounded set")
     attempt_id = (
         _successor_attempt_id(
+            generation=successor_generation,
             identity=identity,
             preflight=state.artifact(),
             fresh_endpoint_proof=fresh.artifact(),
@@ -1966,7 +2124,7 @@ def _journal_for_attempt(
     }
     if predecessor_lineage is not None:
         journal["journal_kind"] = SUCCESSOR_JOURNAL_KIND
-        journal["journal_generation"] = 1
+        journal["journal_generation"] = successor_generation
         journal["predecessor_lineage"] = dict(predecessor_lineage)
     return journal
 
@@ -2036,6 +2194,8 @@ def _recoverable_successor_validation(
             journal,
             preview=preview,
             preview_sha256=digest,
+            require_complete_success_receipt=contract.require_proven_success_receipt,
+            contract=contract,
         )
     except Exception as exc:
         raise MinerAxonAmbiguous(
@@ -2045,11 +2205,17 @@ def _recoverable_successor_validation(
 
 def _post_intent_successor_validation(
     journal: Mapping[str, Any],
+    *,
+    contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> _ValidatedSuccessorJournal | None:
     if not _looks_like_successor_journal(journal):
         return None
     try:
-        return _validated_successor_journal(journal)
+        return _validated_successor_journal(
+            journal,
+            require_complete_success_receipt=contract.require_proven_success_receipt,
+            contract=contract,
+        )
     except Exception as exc:
         raise MinerAxonAmbiguous(
             "successor intent validation failed after persistence; do not retry"
@@ -2091,6 +2257,18 @@ def _recover_existing_journal(
     state_loader: Callable[[Any], FinalizedMinerState],
     contract: MinerAxonContract = UID124_AXON_CONTRACT,
 ) -> Mapping[str, Any]:
+    if contract.successor_generation == 2:
+        pinned_predecessor = contract.predecessor_journal_sha256
+        if pinned_predecessor is None:
+            raise MinerAxonError("generation-2 predecessor journal pin is missing")
+        if _sha256(_canonical_json_bytes(journal)) == _digest(
+            pinned_predecessor,
+            label="pinned predecessor journal digest",
+        ):
+            raise MinerAxonError(
+                "no generation-2 intent exists yet; run announce with the reviewed "
+                "generation-2 preview"
+            )
     successor_validation = _recoverable_successor_validation(
         journal, preview=preview, digest=digest, contract=contract
     )
@@ -2203,6 +2381,8 @@ def _recover_existing_journal(
                 recovered,
                 preview=preview,
                 preview_sha256=digest,
+                require_complete_success_receipt=contract.require_proven_success_receipt,
+                contract=contract,
             )
         except Exception as exc:
             raise MinerAxonAmbiguous(
@@ -2232,7 +2412,7 @@ def _resolve_after_call(
 ) -> Mapping[str, Any]:
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
-    successor_validation = _post_intent_successor_validation(journal)
+    successor_validation = _post_intent_successor_validation(journal, contract=contract)
     successor_minimum = (
         successor_validation.minimum_readback_block
         if successor_validation is not None
@@ -2319,7 +2499,11 @@ def _resolve_after_call(
         )
         if successor_validation is not None:
             try:
-                _validated_successor_journal(ambiguous)
+                _validated_successor_journal(
+                    ambiguous,
+                    require_complete_success_receipt=contract.require_proven_success_receipt,
+                    contract=contract,
+                )
             except Exception as validation_exc:
                 raise MinerAxonAmbiguous(
                     "successor resolution state is contradictory; do not retry"
@@ -2343,7 +2527,11 @@ def _resolve_after_call(
     )
     if successor_validation is not None:
         try:
-            _validated_successor_journal(recovered)
+            _validated_successor_journal(
+                recovered,
+                require_complete_success_receipt=contract.require_proven_success_receipt,
+                contract=contract,
+            )
         except Exception as exc:
             raise MinerAxonAmbiguous(
                 "successor recovered state is contradictory; do not retry"
@@ -2519,7 +2707,7 @@ def _submit_journaled_axon(
         )
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
-    successor_validation = _post_intent_successor_validation(journal)
+    successor_validation = _post_intent_successor_validation(journal, contract=contract)
     successor_minimum = (
         successor_validation.minimum_readback_block
         if successor_validation is not None
@@ -2565,6 +2753,7 @@ def _submit_journaled_axon(
                 required_success=True,
                 preflight=successor_validation.preflight,
                 readback=None,
+                require_inclusion_fields=contract.require_proven_success_receipt,
             )
         except Exception:
             return _resolve_after_call(
@@ -2619,7 +2808,11 @@ def _submit_journaled_axon(
     )
     if successor_validation is not None:
         try:
-            _validated_successor_journal(finalized)
+            _validated_successor_journal(
+                finalized,
+                require_complete_success_receipt=contract.require_proven_success_receipt,
+                contract=contract,
+            )
         except Exception as exc:
             raise MinerAxonAmbiguous(
                 "successor finalized state is contradictory; do not retry"
@@ -2649,11 +2842,56 @@ def _announce_finalized_successor_locked(
     runtime_root: Path,
     journal_path: Path,
     existing: dict[str, Any] | None,
+    contract: MinerAxonContract,
 ) -> Mapping[str, Any]:
     """Authorize the single bounded successor while the canonical lock is held."""
 
     if existing is None:
         raise MinerAxonError("finalized successor requires the canonical predecessor")
+    generation = contract.successor_generation or 1
+    if generation not in {1, 2}:
+        raise MinerAxonError("successor generation is outside the bounded set")
+    if generation == 2 and existing.get("journal_generation") == 2:
+        return _recover_existing_journal(
+            journal=existing,
+            journal_path=journal_path,
+            preview=preview,
+            digest=digest,
+            subtensor=subtensor,
+            state_loader=state_loader,
+            contract=contract,
+        )
+    predecessor_bytes = _canonical_json_bytes(existing)
+    predecessor_sha256 = _sha256(predecessor_bytes)
+    if (
+        contract.predecessor_journal_sha256 is not None
+        and predecessor_sha256
+        != _digest(
+            contract.predecessor_journal_sha256,
+            label="pinned predecessor journal digest",
+        )
+    ):
+        raise MinerAxonError(
+            "canonical predecessor journal differs from the generation-2 pin"
+        )
+    if contract.predecessor_preview_name is not None:
+        expected_predecessor_path = runtime_root / contract.predecessor_preview_name
+        if Path(predecessor_preview_path).resolve(
+            strict=False
+        ) != expected_predecessor_path.resolve(strict=False):
+            raise MinerAxonError(
+                "predecessor preview path differs from the generation-2 pin"
+            )
+    if contract.predecessor_preview_sha256 is not None and _digest(
+        predecessor_reviewed_sha256,
+        label="reviewed predecessor preview digest",
+    ) != _digest(
+        contract.predecessor_preview_sha256,
+        label="pinned predecessor preview digest",
+    ):
+        raise MinerAxonError(
+            "predecessor preview digest differs from the generation-2 pin"
+        )
     predecessor_preview, predecessor_digest = load_reviewed_preview(
         predecessor_preview_path,
         reviewed_sha256=predecessor_reviewed_sha256,
@@ -2664,18 +2902,47 @@ def _announce_finalized_successor_locked(
         strict=False
     ) != runtime_root.resolve(strict=False):
         raise MinerAxonError("predecessor preview names a different runtime root")
-    if _looks_like_successor_journal(existing):
-        _post_intent_successor_validation(existing)
-        if existing.get("status") in FINAL_STATUSES:
-            raise MinerAxonError("the bounded finalized successor was already consumed")
-        raise MinerAxonAmbiguous(
-            "existing successor intent is unresolved; preserve it and do not retry"
+    if generation == 1:
+        if _looks_like_successor_journal(existing):
+            _post_intent_successor_validation(existing, contract=contract)
+            if existing.get("status") in FINAL_STATUSES:
+                raise MinerAxonError(
+                    "the bounded finalized successor was already consumed"
+                )
+            raise MinerAxonAmbiguous(
+                "existing successor intent is unresolved; preserve it and do not retry"
+            )
+        predecessor, _ = _validated_final_predecessor(
+            existing,
+            preview=predecessor_preview,
+            preview_sha256=predecessor_digest,
         )
-    predecessor, _ = _validated_final_predecessor(
-        existing,
-        preview=predecessor_preview,
-        preview_sha256=predecessor_digest,
-    )
+    else:
+        if not _looks_like_successor_journal(existing):
+            raise MinerAxonError(
+                "generation-2 successor requires the finalized generation-1 journal"
+            )
+        predecessor_validation = _validated_successor_journal(
+            existing,
+            preview=predecessor_preview,
+            preview_sha256=predecessor_digest,
+        )
+        if existing.get("journal_generation") != 1:
+            if existing.get("journal_generation") == 2:
+                raise MinerAxonError(
+                    "the bounded generation-2 successor was already consumed"
+                )
+            raise MinerAxonError(
+                "generation-2 predecessor is not the exact generation-1 journal"
+            )
+        if (
+            existing.get("status") not in FINAL_STATUSES
+            or predecessor_validation.stored_readback is None
+        ):
+            raise MinerAxonAmbiguous(
+                "generation-1 predecessor is unresolved; preserve it and do not retry"
+            )
+        predecessor = predecessor_validation.stored_readback
     _canonical_state_block(
         subtensor, predecessor, label="predecessor finalized readback"
     )
@@ -2684,14 +2951,16 @@ def _announce_finalized_successor_locked(
         raise MinerAxonError("successor requires a distinct reviewed preview digest")
     requested = preview["requested_endpoint"]
     assert isinstance(requested, Mapping)
-    ip = _global_ipv4(requested["ip"])
-    port = _service_port(requested["port"])
+    ip = _global_ipv4(requested["ip"], contract=contract)
+    port = _service_port(requested["port"], contract=contract)
     if (ip, port) == (predecessor.ip, predecessor.port):
         raise MinerAxonError("successor endpoint must differ from predecessor endpoint")
     if preview.get("status") != PREVIEW_READY:
         raise MinerAxonError("successor preview is not a replacement-ready artifact")
     preview_state = _state_from_artifact(
-        preview.get("chain_at_preview"), label="successor preview chain state"
+        preview.get("chain_at_preview"),
+        label="successor preview chain state",
+        contract=contract,
     )
     if preview_state.block_number < predecessor.block_number:
         raise MinerAxonError(
@@ -2701,7 +2970,7 @@ def _announce_finalized_successor_locked(
     _canonical_state_block(subtensor, preview_state, label="successor preview")
 
     before = state_loader(subtensor)
-    _current_matches_preview(before, preview)
+    _current_matches_preview(before, preview, contract=contract)
     _current_matches_predecessor(before, predecessor)
     _canonical_state_block(subtensor, before, label="successor preflight")
     elapsed = before.block_number - predecessor.block_number
@@ -2712,7 +2981,7 @@ def _announce_finalized_successor_locked(
         )
 
     fresh = proof_loader(subtensor, qvl_path=qvl_path, ip=ip, port=port)
-    _fresh_matches_preview(fresh, preview)
+    _fresh_matches_preview(fresh, preview, contract=contract)
     after = state_loader(subtensor)
     if (
         after.uid != before.uid
@@ -2730,6 +2999,7 @@ def _announce_finalized_successor_locked(
 
     call = serve_call or subtensor.serve_axon
     call_kwargs = _validated_serve_axon_call(call, advertisement=object())
+    _wallet_identity(wallet, contract=contract)
     advertisement = make_axon(
         bt_module,
         wallet=wallet,
@@ -2739,9 +3009,8 @@ def _announce_finalized_successor_locked(
         max_workers=2,
     )
     call_kwargs["axon"] = advertisement
-    predecessor_sha256 = _sha256(_canonical_json_bytes(existing))
     lineage = {
-        "generation": 1,
+        "generation": generation,
         "journal_sha256": "sha256:" + predecessor_sha256,
         "journal": dict(existing),
     }
@@ -2751,13 +3020,16 @@ def _announce_finalized_successor_locked(
         fresh=fresh,
         state=after,
         predecessor_lineage=lineage,
+        successor_generation=generation,
+        contract=contract,
     )
     _validated_successor_journal(
         journal,
         preview=preview,
         preview_sha256=digest,
+        require_complete_success_receipt=contract.require_proven_success_receipt,
+        contract=contract,
     )
-    _wallet_identity(wallet)
     return _submit_journaled_axon(
         journal=journal,
         journal_path=journal_path,
@@ -2767,6 +3039,7 @@ def _announce_finalized_successor_locked(
         state_loader=state_loader,
         call=call,
         call_kwargs=call_kwargs,
+        contract=contract,
     )
 
 
@@ -2802,6 +3075,13 @@ def announce_reviewed_preview(
     predecessor_supplied = (
         predecessor_preview_path is not None or predecessor_reviewed_sha256 is not None
     )
+    if (
+        contract.successor_generation is not None
+        and allow_finalized_successor is not True
+    ):
+        raise MinerAxonError(
+            "dedicated generation-2 contract requires its pinned predecessor lineage"
+        )
     if allow_finalized_successor is True:
         if not contract.supports_legacy_successor:
             raise MinerAxonError(
@@ -2862,6 +3142,7 @@ def announce_reviewed_preview(
                 runtime_root=root,
                 journal_path=journal_path,
                 existing=_load_journal(journal_path, contract=contract),
+                contract=contract,
             )
 
     with _announcement_lock(root, contract=contract):
@@ -3018,6 +3299,11 @@ __all__ = [
     "SECOND_MINER_HOTKEY",
     "SECOND_MINER_RUNTIME_ROOT",
     "UID124_AXON_CONTRACT",
+    "UID124_GENERATION1_JOURNAL_SHA256",
+    "UID124_GENERATION1_PREVIEW_NAME",
+    "UID124_GENERATION1_PREVIEW_SHA256",
+    "UID124_GENERATION2_AXON_CONTRACT",
+    "UID124_GENERATION2_ENDPOINT_IP",
     "VALIDATOR_HOTKEY",
     "announce_reviewed_preview",
     "build_preview",

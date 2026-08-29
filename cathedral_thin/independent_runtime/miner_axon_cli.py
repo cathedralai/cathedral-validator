@@ -19,6 +19,7 @@ from .miner_axon import (
     MinerAxonAmbiguous,
     MinerAxonError,
     _contract_preview_path,
+    _contract_runtime_root,
     _wallet_public_identity,
     announce_reviewed_preview,
     build_preview,
@@ -59,7 +60,7 @@ def _parser(*, prog: str, contract: MinerAxonContract) -> argparse.ArgumentParse
         action="store_true",
         help="assert every other process or host able to announce this miner is stopped",
     )
-    if contract.supports_legacy_successor:
+    if contract.supports_legacy_successor and contract.successor_generation is None:
         announce.add_argument(
             "--allow-finalized-successor",
             action="store_true",
@@ -164,6 +165,17 @@ def run_contract_cli(
                 ) from exc
             subtensor = make_subtensor(bt, network=NETWORK)
             wallet = _wallet(bt, path=options.wallet_path, wallet_hotkey=wallet_hotkey)
+            pinned_successor = contract.successor_generation is not None
+            predecessor_preview = (
+                _contract_runtime_root(contract) / contract.predecessor_preview_name
+                if pinned_successor and contract.predecessor_preview_name is not None
+                else getattr(options, "predecessor_preview", None)
+            )
+            predecessor_digest = (
+                contract.predecessor_preview_sha256
+                if pinned_successor
+                else getattr(options, "predecessor_reviewed_sha256", None)
+            )
             result = dict(
                 announce_reviewed_preview(
                     bt_module=bt,
@@ -174,15 +186,10 @@ def run_contract_cli(
                     qvl_path=options.qvl,
                     confirm=options.confirm_miner_announce,
                     exclusive_announcer_asserted=options.assert_exclusive_announcer,
-                    allow_finalized_successor=getattr(
-                        options, "allow_finalized_successor", False
-                    ),
-                    predecessor_preview_path=getattr(
-                        options, "predecessor_preview", None
-                    ),
-                    predecessor_reviewed_sha256=getattr(
-                        options, "predecessor_reviewed_sha256", None
-                    ),
+                    allow_finalized_successor=pinned_successor
+                    or getattr(options, "allow_finalized_successor", False),
+                    predecessor_preview_path=predecessor_preview,
+                    predecessor_reviewed_sha256=predecessor_digest,
                     contract=contract,
                 )
             )
