@@ -2720,6 +2720,7 @@ def submit_reviewed_successor(
                     wire_uids=list(wire_uids),
                     wire_weights=list(wire_weights),
                     mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+                    allow_reviewed_uid30_finalized_descendant=True,
                 )
                 submission = _receipt_submission(receipt, state=fresh_state)
                 canonical_validator._record_pending_submission_receipt(

@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import zlib
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7046,6 +7047,368 @@ def _authorize_sn39_chain_submission(
         )
 
 
+def _require_reviewed_uid30_successor_finalized_descendant(
+    preflight: ChainPreflight,
+    *,
+    runtime_contract: Any,
+    attempt_id: str,
+    latest_finalized_block: int,
+    latest_finalized_hash: str,
+    wire_uids: list[int],
+    wire_weights: list[int],
+    version_key: int,
+    mortal_period_blocks: int,
+    pending: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+) -> None:
+    """Re-prove the sole two-miner successor at a bounded descendant head."""
+
+    state, identity, contract = pending
+    state_path = _submission_state_path(runtime_contract)
+    try:
+        _strict_uid30_successor_unsigned_rollback(
+            state,
+            attempt_id=attempt_id,
+            state_file=state_path,
+        )
+    except ValueError as exc:
+        raise wire.VectorError(
+            "UID30 successor descendant lost its exact predecessor reservation"
+        ) from exc
+
+    uid_hotkeys = dict(contract.get("uid_hotkeys", ()))
+    semantic = dict(contract.get("uid_weights", ()))
+    expected_uids, expected_weights = _wire_weights(
+        sorted(semantic),
+        [semantic[uid] for uid in sorted(semantic)],
+    )
+    runtime_digest = getattr(
+        runtime_contract,
+        "_uid30_two_miner_successor_preview_sha256",
+        None,
+    )
+    if (
+        contract.get("kind") != "two_miner_successor"
+        or bool(
+            getattr(runtime_contract, "require_full_provenance_for_broadcast", False)
+        )
+        is not False
+        or getattr(runtime_contract, "max_submissions", None) != 1
+        or getattr(runtime_contract, "_continuous_submission_authorization", None)
+        is not None
+        or getattr(runtime_contract, "_uid30_reviewed_preview_sha256", None) is not None
+        or not isinstance(runtime_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", runtime_digest) is None
+        or identity.get("successor_preview_sha256") != "sha256:" + runtime_digest
+        or not set(uid_hotkeys.values()).issubset(preflight.replacement_safe_hotkeys)
+        or expected_uids != wire_uids
+        or expected_weights != wire_weights
+        or wire_weights != [65535, 65535]
+        or version_key != SN39_UID30_LAUNCH_VERSION_KEY
+        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant differs from its exact reviewed contract"
+        )
+
+    inclusion = _policy_from_submission_identity(identity)
+    moment = datetime.now(UTC)
+    if (
+        latest_finalized_block < preflight.block
+        or inclusion.valid_until_block - latest_finalized_block < mortal_period_blocks
+        or inclusion.expected_next_epoch_start_block - latest_finalized_block
+        < mortal_period_blocks * 3
+        or not (inclusion.valid_from_time <= moment < inclusion.valid_until_time)
+        or (inclusion.valid_until_time - moment).total_seconds()
+        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant lacks reviewed time, block, or epoch room"
+        )
+
+    substrate = getattr(preflight.subtensor, "substrate", None)
+    if substrate is None:
+        raise wire.VectorError("UID30 successor descendant has no substrate interface")
+    expected_mapping_hash = str(preflight.finalized_hash).lower()
+    try:
+        canonical_mapping_hash = str(substrate.get_block_hash(preflight.block)).lower()
+        canonical_latest_hash = str(
+            substrate.get_block_hash(latest_finalized_block)
+        ).lower()
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 successor descendant cannot re-resolve its mapping block"
+        ) from exc
+    if (
+        _CHAIN_HASH_RE.fullmatch(expected_mapping_hash) is None
+        or canonical_mapping_hash != expected_mapping_hash
+        or _CHAIN_HASH_RE.fullmatch(latest_finalized_hash) is None
+        or canonical_latest_hash != latest_finalized_hash
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant mapping block is no longer canonical"
+        )
+
+    cursor_hash = latest_finalized_hash
+    drift = latest_finalized_block - int(preflight.block)
+    try:
+        for _ in range(drift):
+            observed_header = substrate.get_block_header(block_hash=cursor_hash)
+            if not isinstance(observed_header, dict):
+                raise ValueError("finalized header is unavailable")
+            header = observed_header.get("header", observed_header)
+            if not isinstance(header, dict):
+                raise ValueError("finalized header is malformed")
+            parent_hash = str(
+                header.get("parentHash", header.get("parent_hash", ""))
+            ).lower()
+            if _CHAIN_HASH_RE.fullmatch(parent_hash) is None:
+                raise ValueError("finalized parent hash is malformed")
+            cursor_hash = parent_hash
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 successor descendant cannot prove finalized ancestry"
+        ) from exc
+    if cursor_hash != expected_mapping_hash:
+        raise wire.VectorError(
+            "UID30 successor descendant is not a child of the review"
+        )
+
+    expected_bindings = {
+        SN39_UID30_LAUNCH_VALIDATOR_UID: SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
+        **uid_hotkeys,
+    }
+    try:
+        for uid, hotkey in expected_bindings.items():
+            live_uid_raw = substrate.query(
+                module="SubtensorModule",
+                storage_function="Uids",
+                params=[39, hotkey],
+                block_hash=latest_finalized_hash,
+            )
+            live_hotkey_raw = substrate.query(
+                module="SubtensorModule",
+                storage_function="Keys",
+                params=[39, uid],
+                block_hash=latest_finalized_hash,
+            )
+            live_uid = getattr(live_uid_raw, "value", live_uid_raw)
+            live_hotkey = getattr(live_hotkey_raw, "value", live_hotkey_raw)
+            if (
+                type(live_uid) is not int
+                or live_uid != uid
+                or str(live_hotkey) != hotkey
+            ):
+                raise ValueError("live UID mapping changed")
+        current_weights_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[get_mechid_storage_index(39, 0), 30],
+            block_hash=latest_finalized_hash,
+        )
+        current_weights = getattr(current_weights_raw, "value", current_weights_raw)
+        version_floor_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="WeightsVersionKey",
+            params=[39],
+            block_hash=latest_finalized_hash,
+        )
+        version_floor = getattr(version_floor_raw, "value", version_floor_raw)
+        stake_threshold_raw = substrate.query(
+            module="SubtensorModule",
+            storage_function="StakeThreshold",
+            params=[],
+            block_hash=latest_finalized_hash,
+        )
+        stake_threshold = getattr(
+            stake_threshold_raw,
+            "value",
+            stake_threshold_raw,
+        )
+        if hasattr(stake_threshold, "item"):
+            stake_threshold = stake_threshold.item()
+        latest_commit_reveal = preflight.subtensor.commit_reveal_enabled(
+            netuid=39,
+            block=latest_finalized_block,
+        )
+        latest_owner = preflight.subtensor.get_subnet_owner_hotkey(
+            39,
+            block=latest_finalized_block,
+        )
+        latest_min_weights = preflight.subtensor.min_allowed_weights(
+            netuid=39,
+            block=latest_finalized_block,
+        )
+        latest_max_weight = preflight.subtensor.max_weight_limit(
+            netuid=39,
+            block=latest_finalized_block,
+        )
+        latest_next_epoch = preflight.subtensor.get_next_epoch_start_block(
+            39,
+            block=latest_finalized_block,
+        )
+        latest_rate_limit = preflight.subtensor.weights_rate_limit(
+            39,
+            block=latest_finalized_block,
+        )
+        latest_mechanism_count = preflight.subtensor.get_mechanism_count(
+            39,
+            block=latest_finalized_block,
+        )
+        info = preflight.subtensor.get_metagraph_info(
+            39,
+            0,
+            block=latest_finalized_block,
+        )
+        raw_info_block = getattr(info, "block", None)
+        raw_info_block = getattr(
+            raw_info_block,
+            "value",
+            raw_info_block,
+        )
+        if hasattr(raw_info_block, "item"):
+            raw_info_block = raw_info_block.item()
+        if type(raw_info_block) is not int or raw_info_block != latest_finalized_block:
+            raise ValueError("metagraph info block changed")
+
+        def values(raw: Any) -> list[Any]:
+            observed = raw.tolist() if hasattr(raw, "tolist") else raw
+            if not isinstance(observed, (list, tuple)):
+                raise ValueError("metagraph field is not a sequence")
+            return list(observed)
+
+        info_hotkeys = [str(value) for value in values(info.hotkeys)]
+        raw_permits = values(info.validator_permit)
+        raw_permits = [
+            value.item() if hasattr(value, "item") else value for value in raw_permits
+        ]
+        if any(type(value) is not bool for value in raw_permits):
+            raise ValueError("metagraph permit row is not boolean")
+        info_permits = list(raw_permits)
+        raw_last_updates = [
+            value.item() if hasattr(value, "item") else value
+            for value in values(info.last_update)
+        ]
+        if any(type(value) is not int for value in raw_last_updates):
+            raise ValueError("metagraph last-update row is not an integer")
+        info_last_updates = [int(value) for value in raw_last_updates]
+        info_stakes = values(info.total_stake)
+        info_axons = list(info.axons)
+    except Exception as exc:  # noqa: BLE001 - fail closed before signing
+        raise wire.VectorError(
+            "UID30 successor descendant cannot re-read its live mappings and axons"
+        ) from exc
+    if (
+        current_weights
+        not in (
+            [[SN39_UID30_SUCCESSOR_PREDECESSOR_UID, 65535]],
+            [(SN39_UID30_SUCCESSOR_PREDECESSOR_UID, 65535)],
+        )
+        or latest_commit_reveal is not False
+        or str(latest_owner or "") != contract.get("owner")
+        or type(latest_min_weights) is not int
+        or latest_min_weights != 1
+        or isinstance(latest_max_weight, bool)
+        or not isinstance(latest_max_weight, (int, float))
+        or not math.isclose(
+            float(latest_max_weight),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+        or type(version_floor) is not int
+        or (version_floor != 0 and version_key < version_floor)
+        or type(stake_threshold) is not int
+        or stake_threshold < 0
+        or type(latest_mechanism_count) is not int
+        or latest_mechanism_count <= 0
+        or type(latest_next_epoch) is not int
+        or latest_next_epoch != inclusion.expected_next_epoch_start_block
+        or latest_next_epoch - latest_finalized_block < mortal_period_blocks * 3
+        or type(latest_rate_limit) is not int
+        or latest_rate_limit < mortal_period_blocks
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant predecessor row, cooldown, or chain policy "
+            "changed"
+        )
+    if (
+        len(
+            {
+                len(info_hotkeys),
+                len(info_permits),
+                len(info_last_updates),
+                len(info_stakes),
+                len(info_axons),
+            }
+        )
+        != 1
+        or max(expected_bindings) >= len(info_hotkeys)
+        or any(info_hotkeys[uid] != hotkey for uid, hotkey in expected_bindings.items())
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant metagraph identity rows are inconsistent"
+        )
+    validator_index = SN39_UID30_LAUNCH_VALIDATOR_UID
+    validator_stake = getattr(info_stakes[validator_index], "rao", None)
+    if hasattr(validator_stake, "item"):
+        validator_stake = validator_stake.item()
+    if (
+        info_permits[validator_index] is not True
+        or type(validator_stake) is not int
+        or validator_stake < stake_threshold
+        or info_last_updates[validator_index] != SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK
+        or latest_finalized_block - info_last_updates[validator_index]
+        <= latest_rate_limit
+    ):
+        raise wire.VectorError(
+            "UID30 successor descendant mapping or validator permit changed"
+        )
+
+    reviewed_proofs = identity.get("fresh_miner_evidence")
+    reviewed_by_hotkey = (
+        {row.get("hotkey"): row for row in reviewed_proofs}
+        if isinstance(reviewed_proofs, list)
+        and all(isinstance(row, dict) for row in reviewed_proofs)
+        else {}
+    )
+    for uid, hotkey in uid_hotkeys.items():
+        row = reviewed_by_hotkey.get(hotkey)
+        axon = info_axons[uid]
+        try:
+            if not isinstance(axon, Mapping):
+                raise ValueError("axon row is not a mapping")
+            raw_ip = axon.get("ip")
+            raw_ip_type = axon.get("ip_type")
+            raw_port = axon.get("port")
+            raw_protocol = axon.get("protocol")
+            if (
+                type(raw_ip) is not int
+                or raw_ip <= 0
+                or raw_ip > 0xFFFFFFFF
+                or type(raw_ip_type) is not int
+                or raw_ip_type != 4
+            ):
+                raise ValueError("axon IP is malformed")
+            observed_ip = str(ipaddress.IPv4Address(raw_ip))
+        except (ipaddress.AddressValueError, ValueError) as exc:
+            raise wire.VectorError(
+                "UID30 successor descendant axon IP is malformed"
+            ) from exc
+        if (
+            not isinstance(row, dict)
+            or row.get("uid") != uid
+            or row.get("ip") != observed_ip
+            or type(raw_port) is not int
+            or raw_port != row.get("port")
+            or raw_port != 8081
+            or type(raw_protocol) is not int
+            or raw_protocol != 4
+        ):
+            raise wire.VectorError(
+                "UID30 successor descendant reviewed serving axon changed"
+            )
+
+
 def _require_reviewed_uid30_finalized_descendant(
     preflight: ChainPreflight,
     *,
@@ -7081,6 +7444,37 @@ def _require_reviewed_uid30_finalized_descendant(
         )
 
     state = _read_state(_submission_state_path(runtime_contract))
+    runtime_successor_marked = isinstance(
+        getattr(
+            runtime_contract,
+            "_uid30_two_miner_successor_preview_sha256",
+            None,
+        ),
+        str,
+    )
+    if runtime_successor_marked or _uid30_successor_pending_fragment(state):
+        pending = _pending_reviewed_uid30_contract(
+            runtime_contract,
+            attempt_id=attempt_id,
+        )
+        if pending is None or pending[2].get("kind") != "two_miner_successor":
+            raise wire.VectorError(
+                "UID30 successor descendant has no exact durable contract"
+            )
+        _require_reviewed_uid30_successor_finalized_descendant(
+            preflight,
+            runtime_contract=runtime_contract,
+            attempt_id=attempt_id,
+            latest_finalized_block=latest_finalized_block,
+            latest_finalized_hash=latest_finalized_hash,
+            wire_uids=wire_uids,
+            wire_weights=wire_weights,
+            version_key=version_key,
+            mortal_period_blocks=mortal_period_blocks,
+            pending=pending,
+        )
+        return
+
     lane = state.get("submission_pending_lane")
     identity = state.get("submission_pending_identity")
     if (
