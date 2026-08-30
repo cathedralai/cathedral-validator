@@ -120,6 +120,7 @@ snp-production = [
 [project.scripts]
 cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"
 cathedral-validator-update = "cathedral_thin.independent_runtime.updater:main"
+cathedral-validator-telemetry-export = "cathedral_thin.independent_runtime.telemetry_exporter:main"
 # Legacy relay, publisher, candidate-snapshot, and one-shot writer modules stay
 # importable for tests and historical recovery. They install no operator command.
 # Development-only AMD SEV-SNP preview. It has no writer mode and loads the

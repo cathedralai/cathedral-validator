@@ -47,6 +47,7 @@ from cathedral_thin.independent_runtime.fleet_score import (
     MINER_RESPONSE_DEADLINE_SECONDS,
     MultiComputeRound,
 )
+from cathedral_thin.independent_runtime.telemetry import TelemetrySpool
 
 VALIDATOR = "5Validator"
 MINER_ONE = "5MinerOne"
@@ -1359,6 +1360,46 @@ def test_cycle_lock_covers_recovery_collection_and_submission(monkeypatch) -> No
 
     assert result["status"] == STATUS_CONFIRMED
     assert held[0] is False
+
+
+def test_telemetry_failure_never_prevents_a_finalized_weight_write(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    observed = snapshot(miners=(MINER_ONE_AXON,))
+    scored = round_result(machine_row("1"), miners=(MINER_ONE_AXON,))
+    submitted: list[DirectWeightPlan] = []
+    receipt = SimpleNamespace(
+        status=STATUS_CONFIRMED,
+        as_document=lambda: {"status": STATUS_CONFIRMED},
+    )
+    writer_object = SimpleNamespace(
+        recover=lambda: None,
+        submit=lambda plan, **_kwargs: submitted.append(plan) or receipt,
+    )
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: observed
+    )
+    monkeypatch.setattr(runtime, "score_multicompute_round", lambda **_kwargs: scored)
+    monkeypatch.setattr(
+        runtime,
+        "build_telemetry_candidate",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("spool unavailable")),
+    )
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=writer_object,
+        telemetry_sink=TelemetrySpool(tmp_path / "telemetry" / "events.jsonl"),
+    )
+
+    assert submitted and submitted[0].raw_scores == ((19, 1),)
+    assert result["status"] == STATUS_CONFIRMED
+    assert result["telemetry"] == {"status": "FAILED"}
 
 
 def test_cycle_refuses_an_adapter_with_another_qvl_pin(monkeypatch) -> None:

@@ -1,0 +1,3 @@
+g cathedral-telemetry -
+u cathedral-telemetry - "Cathedral sanitized telemetry exporter" /nonexistent /usr/sbin/nologin
+m cathedral-validator cathedral-telemetry

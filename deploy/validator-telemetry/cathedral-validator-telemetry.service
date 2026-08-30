@@ -1,0 +1,30 @@
+[Unit]
+Description=Export Cathedral validator sanitized telemetry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cathedral-telemetry
+Group=cathedral-telemetry
+EnvironmentFile=/etc/cathedral-validator-telemetry/export.env
+ExecStart=/usr/local/bin/cathedral-validator-telemetry-export --spool /var/lib/cathedral-validator-telemetry/events.jsonl --reader-group cathedral-telemetry --endpoint ${CATHEDRAL_TELEMETRY_ENDPOINT} --ingest-token-file ${CATHEDRAL_TELEMETRY_TOKEN_FILE} --sites-authorization-file ${CATHEDRAL_TELEMETRY_SITES_AUTH_FILE}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/cathedral-validator-telemetry /etc/cathedral-validator-telemetry
+InaccessiblePaths=/var/lib/cathedral-validator
+InaccessiblePaths=/etc/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=true
+PrivateDevices=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

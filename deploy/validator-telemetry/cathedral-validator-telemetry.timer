@@ -1,0 +1,12 @@
+[Unit]
+Description=Export Cathedral validator telemetry every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=cathedral-validator-telemetry.service
+
+[Install]
+WantedBy=timers.target

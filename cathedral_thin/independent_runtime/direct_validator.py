@@ -10,6 +10,7 @@ from raw machine counts.
 from __future__ import annotations
 
 import argparse
+import grp
 import hashlib
 import json
 import math
@@ -54,6 +55,14 @@ from .fleet_score import (
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
+from .telemetry import (
+    PendingTelemetryStore,
+    TelemetryError,
+    TelemetrySpool,
+    build_telemetry_candidate,
+    build_telemetry_snapshot,
+    journal_receipt_for_plan,
+)
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
 _REPORTED_EXCLUSION_CATEGORIES = (
@@ -387,12 +396,55 @@ def _run_direct_cycle_unlocked(
     verifier_adapter: ComputeAdapter,
     writer: Any,
     snp_verifier: SnpProductionVerifier | None = None,
+    telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector."""
 
+    pending_telemetry = (
+        PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
+    )
     recovered = writer.recover()
     if recovered is not None:
-        return {"status": recovered.status, "recovery": recovered.as_document()}
+        event = {"status": recovered.status, "recovery": recovered.as_document()}
+        if pending_telemetry is not None:
+            try:
+                pending_plan = pending_telemetry.plan_identity_sha256()
+                journal_receipt = (
+                    journal_receipt_for_plan(writer.state_path, pending_plan)
+                    if pending_plan is not None
+                    else None
+                )
+                telemetry = (
+                    pending_telemetry.finalize(journal_receipt, keypair=keypair)
+                    if journal_receipt == recovered
+                    else None
+                )
+                event["telemetry"] = (
+                    {"status": "SPOOLED", "event_id": telemetry["event_id"]}
+                    if telemetry is not None
+                    else {"status": "NO_FINALIZED_EVENT"}
+                )
+            except Exception:
+                event["telemetry"] = {"status": "FAILED"}
+        return event
+    reconciled_event_id: str | None = None
+    if pending_telemetry is not None:
+        try:
+            pending_plan = pending_telemetry.plan_identity_sha256()
+            prior_receipt = (
+                journal_receipt_for_plan(writer.state_path, pending_plan)
+                if pending_plan is not None
+                else None
+            )
+            if prior_receipt is not None:
+                prior_event = pending_telemetry.finalize(
+                    prior_receipt,
+                    keypair=keypair,
+                )
+                if prior_event is not None:
+                    reconciled_event_id = str(prior_event["event_id"])
+        except Exception:
+            pass
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -416,8 +468,27 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
+    telemetry_candidate = None
+    if pending_telemetry is not None:
+        try:
+            telemetry_candidate = build_telemetry_candidate(
+                result_rows=result.rows,
+                plan=plan,
+            )
+        except Exception:
+            telemetry_candidate = None
+    pending_saved = False
+    if pending_telemetry is not None and telemetry_candidate is not None:
+        try:
+            # Persist before entering the chain writer. The writer retains its
+            # own deadline gate, and telemetry never runs between signing and
+            # broadcast.
+            pending_telemetry.prepare(telemetry_candidate, plan)
+            pending_saved = True
+        except Exception:
+            pending_saved = False
     receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
-    return {
+    event = {
         "status": receipt.status,
         "anchor": snapshot.identity(),
         "raw_scores": [list(row) for row in plan.raw_scores],
@@ -428,6 +499,33 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if telemetry_sink is not None:
+        try:
+            telemetry = (
+                pending_telemetry.finalize(receipt, keypair=keypair)
+                if pending_telemetry is not None and pending_saved
+                else build_telemetry_snapshot(
+                    result_rows=result.rows,
+                    plan=plan,
+                    receipt=receipt,
+                    keypair=keypair,
+                )
+            )
+            if telemetry is None:
+                raise TelemetryError("finalized telemetry event is absent")
+            if not pending_saved:
+                telemetry_sink.append(telemetry)
+            event["telemetry"] = {
+                "status": "SPOOLED",
+                "event_id": telemetry["event_id"],
+            }
+        except Exception:
+            # The scoring result and finalized chain receipt are authoritative.
+            # A local projection failure is reported but never changes them.
+            event["telemetry"] = {"status": "FAILED"}
+    if reconciled_event_id is not None:
+        event["reconciled_telemetry_event_id"] = reconciled_event_id
+    return event
 
 
 def run_direct_cycle(
@@ -437,6 +535,7 @@ def run_direct_cycle(
     verifier_adapter: ComputeAdapter,
     writer: Any,
     snp_verifier: SnpProductionVerifier | None = None,
+    telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -453,6 +552,7 @@ def run_direct_cycle(
             verifier_adapter=verifier_adapter,
             writer=writer,
             snp_verifier=snp_verifier,
+            telemetry_sink=telemetry_sink,
         )
 
 
@@ -477,6 +577,15 @@ def _parser() -> argparse.ArgumentParser:
         "--snpguest",
         required=True,
         help="pinned AMD snpguest verifier",
+    )
+    parser.add_argument(
+        "--telemetry-spool",
+        type=Path,
+        help="sanitized telemetry path shared with the isolated exporter",
+    )
+    parser.add_argument(
+        "--telemetry-reader-group",
+        help="group allowed to read only the sanitized telemetry spool",
     )
     parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
@@ -541,6 +650,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
     )
+    if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
+        raise SystemExit(
+            "--telemetry-spool and --telemetry-reader-group must be supplied together"
+        )
+    if options.telemetry_spool is None:
+        telemetry_sink = None
+    else:
+        if not options.telemetry_spool.is_absolute():
+            raise SystemExit("--telemetry-spool must be absolute")
+        try:
+            reader_gid = grp.getgrnam(options.telemetry_reader_group).gr_gid
+        except KeyError as exc:
+            raise SystemExit("telemetry reader group does not exist") from exc
+        telemetry_sink = TelemetrySpool(
+            options.telemetry_spool,
+            reader_gid=reader_gid,
+        )
     process_lock = getattr(writer, "process_locked", None)
     process_context = process_lock() if callable(process_lock) else nullcontext()
     with process_context:
@@ -577,6 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     verifier_adapter=adapter,
                     writer=writer,
                     snp_verifier=snp_verifier,
+                    telemetry_sink=telemetry_sink,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionContradiction as exc:
