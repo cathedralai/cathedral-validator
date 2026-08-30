@@ -1,4 +1,4 @@
-# Cathedral SN39 mainnet configuration for an authorized relay validator.
+# Cathedral SN39 mainnet configuration for a public validator.
 #
 # This is the only recurring operator profile. It relays Cathedral's signed
 # weight vector from the public HTTPS origin (api.cathedral.computer). An origin
@@ -9,16 +9,10 @@
 # against the pinned weight-policy key, and submit exactly those numbers. It
 # never originates weights, so it has no launch of its own to complete.
 #
-# Every trust-bearing value below is re-checked against the release constants
-# in scaffold/validator_thin.py before any broadcast. Changing any of them is
-# refused, not silently honored. Only wallet identity, log path, and the launch
-# section are the only operator-specific values. Removed authority and local
-# loopback profiles are not alternative production modes.
-#
-# Public validator operation is not self-service during live testing. This
-# profile is release material for an authorized operator, not a public
-# onboarding template. Do not edit its trust pins or use it to infer launch
-# authorization.
+# The public installer ships this profile byte-for-byte and the immutable
+# launcher refuses edits. The operator supplies only a hotkey file. Every
+# trust-bearing value below is checked against release constants before a
+# submission. Removed authority and loopback profiles are not production modes.
 
 [network]
 name = "finney"
@@ -78,7 +72,7 @@ require_full_provenance_for_broadcast = false
 require_completed_launch_for_broadcast = false
 # Weight-originating hosts (holding launch material) additionally need the
 # documented waiver below or the runtime contract refuses the relay opt-out;
-# authorized relays have no launch material and are unaffected by it.
+# public validators have no launch material and are unaffected by it.
 beta_skip_launch_ceremony = true
 
 [logs]

@@ -1,15 +1,12 @@
 """`cathedral-validator` — the console entry point.
 
-v4 keeps the command surface operators already know — `cathedral-validator
-migrate` then `cathedral-validator serve` — so updating from a prior release is
-the same muscle memory and the same systemd unit. Underneath, `serve` runs the
-v4 thin validator (fetch one signed score per miner, verify, apply): no local
-database, no rolling window. `migrate` is therefore a no-op kept only so
-existing update scripts don't break.
+`cathedral-validator serve` is the recurring validator. Starting it permits
+weight submission. Stopping it stops submission. The public command has no
+preview, offline, or broadcast mode.
 
 Config resolution for `serve`, lowest to highest precedence:
   built-in defaults  <  --config TOML  <  environment  <  command-line flags
-A sample config ships at `config/validator.toml`.
+The production config ships at `config/validator-thin-sn39-relay.toml`.
 """
 
 from __future__ import annotations
@@ -56,8 +53,11 @@ _DEFAULTS = {
     ),
     "launch_preflight": False,
     "once": False,
-    "offline": False,  # set by --offline (verify+print, no chain access)
-    "broadcast": False,  # every chain write requires an explicit --broadcast
+    # These remain internal runtime state because the launch and recovery
+    # machinery shares the validator loop. The public recurring command fixes
+    # both values and exposes no switch for either one.
+    "offline": False,
+    "broadcast": True,
     # Supported SN39 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
@@ -341,15 +341,8 @@ def _resolve_serve_config(
         v = getattr(ns, flat, None)
         if v is not None:
             cfg[flat] = v
-    if ns.dry_run:
-        cfg["broadcast"] = False
-    elif getattr(ns, "broadcast", False):
-        cfg["broadcast"] = True
-    if ns.once:
+    if getattr(ns, "once", False):
         cfg["once"] = True
-    if getattr(ns, "offline", False):
-        cfg["offline"] = True
-        cfg["broadcast"] = False
     cfg["netuid"] = int(cfg["netuid"])
     cfg["interval_secs"] = float(cfg["interval_secs"])
     cfg["max_submissions"] = int(cfg["max_submissions"])
@@ -372,7 +365,19 @@ def _resolve_serve_config(
 
 
 def _cmd_serve(ns: argparse.Namespace) -> int:
+    if not validator_thin.installed_recurring_context():
+        print(
+            "error: manual recurring starts are retired because older no-flag "
+            "commands were non-writing. Install and start the system service "
+            "with deploy/sn39/install-validator",
+            file=sys.stderr,
+        )
+        return 2
     cfg = _resolve_serve_config(ns)
+    # One public posture: running the validator submits weights. Read-only
+    # launch and status tools are separate commands with separate handlers.
+    cfg.broadcast = True
+    cfg.offline = False
     # Mirror validator_thin.main(): a --chain-endpoint flag populates the env the
     # resolver reads, so `serve` honors the override the same way (the env var
     # alone already works on this path; this makes the flag work too).
@@ -438,12 +443,7 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         "audits provenance every tick",
     ]
     rows = [
-        (
-            "mode",
-            render.green("writing weights")
-            if cfg.broadcast
-            else render.yellow("dry run · no chain writes"),
-        ),
+        ("mode", render.green("writing weights")),
         ("writer", writer),
         (
             "feed",
@@ -665,13 +665,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser(
-        "serve", help="run the validator (dry-run unless --broadcast is explicit)"
-    )
+    sp = sub.add_parser("serve", help="run the validator and submit weights")
     sp.add_argument(
         "--config",
         default=os.environ.get("CATHEDRAL_VALIDATOR_CONFIG"),
-        help="path to a TOML config (e.g. config/validator.toml)",
+        help="path to the production validator TOML config",
     )
     sp.add_argument("--publisher-url", dest="publisher_url", default=None)
     sp.add_argument("--public-key-hex", dest="public_key_hex", default=None)
@@ -704,25 +702,6 @@ def main(argv: list[str] | None = None) -> int:
         help="optional local durable-attempt ceiling; 0 disables this extra "
         "ceiling, but SN39 recurring writes still require a separately signed "
         "bounded authorization; launch canary requires 1",
-    )
-    sp.add_argument(
-        "--require-full-provenance-for-broadcast",
-        dest="require_full_provenance_for_broadcast",
-        action="store_true",
-        default=None,
-        help="launch-only: synchronously replay raw evidence and require exact "
-        "agreement before the one permitted chain write",
-    )
-    sp.add_argument(
-        "--require-completed-launch-for-broadcast",
-        dest="require_completed_launch_for_broadcast",
-        action="store_true",
-        default=None,
-        help="refuse continuous writes until reconcile-launch proves the finalized "
-        "launch; on by default and mandatory for any host holding the controlled "
-        "launch material. An authorized relay "
-        "validator that only relays Cathedral's signed vector opts out in its "
-        "config file (see config/validator-thin-sn39-relay.toml)",
     )
     sp.add_argument(
         "--require-policy",
@@ -793,21 +772,6 @@ def main(argv: list[str] | None = None) -> int:
         dest="jsonl",
         default=None,
         help="append the stable JSONL event stream to this file",
-    )
-    sp.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="verify and print the weights without setting them on chain",
-    )
-    sp.add_argument(
-        "--broadcast",
-        action="store_true",
-        help="explicitly permit a chain weight submission",
-    )
-    sp.add_argument(
-        "--offline",
-        action="store_true",
-        help="verify + print only, no chain access (CI / smoke)",
     )
     sp.add_argument("--once", action="store_true", help="single tick then exit")
     sp.set_defaults(func=_cmd_serve)

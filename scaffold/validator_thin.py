@@ -12,10 +12,10 @@ Every scoring decision (recency, multi-lane composition, burn) lives
 orchestrator-side and changes WITHOUT a validator release; this binary only
 enforces that what it applies is exactly what the pinned key signed.
 
-Run:  python -m scaffold.validator_thin --publisher-url https://api.cathedral.computer \
-          --public-key-hex <pinned hex> [--once] [--broadcast]
-
-Dry-run by default (computes + prints the uid vector, does not submit).
+The immutable system service starts this module through ``scaffold.cli``.
+Manual recurring starts are refused because older no-flag commands were
+non-writing. Running the installed service permits weight submission. Read-only
+launch and recovery checks use separate functions and commands.
 Rollback fence state persists in a small JSON file (--state-file), so a
 publisher cannot re-serve an older policy_version after a restart.
 """
@@ -124,6 +124,59 @@ SN39_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
 SN39_LAUNCH_APPROVAL_OWNER_UID = 0
 SN39_RELEASE_SHA_ENV = "CATHEDRAL_SN39_RELEASE_SHA"
 SN39_LAUNCH_CONFIG_DIGEST_ENV = "CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"
+SN39_INSTALLED_RELEASE_ROOT = Path("/opt/cathedral-sn39/releases")
+SN39_INSTALLED_VENV_ROOT = Path("/opt/cathedral-sn39/venvs")
+SN39_INSTALLED_MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")
+SN39_INSTALLED_CONFIG = Path("/etc/cathedral-validator/validator-thin-sn39-relay.toml")
+SN39_SYSTEMD_UNIT = "cathedral-validator-sn39-relay.service"
+SN39_PROC_INIT_COMM = Path("/proc/1/comm")
+SN39_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+
+
+def installed_recurring_context() -> bool:
+    """Return whether the immutable installer deliberately started this process.
+
+    Older no-flag CLI invocations were non-writing. Requiring both values the
+    release launcher injects prevents an upgrade from silently turning those
+    same shell commands into weight submissions.
+    """
+
+    release_sha = os.environ.get(SN39_RELEASE_SHA_ENV, "")
+    config_digest = os.environ.get(SN39_LAUNCH_CONFIG_DIGEST_ENV, "")
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", release_sha) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None
+    ):
+        return False
+    expected_release = SN39_INSTALLED_RELEASE_ROOT / release_sha
+    expected_venv = SN39_INSTALLED_VENV_ROOT / release_sha
+    try:
+        manifest = json.loads(SN39_INSTALLED_MANIFEST.read_text("utf-8"))
+        actual_config_digest = (
+            "sha256:" + hashlib.sha256(SN39_INSTALLED_CONFIG.read_bytes()).hexdigest()
+        )
+        return bool(
+            isinstance(manifest, dict)
+            and manifest.get("schema") == "cathedral_sn39_release_install_v3"
+            and manifest.get("release_sha") == release_sha
+            and isinstance(manifest.get("external_files"), dict)
+            and manifest["external_files"].get(str(SN39_INSTALLED_CONFIG))
+            == config_digest
+            and actual_config_digest == config_digest
+            and Path.cwd().resolve(strict=True) == expected_release.resolve(strict=True)
+            and Path(sys.prefix).resolve(strict=True)
+            == expected_venv.resolve(strict=True)
+            and os.getppid() == 1
+            and SN39_PROC_INIT_COMM.read_text("utf-8").strip() == "systemd"
+            and any(
+                line.rpartition(":")[2].endswith(f"/{SN39_SYSTEMD_UNIT}")
+                for line in SN39_PROC_SELF_CGROUP.read_text("utf-8").splitlines()
+            )
+        )
+    except (OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
 SN39_UID30_LAUNCH_SCHEMA = "cathedral_sn39_uid30_launch_preview_v1"
 SN39_UID30_LAUNCH_POLICY = "uid30_single_verified_miner_100_v1"
 SN39_UID30_LAUNCH_VALIDATOR_UID = 30
@@ -12904,7 +12957,7 @@ def _sn39_launch_obligation(args: Any) -> bool:
     """Does THIS runtime owe SN39 its own completed one-shot launch?
 
     The mainnet launch is a subnet-level event, not a per-validator one. A
-    authorized relay that only relays Cathedral's signed vector can never
+    public validator that only relays Cathedral's signed vector can never
     satisfy a per-validator launch gate, so an unconditional gate locks every
     operator except Cathedral out of SN39 entirely. The obligation therefore
     tracks the things an operator cannot simply restate in a config file:
@@ -13709,27 +13762,17 @@ def build_parser() -> argparse.ArgumentParser:
         "bounded authorization; launch canary requires 1",
     )
     p.add_argument("--once", action="store_true", help="single tick, then exit")
-    p.add_argument(
-        "--offline",
-        action="store_true",
-        help="no chain access: verify + print only (CI / smoke)",
-    )
-    p.add_argument(
-        "--broadcast",
-        action="store_true",
-        help="actually submit weights (default: dry-run)",
-    )
-    p.add_argument(
-        "--require-full-provenance-for-broadcast",
-        action="store_true",
-        default=os.environ.get(
+    # The recurring validator has one posture. Starting it permits submissions.
+    # Launch/recovery functions still carry explicit internal state, but the
+    # recurring module exposes no non-writing mode.
+    p.set_defaults(offline=False, broadcast=True)
+    p.set_defaults(
+        require_full_provenance_for_broadcast=os.environ.get(
             "CATHEDRAL_VALIDATOR_REQUIRE_FULL_PROVENANCE_FOR_BROADCAST", ""
         )
         .strip()
         .lower()
-        in {"1", "true", "yes", "on"},
-        help="launch-only: require synchronous strict raw-evidence replay and exact "
-        "vector agreement before the one permitted chain write",
+        in {"1", "true", "yes", "on"}
     )
     p.add_argument(
         "--require-policy",
@@ -13841,6 +13884,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     p = build_parser()
     args = p.parse_args()
+    if not installed_recurring_context():
+        p.error(
+            "manual recurring starts are retired because older no-flag commands "
+            "were non-writing. Install and start the system service with "
+            "deploy/sn39/install-validator"
+        )
     configured_mode = os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "").strip()
     if configured_mode and configured_mode.lower() != "shadow":
         p.error(

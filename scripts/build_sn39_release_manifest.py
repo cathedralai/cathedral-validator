@@ -552,7 +552,7 @@ def main() -> int:
         "--relay",
         action="store_true",
         help=(
-            "build the authorized relay manifest: no controlled verifier "
+            "build the public relay manifest: no controlled verifier "
             "binary pin, the relay unit and tmpfiles, the shadow-audit "
             "mismatch alert, and no producer-side status publisher"
         ),

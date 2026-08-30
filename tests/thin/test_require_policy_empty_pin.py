@@ -30,6 +30,7 @@ V3_PIN = vt.REQUIRE_POLICY_VALIDATED_SUPPLY_V3
 def _main_with(monkeypatch, argv: list[str]) -> tuple[int, list]:
     """Run main() with argv, stubbing run() so nothing touches chain or disk."""
     monkeypatch.delenv("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", raising=False)
+    monkeypatch.setattr(vt, "installed_recurring_context", lambda: True)
     monkeypatch.setattr("sys.argv", ["cathedral-validator", *argv])
     seen: list = []
 
@@ -57,6 +58,7 @@ def test_unknown_require_policy_is_still_rejected(monkeypatch, capsys) -> None:
 
 def test_empty_env_pin_still_falls_back_to_the_default_contract(monkeypatch) -> None:
     monkeypatch.setenv("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", "   ")
+    monkeypatch.setattr(vt, "installed_recurring_context", lambda: True)
     monkeypatch.setattr("sys.argv", ["cathedral-validator"])
     seen: list = []
     monkeypatch.setattr(vt, "run", lambda args: seen.append(args) or 0)
@@ -82,11 +84,12 @@ def test_every_named_choice_is_accepted(monkeypatch) -> None:
 
 def _serve(monkeypatch, argv: list[str]) -> tuple[int, list]:
     monkeypatch.delenv("CATHEDRAL_VALIDATOR_REQUIRE_POLICY", raising=False)
+    monkeypatch.setattr(vt, "installed_recurring_context", lambda: True)
     seen: list = []
+    monkeypatch.setattr(vt, "_validate_runtime_contract", lambda _cfg: None)
     monkeypatch.setattr(vt, "run", lambda cfg: seen.append(cfg) or 0)
     base = [
         "serve",
-        "--offline",
         "--once",
         "--public-key-hex",
         vt.DEFAULT_PUBLIC_KEY_HEX,

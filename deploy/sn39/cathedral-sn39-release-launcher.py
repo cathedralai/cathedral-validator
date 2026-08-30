@@ -489,9 +489,9 @@ def main(argv: list[str]) -> int:
     # default for a non-tty stdout is an 8192-byte BLOCK buffer -- so a tick's
     # worth of operator output can sit unflushed for hours, and a SIGTERM
     # (systemctl restart/stop) discards it entirely. scaffold.cli.main also
-    # line-buffers itself, which covers authorized relay operators running
-    # the CLI directly; this flag is the belt to that braces and additionally
-    # covers the two script modes, which have no such call. Buffering only:
+    # line-buffers itself, which covers the installed recurring child; this flag
+    # is the belt to that braces and additionally covers the two script modes,
+    # which have no such call. Buffering only:
     # -u changes no verdict, gate or ordering.
     #
     # It has to be here rather than in the unit. This launcher builds the
@@ -527,7 +527,6 @@ def main(argv: list[str]) -> int:
             "serve",
             "--config",
             str(CONFIGS[mode]),
-            "--broadcast",
         ]
     config = CONFIGS.get(mode)
     environment = _child_environment(

@@ -47,7 +47,7 @@ DROPIN_BODY = """\
 Environment=CATHEDRAL_VALIDATOR_PROFILE=relay
 WorkingDirectory=/opt/{prefix}{version}
 ExecStart=
-ExecStart=/opt/{prefix}{version}/.venv/bin/python -m scaffold.cli serve --broadcast
+ExecStart=/opt/{prefix}{version}/.venv/bin/python -m scaffold.cli serve
 """
 
 

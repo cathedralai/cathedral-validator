@@ -71,7 +71,7 @@ BITTENSOR_REQUIRED_MAJOR = 10
 
 # Current Cathedral SN39 validator identity and live service cadence. The UID is
 # only a CLI default: operators still resolve their validator by hotkey before
-# any write. The cadence matches config/validator.toml and scaffold.cli.
+# any write. The cadence matches the public relay config and scaffold.cli.
 DEFAULT_VALIDATOR_UID = 30
 DEFAULT_VALIDATOR_INTERVAL_SECONDS = 1500.0
 # One bounded allowance for block timing, RPC latency, finalization, and systemd
