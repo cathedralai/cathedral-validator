@@ -534,30 +534,45 @@ def _recovered_cycle_event(
     event = {"status": recovered.status, "recovery": recovered.as_document()}
     if telemetry_sink is None:
         return event
+    event["telemetry"] = _reconcile_pending_telemetry(
+        writer=writer,
+        keypair=keypair,
+        telemetry_sink=telemetry_sink,
+        expected_receipt=recovered,
+    ) or {"status": "NO_FINALIZED_EVENT"}
+    return event
+
+
+def _reconcile_pending_telemetry(
+    *,
+    writer: Any,
+    keypair: Any,
+    telemetry_sink: TelemetrySpool,
+    expected_receipt: Any | None = None,
+) -> dict[str, Any] | None:
+    """Retry one plan-bound telemetry projection from finalized journal state."""
+
     pending_telemetry = PendingTelemetryStore(telemetry_sink)
     try:
         pending_plan = pending_telemetry.plan_identity_sha256()
-        journal_receipt = (
-            journal_receipt_for_plan(writer.state_path, pending_plan)
-            if pending_plan is not None
-            else None
+        if pending_plan is None:
+            return None
+        journal_receipt = journal_receipt_for_plan(writer.state_path, pending_plan)
+        if journal_receipt is None or (
+            expected_receipt is not None and journal_receipt != expected_receipt
+        ):
+            return {"status": "NO_FINALIZED_EVENT"}
+        telemetry = pending_telemetry.finalize(
+            keypair=keypair,
+            expected_receipt=journal_receipt,
         )
-        telemetry = (
-            pending_telemetry.finalize(
-                keypair=keypair,
-                expected_receipt=recovered,
-            )
-            if journal_receipt == recovered
-            else None
-        )
-        event["telemetry"] = (
+        return (
             {"status": "SPOOLED", "event_id": telemetry["event_id"]}
             if telemetry is not None
             else {"status": "NO_FINALIZED_EVENT"}
         )
     except Exception:
-        event["telemetry"] = {"status": "FAILED"}
-    return event
+        return {"status": "FAILED"}
 
 
 def run_direct_cycle(
@@ -730,6 +745,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else 2
                 )
             time.sleep(options.interval_seconds)
+        elif telemetry_sink is not None:
+            # A prior process can stop after writer recovery commits the
+            # receipt but before the non-authoritative telemetry projection
+            # succeeds. Retry that exact plan from last_attempt only during
+            # startup, after readiness and before entering a fresh cycle.
+            startup_telemetry = _reconcile_pending_telemetry(
+                writer=writer,
+                keypair=keypair,
+                telemetry_sink=telemetry_sink,
+            )
+            if startup_telemetry is not None:
+                print(
+                    json.dumps(
+                        {
+                            "status": "STARTUP_TELEMETRY_RECOVERY",
+                            "telemetry": startup_telemetry,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         while True:
             try:
                 event = run_direct_cycle(

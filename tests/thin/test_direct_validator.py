@@ -1649,25 +1649,53 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
             else pytest.fail("unexpected telemetry group")
         ),
     )
+    original_append = TelemetrySpool.append
+    append_attempts = 0
 
-    assert (
-        runtime.main(
-            [
-                "--qvl",
-                "/reviewed/qvl",
-                "--snp-policy",
-                "/reviewed/snp-policy.json",
-                "--snpguest",
-                "/reviewed/snpguest",
-                f"--expected-hotkey={keypair.ss58_address}",
-                f"--telemetry-spool={spool.path.resolve()}",
-                "--telemetry-reader-group=cathedral-telemetry",
-                "--once",
-                "--confirm-direct-write",
-            ]
-        )
-        == 0
+    def fail_first_append(self, event):
+        nonlocal append_attempts
+        append_attempts += 1
+        if append_attempts == 1:
+            raise runtime.TelemetryError("transient startup spool failure")
+        return original_append(self, event)
+
+    monkeypatch.setattr(TelemetrySpool, "append", fail_first_append)
+    cli_args = [
+        "--qvl",
+        "/reviewed/qvl",
+        "--snp-policy",
+        "/reviewed/snp-policy.json",
+        "--snpguest",
+        "/reviewed/snpguest",
+        f"--expected-hotkey={keypair.ss58_address}",
+        f"--telemetry-spool={spool.path.resolve()}",
+        "--telemetry-reader-group=cathedral-telemetry",
+        "--once",
+        "--confirm-direct-write",
+    ]
+
+    assert runtime.main(cli_args) == 0
+    assert append_attempts == 1
+    assert pending_path.exists()
+    assert not spool.path.exists()
+
+    second_startup_writer = SimpleNamespace(
+        state_path=writer_state,
+        recover=lambda: None,
     )
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: second_startup_writer,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "run_direct_cycle",
+        lambda **_kwargs: {"status": STATUS_CONFIRMED},
+    )
+
+    assert runtime.main(cli_args) == 0
+    assert append_attempts == 2
     assert not pending_path.exists()
     first_event = json.loads(spool.path.read_text())
     assert first_event["submission"] == {
