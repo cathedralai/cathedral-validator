@@ -115,30 +115,10 @@ def test_shipped_unit_and_environment_cover_every_production_pin() -> None:
         assert float(values[name]) == expected, name
 
 
-def test_operator_document_installs_only_the_canonical_unit() -> None:
+def test_operator_document_is_a_retired_historical_pointer() -> None:
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
-    install = readme.split("## Install", 1)[1].split("## Allocation contract", 1)[0]
-    assert "deploy/publisher/*.service" not in install
-    assert "cathedral-scorer-sn39.service" in install
-    assert "systemctl enable --now cathedral-scorer-sn39.service" in install
-    assert "run them on distinct ports" not in readme
-
-
-def test_operator_document_retires_and_masks_both_legacy_names() -> None:
-    readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
-    retirement = readme.split("## Retire legacy unit names", 1)[1].split(
-        "## Install", 1
-    )[0]
-    for unit in (
-        "cathedral-publisher.service",
-        "cathedral-weight-feed-publish.service",
-    ):
-        assert unit in retirement
-    assert "systemctl disable --now" in retirement
-    assert "systemctl mask" in retirement
-    assert "is-active" in retirement
-    assert "is-enabled" in retirement
-    assert "= masked" in retirement
-    assert '"$(readlink "$unit_path")" = /dev/null' in retirement
-    assert "recovery copy already exists" in retirement
-    assert 'mv -- "$unit_path" "$saved_path"' in retirement
+    assert readme.startswith("# Retired SN39 weight publisher deployment\n")
+    assert "current validator guide" in readme
+    assert "historical release reconstruction" in readme
+    assert "systemctl" not in readme
+    assert "cathedral-publisher-serve" not in readme

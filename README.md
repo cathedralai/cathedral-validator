@@ -35,8 +35,9 @@ inside its deadline. Missing a deadline earns zero.
 
 The writer records the exact signed intent before broadcast. A restart searches
 finalized history for the same extrinsic hash. It never signs a replacement for
-an unresolved attempt. A cycle reports `CONFIRMED` only after the exact stored
-row and UID mappings match at inclusion and two later finalized heads.
+an unresolved attempt. A cycle reports `CONFIRMED` only after destination UID
+mappings match at inclusion and the exact stored row matches at inclusion and
+two later finalized heads.
 
 ## Run the validator
 
@@ -50,12 +51,13 @@ python -m venv .venv
   --wallet-name YOUR_WALLET \
   --wallet-hotkey YOUR_HOTKEY \
   --qvl /absolute/path/to/cathedral-tdx-verifier \
-  --once \
   --confirm-direct-write
 ```
 
 The runtime is pinned to Finney and SN39. It scores every serving miner. It has
-no miner allowlist or alternate scoring mode.
+no miner allowlist or alternate scoring mode. Add `--once` only for a bounded
+first-launch verification. It still signs and submits one live vector, and it
+exits zero only after exact finalized confirmation.
 
 The sole journal path is deterministic for the current user and signer:
 
@@ -67,12 +69,26 @@ The sole journal path is deterministic for the current user and signer:
 The parent directory and journal must remain owner-only. There is no command
 line state-path override.
 
-## QVL download pending
+## Install the pinned QVL
 
-The required public linux/amd64 verifier download is pending
-[issue #185](https://github.com/cathedralai/cathedral-validator/issues/185).
-Until it publishes an immutable asset, there is no supported public download.
-Do not substitute another binary or weaken the digest check.
+Download the immutable linux/amd64 asset from the
+[v1.0.0 verifier release](https://github.com/cathedralai/cathedral-sandbox/releases/tag/cathedral-tdx-verifier-v1.0.0),
+verify its exact SHA-256, and make it owner-executable:
+
+```bash
+install -d -m 0700 "$HOME/.local/lib/cathedral-validator"
+qvl="$HOME/.local/lib/cathedral-validator/cathedral-tdx-verifier-linux-amd64"
+curl --fail --location --proto '=https' --proto-redir '=https' \
+  --output "$qvl" \
+  https://github.com/cathedralai/cathedral-sandbox/releases/download/cathedral-tdx-verifier-v1.0.0/cathedral-tdx-verifier-linux-amd64
+printf '%s  %s\n' \
+  4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148 \
+  "$qvl" | sha256sum --check -
+chmod 0500 "$qvl"
+```
+
+Pass that absolute path to `--qvl`. Do not substitute another binary or weaken
+the digest check.
 
 ## Current proof boundary
 

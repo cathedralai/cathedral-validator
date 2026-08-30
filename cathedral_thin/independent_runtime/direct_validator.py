@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
 from typing import Any, Sequence
 
@@ -292,9 +293,11 @@ def run_direct_cycle(
         cycle_deadline_monotonic=cycle_deadline,
     )
     plan = build_direct_plan(snapshot, result)
-    if time.monotonic() >= cycle_deadline:
+    evidence_completed = time.monotonic()
+    if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
-    receipt = writer.submit(plan)
+    evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
+    receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
     return {
         "status": receipt.status,
         "anchor": snapshot.identity(),
@@ -302,9 +305,7 @@ def run_direct_cycle(
         "wire_uids": list(plan.wire_uids),
         "wire_weights": list(plan.wire_weights),
         "evidence_digest": plan.evidence_digest,
-        "evidence_cycle_elapsed_ms": max(
-            0, int((time.monotonic() - cycle_started) * 1000)
-        ),
+        "evidence_cycle_elapsed_ms": evidence_cycle_elapsed_ms,
         "receipt": receipt.as_document(),
     }
 
@@ -333,7 +334,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     if options.network != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
-    if not isinstance(options.interval_seconds, float) or options.interval_seconds <= 0:
+    if (
+        not isinstance(options.interval_seconds, float)
+        or not math.isfinite(options.interval_seconds)
+        or options.interval_seconds <= 0
+    ):
         raise SystemExit("interval must be positive")
 
     verifier = load_direct_validator_verifier(options.qvl)

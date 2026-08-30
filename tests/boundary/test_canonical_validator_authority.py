@@ -87,9 +87,17 @@ def test_active_operator_docs_do_not_advertise_retired_console_commands() -> Non
         "cathedral-miner-axon-recover",
         "cathedral-uid30-recover",
         "cathedral-uid30-fleet-preview",
+        "cathedral-uid30-fleet-submit",
+        "cathedral-publisher-serve",
+        "cathedral-candidate-snapshot",
+        "cathedral-validator serve",
         "cathedral-verifyml",
     )
-    active_docs = [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md")]
+    active_docs = [
+        *ROOT.glob("*.md"),
+        *(ROOT / "docs").glob("*.md"),
+        *(ROOT / "deploy").rglob("*.md"),
+    ]
     for path in active_docs:
         text = path.read_text(encoding="utf-8")
         for command in retired:

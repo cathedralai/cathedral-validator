@@ -8,47 +8,6 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _run_startup_stability_check(
-    tmp_path: Path, mode: str
-) -> subprocess.CompletedProcess[str]:
-    source = (ROOT / "deploy" / "sn39" / "install-validator").read_text(
-        encoding="utf-8"
-    )
-    start = source.index("wait_for_service_stability() {\n")
-    end = source.index("\n}\n", start) + 3
-    function = source[start:end]
-    counter = tmp_path / "systemctl-calls"
-    counter.write_text("0", encoding="utf-8")
-    shell = f"""\
-set -euo pipefail
-SERVICE=cathedral-validator-sn39-relay.service
-STARTUP_STABILITY_SECONDS=2
-fail() {{ printf 'failed: %s\\n' "$*" >&2; exit 1; }}
-sleep() {{ :; }}
-systemctl() {{
-  local calls
-  calls="$(<"${{MOCK_COUNTER}}")"
-  calls=$((calls + 1))
-  printf '%s' "${{calls}}" >"${{MOCK_COUNTER}}"
-  if [[ "${{MOCK_MODE}}" == restart && "${{calls}}" -ge 2 ]]; then
-    printf '%s\\n' ActiveState=active SubState=running NRestarts=1 MainPID=456
-  else
-    printf '%s\\n' ActiveState=active SubState=running NRestarts=0 MainPID=123
-  fi
-}}
-{function}
-wait_for_service_stability
-"""
-    return subprocess.run(
-        ["bash"],
-        input=shell,
-        text=True,
-        capture_output=True,
-        env={**os.environ, "MOCK_COUNTER": str(counter), "MOCK_MODE": mode},
-        check=False,
-    )
-
-
 def test_false_launch_design_page_is_not_active() -> None:
     assert not (ROOT / "MINER_VALIDATOR.md").exists()
     assert not (ROOT / "VALIDATOR-ONBOARDING.md").exists()
@@ -62,11 +21,13 @@ def test_false_launch_design_page_is_not_active() -> None:
 def test_readme_is_the_small_public_guide() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     words = " ".join(guide.split())
+    run_block = guide.split("## Run the validator", 1)[1].split("```bash", 1)[1]
+    run_block = run_block.split("```", 1)[0]
     assert guide.count("## ") == 4
     assert guide.startswith("# Cathedral Validator\n")
     assert "## One recurring path" in guide
     assert "## Run the validator" in guide
-    assert "## QVL download pending" in guide
+    assert "## Install the pinned QVL" in guide
     assert "## Current proof boundary" in guide
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
@@ -75,8 +36,17 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "scores every serving miner" in guide
     assert "YOUR_WALLET" in guide
     assert "YOUR_HOTKEY" in guide
-    assert "issue #185" in guide
+    assert "--once" not in run_block
+    assert "Add `--once` only for a bounded" in guide
+    assert "cathedral-tdx-verifier-v1.0.0" in guide
+    assert (
+        "https://github.com/cathedralai/cathedral-sandbox/releases/download/"
+        "cathedral-tdx-verifier-v1.0.0/"
+        "cathedral-tdx-verifier-linux-amd64" in guide
+    )
+    assert "sha256sum --check -" in guide
     assert "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148" in guide
+    assert "issue #185" not in guide
     assert "not self-service" not in guide
     assert "authorized Cathedral operator" not in guide
     assert "Where to get help" not in guide
@@ -96,70 +66,52 @@ def test_old_validator_page_is_only_a_compatibility_pointer() -> None:
     )
 
 
-def test_public_installer_is_one_live_path() -> None:
+def test_former_public_installer_is_a_fail_closed_tombstone() -> None:
     path = ROOT / "deploy" / "sn39" / "install-validator"
     source = path.read_text(encoding="utf-8")
     assert os.access(path, os.X_OK)
     subprocess.run(["bash", "-n", str(path)], check=True)
-    assert "--hotkey" in source
-    assert "--relay --release" in source
-    assert "requirements/sn39-build.lock" in source
-    assert "requirements/sn39-reproduction.lock" in source
-    assert 'staged_venv="$(mktemp -d' in source
-    assert '"${staged_venv}/bin/python" -m pip install' in source
-    assert 'systemctl enable "${SERVICE}"' in source
-    assert 'systemctl is-active --quiet "${SERVICE}"' in source
-    assert "/.bittensor/wallets/validator/hotkeys/default" in source
-    assert 'hotkey_source="$(realpath -e -- "${hotkey_source}")"' in source
-    assert "*/wallets/*/hotkeys/*" in source
-    assert source.index("cathedral-sn39-release verify") < source.rindex(
-        'systemctl start "${SERVICE}"'
+    result = subprocess.run([str(path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 2
+    assert "RETIRED" in result.stderr
+    assert "No files or services were changed" in result.stderr
+    assert "cathedral-validator-sn39-relay.service" not in source
+    assert "--relay" not in source
+    assert "systemctl" not in source
+    assert "install " not in source
+
+
+def test_active_operator_surfaces_exclude_removed_commands() -> None:
+    active = [
+        *ROOT.glob("*.md"),
+        *(ROOT / "docs").glob("*.md"),
+        *(ROOT / "deploy").rglob("README.md"),
+    ]
+    retired = (
+        "cathedral-validator serve",
+        "cathedral-uid30-fleet-submit",
+        "cathedral-publisher-serve",
+        "cathedral-candidate-snapshot",
+        "--relay --release",
+        "cathedral-validator-sn39-relay.service",
     )
-    assert "restore_targets" in source
-    backup = source.index('  "${LEGACY_UNIT_PATH}" \\\n')
-    mutated = source.index("install_mutated=true", backup)
-    remove = source.index('rm -f -- "${LEGACY_UNIT_PATH}"')
-    mask = source.index('systemctl mask --now --force "${LEGACY_SERVICE}"')
-    assert backup < mutated < remove < mask
-    restore = source.index("    restore_targets\n")
-    reload_systemd = source.index("systemctl daemon-reload", restore)
-    restore_legacy_enabled = source.index(
-        'systemctl enable "${LEGACY_SERVICE}"', reload_systemd
-    )
-    restore_legacy_active = source.index(
-        'systemctl start "${LEGACY_SERVICE}"', restore_legacy_enabled
-    )
-    assert restore < reload_systemd < restore_legacy_enabled < restore_legacy_active
-    assert '-f "${LEGACY_UNIT_PATH}" || -L "${LEGACY_UNIT_PATH}"' in source
-    assert '-e "${LEGACY_UNIT_PATH}" && ! -L "${LEGACY_UNIT_PATH}"' in source
-    assert 'systemctl mask --now --force "${LEGACY_SERVICE}"' in source
-    assert "STARTUP_STABILITY_SECONDS=20" in source
-    assert "--property=ActiveState" in source
-    assert "--property=SubState" in source
-    assert "--property=NRestarts" in source
-    assert "--property=MainPID" in source
-    reset = source.index('systemctl reset-failed "${SERVICE}"')
-    start = source.rindex('systemctl start "${SERVICE}"')
-    stable = source.rindex("wait_for_service_stability")
-    committed = source.index("install_complete=true", stable)
-    assert reset < start < stable < committed
-    assert "--dry-run" not in source
-    assert "--broadcast" not in source
-    assert "--offline" not in source
-    assert "cathedral-sn39-public-status.service" not in source
-    assert 'cathedral-validator-sn39.service"' not in source
+    for path in active:
+        text = path.read_text(encoding="utf-8")
+        for command in retired:
+            assert command not in text, f"{command} remains in {path.relative_to(ROOT)}"
 
 
-def test_installer_startup_check_accepts_one_stable_process(tmp_path: Path) -> None:
-    result = _run_startup_stability_check(tmp_path, "stable")
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "systemctl-calls").read_text(encoding="utf-8") == "3"
-
-
-def test_installer_startup_check_rejects_a_restart_loop(tmp_path: Path) -> None:
-    result = _run_startup_stability_check(tmp_path, "restart")
-    assert result.returncode != 0
-    assert "restarted during its startup check" in result.stderr
+def test_retired_guides_are_only_historical_pointers() -> None:
+    for relative in (
+        "docs/PROVENANCE.md",
+        "docs/SN39_MULTICOMPUTE.md",
+        "docs/VIOLET_EXTERNAL_SCORES.md",
+        "deploy/publisher/README.md",
+        "deploy/sn39/README.md",
+    ):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert text.startswith("# Retired"), relative
+        assert "README.md" in text, relative
 
 
 def test_tracked_documentation_has_no_removed_onboarding_anchors() -> None:

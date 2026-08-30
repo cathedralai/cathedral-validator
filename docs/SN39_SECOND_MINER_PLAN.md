@@ -7,8 +7,8 @@ two-UID UID30 successor paths are retired. Their console entry points are not a
 supported launch surface. Historical recovery code remains because deleting it
 would weaken recovery for an already journaled ambiguous attempt.
 
-Use [SN39 bounded multi-machine compute](SN39_MULTICOMPUTE.md) for the supported
-same-UID fleet preview. It is no-write and adds no recurring authority mode.
+Use the [repository home page](../README.md) for the supported recurring direct
+validator. The linked multi-compute page is a historical pointer only.
 
 ## Preserved finalized evidence
 
@@ -68,7 +68,7 @@ never announces or resubmits.
 
 No retired preview, announce, or successor-submit command is supported. Git
 history preserves their implementation and earlier operator text. The active
-product path is the signed, bounded, same-UID fleet preview documented above.
+product path is the recurring direct validator on the repository home page.
 
 Zero burn refers only to weight allocation. Registration cost is separate. A
 weight row proves allocation from one validator only. Rewards remain NOT PROVEN

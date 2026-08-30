@@ -586,6 +586,13 @@ def writer(
     return instance, subtensor, selected
 
 
+def submit_before_deadline(instance: DirectWeightWriter, planned: DirectWeightPlan):
+    return instance.submit(
+        planned,
+        cycle_deadline_monotonic=writer_runtime.time.monotonic() + 600.0,
+    )
+
+
 def test_writer_uses_one_canonical_signer_network_path(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -620,7 +627,7 @@ def test_multi_uid_writer_persists_exact_intent_and_confirms_three_heads(
     )
     instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
 
-    receipt = instance.submit(planned)
+    receipt = submit_before_deadline(instance, planned)
 
     assert receipt.status == STATUS_CONFIRMED
     assert receipt.extrinsic_hash == EXTRINSIC_HASH
@@ -650,7 +657,7 @@ def test_cooldown_refuses_before_signing_or_journaling(
     with pytest.raises(
         DirectValidatorError, match="inside the finalized weight cooldown"
     ):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
 
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
@@ -664,7 +671,76 @@ def test_stake_threshold_refuses_before_signing_or_journaling(
     subtensor.validator_stake = subtensor.stake_threshold - 1
 
     with pytest.raises(DirectValidatorError, match="below.*stake threshold"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_slow_fresh_snapshot_rpc_expires_before_signing_or_journaling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+
+    def slow_snapshot(_subtensor, _keypair):
+        now[0] = 221.0
+        return snapshot(ANCHOR_NUMBER + 1)
+
+    instance.snapshot_reader = slow_snapshot
+    with pytest.raises(
+        DirectValidatorError, match="expired during fresh snapshot RPC"
+    ) as raised:
+        instance.submit(planned, cycle_deadline_monotonic=220.0)
+
+    assert not isinstance(raised.value, DirectSubmissionAmbiguous)
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_slow_eligibility_rpc_expires_before_later_preflight_or_signing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    now = [100.0]
+    original = subtensor.weights_rate_limit
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+
+    def slow_rate_limit(netuid, *, block):
+        value = original(netuid, block=block)
+        now[0] = 221.0
+        return value
+
+    subtensor.weights_rate_limit = slow_rate_limit
+    with pytest.raises(
+        DirectValidatorError, match="expired during weight cooldown RPC"
+    ):
+        instance.submit(planned, cycle_deadline_monotonic=220.0)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_call_builder_deadline_is_rechecked_immediately_before_signing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+
+    def slow_call_builder(_kwargs):
+        now[0] = 221.0
+        return "direct-call"
+
+    instance.call_builder = slow_call_builder
+    with pytest.raises(
+        DirectValidatorError, match="expired during immediately before signing"
+    ):
+        instance.submit(planned, cycle_deadline_monotonic=220.0)
 
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
@@ -679,7 +755,7 @@ def test_inclusion_waits_for_two_later_heads_then_recovers_without_resubmit(
     monkeypatch.setattr(writer_runtime, "CONFIRMATION_WAIT_SECONDS", 0.0)
 
     with pytest.raises(DirectSubmissionAmbiguous, match="two later finalized heads"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert state["pending"]["phase"] == "included_awaiting_confirmation"
     signed = subtensor.substrate.sign_calls
@@ -708,7 +784,7 @@ def test_confirmation_poll_allows_once_style_submission_to_finish(
 
     monkeypatch.setattr(writer_runtime.time, "sleep", advance)
 
-    receipt = instance.submit(planned)
+    receipt = submit_before_deadline(instance, planned)
 
     assert receipt.status == STATUS_CONFIRMED
     assert sleeps and sleeps[0] <= writer_runtime.CONFIRMATION_POLL_SECONDS
@@ -721,7 +797,7 @@ def test_timeout_after_inclusion_recovers_hash_and_row_without_resubmit(
     subtensor.substrate.raise_after_include = True
 
     with pytest.raises(DirectSubmissionAmbiguous, match="recover, never retry"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     signed = subtensor.substrate.sign_calls
     submitted = subtensor.substrate.submit_calls
 
@@ -742,11 +818,11 @@ def test_unresolved_timeout_is_fenced_until_the_mortal_era_expires(
     subtensor.substrate.raise_without_include = True
 
     with pytest.raises(DirectSubmissionAmbiguous):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     with pytest.raises(DirectSubmissionAmbiguous, match="unresolved"):
         instance.recover()
     with pytest.raises(DirectSubmissionAmbiguous, match="must be recovered"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     assert subtensor.substrate.sign_calls == 1
     assert subtensor.substrate.submit_calls == 1
 
@@ -764,7 +840,7 @@ def test_recovery_refuses_a_mutated_exact_signed_intent(
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     subtensor.substrate.raise_without_include = True
     with pytest.raises(DirectSubmissionAmbiguous):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     state["pending"]["intent"]["nonce"] += 1
     instance.state_path.write_text(json.dumps(state), encoding="ascii")
@@ -778,7 +854,7 @@ def test_recovery_refuses_a_mutated_exact_signed_intent(
     [
         ("wrong_call", "different chain call"),
         ("wrong_storage", "stored mechanism row differs"),
-        ("later_mapping", "weighted miner mapping changed"),
+        ("inclusion_mapping", "weighted miner mapping changed"),
     ],
 )
 def test_recovery_stops_on_finalized_contradiction(
@@ -787,16 +863,31 @@ def test_recovery_stops_on_finalized_contradiction(
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     subtensor.substrate.raise_after_include = True
     with pytest.raises(DirectSubmissionAmbiguous):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     if mutation == "wrong_call":
         subtensor.substrate.wrong_call = True
     elif mutation == "wrong_storage":
         subtensor.substrate.wrong_storage = True
     else:
-        subtensor.remap_after = ANCHOR_NUMBER + 3
+        subtensor.remap_after = ANCHOR_NUMBER + 2
 
     with pytest.raises(DirectSubmissionContradiction, match=message):
         instance.recover()
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+
+
+@pytest.mark.parametrize("remap_after", (ANCHOR_NUMBER + 3, ANCHOR_NUMBER + 4))
+def test_later_miner_remap_keeps_exact_stored_row_confirmed(
+    tmp_path: Path, monkeypatch, remap_after: int
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    subtensor.remap_after = remap_after
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert [row[0] for row in receipt.confirmation_heads] == [102, 103, 104]
     assert subtensor.substrate.sign_calls == 1
     assert subtensor.substrate.submit_calls == 1
 
@@ -812,7 +903,7 @@ def test_writer_refuses_remapped_miner_before_signing(
     instance.snapshot_reader = lambda _subtensor, _keypair: changed
 
     with pytest.raises(DirectValidatorError, match="serving miner set changed"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
 
@@ -826,7 +917,7 @@ def test_writer_refuses_a_new_serving_miner_before_signing(
     )
 
     with pytest.raises(DirectValidatorError, match="serving miner set changed"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     assert subtensor.substrate.sign_calls == 0
 
 
@@ -837,7 +928,7 @@ def test_writer_refuses_truthy_non_boolean_permit_before_signing(
     subtensor.truthy_permit_at = ANCHOR_NUMBER + 1
 
     with pytest.raises(DirectValidatorError, match="explicit boolean"):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     assert subtensor.substrate.sign_calls == 0
 
 
@@ -847,7 +938,7 @@ def test_confirmation_refuses_truthy_non_boolean_permit(
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     subtensor.substrate.raise_after_include = True
     with pytest.raises(DirectSubmissionAmbiguous):
-        instance.submit(planned)
+        submit_before_deadline(instance, planned)
     subtensor.truthy_permit_at = ANCHOR_NUMBER + 3
 
     with pytest.raises(DirectSubmissionAmbiguous, match="confirmation block"):
@@ -903,14 +994,18 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     submitted: list[DirectWeightPlan] = []
     seen_axons: list[tuple[ServingAxon, ...]] = []
     seen_deadlines: list[float] = []
+    writer_deadlines: list[float] = []
     receipt = SimpleNamespace(
         status=STATUS_CONFIRMED,
         as_document=lambda: {"status": STATUS_CONFIRMED},
     )
-    writer_object = SimpleNamespace(
-        recover=lambda: None,
-        submit=lambda value: submitted.append(value) or receipt,
-    )
+
+    def submit(value, *, cycle_deadline_monotonic):
+        submitted.append(value)
+        writer_deadlines.append(float(cycle_deadline_monotonic))
+        return receipt
+
+    writer_object = SimpleNamespace(recover=lambda: None, submit=submit)
     monkeypatch.setattr(
         runtime, "finalized_serving_miners_snapshot", lambda *_args: observed
     )
@@ -933,6 +1028,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
 
     assert seen_axons == [miners]
     assert seen_deadlines[0] > runtime.time.monotonic()
+    assert writer_deadlines == seen_deadlines
     assert result["status"] == STATUS_CONFIRMED
     assert result["raw_scores"] == [[19, 1], [20, 1]]
     assert result["wire_uids"] == [19, 20]
@@ -963,7 +1059,7 @@ def test_snapshot_and_scoring_share_one_end_to_end_presign_deadline(
     submitted: list[DirectWeightPlan] = []
     writer_object = SimpleNamespace(
         recover=lambda: None,
-        submit=lambda value: submitted.append(value),
+        submit=lambda value, **_kwargs: submitted.append(value),
     )
     now = [100.0]
     monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
@@ -989,6 +1085,43 @@ def test_snapshot_and_scoring_share_one_end_to_end_presign_deadline(
             writer=writer_object,
         )
     assert submitted == []
+
+
+def test_evidence_elapsed_excludes_writer_chain_wait(monkeypatch) -> None:
+    now = [100.0]
+    observed = snapshot()
+    scored = round_result(machine_row("1"))
+    receipt = SimpleNamespace(
+        status=STATUS_CONFIRMED,
+        as_document=lambda: {"status": STATUS_CONFIRMED},
+    )
+    deadlines: list[float] = []
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: observed
+    )
+
+    def score(**_kwargs):
+        now[0] = 110.0
+        return scored
+
+    def submit(_plan, *, cycle_deadline_monotonic):
+        deadlines.append(float(cycle_deadline_monotonic))
+        now[0] = 500.0
+        return receipt
+
+    monkeypatch.setattr(runtime, "score_multicompute_round", score)
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(recover=lambda: None, submit=submit),
+    )
+
+    assert deadlines == [220.0]
+    assert result["evidence_cycle_elapsed_ms"] == 10_000
 
 
 def test_cli_refuses_before_wallet_or_chain_access(monkeypatch) -> None:
@@ -1021,16 +1154,16 @@ def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
                 "--confirm-direct-write",
             ]
         )
-    with pytest.raises(SystemExit, match=r"interval must be positive$"):
-        runtime.main(
-            [
-                "--qvl",
-                "/reviewed/qvl",
-                "--interval-seconds",
-                "0",
-                "--confirm-direct-write",
-            ]
-        )
+    for interval in ("0", "nan", "inf", "-inf"):
+        with pytest.raises(SystemExit, match=r"interval must be positive$"):
+            runtime.main(
+                [
+                    "--qvl",
+                    "/reviewed/qvl",
+                    f"--interval-seconds={interval}",
+                    "--confirm-direct-write",
+                ]
+            )
 
 
 def test_cli_checks_direct_qvl_pin_before_wallet_or_chain_access(monkeypatch) -> None:

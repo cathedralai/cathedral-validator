@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -67,6 +68,23 @@ class DirectSubmissionAmbiguous(DirectValidatorError):
 
 class DirectSubmissionContradiction(DirectSubmissionAmbiguous):
     """Finalized history or durable state contradicts the signed intent."""
+
+
+def _presign_deadline(value: object) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise DirectValidatorError(
+            "pre-sign deadline must be a finite monotonic timestamp"
+        )
+    return float(value)
+
+
+def _require_presign_time(deadline: float, *, stage: str) -> None:
+    if time.monotonic() >= deadline:
+        raise DirectValidatorError(f"pre-sign deadline expired during {stage}")
 
 
 def _canonical_hash(value: object, *, label: str) -> str:
@@ -396,7 +414,10 @@ class DirectWeightWriter:
         self,
         plan: DirectWeightPlan,
         fresh: FinalizedMetagraphSnapshot,
+        *,
+        presign_deadline: float,
     ) -> None:
+        _require_presign_time(presign_deadline, stage="freshness preflight")
         anchor = plan.snapshot
         anchor_miners = anchor.miner_by_uid()
         fresh_miners = fresh.miner_by_uid()
@@ -418,6 +439,7 @@ class DirectWeightWriter:
             )
         except DirectSubmissionAmbiguous as exc:
             raise DirectValidatorError("evidence anchor cannot be rechecked") from exc
+        _require_presign_time(presign_deadline, stage="anchor freshness RPC")
         if canonical != anchor.block_hash:
             raise DirectValidatorError("evidence anchor is no longer canonical")
 
@@ -425,37 +447,47 @@ class DirectWeightWriter:
         self,
         plan: DirectWeightPlan,
         fresh: FinalizedMetagraphSnapshot,
+        *,
+        presign_deadline: float,
     ) -> dict[str, object]:
         """Refuse every deterministic chain-policy failure before signing."""
 
         block = fresh.block_number
         try:
+            _require_presign_time(presign_deadline, stage="eligibility preflight")
             rate_limit = _nonnegative_int(
                 self.subtensor.weights_rate_limit(NETUID, block=block),
                 label="SN39 weight cooldown",
             )
+            _require_presign_time(presign_deadline, stage="weight cooldown RPC")
             blocks_since = _nonnegative_int(
                 self.subtensor.blocks_since_last_update(
                     NETUID, fresh.validator_uid, block=block
                 ),
                 label="validator blocks since last update",
             )
+            _require_presign_time(presign_deadline, stage="last-update RPC")
             min_allowed = _nonnegative_int(
                 self.subtensor.min_allowed_weights(netuid=NETUID, block=block),
                 label="SN39 minimum allowed weights",
             )
+            _require_presign_time(presign_deadline, stage="minimum-weights RPC")
             max_weight = float(
                 _raw_value(self.subtensor.max_weight_limit(netuid=NETUID, block=block))
             )
+            _require_presign_time(presign_deadline, stage="maximum-weight RPC")
             commit_reveal = _strict_bool(
                 self.subtensor.commit_reveal_enabled(netuid=NETUID, block=block),
                 label="SN39 commit-reveal state",
             )
+            _require_presign_time(presign_deadline, stage="commit-reveal RPC")
             mechanism_count = _nonnegative_int(
                 self.subtensor.get_mechanism_count(NETUID, block=block),
                 label="SN39 mechanism count",
             )
+            _require_presign_time(presign_deadline, stage="mechanism-count RPC")
             metagraph = self.subtensor.metagraph(NETUID, block=block)
+            _require_presign_time(presign_deadline, stage="eligibility metagraph RPC")
             if (
                 _nonnegative_int(
                     int(getattr(metagraph, "block", -1)),
@@ -474,6 +506,7 @@ class DirectWeightWriter:
                 for value in list(metagraph.last_update)
             ]
             info = self.subtensor.get_metagraph_info(NETUID, MECID, block=block)
+            _require_presign_time(presign_deadline, stage="metagraph-info RPC")
             if info is None or int(getattr(info, "block", -1)) != block:
                 raise DirectValidatorError(
                     "SN39 metagraph info is not at the finalized sign head"
@@ -493,6 +526,7 @@ class DirectWeightWriter:
                 ),
                 label="weight stake threshold",
             )
+            _require_presign_time(presign_deadline, stage="stake-threshold RPC")
             version_key = _nonnegative_int(
                 self.subtensor.substrate.query(
                     module="SubtensorModule",
@@ -502,6 +536,7 @@ class DirectWeightWriter:
                 ),
                 label="SN39 weight version",
             )
+            _require_presign_time(presign_deadline, stage="weight-version RPC")
         except DirectValidatorError:
             raise
         except Exception as exc:
@@ -749,6 +784,7 @@ class DirectWeightWriter:
         uid_hotkeys: Mapping[int, str],
         dests: tuple[int, ...],
         weights: tuple[int, ...],
+        require_dest_mapping: bool,
     ) -> None:
         try:
             canonical = _canonical_hash(
@@ -800,12 +836,14 @@ class DirectWeightWriter:
             raise DirectSubmissionContradiction(
                 f"validator mapping changed at finalized block {block_number}"
             )
-        for uid in dests:
-            index = uid_to_index.get(uid)
-            if index is None or hotkeys[index] != uid_hotkeys[uid]:
-                raise DirectSubmissionContradiction(
-                    f"weighted miner mapping changed at finalized block {block_number}"
-                )
+        if require_dest_mapping:
+            for uid in dests:
+                index = uid_to_index.get(uid)
+                if index is None or hotkeys[index] != uid_hotkeys[uid]:
+                    raise DirectSubmissionContradiction(
+                        "weighted miner mapping changed at finalized block "
+                        f"{block_number}"
+                    )
         if stored_rows != tuple(zip(dests, weights)):
             raise DirectSubmissionContradiction(
                 f"stored mechanism row differs at finalized block {block_number}"
@@ -868,6 +906,7 @@ class DirectWeightWriter:
                 uid_hotkeys=contract[2],
                 dests=contract[3],
                 weights=contract[4],
+                require_dest_mapping=block_number == located.block_number,
             )
             proven.append((block_number, block_hash))
         return DirectSubmissionReceipt(
@@ -1059,12 +1098,22 @@ class DirectWeightWriter:
                 "signed direct extrinsic is unresolved; recovery will not retry it"
             )
 
-    def submit(self, plan: DirectWeightPlan) -> DirectSubmissionReceipt:
+    def submit(
+        self,
+        plan: DirectWeightPlan,
+        *,
+        cycle_deadline_monotonic: float,
+    ) -> DirectSubmissionReceipt:
         """Persist one signed intent, broadcast once, and prove stored finality."""
 
+        presign_deadline = _presign_deadline(cycle_deadline_monotonic)
+        _require_presign_time(presign_deadline, stage="writer entry")
         kwargs = self._validate_plan(plan)
+        _require_presign_time(presign_deadline, stage="plan validation")
         with self._locked():
+            _require_presign_time(presign_deadline, stage="writer lock acquisition")
             state = self._read_state()
+            _require_presign_time(presign_deadline, stage="journal preflight")
             if self._pending(state) is not None:
                 raise DirectSubmissionAmbiguous(
                     "a prior signed direct intent must be recovered first"
@@ -1078,16 +1127,26 @@ class DirectWeightWriter:
                     "direct validator already attempted this finalized anchor"
                 )
 
+            _require_presign_time(presign_deadline, stage="before genesis RPC")
             observed_genesis_hash(self.subtensor)
+            _require_presign_time(presign_deadline, stage="genesis RPC")
             fresh = self.snapshot_reader(self.subtensor, self.keypair)
-            self._require_fresh_snapshot(plan, fresh)
-            eligibility = self._require_finalized_eligibility(plan, fresh)
+            _require_presign_time(presign_deadline, stage="fresh snapshot RPC")
+            self._require_fresh_snapshot(plan, fresh, presign_deadline=presign_deadline)
+            eligibility = self._require_finalized_eligibility(
+                plan, fresh, presign_deadline=presign_deadline
+            )
+            _require_presign_time(presign_deadline, stage="eligibility preflight")
             substrate = self.subtensor.substrate
             try:
                 nonce = substrate.get_account_next_index(plan.snapshot.validator_hotkey)
+                _require_presign_time(presign_deadline, stage="nonce RPC")
                 if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
                     raise ValueError("account nonce is invalid")
                 call = self.call_builder(kwargs)
+                _require_presign_time(
+                    presign_deadline, stage="immediately before signing"
+                )
                 signed = substrate.create_signed_extrinsic(
                     call=call,
                     keypair=self.keypair,
@@ -1102,6 +1161,8 @@ class DirectWeightWriter:
                     label="signed extrinsic",
                 )
             except DirectSubmissionAmbiguous:
+                raise
+            except DirectValidatorError:
                 raise
             except Exception as exc:
                 raise DirectValidatorError(
