@@ -34,8 +34,8 @@ sudo ./deploy/sn39/install-validator \
 ```
 
 The installer locks the exact Git commit and dependencies, copies only the
-hotkey into the validator service account, verifies the installation, and
-starts the validator.
+hotkey into the validator service account, verifies the installation, starts
+the validator, and checks that its process stays up through startup.
 
 Check it with:
 
