@@ -28,6 +28,7 @@ from cathedral_thin.independent_runtime.updater import (
     SignedReleaseUpdater,
     UpdateRefused,
     direct_writer_journal_path,
+    load_expected_hotkey_identity,
     parse_release_metadata,
     release_tree_sha256,
 )
@@ -311,6 +312,39 @@ def test_updater_rejects_unsafe_expected_hotkey(tmp_path: Path, hotkey: str) -> 
             expected_hotkey=hotkey,
             journal_scope_root=tmp_path / "scope",
         )
+
+
+def test_updater_loads_one_root_owned_public_identity(tmp_path: Path) -> None:
+    identity = tmp_path / "identity.env"
+    identity.write_text(
+        "# Public address only.\n"
+        "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=5ExpectedValidator\n"
+    )
+    identity.chmod(0o600)
+
+    assert (
+        load_expected_hotkey_identity(
+            identity,
+            expected_uid=os.geteuid(),
+        )
+        == "5ExpectedValidator"
+    )
+
+    identity.write_text(
+        "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=5ExpectedValidator\n"
+        "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=5OtherValidator\n"
+    )
+    with pytest.raises(UpdateRefused, match="unexpected fields"):
+        load_expected_hotkey_identity(identity, expected_uid=os.geteuid())
+
+    identity.write_text("CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=../other\n")
+    with pytest.raises(UpdateRefused, match="hotkey is not path-safe"):
+        load_expected_hotkey_identity(identity, expected_uid=os.geteuid())
+
+    identity.write_text("CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=5ExpectedValidator\n")
+    identity.chmod(0o640)
+    with pytest.raises(UpdateRefused, match="not root-controlled"):
+        load_expected_hotkey_identity(identity, expected_uid=os.geteuid())
 
 
 def _update(
@@ -878,8 +912,9 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
         unit = (deploy / name).read_text()
         assert "ProtectHome=true" in unit
         assert "ConditionPathExists=/etc/cathedral-validator/identity.env" in unit
-        assert "EnvironmentFile=/etc/cathedral-validator/identity.env" in unit
-        assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in unit
+        assert "EnvironmentFile=/etc/cathedral-validator/identity.env" not in unit
+        assert "--identity-file=/etc/cathedral-validator/identity.env" in unit
+        assert "--expected-hotkey" not in unit
         assert "--journal" not in unit
         assert (
             "ExecStart=/usr/local/lib/cathedral-validator-updater/bin/"

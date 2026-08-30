@@ -12,8 +12,7 @@ Type=oneshot
 User=root
 Group=root
 EnvironmentFile=/etc/cathedral-validator/update.env
-EnvironmentFile=/etc/cathedral-validator/identity.env
-ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=stable --metadata-url=${CATHEDRAL_VALIDATOR_STABLE_METADATA_URL} --public-key=/etc/cathedral-validator/update-public-key.pem --expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY} --minimum-sequence=${CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE}
+ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=stable --metadata-url=${CATHEDRAL_VALIDATOR_STABLE_METADATA_URL} --public-key=/etc/cathedral-validator/update-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=${CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE}
 TimeoutStartSec=480s
 UMask=0077
 NoNewPrivileges=true

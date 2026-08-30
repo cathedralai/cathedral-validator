@@ -171,8 +171,9 @@ sudo install -o root -g root -m 0644 \
 sudo systemctl daemon-reload
 ```
 
-Edit `update.env` and `identity.env` before continuing. Then run the bootstrap
-with the same public hotkey identity and authenticated minimum sequence:
+Edit `update.env` and `identity.env` before continuing. Then run the bootstrap.
+It reads the exact same identity file as the direct service, so there is no
+second hotkey value to type or keep in sync:
 
 ```bash
 sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
@@ -180,7 +181,7 @@ sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
   --channel stable \
   --metadata-url https://releases.cathedral.com/validator/stable.json \
   --public-key /etc/cathedral-validator/update-public-key.pem \
-  --expected-hotkey YOUR_HOTKEY_SS58 \
+  --identity-file /etc/cathedral-validator/identity.env \
   --minimum-sequence YOUR_AUTHENTICATED_STABLE_SEQUENCE
 ```
 

@@ -60,6 +60,7 @@ DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT = Path(
     "/var/lib/cathedral-validator/.local/state/cathedral-validator/"
     "direct-writer/finney-sn39-mechanism-0"
 )
+DEFAULT_IDENTITY_FILE = Path("/etc/cathedral-validator/identity.env")
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -478,6 +479,44 @@ def direct_writer_journal_path(
     ):
         raise UpdateRefused("direct writer journal scope is invalid")
     return scope_root / expected_hotkey / "state.json"
+
+
+def load_expected_hotkey_identity(
+    path: Path,
+    *,
+    expected_uid: int = 0,
+) -> str:
+    """Load one root-controlled public validator identity environment file."""
+
+    if not path.is_absolute() or path.is_symlink():
+        raise UpdateRefused("validator identity file path is invalid")
+    try:
+        metadata = path.stat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise UpdateRefused("validator identity file is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or not 1 <= len(raw) <= 4096
+    ):
+        raise UpdateRefused("validator identity file is not root-controlled")
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise UpdateRefused("validator identity file is not ASCII") from exc
+    assignments = [line for line in lines if line and not line.startswith("#")]
+    prefix = "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY="
+    if (
+        len(assignments) != 1
+        or not assignments[0].startswith(prefix)
+        or assignments[0].count("=") != 1
+    ):
+        raise UpdateRefused("validator identity file has unexpected fields")
+    expected_hotkey = assignments[0][len(prefix) :]
+    direct_writer_journal_path(expected_hotkey)
+    return expected_hotkey
 
 
 def _state_path(root: Path) -> Path:
@@ -1265,7 +1304,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--channel", required=True, choices=("canary", "stable"))
     parser.add_argument("--metadata-url", required=True)
     parser.add_argument("--public-key", required=True, type=Path)
-    parser.add_argument("--expected-hotkey", required=True)
+    parser.add_argument(
+        "--identity-file",
+        type=Path,
+        default=DEFAULT_IDENTITY_FILE,
+    )
     parser.add_argument("--minimum-sequence", required=True, type=int)
     parser.add_argument(
         "--bootstrap-first-install",
@@ -1291,10 +1334,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("the updater must run as root")
     try:
         key = load_pinned_public_key(options.public_key)
+        expected_hotkey = load_expected_hotkey_identity(options.identity_file)
         updater = SignedReleaseUpdater(
             install_root=options.install_root,
             state_root=options.state_root,
-            expected_hotkey=options.expected_hotkey,
+            expected_hotkey=expected_hotkey,
         )
         arguments = {
             "metadata_url": options.metadata_url,
@@ -1338,6 +1382,7 @@ __all__ = [
     "release_tree_sha256",
     "require_idle_direct_writer_journal",
     "direct_writer_journal_path",
+    "load_expected_hotkey_identity",
 ]
 
 
