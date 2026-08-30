@@ -59,21 +59,35 @@ def test_false_launch_design_page_is_not_active() -> None:
     assert not (ROOT / "deploy" / "sn39" / "docker").exists()
 
 
-def test_validator_page_is_a_small_public_guide() -> None:
-    guide = (ROOT / "VALIDATOR.md").read_text(encoding="utf-8")
+def test_readme_is_the_small_public_guide() -> None:
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
     assert guide.count("## ") == 3
+    assert '<div align="center">' in guide
+    assert "<h1>⚡ Cathedral Validator</h1>" in guide
+    assert "<strong>Bittensor SN39</strong>" in guide
     assert "## 1. What it does" in guide
     assert "## 2. What you need" in guide
     assert "## 3. Install, run, and know it is working" in guide
     assert "deploy/sn39/install-validator" in guide
     assert "WEIGHTS_SUBMITTED" in guide
-    assert "never needs\n  your coldkey" in guide
+    assert "Never provide your coldkey" in guide
     assert "not self-service" not in guide
     assert "authorized Cathedral operator" not in guide
     assert "Where to get help" not in guide
     assert "--dry-run" not in guide
     assert "--broadcast" not in guide
     assert "--offline" not in guide
+    assert "cathedral-sandbox/blob/main/MINING.md" not in guide
+    assert "cathedral-validator/blob/main/VALIDATOR.md" not in guide
+
+
+def test_old_validator_page_is_only_a_compatibility_pointer() -> None:
+    pointer = (ROOT / "VALIDATOR.md").read_text(encoding="utf-8")
+    assert pointer == (
+        "# Cathedral Validator\n\n"
+        "The public installation and operating guide is on the "
+        "[repository home page](README.md).\n"
+    )
 
 
 def test_public_installer_is_one_live_path() -> None:
@@ -152,19 +166,3 @@ def test_tracked_documentation_has_no_removed_onboarding_anchors() -> None:
         text = path.read_text(encoding="utf-8")
         assert "README.md#quickstart" not in text, path.relative_to(ROOT)
         assert "VALIDATOR.md#" not in text, path.relative_to(ROOT)
-
-
-def test_readme_is_a_small_centered_product_front_door() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert readme.count("\n") == 7
-    assert '<div align="center">' in readme
-    assert "<strong>Bittensor SN39</strong>" in readme
-    assert (
-        "<strong>Racing to build the fastest sandbox fleet on earth</strong>" in readme
-    )
-    assert "<strong>With machines that prove what they run</strong>" in readme
-    assert "cathedralai/cathedral-sandbox/blob/main/MINING.md" in readme
-    assert "cathedralai/cathedral-validator/blob/main/VALIDATOR.md" in readme
-    assert "cathedral.computer" not in readme
-    assert "cathedral-distill" not in readme
-    assert "--broadcast" not in readme

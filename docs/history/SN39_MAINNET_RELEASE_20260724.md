@@ -1,7 +1,7 @@
 # SN39 Intel TDX CPU mainnet release
 
 This file records the 2026-07-24 release ceremony and its evidence. It is not
-an operator guide. Use the current public installer in `VALIDATOR.md`. Recheck
+an operator guide. Use the current public installer in `README.md`. Recheck
 every live fact before a new release or submission.
 
 > [!CAUTION]
