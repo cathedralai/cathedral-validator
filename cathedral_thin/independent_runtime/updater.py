@@ -379,6 +379,8 @@ def extract_release_archive(archive: bytes, destination: Path) -> None:
                 with target.open("xb") as output:
                     shutil.copyfileobj(source, output, length=65_536)
                 os.chmod(target, 0o555 if member.mode & 0o111 else 0o444)
+        for root, _directories, _files in os.walk(destination):
+            os.chmod(root, 0o755)
     except (tarfile.TarError, OSError) as exc:
         raise UpdateRefused("release archive extraction failed") from exc
 
@@ -601,15 +603,17 @@ def enforce_monotonic_release(state: Mapping[str, Any], release: Release) -> Non
         raise UpdateRefused("release metadata equivocates at an existing sequence")
 
 
-def _root_owned_directory(path: Path, *, expected_uid: int) -> None:
-    path.mkdir(mode=0o755, parents=True, exist_ok=True)
+def _root_owned_directory(path: Path, *, expected_uid: int, required_mode: int) -> None:
+    path.mkdir(mode=required_mode, parents=True, exist_ok=True)
     metadata = path.stat()
     if (
         path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != expected_uid
         or stat.S_IMODE(metadata.st_mode) & 0o022
     ):
         raise UpdateRefused("update installation directory is not root-controlled")
+    os.chmod(path, required_mode)
 
 
 def _release_target(archive_sha256: str) -> str:
@@ -996,7 +1000,9 @@ class SignedReleaseUpdater:
 
     def _install_release(self, release: Release, archive: bytes) -> Path:
         releases = self.install_root / "releases"
-        _root_owned_directory(releases, expected_uid=self.expected_uid)
+        _root_owned_directory(
+            releases, expected_uid=self.expected_uid, required_mode=0o755
+        )
         release_dir = releases / release.archive_sha256
         if len(archive) > MAX_ARCHIVE_BYTES:
             raise UpdateRefused("release archive exceeds its size limit")
@@ -1100,8 +1106,12 @@ class SignedReleaseUpdater:
             or minimum_sequence < 1
         ):
             raise UpdateRefused("trusted minimum release sequence is invalid")
-        _root_owned_directory(self.install_root, expected_uid=self.expected_uid)
-        _root_owned_directory(self.state_root, expected_uid=self.expected_uid)
+        _root_owned_directory(
+            self.install_root, expected_uid=self.expected_uid, required_mode=0o755
+        )
+        _root_owned_directory(
+            self.state_root, expected_uid=self.expected_uid, required_mode=0o700
+        )
         lock_path = self.state_root / "updater.lock"
         flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):

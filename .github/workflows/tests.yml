@@ -332,7 +332,7 @@ jobs:
           pex3 lock create \
             --style strict \
             "$VALIDATOR_REQUIREMENT" \
-            'cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@5268443104fd7717b95ce4c398ddf6229ec4f461' \
+            'cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb' \
             --python "$(command -v python)" \
             --interpreter-constraint 'CPython==3.12.*' \
             --no-build \
@@ -371,9 +371,12 @@ jobs:
           builder["_validator_pex"](pex)
           builder["validator_release_tree"](pex, release)
           PY
-          mkdir -m 0700 /tmp/cathedral-validator-pex-root
+          sudo chown -R root:root /tmp/cathedral-validator-release
+          sudo install -d -o nobody -m 0700 /tmp/cathedral-validator-pex-root
           cd /tmp
-          CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=/tmp/cathedral-validator-pex-root \
-            PEX_ROOT=/tmp/cathedral-validator-pex-root PEX_INTERPRETER=1 \
+          sudo -u nobody env \
+            CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=/tmp/cathedral-validator-pex-root \
+            PEX_ROOT=/tmp/cathedral-validator-pex-root \
+            PEX_INTERPRETER=1 \
             /tmp/cathedral-validator-release/bin/cathedral-validator \
             "$GITHUB_WORKSPACE/tests/release_smoke/run_real_validator.py"

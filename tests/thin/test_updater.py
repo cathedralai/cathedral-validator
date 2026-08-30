@@ -371,9 +371,23 @@ def test_clean_host_bootstrap_creates_idle_lock_and_starts_first_release(
         seed_current=False,
     )
 
-    assert _bootstrap(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    previous_umask = os.umask(0o077)
+    try:
+        assert _bootstrap(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    finally:
+        os.umask(previous_umask)
 
     assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    assert stat.S_IMODE((tmp_path / "install").stat().st_mode) == 0o755
+    assert stat.S_IMODE((tmp_path / "install" / "releases").stat().st_mode) == 0o755
+    assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
+    current_release = (tmp_path / "install" / "current").resolve()
+    assert stat.S_IMODE(current_release.stat().st_mode) == 0o755
+    assert stat.S_IMODE((current_release / "bin").stat().st_mode) == 0o755
+    assert (
+        stat.S_IMODE((current_release / "bin" / "cathedral-validator").stat().st_mode)
+        == 0o555
+    )
     assert journal.is_file()
     assert stat.S_IMODE(journal.stat().st_mode) == 0o600
     cycle_lock = journal.with_name("cycle.lock")
@@ -848,7 +862,10 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "continue-on-error" not in release_job
     assert "pex==2.101.1" in release_job
     assert "cathedral-scaffold[snp-production] @" in release_job
-    assert "cathedral @ git+https://github.com/cathedralai/" in release_job
+    assert (
+        "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@"
+        "8dde6eaca27116eed53386a1fa33ec70b74a01fb" in release_job
+    )
     assert release_job.count("CPython==3.12.*") == 2
     assert "cmp /tmp/cathedral-validator-one.pex" in release_job
     assert 'builder["_validator_pex"](pex)' in release_job
@@ -856,6 +873,7 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "PEX_INTERPRETER=1" in release_job
     assert "PEX_ROOT=/tmp/cathedral-validator-pex-root" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=" in release_job
+    assert "sudo -u nobody env" in release_job
     assert "tests/release_smoke/run_real_validator.py" in release_job
 
     smoke = (root / "tests" / "release_smoke" / "run_real_validator.py").read_text()
@@ -879,7 +897,11 @@ def test_extracted_release_is_traversable_but_not_writable_by_service(
     from cathedral_thin.independent_runtime.updater import extract_release_archive
 
     release = tmp_path / "release"
-    extract_release_archive(_archive(), release)
+    previous_umask = os.umask(0o077)
+    try:
+        extract_release_archive(_archive(), release)
+    finally:
+        os.umask(previous_umask)
     assert stat.S_IMODE(release.stat().st_mode) == 0o755
     assert stat.S_IMODE((release / "bin").stat().st_mode) == 0o755
     assert (

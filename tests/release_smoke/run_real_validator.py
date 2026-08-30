@@ -15,7 +15,7 @@ from cathedral_thin.independent_runtime import qvl as qvl_runtime
 from cathedral_thin.independent_runtime import snp_production
 
 
-COMPUTE_COMMIT = "5268443104fd7717b95ce4c398ddf6229ec4f461"
+COMPUTE_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
 
 
 class _Hotkey:
