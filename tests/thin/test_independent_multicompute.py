@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from dataclasses import replace
 from itertools import permutations
 from types import SimpleNamespace
@@ -336,6 +338,69 @@ def _runtime_keypair():
     return SimpleNamespace(ss58_address=CANARY_HOTKEY, sign=lambda _body: b"s" * 64)
 
 
+def _bounded_miner_result(axon: ServingAxon, *, scoring_window: str = WINDOW):
+    endpoint = f"https://{axon.ip}:{axon.port}"
+    marker = axon.uid % 250 + 1
+    spki = bytes([marker]) * 32
+    collected = _runtime_collected(axon.hotkey, marker=marker, spki=spki)
+    machine_id = machine_id_from_stable_platform_id(
+        "tdx-platform-sha256:" + f"{marker:064x}"
+    )
+    row = {
+        "uid": axon.uid,
+        "hotkey": axon.hotkey,
+        "endpoint": endpoint,
+        "sat_url": endpoint + "/v1/sat-work",
+        "scoring_window": scoring_window,
+        "verdict": "PASS",
+        "platform_identity_verified": True,
+        "machine_id": machine_id,
+        "channel_id": spki.hex(),
+        "phase_timings_ms": {
+            "binding": 1,
+            "evidence": 1,
+            "fleet": 1,
+            "qvl": 1,
+            "sat": None,
+        },
+    }
+    observation = MachineWorkObservation(
+        scoring_window=scoring_window,
+        uid=axon.uid,
+        miner_hotkey=axon.hotkey,
+        endpoint=endpoint,
+        channel_id=spki.hex(),
+        machine_id=machine_id,
+        evidence_fresh=True,
+        hardware_verified=True,
+        channel_bound=True,
+        work_units=None,
+    )
+    key = (axon.uid, endpoint)
+    return fleet_score._MinerEvidence(
+        axon=axon,
+        rows=[row],
+        observations=[observation],
+        collected_by_key={key: collected},
+        row_by_key={key: row},
+        non_scoreable_keys=set(),
+        fleet_row={
+            "uid": axon.uid,
+            "hotkey": axon.hotkey,
+            "primary": endpoint,
+            "ok": True,
+            "singleton_compatibility": False,
+            "candidate_count": 1,
+            "endpoints": [endpoint],
+            "phase_timings_ms": {"fleet": 1},
+        },
+        exclusions=[],
+        pass_count=1,
+        qvl_infra_count=0,
+        finished_monotonic=time.monotonic(),
+    )
+
+
 def test_runtime_attests_chain_axon_before_trusting_fleet_and_scores_two(monkeypatch):
     events: list[str] = []
     root = "https://1.1.1.1:8081"
@@ -381,6 +446,196 @@ def test_runtime_attests_chain_axon_before_trusting_fleet_and_scores_two(monkeyp
     assert result.verified_units == {BOB: 40}
     assert [row["counted_units"] for row in result.rows] == [20, 20]
     assert result.feature_blocked is False
+    assert all(
+        tuple(row["phase_timings_ms"]) == fleet_score.PHASE_TIMING_FIELDS
+        for row in result.rows
+    )
+
+
+def test_bounded_round_zeros_a_slow_valid_miner_without_losing_the_healthy_one(
+    monkeypatch,
+):
+    slow = ServingAxon(8, BOB, "1.1.1.1", 8081)
+    healthy = ServingAxon(124, CHARLIE, "8.8.8.8", 8081)
+
+    def collect(*, axon, **_kwargs):
+        if axon.uid == slow.uid:
+            time.sleep(0.08)
+        return _bounded_miner_result(axon)
+
+    monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
+    monkeypatch.setattr(fleet_score, "_units_after_quote", lambda **_kwargs: 20)
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.03)
+    monkeypatch.setattr(fleet_score, "MINER_RESPONSE_DEADLINE_SECONDS", 0.08)
+    started = time.monotonic()
+    result = fleet_score.score_multicompute_round(
+        axons=(healthy, slow),
+        keypair=_runtime_keypair(),
+        anchor_hash=WINDOW,
+        verifier_adapter=_runtime_adapter(),
+        cycle_deadline_monotonic=time.monotonic() + 0.15,
+    )
+
+    assert time.monotonic() - started < 0.07
+    assert result.verified_units == {CHARLIE: 20}
+    assert [row["uid"] for row in result.fleet] == [8, 124]
+    assert result.fleet[0]["ok"] is False
+    assert result.fleet[0]["error"] == "discovery_response_deadline_exceeded"
+    assert [row["uid"] for row in result.rows] == [124]
+
+
+def test_bounded_round_all_dead_returns_deterministic_zero_rows(monkeypatch):
+    miners = (
+        ServingAxon(124, CHARLIE, "8.8.8.8", 8081),
+        ServingAxon(8, BOB, "1.1.1.1", 8081),
+    )
+
+    def collect(*, axon, **_kwargs):
+        time.sleep(0.08)
+        return _bounded_miner_result(axon)
+
+    monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(fleet_score, "MINER_RESPONSE_DEADLINE_SECONDS", 0.06)
+    result = fleet_score.score_multicompute_round(
+        axons=miners,
+        keypair=_runtime_keypair(),
+        anchor_hash=WINDOW,
+        verifier_adapter=_runtime_adapter(),
+        cycle_deadline_monotonic=time.monotonic() + 0.12,
+    )
+
+    assert result.verified_units == {}
+    assert result.rows == ()
+    assert [row["uid"] for row in result.fleet] == [8, 124]
+    assert all(row["ok"] is False for row in result.fleet)
+    assert all(
+        row["error"] == "discovery_response_deadline_exceeded" for row in result.fleet
+    )
+
+
+def test_bounded_round_never_exceeds_the_reviewed_worker_cap(monkeypatch):
+    miners = tuple(
+        ServingAxon(uid, f"miner-{uid}", "1.1.1.1", 8081) for uid in range(64)
+    )
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def collect(*, axon, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        release.wait(timeout=0.3)
+        with lock:
+            active -= 1
+        return _bounded_miner_result(axon)
+
+    monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.2)
+    try:
+        result = fleet_score.score_multicompute_round(
+            axons=miners,
+            keypair=_runtime_keypair(),
+            anchor_hash="0x" + "0" * 64,
+            verifier_adapter=_runtime_adapter(),
+            cycle_deadline_monotonic=time.monotonic() + 0.3,
+        )
+    finally:
+        release.set()
+
+    assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
+    assert result.verified_units == {}
+    assert len(result.fleet) == 64
+
+
+def test_discovery_and_sat_share_the_same_reviewed_worker_pool(monkeypatch):
+    miners = tuple(
+        ServingAxon(uid, f"miner-{uid}", "1.1.1.1", 8000 + uid) for uid in range(64)
+    )
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def enter() -> None:
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+
+    def leave() -> None:
+        nonlocal active
+        with lock:
+            active -= 1
+
+    def collect(*, axon, **kwargs):
+        enter()
+        try:
+            if axon.uid >= fleet_score.MAX_CONCURRENT_MINERS:
+                time.sleep(0.12)
+            return _bounded_miner_result(
+                axon, scoring_window=str(kwargs["anchor_hash"])
+            )
+        finally:
+            leave()
+
+    def units(**_kwargs):
+        enter()
+        try:
+            time.sleep(0.005)
+            return 20
+        finally:
+            leave()
+
+    monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
+    monkeypatch.setattr(fleet_score, "_units_after_quote", units)
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.03)
+    monkeypatch.setattr(fleet_score, "MINER_RESPONSE_DEADLINE_SECONDS", 0.3)
+    result = fleet_score.score_multicompute_round(
+        axons=miners,
+        keypair=_runtime_keypair(),
+        anchor_hash="0x" + "0" * 64,
+        verifier_adapter=_runtime_adapter(),
+        cycle_deadline_monotonic=time.monotonic() + 0.35,
+    )
+
+    assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
+    assert len(result.verified_units) == 32
+    assert all(value == 20 for value in result.verified_units.values())
+
+
+def test_dead_set_scheduling_rotates_from_the_finalized_anchor(monkeypatch):
+    miners = tuple(
+        ServingAxon(uid, f"miner-{uid}", "1.1.1.1", 8081) for uid in range(40)
+    )
+    monkeypatch.setattr(fleet_score, "MAX_CONCURRENT_MINERS", 2)
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.02)
+
+    def started_for(anchor_value: int) -> set[int]:
+        started: set[int] = set()
+        lock = threading.Lock()
+
+        def collect(*, axon, **_kwargs):
+            with lock:
+                started.add(axon.uid)
+            time.sleep(0.06)
+            return _bounded_miner_result(axon)
+
+        monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
+        fleet_score.score_multicompute_round(
+            axons=miners,
+            keypair=_runtime_keypair(),
+            anchor_hash="0x" + f"{anchor_value:064x}",
+            verifier_adapter=_runtime_adapter(),
+            cycle_deadline_monotonic=time.monotonic() + 0.1,
+        )
+        time.sleep(0.07)
+        return started
+
+    assert started_for(0) == {0, 1}
+    assert started_for(20) == {20, 21}
 
 
 def test_unverified_root_never_authorizes_its_fleet(monkeypatch):

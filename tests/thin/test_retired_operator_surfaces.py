@@ -94,10 +94,14 @@ def test_packaged_scripts_expose_only_current_live_and_friend_workflows() -> Non
         "cathedral-second-miner-plan =",
         "cathedral-uid124-axon-generation2 =",
         "cathedral-uid30-launch =",
+        "cathedral-uid30-fleet-submit =",
+        "cathedral-uid30-fleet-preview =",
+        "cathedral-publisher-serve =",
+        "cathedral-candidate-snapshot =",
     ):
         assert retired not in source
-    assert "cathedral-uid30-fleet-preview =" in source
     assert (
-        'cathedral-uid30-fleet-submit = "cathedral_thin.uid30_fleet_submit:main"'
+        'cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"'
         in source
     )
+    assert "cathedral-amd-sev-snp-dev-preview =" in source

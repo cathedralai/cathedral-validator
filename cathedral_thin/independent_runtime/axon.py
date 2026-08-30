@@ -8,6 +8,7 @@ endpoint model from here so importing a preview never imports a chain writer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 from typing import Any
 
 from cathedral_thin.independent.constants import (
@@ -15,6 +16,7 @@ from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
     REFUSE_HOTKEYS,
 )
+from cathedral_thin.independent.fetch_policy import is_globally_routable_address
 from cathedral_thin.independent.inclusion import MetagraphView
 
 from .errors import ChainClientError
@@ -29,7 +31,7 @@ AXON_SKIP_REASONS = (
     "unroutable",
     "unusable_ip",
 )
-_UNROUTABLE_IPS = frozenset({"0.0.0.0", "::", "127.0.0.1", "::1"})
+_CHAIN_HASH_HEX = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -58,11 +60,18 @@ def _empty_skips() -> dict[str, int]:
     return {reason: 0 for reason in AXON_SKIP_REASONS}
 
 
-def _ip_to_str(raw: Any) -> str:
-    if isinstance(raw, str) and raw:
-        return raw
-    if isinstance(raw, int) and not isinstance(raw, bool):
-        return f"{(raw >> 24) & 255}.{(raw >> 16) & 255}.{(raw >> 8) & 255}.{raw & 255}"
+def _ip_address(raw: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    try:
+        if isinstance(raw, str) and raw:
+            return ipaddress.ip_address(raw)
+        if (
+            isinstance(raw, int)
+            and not isinstance(raw, bool)
+            and 0 <= raw <= (1 << 32) - 1
+        ):
+            return ipaddress.IPv4Address(raw)
+    except ValueError as exc:
+        raise ChainClientError(f"axon ip {raw!r} is not usable") from exc
     raise ChainClientError(f"axon ip {raw!r} is not usable")
 
 
@@ -73,6 +82,8 @@ def metagraph_view(metagraph: Any) -> MetagraphView:
     hotkeys = [str(hotkey) for hotkey in list(metagraph.hotkeys)]
     if len(uids) != len(hotkeys):
         raise ChainClientError("metagraph uids and hotkeys differ in length")
+    if len(set(uids)) != len(uids) or len(set(hotkeys)) != len(hotkeys):
+        raise ChainClientError("metagraph repeats a UID or hotkey")
     return MetagraphView.from_uid_map(dict(zip(uids, hotkeys)))
 
 
@@ -99,14 +110,16 @@ def scan_axons(metagraph: Any) -> AxonScan:
             skipped["not_serving"] += 1
             continue
         try:
-            ip = _ip_to_str(getattr(axon, "ip", ""))
+            address = _ip_address(getattr(axon, "ip", ""))
         except ChainClientError:
             skipped["unusable_ip"] += 1
             continue
-        if ip in _UNROUTABLE_IPS:
+        if not is_globally_routable_address(address):
             skipped["unroutable"] += 1
             continue
-        found.append(ServingAxon(uid=uid, hotkey=hotkey, ip=ip, port=port))
+        found.append(
+            ServingAxon(uid=uid, hotkey=hotkey, ip=address.compressed, port=port)
+        )
     return AxonScan(serving=tuple(found), skipped=skipped)
 
 
@@ -134,10 +147,48 @@ def observed_genesis_hash(subtensor: Any) -> str:
     return text
 
 
+def finalized_head(subtensor: Any) -> tuple[int, str]:
+    """Return one reverse-checked canonical finalized block number and hash."""
+
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        raise ChainClientError("subtensor has no finalized-head reader")
+    try:
+        raw_hash = substrate.get_chain_finalised_head()
+        text = str(raw_hash).lower()
+        if not text.startswith("0x"):
+            text = "0x" + text
+        body = text[2:]
+        if len(body) != 64 or any(
+            character not in _CHAIN_HASH_HEX for character in body
+        ):
+            raise ChainClientError("finalized block hash is not canonical")
+        raw_number = substrate.get_block_number(text)
+        if (
+            isinstance(raw_number, bool)
+            or not isinstance(raw_number, int)
+            or raw_number < 0
+        ):
+            raise ChainClientError(
+                "finalized block number is not a non-negative integer"
+            )
+        reverse = str(substrate.get_block_hash(raw_number)).lower()
+        if not reverse.startswith("0x"):
+            reverse = "0x" + reverse
+    except ChainClientError:
+        raise
+    except Exception as exc:
+        raise ChainClientError("finalized chain head is unavailable") from exc
+    if reverse != text:
+        raise ChainClientError("finalized block number and hash are not canonical")
+    return raw_number, text
+
+
 __all__ = [
     "AXON_SKIP_REASONS",
     "AxonScan",
     "ServingAxon",
+    "finalized_head",
     "metagraph_view",
     "observed_genesis_hash",
     "scan_axons",

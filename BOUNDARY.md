@@ -4,10 +4,10 @@ This repository is the sole source for Cathedral SN39 validator behavior.
 
 It owns:
 
-- signed score and evidence verification;
-- miner hotkey to UID resolution;
-- allocation and burn enforcement;
-- replay, rollback, and single-writer protection; and
+- finalized miner discovery and signed fleet verification;
+- local Intel TDX and SAT verification;
+- miner hotkey to UID resolution and zero-burn machine-count scoring;
+- exact-intent recovery and single-writer protection; and
 - the authorized Bittensor weight transaction.
 
 Cathedral Compute supplies worker evidence. Cathedral Distill supplies receipt
@@ -18,13 +18,15 @@ Registration, uptime, hardware ownership, attestation, or a self-reported score
 does not earn weight. Only work which passes the active verification and policy
 checks is eligible.
 
-The recurring provenance audit is observational. It records findings but never
-changes or blocks the signed vector submitted by the recurring relay.
+The supported recurring validator does not consume a signed weight vector or
+use a weight publisher or relay. It derives the full vector locally and submits
+it directly. Miners still require their fresh signed validator-access snapshot
+before serving validator-authenticated fleet and evidence requests.
 
-The v3 CyberGym lane shape is shared through
-`V3_CYBERGYM_LANE_FIELDS`. Every value is independently derived by this
-repository. `cathedralai/cathedral` is not a v3 allocation source.
+Historical v3 code still shares the `V3_CYBERGYM_LANE_FIELDS` shape. It is not
+an input to the supported direct recurring validator. `cathedralai/cathedral`
+is not a v3 allocation source.
 
-Anyone may install and run the public validator. Starting the installed service
-permits it to submit weights. Historical documents, tests, and local runs do not
-prove a current deployment or a successful on-chain submission.
+Running `cathedral-validator --confirm-direct-write` permits it to sign and
+submit weights. Historical documents, tests, and local runs do not prove a
+current deployment or a successful on-chain submission.

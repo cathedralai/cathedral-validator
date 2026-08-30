@@ -142,7 +142,11 @@ class QuoteIdentityVerdict:
 @runtime_checkable
 class QuoteIdentityVerifier(Protocol):
     def verify_with_identity(
-        self, quote: bytes, *, expected_report_data: bytes
+        self,
+        quote: bytes,
+        *,
+        expected_report_data: bytes,
+        deadline_monotonic: float | None = None,
     ) -> QuoteIdentityVerdict: ...
 
 
@@ -454,7 +458,11 @@ class ComputeAdapter:
         return verdict
 
     def verify_quote_with_identity(
-        self, quote: bytes, *, expected_report_data: bytes
+        self,
+        quote: bytes,
+        *,
+        expected_report_data: bytes,
+        deadline_monotonic: float | None = None,
     ) -> QuoteIdentityVerdict:
         """Verify quote and require the verifier's stable-identity interface.
 
@@ -470,7 +478,12 @@ class ComputeAdapter:
             raise AdapterUnavailable(
                 "multi-machine scoring requires QVL stable platform identity output"
             )
-        result = method(bytes(quote), expected_report_data=bytes(expected_report_data))
+        kwargs: dict[str, object] = {
+            "expected_report_data": bytes(expected_report_data)
+        }
+        if deadline_monotonic is not None:
+            kwargs["deadline_monotonic"] = deadline_monotonic
+        result = method(bytes(quote), **kwargs)
         if not isinstance(result, QuoteIdentityVerdict):
             return QuoteIdentityVerdict(QuoteVerdict.INFRA, None, False)
         if result.verdict is not QuoteVerdict.PASS:

@@ -24,14 +24,12 @@ def test_validator_console_script_belongs_to_this_repository() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = project["project"]["scripts"]
     assert scripts == {
-        "cathedral-validator": "scaffold.cli:main",
-        "cathedral-publisher-serve": "scaffold.publisher.server:_serve_cli",
-        "cathedral-candidate-snapshot": "scaffold.snapshot_candidates:main",
+        "cathedral-validator": (
+            "cathedral_thin.independent_runtime.direct_validator:main"
+        ),
         "cathedral-amd-sev-snp-dev-preview": (
             "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
         ),
-        "cathedral-uid30-fleet-preview": "cathedral_thin.uid30_fleet_preview:main",
-        "cathedral-uid30-fleet-submit": "cathedral_thin.uid30_fleet_submit:main",
     }
 
 
@@ -88,9 +86,18 @@ def test_active_operator_docs_do_not_advertise_retired_console_commands() -> Non
         "cathedral-multicompute-preview",
         "cathedral-miner-axon-recover",
         "cathedral-uid30-recover",
+        "cathedral-uid30-fleet-preview",
+        "cathedral-uid30-fleet-submit",
+        "cathedral-publisher-serve",
+        "cathedral-candidate-snapshot",
+        "cathedral-validator serve",
         "cathedral-verifyml",
     )
-    active_docs = [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md")]
+    active_docs = [
+        *ROOT.glob("*.md"),
+        *(ROOT / "docs").glob("*.md"),
+        *(ROOT / "deploy").rglob("*.md"),
+    ]
     for path in active_docs:
         text = path.read_text(encoding="utf-8")
         for command in retired:
