@@ -1,0 +1,1 @@
+d /var/lib/cathedral-validator-telemetry 0750 cathedral-validator cathedral-telemetry -

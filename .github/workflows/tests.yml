@@ -386,3 +386,9 @@ jobs:
             PEX_INTERPRETER=1 \
             /tmp/cathedral-validator-release/bin/cathedral-validator \
             /tmp/cathedral-validator-release-smoke.py
+          sudo -u nobody env \
+            HOME=/tmp/cathedral-validator-nobody-home \
+            PEX_ROOT=/tmp/cathedral-validator-pex-root \
+            PEX_INTERPRETER=1 \
+            /tmp/cathedral-validator-release/bin/cathedral-validator \
+            -m cathedral_thin.independent_runtime.telemetry_exporter --help

@@ -37,6 +37,7 @@ from cathedral_thin.independent_runtime.updater import (
 )
 
 VALIDATOR_PEX_ENTRY_POINT = "cathedral_thin.independent_runtime.direct_validator:main"
+TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v1"
 MAX_PEX_BYTES = 512 * 1024 * 1024
 MAX_PEX_FILES = 100_000
@@ -229,12 +230,20 @@ def _validator_pex(path: Path) -> ValidatedPex:
         raise UpdateRefused(
             "validator PEX omits the production extra or pinned Compute contract"
         )
-    module_suffix = "cathedral_thin/independent_runtime/direct_validator.py"
-    if not any(name.endswith(module_suffix) for name in names):
+
+    def project_module_present(module_path: str) -> bool:
+        return module_path in names or f".deps/{project}/{module_path}" in names
+
+    validator_module = "cathedral_thin/independent_runtime/direct_validator.py"
+    if not project_module_present(validator_module):
         raise UpdateRefused("validator PEX omits the direct validator module")
-    snp_suffix = "cathedral_thin/independent_runtime/snp_production.py"
-    if not any(name.endswith(snp_suffix) for name in names):
+    snp_module = "cathedral_thin/independent_runtime/snp_production.py"
+    if not project_module_present(snp_module):
         raise UpdateRefused("validator PEX omits the production SNP verifier")
+    for module in ("telemetry.py", "telemetry_exporter.py"):
+        module_path = f"cathedral_thin/independent_runtime/{module}"
+        if not project_module_present(module_path):
+            raise UpdateRefused("validator PEX omits the private telemetry runtime")
     return ValidatedPex(
         raw=raw,
         info_sha256=hashlib.sha256(info_raw).hexdigest(),
@@ -257,6 +266,7 @@ def validator_release_tree(pex: Path, destination: Path) -> ValidatedPex:
     manifest = {
         "schema": VALIDATOR_BUNDLE_SCHEMA,
         "entry_point": VALIDATOR_PEX_ENTRY_POINT,
+        "telemetry_module": TELEMETRY_PEX_MODULE,
         "pex_sha256": hashlib.sha256(validated.raw).hexdigest(),
         "pex_info_sha256": validated.info_sha256,
         "project_distribution": validated.project_distribution,

@@ -10,6 +10,7 @@ from raw machine counts.
 from __future__ import annotations
 
 import argparse
+import grp
 import hashlib
 import json
 import math
@@ -54,6 +55,14 @@ from .fleet_score import (
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
+from .telemetry import (
+    PendingTelemetryStore,
+    TelemetryError,
+    TelemetrySpool,
+    build_telemetry_candidate,
+    journal_pending_plan_matches,
+    journal_receipt_for_plan,
+)
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
 _REPORTED_EXCLUSION_CATEGORIES = (
@@ -387,12 +396,21 @@ def _run_direct_cycle_unlocked(
     verifier_adapter: ComputeAdapter,
     writer: Any,
     snp_verifier: SnpProductionVerifier | None = None,
+    telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector."""
 
+    pending_telemetry = (
+        PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
+    )
     recovered = writer.recover()
     if recovered is not None:
-        return {"status": recovered.status, "recovery": recovered.as_document()}
+        return _recovered_cycle_event(
+            recovered=recovered,
+            writer=writer,
+            keypair=keypair,
+            telemetry_sink=telemetry_sink,
+        )
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -416,8 +434,44 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
-    receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
-    return {
+    try:
+        receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
+    except Exception as exc:
+        # The writer owns the chain ambiguity boundary. Only after it returns
+        # control may telemetry persist the in-memory candidate for recovery.
+        from .direct_writer import (
+            DirectSubmissionAmbiguous,
+            DirectSubmissionContradiction,
+        )
+
+        if (
+            pending_telemetry is not None
+            and isinstance(exc, DirectSubmissionAmbiguous)
+            and not isinstance(exc, DirectSubmissionContradiction)
+        ):
+            try:
+                plan_identity_sha256 = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        canonical_document_bytes(plan.identity())
+                    ).hexdigest()
+                )
+                if journal_pending_plan_matches(
+                    writer.state_path,
+                    plan_identity_sha256,
+                ):
+                    pending_telemetry.prepare(
+                        build_telemetry_candidate(
+                            result_rows=result.rows,
+                            plan=plan,
+                        ),
+                        plan,
+                        None,
+                    )
+            except Exception:
+                pass
+        raise
+    event = {
         "status": receipt.status,
         "anchor": snapshot.identity(),
         "raw_scores": [list(row) for row in plan.raw_scores],
@@ -428,6 +482,99 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    reconciled_event_id: str | None = None
+    if pending_telemetry is not None:
+        try:
+            # A prior candidate contains its own finalized receipt. Reconcile
+            # only after this cycle's authoritative chain write has finished.
+            prior_event = pending_telemetry.finalize(keypair=keypair)
+            if prior_event is not None:
+                reconciled_event_id = str(prior_event["event_id"])
+        except Exception:
+            pass
+    if telemetry_sink is not None:
+        try:
+            if pending_telemetry is None:
+                raise TelemetryError("telemetry pending store is absent")
+            # Every telemetry filesystem operation happens only after the
+            # authoritative writer has returned a finalized receipt.
+            telemetry_candidate = build_telemetry_candidate(
+                result_rows=result.rows,
+                plan=plan,
+            )
+            pending_telemetry.prepare(telemetry_candidate, plan, receipt)
+            telemetry = pending_telemetry.finalize(
+                keypair=keypair,
+                expected_receipt=receipt,
+            )
+            if telemetry is None:
+                raise TelemetryError("finalized telemetry event is absent")
+            event["telemetry"] = {
+                "status": "SPOOLED",
+                "event_id": telemetry["event_id"],
+            }
+        except Exception:
+            # The scoring result and finalized chain receipt are authoritative.
+            # A local projection failure is reported but never changes them.
+            event["telemetry"] = {"status": "FAILED"}
+    if reconciled_event_id is not None:
+        event["reconciled_telemetry_event_id"] = reconciled_event_id
+    return event
+
+
+def _recovered_cycle_event(
+    *,
+    recovered: Any,
+    writer: Any,
+    keypair: Any,
+    telemetry_sink: TelemetrySpool | None,
+) -> dict[str, Any]:
+    """Project one already-finalized writer recovery without chain access."""
+
+    event = {"status": recovered.status, "recovery": recovered.as_document()}
+    if telemetry_sink is None:
+        return event
+    event["telemetry"] = _reconcile_pending_telemetry(
+        writer=writer,
+        keypair=keypair,
+        telemetry_sink=telemetry_sink,
+        expected_receipt=recovered,
+    ) or {"status": "NO_FINALIZED_EVENT"}
+    return event
+
+
+def _reconcile_pending_telemetry(
+    *,
+    writer: Any,
+    keypair: Any,
+    telemetry_sink: TelemetrySpool,
+    expected_receipt: Any | None = None,
+) -> dict[str, Any] | None:
+    """Retry one plan-bound telemetry projection from finalized journal state."""
+
+    pending_telemetry = PendingTelemetryStore(telemetry_sink)
+    try:
+        pending_plan = pending_telemetry.plan_identity_sha256()
+        if pending_plan is None:
+            return None
+        journal_receipt = journal_receipt_for_plan(writer.state_path, pending_plan)
+        if journal_receipt is None or (
+            expected_receipt is not None and journal_receipt != expected_receipt
+        ):
+            return {"status": "NO_FINALIZED_EVENT"}
+        if not pending_telemetry.bind_receipt(pending_plan, journal_receipt):
+            return {"status": "NO_FINALIZED_EVENT"}
+        telemetry = pending_telemetry.finalize(
+            keypair=keypair,
+            expected_receipt=journal_receipt,
+        )
+        return (
+            {"status": "SPOOLED", "event_id": telemetry["event_id"]}
+            if telemetry is not None
+            else {"status": "NO_FINALIZED_EVENT"}
+        )
+    except Exception:
+        return {"status": "FAILED"}
 
 
 def run_direct_cycle(
@@ -437,6 +584,7 @@ def run_direct_cycle(
     verifier_adapter: ComputeAdapter,
     writer: Any,
     snp_verifier: SnpProductionVerifier | None = None,
+    telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -453,6 +601,7 @@ def run_direct_cycle(
             verifier_adapter=verifier_adapter,
             writer=writer,
             snp_verifier=snp_verifier,
+            telemetry_sink=telemetry_sink,
         )
 
 
@@ -477,6 +626,15 @@ def _parser() -> argparse.ArgumentParser:
         "--snpguest",
         required=True,
         help="pinned AMD snpguest verifier",
+    )
+    parser.add_argument(
+        "--telemetry-spool",
+        type=Path,
+        help="sanitized telemetry path shared with the isolated exporter",
+    )
+    parser.add_argument(
+        "--telemetry-reader-group",
+        help="group allowed to read only the sanitized telemetry spool",
     )
     parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
@@ -541,6 +699,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
     )
+    if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
+        raise SystemExit(
+            "--telemetry-spool and --telemetry-reader-group must be supplied together"
+        )
+    if options.telemetry_spool is None:
+        telemetry_sink = None
+    else:
+        if not options.telemetry_spool.is_absolute():
+            raise SystemExit("--telemetry-spool must be absolute")
+        try:
+            reader_gid = grp.getgrnam(options.telemetry_reader_group).gr_gid
+        except KeyError as exc:
+            raise SystemExit("telemetry reader group does not exist") from exc
+        telemetry_sink = TelemetrySpool(
+            options.telemetry_spool,
+            reader_gid=reader_gid,
+        )
     process_lock = getattr(writer, "process_locked", None)
     process_context = process_lock() if callable(process_lock) else nullcontext()
     with process_context:
@@ -551,12 +726,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         startup_recovery = writer.recover()
         _notify_ready()
         if startup_recovery is not None:
+            startup_event = _recovered_cycle_event(
+                recovered=startup_recovery,
+                writer=writer,
+                keypair=keypair,
+                telemetry_sink=telemetry_sink,
+            )
             print(
                 json.dumps(
-                    {
-                        "status": startup_recovery.status,
-                        "recovery": startup_recovery.as_document(),
-                    },
+                    startup_event,
                     sort_keys=True,
                     default=str,
                 ),
@@ -569,6 +747,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else 2
                 )
             time.sleep(options.interval_seconds)
+        elif telemetry_sink is not None:
+            # A prior process can stop after writer recovery commits the
+            # receipt but before the non-authoritative telemetry projection
+            # succeeds. Retry that exact plan from last_attempt only during
+            # startup, after readiness and before entering a fresh cycle.
+            startup_telemetry = _reconcile_pending_telemetry(
+                writer=writer,
+                keypair=keypair,
+                telemetry_sink=telemetry_sink,
+            )
+            if startup_telemetry is not None:
+                print(
+                    json.dumps(
+                        {
+                            "status": "STARTUP_TELEMETRY_RECOVERY",
+                            "telemetry": startup_telemetry,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         while True:
             try:
                 event = run_direct_cycle(
@@ -577,6 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     verifier_adapter=adapter,
                     writer=writer,
                     snp_verifier=snp_verifier,
+                    telemetry_sink=telemetry_sink,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionContradiction as exc:

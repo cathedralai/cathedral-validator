@@ -204,10 +204,15 @@ The readiness result proves initialization and journal recovery completed
 before a fresh cycle. It does not prove a successful evidence round or chain
 write. Confirm those from the validator journal and finalized on-chain state.
 
-## Optional private telemetry
+## UID30 private telemetry
 
-Telemetry stays off when
-`/etc/cathedral-validator/direct-telemetry.env` is absent. To opt in, first
+This release sends private telemetry only from Cathedral's UID30 validator.
+Independent validators do not install the exporter or receive Cathedral's
+collector credentials. Their validators remain fully independent and keep
+their own chain keys.
+
+On UID30, telemetry stays off when
+`/etc/cathedral-validator/direct-telemetry.env` is absent. To enable it, first
 install the separate telemetry account, spool directory, and exporter. Then
 install `direct-telemetry.env.example` at that path, root-owned mode `0600`,
 and restart the direct service.
@@ -216,6 +221,10 @@ The optional file expands to exactly `--telemetry-spool` and
 `--telemetry-reader-group`. It contains no endpoint or token. Only the
 separate unprivileged exporter reads the collector token. An absent or empty
 optional file adds no validator argument and leaves startup unchanged.
+
+Supporting telemetry from other validators later requires separate ingress
+credentials for each operator. Never distribute UID30's collector or Sites
+credentials.
 
 ## Build and sign a canary offline
 

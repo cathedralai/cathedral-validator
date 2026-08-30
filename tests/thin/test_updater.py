@@ -121,6 +121,8 @@ def main():
             "cathedral_thin/independent_runtime/__init__.py": b"",
             "cathedral_thin/independent_runtime/direct_validator.py": runtime,
             "cathedral_thin/independent_runtime/snp_production.py": b"",
+            "cathedral_thin/independent_runtime/telemetry.py": b"",
+            "cathedral_thin/independent_runtime/telemetry_exporter.py": b"",
             ".deps/cathedral_scaffold-1.2.3-py3-none-any.whl/"
             "cathedral_thin/independent_runtime/direct_validator.py": runtime,
             ".deps/cathedral_scaffold-1.2.3-py3-none-any.whl/"
@@ -962,10 +964,13 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "PEX_ROOT=/tmp/cathedral-validator-pex-root" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT=" in release_job
-    assert "HOME=/tmp/cathedral-validator-nobody-home" in release_job
+    assert release_job.count("HOME=/tmp/cathedral-validator-nobody-home") == 2
     assert "sudo -u nobody env" in release_job
     assert "tests/release_smoke/run_real_validator.py" in release_job
     assert "/tmp/cathedral-validator-release-smoke.py" in release_job
+    assert (
+        "-m cathedral_thin.independent_runtime.telemetry_exporter --help" in release_job
+    )
 
     smoke = (root / "tests" / "release_smoke" / "run_real_validator.py").read_text()
     assert "snp_production.load_compute_contract()" in smoke
@@ -1000,6 +1005,35 @@ def test_extracted_release_is_traversable_but_not_writable_by_service(
         stat.S_IMODE((release / "bin" / "cathedral-validator").stat().st_mode) == 0o555
     )
     assert stat.S_IMODE((release / "README").stat().st_mode) == 0o444
+
+
+def test_offline_builder_rejects_decoy_telemetry_module_paths(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    builder = runpy.run_path(
+        str(root / "deploy" / "validator-update" / "build_signed_release.py")
+    )
+    pex = tmp_path / "cathedral-validator.pex"
+    _validator_pex(pex)
+    original = pex.read_bytes()
+    output = io.BytesIO()
+    telemetry_paths = {
+        "cathedral_thin/independent_runtime/telemetry.py",
+        "cathedral_thin/independent_runtime/telemetry_exporter.py",
+    }
+    with zipfile.ZipFile(io.BytesIO(original), mode="r") as source:
+        with zipfile.ZipFile(
+            output, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for member in source.infolist():
+                if member.filename not in telemetry_paths:
+                    target.writestr(member, source.read(member.filename))
+            for path in sorted(telemetry_paths):
+                target.writestr(f"decoy/{path}", b"")
+    pex.write_bytes(b"#!/usr/bin/python3.12\n" + output.getvalue())
+    pex.chmod(0o755)
+
+    with pytest.raises(UpdateRefused, match="private telemetry runtime"):
+        builder["_validator_pex"](pex)
 
 
 def test_offline_builder_is_deterministic_and_promotes_exact_canary(
@@ -1037,6 +1071,9 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     assert manifest["schema"] == "cathedral_validator_bundle_v1"
     assert manifest["entry_point"] == (
         "cathedral_thin.independent_runtime.direct_validator:main"
+    )
+    assert manifest["telemetry_module"] == (
+        "cathedral_thin.independent_runtime.telemetry_exporter"
     )
     assert manifest["project_distribution"].startswith("cathedral_scaffold-1.2.3")
     executable = release / "bin" / "cathedral-validator"
