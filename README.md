@@ -46,11 +46,22 @@ two later finalized heads.
 
 ## Run the validator
 
-Install this checkout in a virtual environment. Use the reviewed verifier
-executable and an existing Bittensor validator wallet.
+Use a Linux/amd64 host with CPython 3.12. The published verifier binaries do
+not run on macOS or Arm hosts.
+
+The validator needs only its Bittensor hotkey. Do not copy the coldkey,
+mnemonic, or coldkey password to this host. Install this checkout in a virtual
+environment, then use the reviewed verifier executables and the hotkey's
+existing wallet name.
+
+The first four commands below install the package. Before the final start
+command, complete [the QVL setup](#install-the-pinned-qvl) and
+[the AMD setup](#install-the-pinned-amd-verifier-and-policy).
 
 ```bash
-python -m venv .venv
+git clone https://github.com/cathedralai/cathedral-validator.git
+cd cathedral-validator
+python3.12 -m venv .venv
 .venv/bin/pip install -e '.[snp-production]'
 .venv/bin/cathedral-validator \
   --wallet-name YOUR_WALLET \
@@ -64,11 +75,30 @@ python -m venv .venv
 
 `--expected-hotkey` is the public SS58 address for the loaded hotkey. Startup
 stops before chain access if the local credential belongs to another address.
+The validator opens `wallet.hotkey` only. It never reads or signs with a
+coldkey. Add `--wallet-path /absolute/hotkey-only/wallets` only when the hotkey
+is outside Bittensor's default wallet directory.
 
 The runtime is pinned to Finney and SN39. It scores every serving miner. It has
 no miner allowlist or alternate scoring mode. Add `--once` only for a bounded
 first-launch verification. It still signs and submits one live vector, and it
 exits zero only after exact finalized confirmation.
+
+There is no non-writing launch mode. The process prints one JSON document for
+each completed attempt:
+
+- `CONFIRMED` or `RECOVERED_CONFIRMED` means the exact stored row matched at
+  inclusion and two later finalized heads.
+- `NOT_PROVEN` means success was not established. Read its `error`, preserve
+  the journal, and do not submit a replacement for an ambiguous attempt.
+- `EXPIRED_WITHOUT_INCLUSION` means recovery proved the stored signed intent
+  reached the end of its mortal era without finalized inclusion. `--once`
+  exits 2. Recurring mode waits, then starts the next cycle.
+- `CONTRADICTION_STOPPED` is a terminal safety stop with exit status 2. Review
+  the journal and finalized chain state before any restart or manual action.
+
+For `--once`, only the two confirmed statuses exit zero. In recurring mode,
+`NOT_PROVEN` waits for the next interval while `CONTRADICTION_STOPPED` exits.
 
 The sole journal path is deterministic for the current user and signer:
 
@@ -86,6 +116,12 @@ is a deliberate terminal exit with status 2. For systemd, use
 restarted. A supervisor must never clear the journal or the contradiction.
 Review the stored signed intent and finalized chain state
 before any manual journal clearance.
+
+The optional signed-release updater and the hotkey-only systemd layout are
+documented in [Validator auto-update](docs/AUTO_UPDATE.md). Auto-update remains
+unavailable until the reviewed public wheelhouse, hash lock, signed executable,
+release archive, metadata, and public key are published. You can still run the
+validator from this checkout. Do not enable updater units from the checkout.
 
 ## Install the pinned QVL
 
@@ -111,8 +147,9 @@ the digest check.
 ## Install the pinned AMD verifier and policy
 
 Every production validator starts with both CPU verification paths. There is
-no TDX-only runtime mode. Download `snpguest` 0.10.0 and verify the exact
-binary before starting:
+no TDX-only runtime mode. Download the immutable binary from the
+[snpguest 0.10.0 release](https://github.com/virtee/snpguest/releases/tag/v0.10.0)
+and verify it before starting:
 
 ```bash
 install -d -m 0700 "$HOME/.local/lib/cathedral-validator"
@@ -127,13 +164,29 @@ chmod 0500 "$snpguest"
 ```
 
 The SNP policy admits only measurements and component TCB floors observed in
-a reviewed hardware run. It has this exact shape:
+a reviewed hardware run. No shared SNP admission policy is published. Each
+validator owns its allowlist.
+
+Before starting the validator, observe a live friend-hardware run using the
+[pinned AMD hardware-proof procedure](https://github.com/cathedralai/cathedral-sandbox/blob/8dde6eaca27116eed53386a1fa33ec70b74a01fb/docs/AMD_SEV_SNP_FRIEND_TEST.md)
+and its exact Compute commit
+`8dde6eaca27116eed53386a1fa33ec70b74a01fb`. Choose the fresh review challenge
+yourself and require `LOCAL_PASS` while you observe the native guest run. Then:
+
+1. Copy `report.measurement` into `allowed_measurements`.
+2. Copy `report.reported_tcb_hex` into `minimum_tcb`.
+3. Put both under the machine's Milan, Genoa, or Turin processor generation.
+4. Follow the local [AMD verification rehearsal](docs/AMD_SEV_SNP_DEV_PREVIEW.md)
+   and require `PROVEN_DEVELOPMENT_NO_WRITE`. It verifies that the selected
+   processor generation matches the fresh report before you use the policy.
+
+The resulting owner-controlled file has this exact shape:
 
 ```json
 {
   "schema": "cathedral_amd_sev_snp_policy_v1",
   "generations": {
-    "genoa": {
+    "REPLACE_WITH_milan_genoa_OR_turin": {
       "allowed_measurements": ["REPLACE_WITH_96_LOWERCASE_HEX"],
       "minimum_tcb": "0xREPLACE_WITH_16_LOWERCASE_HEX"
     }
@@ -141,17 +194,22 @@ a reviewed hardware run. It has this exact shape:
 }
 ```
 
-Replace both values with the friend-test observation, keep measurements in
-sorted order, and set the file mode to `0600`. Do not add a wildcard or lower
-the observed TCB to make an unknown machine pass. Missing, malformed, or
-unpinned SNP configuration stops the validator before wallet or chain access.
-An AMD collateral outage also blocks the weight write. A malformed or late
-miner response scores only that machine zero.
+Replace all three placeholders with the verified generation and observed
+transcript values. Keep measurements in sorted order and set the file mode to
+`0600`. Never pass the placeholder file to the validator. Do not accept an
+unobserved transcript, add a wildcard, or lower the observed TCB to make an
+unknown machine pass. Missing, malformed, or unpinned SNP configuration stops
+the validator before wallet or chain access. An AMD collateral outage also
+blocks the weight write. A malformed or late miner response scores only that
+machine zero.
 
 ## Current proof boundary
+
+The linked QVL and `snpguest` release assets are public and match the exact
+SHA-256 values above.
 
 The local tests cover discovery, signed fleet enforcement, unchanged SAT,
 deterministic multi-UID scoring, cooldown refusal before signing, exact-intent
 persistence, ambiguous-submit recovery, and three-head stored-row confirmation.
-They do not prove a production miner endpoint, production QVL availability,
+They do not prove a production miner endpoint, an observed live AMD policy,
 validator permit, wallet funding, chain cooldown, or a live set-weights result.

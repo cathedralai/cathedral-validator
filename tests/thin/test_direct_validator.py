@@ -2206,6 +2206,46 @@ def test_cli_recovers_journal_before_reporting_ready(monkeypatch) -> None:
     assert order == ["recover", "ready"]
 
 
+def test_cli_startup_recovery_contradiction_stops_before_ready(
+    monkeypatch, capsys
+) -> None:
+    _stub_cli_runtime(monkeypatch, [])
+
+    def recover():
+        raise DirectSubmissionContradiction("stored row differs")
+
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: SimpleNamespace(recover=recover),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_notify_ready",
+        lambda: pytest.fail("contradictory journal reported ready"),
+    )
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--confirm-direct-write",
+            ]
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "CONTRADICTION_STOPPED",
+        "error": "stored row differs",
+    }
+
+
 def test_cli_reconciles_startup_telemetry_after_reporting_ready(
     monkeypatch, tmp_path: Path
 ) -> None:

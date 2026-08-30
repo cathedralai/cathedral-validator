@@ -723,7 +723,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         # any unresolved chain identity before systemd treats the release as
         # ready.  During an update, the root updater still owns cycle.lock, so
         # no fresh scoring or signing cycle can begin before activation commits.
-        startup_recovery = writer.recover()
+        try:
+            startup_recovery = writer.recover()
+        except DirectSubmissionContradiction as exc:
+            print(
+                json.dumps(
+                    {"status": "CONTRADICTION_STOPPED", "error": str(exc)},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return 2
         _notify_ready()
         if startup_recovery is not None:
             startup_event = _recovered_cycle_event(

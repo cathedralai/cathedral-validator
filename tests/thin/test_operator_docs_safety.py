@@ -1,5 +1,6 @@
 """The public validator has one short, runnable operator path."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -30,6 +31,27 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "## Install the pinned QVL" in guide
     assert "## Install the pinned AMD verifier and policy" in guide
     assert "## Current proof boundary" in guide
+    assert "Linux/amd64 host with CPython 3.12" in guide
+    assert (
+        "git clone https://github.com/cathedralai/cathedral-validator.git" in run_block
+    )
+    assert "cd cathedral-validator" in run_block
+    assert "python3.12 -m venv .venv" in run_block
+    assert "[the QVL setup](#install-the-pinned-qvl)" in guide
+    assert "[the AMD setup](#install-the-pinned-amd-verifier-and-policy)" in guide
+    assert "Do not copy the coldkey" in guide
+    assert "The validator opens `wallet.hotkey` only" in guide
+    assert "It never reads or signs with a coldkey" in words
+    assert "--wallet-path /absolute/hotkey-only/wallets" in guide
+    assert "There is no non-writing launch mode" in guide
+    assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in guide
+    assert "`NOT_PROVEN` means success was not established" in guide
+    assert "`EXPIRED_WITHOUT_INCLUSION` means recovery proved" in guide
+    assert "For `--once`, only the two confirmed statuses exit zero" in guide
+    assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
+    assert "Auto-update remains unavailable until" in words
+    assert "You can still run the validator from this checkout" in words
+    assert "Do not enable updater units from the checkout" in words
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
     assert "does not download a signed weight vector" in words
@@ -55,6 +77,16 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "sha256sum --check -" in guide
     assert "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148" in guide
     assert "70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0" in guide
+    assert "[snpguest 0.10.0 release]" in guide
+    assert "No shared SNP admission policy is published" in guide
+    assert (
+        "cathedral-sandbox/blob/8dde6eaca27116eed53386a1fa33ec70b74a01fb/"
+        "docs/AMD_SEV_SNP_FRIEND_TEST.md" in guide
+    )
+    assert "[AMD verification rehearsal](docs/AMD_SEV_SNP_DEV_PREVIEW.md)" in guide
+    assert "require `PROVEN_DEVELOPMENT_NO_WRITE`" in guide
+    assert "Never pass the placeholder file to the validator" in words
+    assert "release assets are public and match the exact" in words
     assert "--snp-policy" in run_block
     assert "--snpguest" in run_block
     assert ".[snp-production]" in run_block
@@ -67,6 +99,34 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "--offline" not in guide
     assert "cathedral-sandbox/blob/main/MINING.md" not in guide
     assert "cathedral-validator/blob/main/VALIDATOR.md" not in guide
+
+
+def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    updater = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
+
+    assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
+    assert updater.startswith(
+        "# Validator auto-update\n\n"
+        "Status: implementation candidate. Installation is not self-service or\n"
+        "launch-ready."
+    )
+    assert "Do not enable these units from a repository\ncheckout" in updater
+    assert "It never receives a coldkey" in updater
+
+
+def test_readme_snp_policy_template_is_strict_json_with_the_runtime_shape() -> None:
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = guide.split("## Install the pinned AMD verifier and policy", 1)[1]
+    policy = json.loads(section.split("```json", 1)[1].split("```", 1)[0])
+
+    assert set(policy) == {"schema", "generations"}
+    assert policy["schema"] == "cathedral_amd_sev_snp_policy_v1"
+    assert set(policy["generations"]) == {"REPLACE_WITH_milan_genoa_OR_turin"}
+    generation = policy["generations"]["REPLACE_WITH_milan_genoa_OR_turin"]
+    assert set(generation) == {"allowed_measurements", "minimum_tcb"}
+    assert generation["allowed_measurements"] == ["REPLACE_WITH_96_LOWERCASE_HEX"]
+    assert generation["minimum_tcb"] == "0xREPLACE_WITH_16_LOWERCASE_HEX"
 
 
 def test_old_validator_page_is_only_a_compatibility_pointer() -> None:
