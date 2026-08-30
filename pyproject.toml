@@ -108,7 +108,9 @@ snp-dev = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
 # Production direct-validator SNP verification uses the same exact reviewed
-# contract.  Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT.
+# contract. Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT. The signed
+# updater accepts only PEX-INFO which carries this extra and the same immutable
+# Cathedral Sandbox VCS requirement.
 snp-production = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]

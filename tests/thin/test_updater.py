@@ -98,7 +98,7 @@ def main():
                 "cathedral-scaffold[snp-production] @ "
                 "file:///reviewed/cathedral_scaffold-1.2.3-py3-none-any.whl",
                 "cathedral@ git+https://github.com/cathedralai/"
-                "cathedral-compute.git@5268443104fd7717b95ce4c398ddf6229ec4f461",
+                "cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
             ],
             "strip_pex_env": True,
         }

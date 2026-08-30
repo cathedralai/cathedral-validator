@@ -1609,6 +1609,10 @@ def test_cli_recovers_journal_before_reporting_ready(monkeypatch) -> None:
             [
                 "--qvl",
                 "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--once",
                 "--confirm-direct-write",
             ]

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tomllib
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -671,10 +673,80 @@ def test_packaging_keeps_the_compute_pin_exact():
         "cathedral @ git+https://github.com/cathedralai/"
         f"cathedral-sandbox.git@{expected}"
     ]
+    assert project["optional-dependencies"]["snp-production"] == [
+        "cathedral @ git+https://github.com/cathedralai/"
+        f"cathedral-sandbox.git@{expected}"
+    ]
     assert (
         project["scripts"]["cathedral-amd-sev-snp-dev-preview"]
         == "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
     )
+
+
+def _production_pex(path: Path, info: dict[str, object]) -> None:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as bundle:
+        bundle.writestr("PEX-INFO", json.dumps(info))
+    path.write_bytes(b"#!/usr/bin/python3.12\n" + output.getvalue())
+    path.chmod(0o555)
+
+
+def _production_pex_info() -> dict[str, object]:
+    return {
+        "entry_point": "cathedral_thin.independent_runtime.direct_validator:main",
+        "inherit_path": "false",
+        "pex_path": "",
+        "pex_paths": [],
+        "inject_env": {},
+        "strip_pex_env": True,
+        "distributions": {
+            "bittensor-10.5.0-py3-none-any.whl": "1" * 64,
+            "cathedral-0.0.0-py3-none-any.whl": "2" * 64,
+            "cathedral_scaffold-1.2.3-py3-none-any.whl": "3" * 64,
+            "cryptography-48.0.0-py3-none-any.whl": "4" * 64,
+            "numpy-2.5.2-py3-none-any.whl": "5" * 64,
+        },
+        "requirements": [
+            "cathedral-scaffold[snp-production]@file:///reviewed/validator.whl",
+            "cathedral@git+https://github.com/cathedralai/"
+            f"cathedral-sandbox.git@{preview.COMPUTE_CONTRACT_COMMIT}",
+        ],
+    }
+
+
+def test_production_pex_provenance_requires_root_metadata_and_exact_contract(
+    monkeypatch, tmp_path
+):
+    pex = tmp_path / "cathedral-validator.pex"
+    _production_pex(pex, _production_pex_info())
+    monkeypatch.setattr(preview, "PEX_METADATA_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(sys, "argv", [str(pex)])
+
+    assert preview._running_pex_compute_provenance() == preview.COMPUTE_CONTRACT_COMMIT
+
+    monkeypatch.setattr(preview, "PEX_METADATA_OWNER_UID", os.geteuid() + 1)
+    with pytest.raises(preview.AmdSnpDevPreviewError, match="not root-controlled"):
+        preview._running_pex_compute_provenance()
+
+
+def test_production_pex_provenance_refuses_wrong_entrypoint_or_requirement(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(preview, "PEX_METADATA_OWNER_UID", os.geteuid())
+    for index, mutation in enumerate(
+        (
+            lambda info: info.update(entry_point="other:main"),
+            lambda info: info.update(requirements=[]),
+            lambda info: info.update(distributions={"cathedral-0.0.0.whl": "0" * 64}),
+        )
+    ):
+        info = _production_pex_info()
+        mutation(info)
+        pex = tmp_path / f"invalid-{index}.pex"
+        _production_pex(pex, info)
+        monkeypatch.setattr(sys, "argv", [str(pex)])
+        with pytest.raises(preview.AmdSnpDevPreviewError, match="exact SNP provenance"):
+            preview._running_pex_compute_provenance()
 
 
 def test_compute_contract_provenance_refuses_placeholder_and_wrong_commit(monkeypatch):

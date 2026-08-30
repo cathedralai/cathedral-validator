@@ -56,6 +56,11 @@ operator review of the journal and finalized chain state.
    and archive digest.
 6. The final idle direct-writer journal while the full-cycle lock is held.
 
+When the AMD production verifier loads, it also reads the signed release's
+root-owned `PEX-INFO`. It requires the direct-validator entry point, locked
+runtime distributions, the `snp-production` extra, and the exact Sandbox VCS
+commit. Editable and development installs instead retain the PEP 610 check.
+
 ## Install the direct service
 
 Create the `cathedral-validator` system account. Install one reviewed hotkey at
@@ -208,7 +213,7 @@ export VALIDATOR_WHEEL=/absolute/reviewed/project-wheels-one/cathedral_scaffold-
 uvx --from pex==2.101.1 pex3 lock create \
   --style strict \
   "cathedral-scaffold[snp-production] @ file://${VALIDATOR_WHEEL}" \
-  'cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@5268443104fd7717b95ce4c398ddf6229ec4f461' \
+  'cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb' \
   --python /usr/bin/python3.12 \
   --interpreter-constraint 'CPython==3.12.*' \
   --no-build \

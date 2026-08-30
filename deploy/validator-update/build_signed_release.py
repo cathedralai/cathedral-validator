@@ -49,12 +49,12 @@ _REQUIRED_DISTRIBUTIONS = (
     "numpy-",
 )
 _WHEEL_VERSION = re.compile(r"[0-9][0-9a-z.]*")
-_COMPUTE_COMMIT = "5268443104fd7717b95ce4c398ddf6229ec4f461"
+_COMPUTE_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
 _RELEASE_INTERPRETER_CONSTRAINT = "CPython==3.12.*"
 _RELEASE_INTERPRETER_SHEBANG = b"#!/usr/bin/python3.12\n"
 _COMPUTE_REQUIREMENT = (
     "cathedral@git+https://github.com/cathedralai/"
-    f"cathedral-compute.git@{_COMPUTE_COMMIT}"
+    f"cathedral-sandbox.git@{_COMPUTE_COMMIT}"
 )
 _PROJECT_RELEASE_REQUIREMENT = "cathedral-scaffold[snp-production]@file://"
 
