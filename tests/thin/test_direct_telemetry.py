@@ -52,7 +52,10 @@ def _plan() -> DirectWeightPlan:
         snapshot=snapshot,
         qvl_digest="4b6f" + "0" * 60,
         evidence_digest="sha256:" + "b" * 64,
-        machine_ids_by_uid=((41, ("tdx-machine",)), (42, ("snp-machine",))),
+        machine_ids_by_uid=(
+            (41, ("private-machine-41",)),
+            (42, ("private-machine-42",)),
+        ),
         raw_scores=((41, 1), (42, 1)),
         uid_hotkeys=(
             (41, TDX_MINER_KEYPAIR.ss58_address),
@@ -79,7 +82,7 @@ def _row(uid: int, hotkey: str, tee: str, elapsed: int) -> dict[str, object]:
         "uid": uid,
         "hotkey": hotkey,
         "endpoint": "https://private.example:8081",
-        "machine_id": "private-machine-id",
+        "machine_id": f"private-machine-{uid}",
         "channel_id": "private-spki",
         "quote_sha256": "private-quote",
         "verdict": "PASS",
@@ -147,13 +150,55 @@ def test_snapshot_exposes_only_sanitized_direct_round_facts() -> None:
     encoded = json.dumps(snapshot, sort_keys=True)
     for secret in (
         "private.example",
-        "private-machine-id",
+        "private-machine",
         "private-spki",
         "private-quote",
         "1.1.1.1",
         "8.8.8.8",
     ):
         assert secret not in encoded
+
+
+def test_snapshot_uses_plan_admission_for_mixed_legacy_and_fleet_rows() -> None:
+    base = _plan()
+    plan = DirectWeightPlan(
+        snapshot=base.snapshot,
+        qvl_digest=base.qvl_digest,
+        evidence_digest=base.evidence_digest,
+        machine_ids_by_uid=((41, ()), (42, ("private-machine-42",))),
+        raw_scores=((41, 0), (42, 1)),
+        uid_hotkeys=base.uid_hotkeys,
+        wire_uids=(41, 42),
+        wire_weights=(0, 65535),
+    )
+
+    snapshot = build_telemetry_snapshot(
+        result_rows=(
+            _row(41, TDX_MINER_KEYPAIR.ss58_address, "tdx", 10),
+            _row(42, SNP_MINER_KEYPAIR.ss58_address, "sev_snp", 20),
+        ),
+        plan=plan,
+        receipt=_receipt(),
+        keypair=VALIDATOR_KEYPAIR,
+        observed_at=datetime(2026, 8, 30, 12, 1, tzinfo=UTC),
+    )
+
+    legacy, current = snapshot["miners"]
+    assert legacy == {
+        "uid": 41,
+        "hotkey": TDX_MINER_KEYPAIR.ss58_address,
+        "distinct_verified_compute": 0,
+        "tee_counts": {"tdx": 0, "sev_snp": 0},
+        "sat_units": 0,
+        "verification_ms": {"samples": 0, "average": None, "maximum": None},
+        "weight_u16": 0,
+        "verified_at": None,
+        "status": "not_verified",
+    }
+    assert current["uid"] == 42
+    assert current["distinct_verified_compute"] == 1
+    assert current["weight_u16"] == 65535
+    assert current["status"] == "weighted"
 
 
 def test_python_generated_wire_fixture_stays_collector_compatible() -> None:
@@ -193,6 +238,7 @@ def test_python_generated_wire_fixture_stays_collector_compatible() -> None:
     row = {
         "uid": 41,
         "hotkey": miner,
+        "machine_id": "fixture-machine",
         "verdict": "PASS",
         "platform_identity_verified": True,
         "sat_units": 20,
@@ -238,9 +284,10 @@ def test_signed_snapshot_refuses_content_and_signature_tampering(tmp_path) -> No
         spool.append(changed_content)
 
     changed_signature = deepcopy(event)
+    original_signature = changed_signature["signature"]["value_base64"]
     changed_signature["signature"]["value_base64"] = (
-        "A" + changed_signature["signature"]["value_base64"][1:]
-    )
+        "B" if original_signature.startswith("A") else "A"
+    ) + original_signature[1:]
     with pytest.raises(TelemetryError, match="signature"):
         spool.append(changed_signature)
 

@@ -197,12 +197,21 @@ def _build_telemetry_snapshot_base(
 
     uid_hotkeys = dict(plan.uid_hotkeys)
     score_by_uid = dict(plan.raw_scores)
+    admitted_machine_ids = {
+        uid: frozenset(machine_ids) for uid, machine_ids in plan.machine_ids_by_uid
+    }
     weight_by_uid = dict(zip(plan.wire_uids, plan.wire_weights, strict=True))
     rows_by_uid: dict[int, list[Mapping[str, Any]]] = {uid: [] for uid in uid_hotkeys}
     for row in _positive_rows(result_rows):
         uid = row.get("uid")
         hotkey = row.get("hotkey")
-        if isinstance(uid, int) and uid_hotkeys.get(uid) == hotkey:
+        machine_id = row.get("machine_id")
+        if (
+            isinstance(uid, int)
+            and uid_hotkeys.get(uid) == hotkey
+            and isinstance(machine_id, str)
+            and machine_id in admitted_machine_ids.get(uid, ())
+        ):
             rows_by_uid[uid].append(row)
 
     miners: list[dict[str, Any]] = []
