@@ -56,6 +56,10 @@ MAX_METADATA_BYTES = 131_072
 MAX_ARCHIVE_BYTES = 536_870_912
 MAX_TREE_FILES = 20_000
 MAX_TREE_BYTES = 1_073_741_824
+DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT = Path(
+    "/var/lib/cathedral-validator/.local/state/cathedral-validator/"
+    "direct-writer/finney-sn39-mechanism-0"
+)
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -453,6 +457,29 @@ def require_idle_direct_writer_journal(path: Path) -> None:
         raise UpdateRefused("direct writer journal contradicts the supported schema")
 
 
+def direct_writer_journal_path(
+    expected_hotkey: object,
+    *,
+    scope_root: Path = DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
+) -> Path:
+    """Derive the only writer journal accepted for one public hotkey identity."""
+
+    if (
+        not isinstance(expected_hotkey, str)
+        or not 1 <= len(expected_hotkey) <= 64
+        or not expected_hotkey.isascii()
+        or not expected_hotkey.isalnum()
+    ):
+        raise UpdateRefused("expected validator hotkey is not path-safe")
+    if (
+        not scope_root.is_absolute()
+        or ".." in scope_root.parts
+        or scope_root.is_symlink()
+    ):
+        raise UpdateRefused("direct writer journal scope is invalid")
+    return scope_root / expected_hotkey / "state.json"
+
+
 def _state_path(root: Path) -> Path:
     return root / "state.json"
 
@@ -683,14 +710,19 @@ class SignedReleaseUpdater:
         *,
         install_root: Path,
         state_root: Path,
-        journal: Path,
+        expected_hotkey: str,
+        journal_scope_root: Path = DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
         expected_uid: int = 0,
         fetcher: Callable[[str, int], bytes] | None = None,
         service_restarter: Callable[[Sequence[str]], None] | None = None,
     ) -> None:
         self.install_root = install_root
         self.state_root = state_root
-        self.journal = journal
+        self.expected_hotkey = expected_hotkey
+        self.journal = direct_writer_journal_path(
+            expected_hotkey,
+            scope_root=journal_scope_root,
+        )
         self.expected_uid = expected_uid
         self.fetcher = fetcher or (
             lambda url, maximum: fetch_bounded_https(url, maximum_bytes=maximum)
@@ -1233,7 +1265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--channel", required=True, choices=("canary", "stable"))
     parser.add_argument("--metadata-url", required=True)
     parser.add_argument("--public-key", required=True, type=Path)
-    parser.add_argument("--journal", required=True, type=Path)
+    parser.add_argument("--expected-hotkey", required=True)
     parser.add_argument("--minimum-sequence", required=True, type=int)
     parser.add_argument(
         "--bootstrap-first-install",
@@ -1262,7 +1294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         updater = SignedReleaseUpdater(
             install_root=options.install_root,
             state_root=options.state_root,
-            journal=options.journal,
+            expected_hotkey=options.expected_hotkey,
         )
         arguments = {
             "metadata_url": options.metadata_url,
@@ -1305,6 +1337,7 @@ __all__ = [
     "parse_release_metadata",
     "release_tree_sha256",
     "require_idle_direct_writer_journal",
+    "direct_writer_journal_path",
 ]
 
 

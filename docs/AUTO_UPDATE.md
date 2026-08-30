@@ -8,10 +8,16 @@ runtime is integrated, and the updater installer artifacts described below
 must be published from a reviewed release before an operator uses this design.
 
 Each validator opts in on its own machine. Cathedral never receives its wallet
-or hotkey. UID30 follows the signed `canary` channel. Other operators follow
+key. UID30 follows the signed `canary` channel. Other operators follow
 the signed `stable` channel. Stable metadata identifies the exact signed canary
 record and archive selected for promotion. The maintainer verifies UID30's
 finalized result before performing that separate manual promotion step.
+
+UID30 does not sign or submit weights for anyone else. Every validator keeps
+its own Bittensor hotkey and signs its own weight extrinsics. The release
+metadata uses a separate offline Ed25519 software-release key. Promoting a
+release means signing a stable metadata record for the exact archive already
+tested on UID30. It never copies UID30's wallet key to another validator.
 
 The release signing key stays on an offline release workstation. Validator
 machines receive only its public key.
@@ -27,6 +33,12 @@ restarts exactly `cathedral-validator-direct.service`.
 The root updater never executes downloaded code. The service starts the new
 release as the unprivileged `cathedral-validator` account. It receives one
 hotkey through a systemd credential. It never receives a coldkey.
+
+Both services load one root-owned `identity.env` containing only the expected
+public hotkey address. The validator proves its loaded credential has that
+address before chain access. The updater derives the one matching writer
+journal and cycle lock from the same address. The updater never receives or
+reads the hotkey credential.
 
 The service loads the pinned TDX verifier, AMD SEV-SNP policy and verifier,
 wallet hotkey, chain client, process lock, and existing writer journal before
@@ -69,6 +81,11 @@ not place a coldkey on this host or in that directory. Install the reviewed
 SNP policy and pinned `snpguest` binary at the fixed paths outside every
 release directory.
 
+Copy `identity.env.example` to `/etc/cathedral-validator/identity.env`, set
+`CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY` to the public SS58 address belonging to
+the installed hotkey credential, and keep the file root-owned mode `0600`.
+This address is public identity, not key material.
+
 ```bash
 sudo install -o root -g root -m 0644 \
   deploy/validator-update/cathedral-validator.sysusers \
@@ -88,6 +105,9 @@ sudo install -o root -g root -m 0644 \
 sudo install -o root -g root -m 0600 \
   deploy/validator-update/direct.env.example \
   /etc/cathedral-validator/direct.env
+sudo install -o root -g root -m 0600 \
+  deploy/validator-update/identity.env.example \
+  /etc/cathedral-validator/identity.env
 sudo systemctl daemon-reload
 ```
 
@@ -123,9 +143,10 @@ sudo test "$(head -n 1 /usr/local/lib/cathedral-validator-updater/bin/cathedral-
   '#!/usr/local/lib/cathedral-validator-updater/bin/python'
 ```
 
-Install `update.env.example` as root-owned mode `0600`. Set the exact hotkey
-journal path and an authenticated minimum sequence from the signed release
-record. Install the signing public key at:
+Install `update.env.example` as root-owned mode `0600`. Set an authenticated
+minimum sequence from the signed release record. The updater reads the same
+root-owned public identity file as the direct service and derives the journal
+path itself. Install the signing public key at:
 
 ```text
 /etc/cathedral-validator/update-public-key.pem
@@ -150,8 +171,8 @@ sudo install -o root -g root -m 0644 \
 sudo systemctl daemon-reload
 ```
 
-Edit `update.env` before continuing. Then run the bootstrap with the same URL,
-journal, and authenticated minimum sequence:
+Edit `update.env` and `identity.env` before continuing. Then run the bootstrap
+with the same public hotkey identity and authenticated minimum sequence:
 
 ```bash
 sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
@@ -159,7 +180,7 @@ sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
   --channel stable \
   --metadata-url https://releases.cathedral.com/validator/stable.json \
   --public-key /etc/cathedral-validator/update-public-key.pem \
-  --journal /var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0/YOUR_HOTKEY/state.json \
+  --expected-hotkey YOUR_HOTKEY_SS58 \
   --minimum-sequence YOUR_AUTHENTICATED_STABLE_SEQUENCE
 ```
 

@@ -55,11 +55,15 @@ python -m venv .venv
 .venv/bin/cathedral-validator \
   --wallet-name YOUR_WALLET \
   --wallet-hotkey YOUR_HOTKEY \
+  --expected-hotkey YOUR_HOTKEY_SS58 \
   --qvl /absolute/path/to/cathedral-tdx-verifier \
   --snpguest /absolute/path/to/snpguest \
   --snp-policy /absolute/path/to/amd-sev-snp-policy.json \
   --confirm-direct-write
 ```
+
+`--expected-hotkey` is the public SS58 address for the loaded hotkey. Startup
+stops before chain access if the local credential belongs to another address.
 
 The runtime is pinned to Finney and SN39. It scores every serving miner. It has
 no miner allowlist or alternate scoring mode. Add `--once` only for a bounded

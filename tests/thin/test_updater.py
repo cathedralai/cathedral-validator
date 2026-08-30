@@ -21,11 +21,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 from cathedral_thin.independent_runtime.updater import (
+    DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
     METADATA_SCHEMA,
     SYSTEMCTL,
     VALIDATOR_SERVICE,
     SignedReleaseUpdater,
     UpdateRefused,
+    direct_writer_journal_path,
     parse_release_metadata,
     release_tree_sha256,
 )
@@ -65,8 +67,11 @@ def main():
     parser.add_argument("--qvl", required=True)
     parser.add_argument("--snp-policy", required=True)
     parser.add_argument("--snpguest", required=True)
+    parser.add_argument("--expected-hotkey", required=True)
     options, _ = parser.parse_known_args()
     if not all(os.path.isfile(item) for item in (options.qvl, options.snp_policy, options.snpguest)):
+        return 2
+    if not options.expected_hotkey.isascii() or not options.expected_hotkey.isalnum():
         return 2
     if not os.access(options.snpguest, os.X_OK):
         return 2
@@ -269,11 +274,43 @@ def _updater(
     return SignedReleaseUpdater(
         install_root=tmp_path / "install",
         state_root=tmp_path / "state",
-        journal=journal,
+        expected_hotkey=journal.parent.name,
+        journal_scope_root=journal.parent.parent,
         expected_uid=os.geteuid(),
         fetcher=lambda url, _maximum: metadata if url.endswith(".json") else archive,
         service_restarter=service_restarter,
     )
+
+
+def test_updater_derives_the_only_journal_for_the_expected_hotkey(
+    tmp_path: Path,
+) -> None:
+    scope = tmp_path / "direct-writer" / "finney-sn39-mechanism-0"
+    updater = SignedReleaseUpdater(
+        install_root=tmp_path / "install",
+        state_root=tmp_path / "state",
+        expected_hotkey="5ExpectedValidator",
+        journal_scope_root=scope,
+    )
+
+    assert updater.journal == scope / "5ExpectedValidator" / "state.json"
+    assert direct_writer_journal_path("5ExpectedValidator") == (
+        DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT / "5ExpectedValidator" / "state.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "hotkey",
+    ("", "../other", "5Validator/other", "5 validator", "\N{SNOWMAN}", "x" * 65),
+)
+def test_updater_rejects_unsafe_expected_hotkey(tmp_path: Path, hotkey: str) -> None:
+    with pytest.raises(UpdateRefused, match="hotkey is not path-safe"):
+        SignedReleaseUpdater(
+            install_root=tmp_path / "install",
+            state_root=tmp_path / "state",
+            expected_hotkey=hotkey,
+            journal_scope_root=tmp_path / "scope",
+        )
 
 
 def _update(
@@ -786,12 +823,18 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "RestartPreventExitStatus=2" in direct
     assert "TimeoutStartSec=120s" in direct
     assert "LoadCredential=validator-hotkey:" in direct
+    assert "ConditionPathExists=/etc/cathedral-validator/identity.env" in direct
+    assert "EnvironmentFile=/etc/cathedral-validator/identity.env" in direct
+    assert direct.rindex("EnvironmentFile=/etc/cathedral-validator/identity.env") > (
+        direct.rindex("EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env")
+    )
     assert "Environment=PEX_ROOT=/run/cathedral-validator-pex" in direct
     assert (
         "RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex" in direct
     )
     assert "/var/lib/cathedral-validator/.cache/pex" not in direct
     assert "--wallet-path=/run/cathedral-validator-wallet" in direct
+    assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in direct
     assert "ConditionPathExists=/etc/cathedral-validator/snp-policy.json" in direct
     assert (
         "ConditionFileIsExecutable=/usr/local/lib/cathedral-validator/snpguest"
@@ -822,6 +865,11 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     )
     assert "CATHEDRAL_TELEMETRY_ENDPOINT" not in telemetry_env
     assert "TOKEN_FILE" not in telemetry_env
+    identity_env = (deploy / "identity.env.example").read_text()
+    assert "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=YOUR_HOTKEY_SS58" in identity_env
+    assert "PRIVATE" not in identity_env
+    update_env = (deploy / "update.env.example").read_text()
+    assert "CATHEDRAL_VALIDATOR_DIRECT_JOURNAL" not in update_env
 
     for name, minimum in (
         ("cathedral-validator-canary-update.service", "CANARY"),
@@ -829,6 +877,10 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     ):
         unit = (deploy / name).read_text()
         assert "ProtectHome=true" in unit
+        assert "ConditionPathExists=/etc/cathedral-validator/identity.env" in unit
+        assert "EnvironmentFile=/etc/cathedral-validator/identity.env" in unit
+        assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in unit
+        assert "--journal" not in unit
         assert (
             "ExecStart=/usr/local/lib/cathedral-validator-updater/bin/"
             "cathedral-validator-update "
@@ -974,6 +1026,8 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
                     str(policy),
                     "--snpguest",
                     str(snpguest),
+                    "--expected-hotkey",
+                    "5ReleaseFixtureValidator",
                 ],
                 check=False,
                 env=environment,

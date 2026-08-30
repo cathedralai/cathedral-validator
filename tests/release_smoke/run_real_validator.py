@@ -107,6 +107,8 @@ def main() -> int:
                     str(policy),
                     "--snpguest",
                     str(snpguest),
+                    "--expected-hotkey",
+                    _Hotkey.ss58_address,
                     "--once",
                     "--confirm-direct-write",
                 ]

@@ -65,6 +65,17 @@ _REPORTED_EXCLUSION_CATEGORIES = (
 )
 
 
+def _expected_hotkey(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 64
+        or not value.isascii()
+        or not value.isalnum()
+    ):
+        raise SystemExit("--expected-hotkey must be a path-safe public SS58 address")
+    return value
+
+
 def _notify_ready() -> None:
     """Tell systemd initialization finished before any cycle or chain write."""
 
@@ -451,6 +462,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
+    parser.add_argument(
+        "--expected-hotkey",
+        required=True,
+        help="public SS58 address which the loaded hotkey credential must match",
+    )
     parser.add_argument("--qvl", required=True)
     parser.add_argument(
         "--snp-policy",
@@ -480,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     if options.network != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
+    expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
         or not math.isfinite(options.interval_seconds)
@@ -507,6 +524,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         path=str(options.wallet_path) if options.wallet_path is not None else None,
     )
     keypair = wallet.hotkey
+    if str(getattr(keypair, "ss58_address", "")) != expected_hotkey:
+        raise SystemExit("loaded validator hotkey does not match --expected-hotkey")
     if not callable(getattr(keypair, "sign", None)):
         raise SystemExit("validator hotkey cannot sign")
     subtensor = make_subtensor(bt, network=options.network)
