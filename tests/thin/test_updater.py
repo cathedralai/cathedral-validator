@@ -862,6 +862,7 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert direct.rindex("EnvironmentFile=/etc/cathedral-validator/identity.env") > (
         direct.rindex("EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env")
     )
+    assert "Environment=HOME=/var/lib/cathedral-validator" in direct
     assert "Environment=PEX_ROOT=/run/cathedral-validator-pex" in direct
     assert (
         "RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex" in direct
@@ -961,6 +962,7 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "PEX_ROOT=/tmp/cathedral-validator-pex-root" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT=" in release_job
+    assert "HOME=/tmp/cathedral-validator-nobody-home" in release_job
     assert "sudo -u nobody env" in release_job
     assert "tests/release_smoke/run_real_validator.py" in release_job
     assert "/tmp/cathedral-validator-release-smoke.py" in release_job
