@@ -2246,6 +2246,88 @@ def test_cli_startup_recovery_contradiction_stops_before_ready(
     }
 
 
+def test_cli_once_reports_startup_recovery_ambiguity_without_ready(
+    monkeypatch, capsys
+) -> None:
+    _stub_cli_runtime(monkeypatch, [])
+
+    def recover():
+        raise DirectSubmissionAmbiguous("signed intent is unresolved")
+
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: SimpleNamespace(recover=recover),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_notify_ready",
+        lambda: pytest.fail("ambiguous one-shot recovery reported ready"),
+    )
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "NOT_PROVEN",
+        "error": "signed intent is unresolved",
+    }
+
+
+def test_recurring_cli_paces_startup_recovery_ambiguity(monkeypatch, capsys) -> None:
+    class StopLoop(BaseException):
+        pass
+
+    events = [StopLoop()]
+    order: list[str] = []
+    _stub_cli_runtime(monkeypatch, events)
+
+    def recover():
+        raise DirectSubmissionAmbiguous("signed intent is unresolved")
+
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: SimpleNamespace(recover=recover),
+    )
+    monkeypatch.setattr(runtime, "_notify_ready", lambda: order.append("ready"))
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: order.append("sleep"))
+
+    with pytest.raises(StopLoop):
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--confirm-direct-write",
+            ]
+        )
+
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "NOT_PROVEN",
+        "error": "signed intent is unresolved",
+    }
+    assert order == ["ready", "sleep"]
+    assert events == []
+
+
 def test_cli_reconciles_startup_telemetry_after_reporting_ready(
     monkeypatch, tmp_path: Path
 ) -> None:
