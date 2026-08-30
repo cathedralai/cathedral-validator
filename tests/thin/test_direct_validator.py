@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import stat
 from contextlib import contextmanager
@@ -1543,7 +1544,10 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
     row["phase_timings_ms"] = {"binding": 1}
     scored = round_result(row, miners=(MINER_ONE_AXON,))
     ambiguous_plan = build_direct_plan(observed, scored)
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(
+        tmp_path / "telemetry" / "events.jsonl",
+        reader_gid=os.getegid(),
+    )
     writer_state = tmp_path / "direct-writer" / "state.json"
     writer_state.parent.mkdir(mode=0o700)
     writer_state.write_bytes(
@@ -1624,23 +1628,103 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
         writer_state.chmod(0o600)
         return recovered_receipt
 
-    recovered = run_direct_cycle(
-        subtensor=object(),
-        keypair=keypair,
-        verifier_adapter=object(),
-        writer=SimpleNamespace(state_path=writer_state, recover=recover),
-        telemetry_sink=spool,
+    _stub_cli_runtime(monkeypatch, [])
+    monkeypatch.setattr(
+        runtime,
+        "make_wallet",
+        lambda *_args, **_kwargs: SimpleNamespace(hotkey=keypair),
+    )
+    startup_writer = SimpleNamespace(state_path=writer_state, recover=recover)
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: startup_writer,
+    )
+    monkeypatch.setattr(
+        runtime.grp,
+        "getgrnam",
+        lambda group: (
+            SimpleNamespace(gr_gid=os.getegid())
+            if group == "cathedral-telemetry"
+            else pytest.fail("unexpected telemetry group")
+        ),
     )
 
-    assert recovered["status"] == STATUS_RECOVERED
-    assert recovered["telemetry"]["status"] == "SPOOLED"
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={keypair.ss58_address}",
+                f"--telemetry-spool={spool.path.resolve()}",
+                "--telemetry-reader-group=cathedral-telemetry",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 0
+    )
     assert not pending_path.exists()
-    assert json.loads(spool.path.read_text())["submission"] == {
+    first_event = json.loads(spool.path.read_text())
+    assert first_event["submission"] == {
         "block_hash": recovered_receipt.block_hash,
         "block_number": recovered_receipt.block_number,
         "recovered": True,
         "status": STATUS_RECOVERED,
     }
+
+    current_observed = replace(
+        snapshot(ANCHOR_NUMBER + 1, miners=(MINER_ONE_AXON,)),
+        validator_hotkey=keypair.ss58_address,
+    )
+    current_row = machine_row("after-restart")
+    current_row["tee_kind"] = "tdx"
+    current_row["phase_timings_ms"] = {"binding": 1}
+    current_result = round_result(current_row, miners=(MINER_ONE_AXON,))
+    current_receipt = DirectSubmissionReceipt(
+        status=STATUS_CONFIRMED,
+        attempt_id="sha256:" + "a" * 64,
+        extrinsic_hash="0x" + "b" * 64,
+        block_hash="0x" + "c" * 64,
+        block_number=ANCHOR_NUMBER + 1,
+        recovered=False,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "finalized_serving_miners_snapshot",
+        lambda *_args: current_observed,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: current_result,
+    )
+
+    current = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(
+            recover=lambda: None,
+            submit=lambda _plan, **_kwargs: current_receipt,
+        ),
+        telemetry_sink=spool,
+    )
+
+    events = [json.loads(line) for line in spool.path.read_text().splitlines()]
+    assert current["status"] == STATUS_CONFIRMED
+    assert [event["submission"]["block_number"] for event in events] == [
+        ANCHOR_NUMBER,
+        ANCHOR_NUMBER + 1,
+    ]
+    assert events[0] == first_event
+    assert not pending_path.exists()
 
 
 def test_prior_pending_ambiguity_never_overwrites_another_telemetry_plan(
