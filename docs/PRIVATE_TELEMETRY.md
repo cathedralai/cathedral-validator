@@ -11,13 +11,19 @@ It never contains IP addresses, TLS identities, machine identifiers, quotes, cer
 
 The validator signs each event with its own local sr25519 hotkey after the
 weight result is finalized. The collector receives the signature and public
-hotkey, never the wallet or private key. UID30 and every future independent
-validator therefore keep separate chain keys. The ingest credential permits a
-network request but does not establish event identity. The collector verifies
-the hotkey signature and on-chain permit itself.
+hotkey, never the wallet or private key. The signature format keeps every
+validator's chain key separate. The current transport remains UID30-only. The
+ingest credential permits a network request but does not establish event
+identity. The collector verifies the hotkey signature and on-chain permit
+itself.
 
-Telemetry is opt-in. Install the isolated exporter after the validator's
-`cathedral-validator` operating-system user and executable already exist:
+Telemetry export is limited to Cathedral's UID30 validator in this release.
+Do not distribute the collector or Sites credentials to independent validator
+operators. Per-validator ingress credentials are required before contributors
+outside UID30 opt in.
+
+Install the isolated exporter after the validator's `cathedral-validator`
+operating-system user and signed release already exist:
 
 ```bash
 sudo install -o root -g root -m 0644 \
@@ -46,13 +52,22 @@ sudo install -o root -g cathedral-telemetry -m 0640 \
 ```
 
 The definitions create a separate `cathedral-telemetry` network identity and
-one shared directory. Add these fixed arguments to the direct validator
-service:
+one shared directory. The exporter runs the telemetry module from the same
+signed PEX selected by `/opt/cathedral-validator/current`, so validator and
+exporter code promote or roll back together. It never uses an independently
+installed `/usr/local/bin` copy.
 
-```text
---telemetry-spool /var/lib/cathedral-validator-telemetry/events.jsonl
---telemetry-reader-group cathedral-telemetry
+Install the optional direct-service arguments:
+
+```bash
+sudo install -o root -g root -m 0600 \
+  deploy/validator-update/direct-telemetry.env.example \
+  /etc/cathedral-validator/direct-telemetry.env
 ```
+
+That file enables exactly `--telemetry-spool /var/lib/cathedral-validator-telemetry/events.jsonl` and
+`--telemetry-reader-group cathedral-telemetry`. It contains no network
+credential.
 
 Edit `/etc/cathedral-validator-telemetry/export.env` and set the exact private
 collector URL. Install each issued token from a root-only staging path:
@@ -76,13 +91,12 @@ exporter:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart cathedral-validator.service
+sudo systemctl restart cathedral-validator-direct.service
 sudo systemctl enable --now cathedral-validator-telemetry.timer
 sudo systemctl start cathedral-validator-telemetry.service
 sudo systemctl status cathedral-validator-telemetry.service --no-pager
 ```
 
-Use the validator service name installed on your host if it differs from
-`cathedral-validator.service`. Enable the timer only after the private
-collector URL and both credentials exist. Repeated delivery is safe because
-the collector deduplicates by event ID.
+Enable the timer only after the private collector URL and both credentials
+exist. Repeated delivery is safe because the collector deduplicates by event
+ID.

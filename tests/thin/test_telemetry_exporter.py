@@ -194,12 +194,22 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
 
     assert "User=cathedral-telemetry" in service
     assert "Group=cathedral-telemetry" in service
+    assert "Environment=PEX_INTERPRETER=1" in service
+    assert "Environment=PEX_ROOT=/run/cathedral-validator-telemetry-pex" in service
+    assert "RuntimeDirectory=cathedral-validator-telemetry-pex" in service
+    assert "ConditionFileIsExecutable=/usr/bin/python3.12" in service
+    assert (
+        "ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator "
+        "-m cathedral_thin.independent_runtime.telemetry_exporter" in service
+    )
+    assert "/usr/local/bin/cathedral-validator-telemetry-export" not in service
     assert "InaccessiblePaths=/var/lib/cathedral-validator" in service
     assert "InaccessiblePaths=/etc/cathedral-validator" in service
     assert "EnvironmentFile=/etc/cathedral-validator-telemetry/export.env" in service
     assert (
-        "ReadOnlyPaths=/var/lib/cathedral-validator-telemetry /etc/cathedral-validator-telemetry"
-        in service
+        "ReadOnlyPaths=/opt/cathedral-validator/current "
+        "/var/lib/cathedral-validator-telemetry "
+        "/etc/cathedral-validator-telemetry" in service
     )
     assert "CapabilityBoundingSet=" in service
     assert "PrivateDevices=true" in service

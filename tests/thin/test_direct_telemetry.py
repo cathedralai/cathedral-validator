@@ -6,6 +6,7 @@ import json
 import os
 from copy import deepcopy
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from bittensor_wallet import Keypair
@@ -27,6 +28,7 @@ from cathedral_thin.independent_runtime.telemetry import (
     canonical_telemetry_path,
     latest_telemetry_event,
     journal_receipt_for_plan,
+    validate_public_telemetry_event,
 )
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 
@@ -153,6 +155,70 @@ def test_snapshot_exposes_only_sanitized_direct_round_facts() -> None:
         "8.8.8.8",
     ):
         assert secret not in encoded
+
+
+def test_python_generated_wire_fixture_stays_collector_compatible() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "cathedral_validator_telemetry_v2_python.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="ascii"))
+    validator = Keypair.create_from_seed("0x" + bytes(range(32)).hex())
+    miner = "5CShbTqxKUgKZBRDu1VGVpivm3m415stz86A5GBdoV7wrU1d"
+    plan = DirectWeightPlan(
+        snapshot=FinalizedMetagraphSnapshot(
+            block_number=123,
+            block_hash="0x" + "a" * 64,
+            validator_uid=30,
+            validator_hotkey=validator.ss58_address,
+            miners=(ServingAxon(41, miner, "1.1.1.1", 8081),),
+            skipped_axons={},
+        ),
+        qvl_digest="fixture",
+        evidence_digest="sha256:" + "b" * 64,
+        machine_ids_by_uid=((41, ("fixture-machine",)),),
+        raw_scores=((41, 1),),
+        uid_hotkeys=((41, miner),),
+        wire_uids=(41,),
+        wire_weights=(65535,),
+    )
+    receipt = DirectSubmissionReceipt(
+        status="CONFIRMED",
+        attempt_id="sha256:" + "c" * 64,
+        extrinsic_hash="0x" + "d" * 64,
+        block_hash="0x" + "e" * 64,
+        block_number=124,
+        recovered=False,
+    )
+    row = {
+        "uid": 41,
+        "hotkey": miner,
+        "verdict": "PASS",
+        "platform_identity_verified": True,
+        "sat_units": 20,
+        "counted_units": 20,
+        "tee_kind": "tdx",
+        "phase_timings_ms": {
+            "binding": 10,
+            "evidence": 10,
+            "qvl": 10,
+            "sat": 10,
+        },
+    }
+    generated = build_telemetry_snapshot(
+        result_rows=(row,),
+        plan=plan,
+        receipt=receipt,
+        keypair=validator,
+        observed_at=datetime(2026, 8, 30, 12, 3, tzinfo=UTC),
+    )
+
+    assert fixture_path.read_bytes() == canonical_document_bytes(fixture)
+    assert validate_public_telemetry_event(fixture) == fixture
+    assert {key: value for key, value in generated.items() if key != "signature"} == {
+        key: value for key, value in fixture.items() if key != "signature"
+    }
 
 
 def test_signed_snapshot_refuses_content_and_signature_tampering(tmp_path) -> None:

@@ -2,19 +2,25 @@
 Description=Export Cathedral validator sanitized telemetry
 After=network-online.target
 Wants=network-online.target
+ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-validator
+ConditionFileIsExecutable=/usr/bin/python3.12
 
 [Service]
 Type=oneshot
 User=cathedral-telemetry
 Group=cathedral-telemetry
+Environment=PEX_ROOT=/run/cathedral-validator-telemetry-pex
+Environment=PEX_INTERPRETER=1
 EnvironmentFile=/etc/cathedral-validator-telemetry/export.env
-ExecStart=/usr/local/bin/cathedral-validator-telemetry-export --spool /var/lib/cathedral-validator-telemetry/events.jsonl --reader-group cathedral-telemetry --endpoint ${CATHEDRAL_TELEMETRY_ENDPOINT} --ingest-token-file ${CATHEDRAL_TELEMETRY_TOKEN_FILE} --sites-authorization-file ${CATHEDRAL_TELEMETRY_SITES_AUTH_FILE}
+RuntimeDirectory=cathedral-validator-telemetry-pex
+RuntimeDirectoryMode=0700
+ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator -m cathedral_thin.independent_runtime.telemetry_exporter --spool /var/lib/cathedral-validator-telemetry/events.jsonl --reader-group cathedral-telemetry --endpoint ${CATHEDRAL_TELEMETRY_ENDPOINT} --ingest-token-file ${CATHEDRAL_TELEMETRY_TOKEN_FILE} --sites-authorization-file ${CATHEDRAL_TELEMETRY_SITES_AUTH_FILE}
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadOnlyPaths=/var/lib/cathedral-validator-telemetry /etc/cathedral-validator-telemetry
+ReadOnlyPaths=/opt/cathedral-validator/current /var/lib/cathedral-validator-telemetry /etc/cathedral-validator-telemetry
 InaccessiblePaths=/var/lib/cathedral-validator
 InaccessiblePaths=/etc/cathedral-validator
 RestrictSUIDSGID=true

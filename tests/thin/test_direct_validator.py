@@ -1369,13 +1369,18 @@ def test_telemetry_failure_never_prevents_a_finalized_weight_write(
     observed = snapshot(miners=(MINER_ONE_AXON,))
     scored = round_result(machine_row("1"), miners=(MINER_ONE_AXON,))
     submitted: list[DirectWeightPlan] = []
+    order: list[str] = []
     receipt = SimpleNamespace(
         status=STATUS_CONFIRMED,
         as_document=lambda: {"status": STATUS_CONFIRMED},
     )
     writer_object = SimpleNamespace(
         recover=lambda: None,
-        submit=lambda plan, **_kwargs: submitted.append(plan) or receipt,
+        submit=lambda plan, **_kwargs: (
+            order.append("submit"),
+            submitted.append(plan),
+            receipt,
+        )[-1],
     )
     monkeypatch.setattr(
         runtime, "finalized_serving_miners_snapshot", lambda *_args: observed
@@ -1384,7 +1389,10 @@ def test_telemetry_failure_never_prevents_a_finalized_weight_write(
     monkeypatch.setattr(
         runtime,
         "build_telemetry_candidate",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("spool unavailable")),
+        lambda **_kwargs: (
+            order.append("telemetry"),
+            (_ for _ in ()).throw(RuntimeError("spool unavailable")),
+        )[-1],
     )
 
     result = run_direct_cycle(
@@ -1398,6 +1406,7 @@ def test_telemetry_failure_never_prevents_a_finalized_weight_write(
     )
 
     assert submitted and submitted[0].raw_scores == ((19, 1),)
+    assert order == ["submit", "telemetry"]
     assert result["status"] == STATUS_CONFIRMED
     assert result["telemetry"] == {"status": "FAILED"}
 

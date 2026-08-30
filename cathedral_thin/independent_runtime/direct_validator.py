@@ -60,7 +60,6 @@ from .telemetry import (
     TelemetryError,
     TelemetrySpool,
     build_telemetry_candidate,
-    build_telemetry_snapshot,
     journal_receipt_for_plan,
 )
 
@@ -468,25 +467,6 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
-    telemetry_candidate = None
-    if pending_telemetry is not None:
-        try:
-            telemetry_candidate = build_telemetry_candidate(
-                result_rows=result.rows,
-                plan=plan,
-            )
-        except Exception:
-            telemetry_candidate = None
-    pending_saved = False
-    if pending_telemetry is not None and telemetry_candidate is not None:
-        try:
-            # Persist before entering the chain writer. The writer retains its
-            # own deadline gate, and telemetry never runs between signing and
-            # broadcast.
-            pending_telemetry.prepare(telemetry_candidate, plan)
-            pending_saved = True
-        except Exception:
-            pending_saved = False
     receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
     event = {
         "status": receipt.status,
@@ -501,20 +481,18 @@ def _run_direct_cycle_unlocked(
     }
     if telemetry_sink is not None:
         try:
-            telemetry = (
-                pending_telemetry.finalize(receipt, keypair=keypair)
-                if pending_telemetry is not None and pending_saved
-                else build_telemetry_snapshot(
-                    result_rows=result.rows,
-                    plan=plan,
-                    receipt=receipt,
-                    keypair=keypair,
-                )
+            if pending_telemetry is None:
+                raise TelemetryError("telemetry pending store is absent")
+            # Every telemetry filesystem operation happens only after the
+            # authoritative writer has returned a finalized receipt.
+            telemetry_candidate = build_telemetry_candidate(
+                result_rows=result.rows,
+                plan=plan,
             )
+            pending_telemetry.prepare(telemetry_candidate, plan)
+            telemetry = pending_telemetry.finalize(receipt, keypair=keypair)
             if telemetry is None:
                 raise TelemetryError("finalized telemetry event is absent")
-            if not pending_saved:
-                telemetry_sink.append(telemetry)
             event["telemetry"] = {
                 "status": "SPOOLED",
                 "event_id": telemetry["event_id"],
