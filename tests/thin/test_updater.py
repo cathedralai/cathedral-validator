@@ -1007,6 +1007,35 @@ def test_extracted_release_is_traversable_but_not_writable_by_service(
     assert stat.S_IMODE((release / "README").stat().st_mode) == 0o444
 
 
+def test_offline_builder_rejects_decoy_telemetry_module_paths(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    builder = runpy.run_path(
+        str(root / "deploy" / "validator-update" / "build_signed_release.py")
+    )
+    pex = tmp_path / "cathedral-validator.pex"
+    _validator_pex(pex)
+    original = pex.read_bytes()
+    output = io.BytesIO()
+    telemetry_paths = {
+        "cathedral_thin/independent_runtime/telemetry.py",
+        "cathedral_thin/independent_runtime/telemetry_exporter.py",
+    }
+    with zipfile.ZipFile(io.BytesIO(original), mode="r") as source:
+        with zipfile.ZipFile(
+            output, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as target:
+            for member in source.infolist():
+                if member.filename not in telemetry_paths:
+                    target.writestr(member, source.read(member.filename))
+            for path in sorted(telemetry_paths):
+                target.writestr(f"decoy/{path}", b"")
+    pex.write_bytes(b"#!/usr/bin/python3.12\n" + output.getvalue())
+    pex.chmod(0o755)
+
+    with pytest.raises(UpdateRefused, match="private telemetry runtime"):
+        builder["_validator_pex"](pex)
+
+
 def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     tmp_path: Path,
 ) -> None:

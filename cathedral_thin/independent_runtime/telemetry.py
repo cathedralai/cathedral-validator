@@ -24,7 +24,7 @@ from .direct_contract import DirectSubmissionReceipt, DirectWeightPlan
 from .preview_io import canonical_document_bytes
 
 TELEMETRY_SCHEMA = "cathedral_validator_telemetry_v2"
-TELEMETRY_PENDING_SCHEMA = "cathedral_validator_telemetry_pending_v2"
+TELEMETRY_PENDING_SCHEMA = "cathedral_validator_telemetry_pending_v3"
 TELEMETRY_STATE_SCHEMA = "cathedral_validator_telemetry_export_state_v2"
 TELEMETRY_SIGNING_DOMAIN = b"cathedral-validator-telemetry-v2\x00"
 SR25519_CRYPTO_TYPE = 1
@@ -637,14 +637,56 @@ class TelemetrySpool:
                     pass
 
 
+def _stored_submission_receipt(document: object) -> DirectSubmissionReceipt:
+    if not isinstance(document, Mapping) or set(document) != {
+        "status",
+        "attempt_id",
+        "extrinsic_hash",
+        "block_hash",
+        "block_number",
+        "recovered",
+        "confirmation_heads",
+    }:
+        raise TelemetryError("pending telemetry receipt is malformed")
+    try:
+        receipt = DirectSubmissionReceipt(
+            status=document["status"],
+            attempt_id=document["attempt_id"],
+            extrinsic_hash=document["extrinsic_hash"],
+            block_hash=document["block_hash"],
+            block_number=document["block_number"],
+            recovered=document["recovered"],
+            confirmation_heads=tuple(
+                (int(row[0]), str(row[1])) for row in document["confirmation_heads"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise TelemetryError("pending telemetry receipt is invalid") from exc
+    if receipt.as_document() != dict(document):
+        raise TelemetryError("pending telemetry receipt is not canonical")
+    return receipt
+
+
 class PendingTelemetryStore:
-    """Durable bridge from a persisted signed intent to finalized telemetry."""
+    """Durable bridge from one submitted plan to its signed telemetry."""
 
     def __init__(self, spool: TelemetrySpool) -> None:
         self.spool = spool
         self.path = spool.path.with_name("pending.json")
 
-    def prepare(self, candidate: Mapping[str, Any], plan: DirectWeightPlan) -> None:
+    def prepare(
+        self,
+        candidate: Mapping[str, Any],
+        plan: DirectWeightPlan,
+        receipt: DirectSubmissionReceipt | None,
+    ) -> None:
+        if not isinstance(plan, DirectWeightPlan):
+            raise TelemetryError("pending telemetry requires a direct weight plan")
+        if receipt is not None and (
+            not isinstance(receipt, DirectSubmissionReceipt)
+            or receipt.status not in FINALIZED_SUBMISSION_STATUSES
+        ):
+            raise TelemetryError("pending telemetry requires a finalized receipt")
         plan_identity_sha256 = (
             "sha256:"
             + hashlib.sha256(canonical_document_bytes(plan.identity())).hexdigest()
@@ -653,6 +695,7 @@ class PendingTelemetryStore:
             "schema": TELEMETRY_PENDING_SCHEMA,
             "plan_identity_sha256": plan_identity_sha256,
             "candidate": dict(candidate),
+            "receipt": receipt.as_document() if receipt is not None else None,
         }
         body = canonical_document_bytes(document)
         if len(body) > MAX_TELEMETRY_EVENT_BYTES:
@@ -715,14 +758,27 @@ class PendingTelemetryStore:
             raise TelemetryError("pending telemetry is invalid JSON") from exc
         if (
             not isinstance(document, dict)
-            or set(document) != {"schema", "plan_identity_sha256", "candidate"}
+            or set(document)
+            != {"schema", "plan_identity_sha256", "candidate", "receipt"}
             or document.get("schema") != TELEMETRY_PENDING_SCHEMA
             or not isinstance(document.get("plan_identity_sha256"), str)
+            or len(document["plan_identity_sha256"]) != 71
+            or not document["plan_identity_sha256"].startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in document["plan_identity_sha256"][7:]
+            )
             or not isinstance(document.get("candidate"), dict)
+            or (
+                document.get("receipt") is not None
+                and not isinstance(document.get("receipt"), dict)
+            )
         ):
             raise TelemetryError("pending telemetry is malformed")
         if canonical_document_bytes(document) != raw:
             raise TelemetryError("pending telemetry is not canonical JSON")
+        if document.get("receipt") is not None:
+            _stored_submission_receipt(document["receipt"])
         return document
 
     def plan_identity_sha256(self) -> str | None:
@@ -731,13 +787,27 @@ class PendingTelemetryStore:
 
     def finalize(
         self,
-        receipt: DirectSubmissionReceipt,
         *,
         keypair: Any,
+        expected_receipt: DirectSubmissionReceipt | None = None,
     ) -> dict[str, Any] | None:
         document = self._load()
         if document is None:
             return None
+        stored_receipt = (
+            _stored_submission_receipt(document["receipt"])
+            if document["receipt"] is not None
+            else None
+        )
+        if (
+            expected_receipt is not None
+            and stored_receipt is not None
+            and stored_receipt != expected_receipt
+        ):
+            raise TelemetryError("pending telemetry receipt differs from the writer")
+        receipt = expected_receipt or stored_receipt
+        if receipt is None:
+            raise TelemetryError("pending telemetry awaits writer recovery")
         if receipt.status == "EXPIRED_WITHOUT_INCLUSION":
             self.clear()
             return None
@@ -767,12 +837,7 @@ class PendingTelemetryStore:
             os.close(directory)
 
 
-def journal_receipt_for_plan(
-    state_path: Path,
-    plan_identity_sha256: str,
-) -> DirectSubmissionReceipt | None:
-    """Recover a completed receipt when telemetry crashed after writer finality."""
-
+def _direct_writer_journal(state_path: Path) -> dict[str, Any]:
     if state_path.is_symlink():
         raise TelemetryError("direct writer journal is a symlink")
     try:
@@ -791,42 +856,52 @@ def journal_receipt_for_plan(
         state = json.loads(raw.decode("ascii"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TelemetryError("direct writer journal is invalid JSON") from exc
-    last = state.get("last_attempt") if isinstance(state, dict) else None
-    if not isinstance(last, dict):
-        return None
-    identity = last.get("identity")
-    if not isinstance(identity, dict):
+    if (
+        not isinstance(state, dict)
+        or set(state) != {"schema", "pending", "last_attempt"}
+        or state.get("schema") != "cathedral_direct_validator_state_v1"
+        or canonical_document_bytes(state) != raw
+    ):
+        raise TelemetryError("direct writer journal is malformed")
+    return state
+
+
+def _plan_identity_sha256(identity: object) -> str:
+    if not isinstance(identity, Mapping):
         raise TelemetryError("direct writer plan identity is malformed")
-    observed_plan_identity = (
-        "sha256:" + hashlib.sha256(canonical_document_bytes(identity)).hexdigest()
-    )
-    if observed_plan_identity != plan_identity_sha256:
+    return "sha256:" + hashlib.sha256(canonical_document_bytes(identity)).hexdigest()
+
+
+def journal_pending_plan_matches(
+    state_path: Path,
+    plan_identity_sha256: str,
+) -> bool:
+    """Check one post-submit ambiguity against the writer's durable intent."""
+
+    state = _direct_writer_journal(state_path)
+    pending = state["pending"]
+    if pending is None:
+        return False
+    if not isinstance(pending, Mapping):
+        raise TelemetryError("direct writer pending intent is malformed")
+    return _plan_identity_sha256(pending.get("identity")) == plan_identity_sha256
+
+
+def journal_receipt_for_plan(
+    state_path: Path,
+    plan_identity_sha256: str,
+) -> DirectSubmissionReceipt | None:
+    """Bind recovered telemetry to the writer's finalized plan and receipt."""
+
+    state = _direct_writer_journal(state_path)
+    last = state["last_attempt"]
+    if last is None:
         return None
-    receipt = last.get("receipt")
-    if not isinstance(receipt, dict) or set(receipt) != {
-        "status",
-        "attempt_id",
-        "extrinsic_hash",
-        "block_hash",
-        "block_number",
-        "recovered",
-        "confirmation_heads",
-    }:
-        raise TelemetryError("direct writer receipt is malformed")
-    try:
-        return DirectSubmissionReceipt(
-            status=receipt["status"],
-            attempt_id=receipt["attempt_id"],
-            extrinsic_hash=receipt["extrinsic_hash"],
-            block_hash=receipt["block_hash"],
-            block_number=receipt["block_number"],
-            recovered=receipt["recovered"],
-            confirmation_heads=tuple(
-                (int(row[0]), str(row[1])) for row in receipt["confirmation_heads"]
-            ),
-        )
-    except (KeyError, TypeError, ValueError, IndexError) as exc:
-        raise TelemetryError("direct writer receipt is invalid") from exc
+    if not isinstance(last, Mapping):
+        raise TelemetryError("direct writer last attempt is malformed")
+    if _plan_identity_sha256(last.get("identity")) != plan_identity_sha256:
+        return None
+    return _stored_submission_receipt(last.get("receipt"))
 
 
 def latest_telemetry_event(
@@ -888,6 +963,7 @@ __all__ = [
     "canonical_telemetry_path",
     "latest_telemetry_event",
     "finalize_telemetry_candidate",
+    "journal_pending_plan_matches",
     "journal_receipt_for_plan",
     "validate_public_telemetry_event",
 ]

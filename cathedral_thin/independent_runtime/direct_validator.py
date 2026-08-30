@@ -60,6 +60,7 @@ from .telemetry import (
     TelemetryError,
     TelemetrySpool,
     build_telemetry_candidate,
+    journal_pending_plan_matches,
     journal_receipt_for_plan,
 )
 
@@ -414,7 +415,10 @@ def _run_direct_cycle_unlocked(
                     else None
                 )
                 telemetry = (
-                    pending_telemetry.finalize(journal_receipt, keypair=keypair)
+                    pending_telemetry.finalize(
+                        keypair=keypair,
+                        expected_receipt=recovered,
+                    )
                     if journal_receipt == recovered
                     else None
                 )
@@ -426,24 +430,6 @@ def _run_direct_cycle_unlocked(
             except Exception:
                 event["telemetry"] = {"status": "FAILED"}
         return event
-    reconciled_event_id: str | None = None
-    if pending_telemetry is not None:
-        try:
-            pending_plan = pending_telemetry.plan_identity_sha256()
-            prior_receipt = (
-                journal_receipt_for_plan(writer.state_path, pending_plan)
-                if pending_plan is not None
-                else None
-            )
-            if prior_receipt is not None:
-                prior_event = pending_telemetry.finalize(
-                    prior_receipt,
-                    keypair=keypair,
-                )
-                if prior_event is not None:
-                    reconciled_event_id = str(prior_event["event_id"])
-        except Exception:
-            pass
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -467,7 +453,43 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
-    receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
+    try:
+        receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
+    except Exception as exc:
+        # The writer owns the chain ambiguity boundary. Only after it returns
+        # control may telemetry persist the in-memory candidate for recovery.
+        from .direct_writer import (
+            DirectSubmissionAmbiguous,
+            DirectSubmissionContradiction,
+        )
+
+        if (
+            pending_telemetry is not None
+            and isinstance(exc, DirectSubmissionAmbiguous)
+            and not isinstance(exc, DirectSubmissionContradiction)
+        ):
+            try:
+                plan_identity_sha256 = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        canonical_document_bytes(plan.identity())
+                    ).hexdigest()
+                )
+                if journal_pending_plan_matches(
+                    writer.state_path,
+                    plan_identity_sha256,
+                ):
+                    pending_telemetry.prepare(
+                        build_telemetry_candidate(
+                            result_rows=result.rows,
+                            plan=plan,
+                        ),
+                        plan,
+                        None,
+                    )
+            except Exception:
+                pass
+        raise
     event = {
         "status": receipt.status,
         "anchor": snapshot.identity(),
@@ -479,6 +501,16 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    reconciled_event_id: str | None = None
+    if pending_telemetry is not None:
+        try:
+            # A prior candidate contains its own finalized receipt. Reconcile
+            # only after this cycle's authoritative chain write has finished.
+            prior_event = pending_telemetry.finalize(keypair=keypair)
+            if prior_event is not None:
+                reconciled_event_id = str(prior_event["event_id"])
+        except Exception:
+            pass
     if telemetry_sink is not None:
         try:
             if pending_telemetry is None:
@@ -489,8 +521,11 @@ def _run_direct_cycle_unlocked(
                 result_rows=result.rows,
                 plan=plan,
             )
-            pending_telemetry.prepare(telemetry_candidate, plan)
-            telemetry = pending_telemetry.finalize(receipt, keypair=keypair)
+            pending_telemetry.prepare(telemetry_candidate, plan, receipt)
+            telemetry = pending_telemetry.finalize(
+                keypair=keypair,
+                expected_receipt=receipt,
+            )
             if telemetry is None:
                 raise TelemetryError("finalized telemetry event is absent")
             event["telemetry"] = {

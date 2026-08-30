@@ -230,15 +230,19 @@ def _validator_pex(path: Path) -> ValidatedPex:
         raise UpdateRefused(
             "validator PEX omits the production extra or pinned Compute contract"
         )
-    module_suffix = "cathedral_thin/independent_runtime/direct_validator.py"
-    if not any(name.endswith(module_suffix) for name in names):
+
+    def project_module_present(module_path: str) -> bool:
+        return module_path in names or f".deps/{project}/{module_path}" in names
+
+    validator_module = "cathedral_thin/independent_runtime/direct_validator.py"
+    if not project_module_present(validator_module):
         raise UpdateRefused("validator PEX omits the direct validator module")
-    snp_suffix = "cathedral_thin/independent_runtime/snp_production.py"
-    if not any(name.endswith(snp_suffix) for name in names):
+    snp_module = "cathedral_thin/independent_runtime/snp_production.py"
+    if not project_module_present(snp_module):
         raise UpdateRefused("validator PEX omits the production SNP verifier")
     for module in ("telemetry.py", "telemetry_exporter.py"):
-        suffix = f"cathedral_thin/independent_runtime/{module}"
-        if not any(name.endswith(suffix) for name in names):
+        module_path = f"cathedral_thin/independent_runtime/{module}"
+        if not project_module_present(module_path):
             raise UpdateRefused("validator PEX omits the private telemetry runtime")
     return ValidatedPex(
         raw=raw,

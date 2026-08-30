@@ -27,7 +27,6 @@ from cathedral_thin.independent_runtime.telemetry import (
     build_telemetry_candidate,
     canonical_telemetry_path,
     latest_telemetry_event,
-    journal_receipt_for_plan,
     validate_public_telemetry_event,
 )
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
@@ -393,56 +392,16 @@ def test_pending_candidate_survives_until_the_finalized_receipt(tmp_path) -> Non
     pending = PendingTelemetryStore(spool)
     receipt = _receipt()
 
-    pending.prepare(candidate, _plan())
-    event = pending.finalize(receipt, keypair=VALIDATOR_KEYPAIR)
+    pending.prepare(candidate, _plan(), receipt)
+    event = pending.finalize(
+        keypair=VALIDATOR_KEYPAIR,
+        expected_receipt=receipt,
+    )
 
     assert event is not None
     assert event["submission"]["status"] == "CONFIRMED"
     assert latest_telemetry_event(spool.path) == event
     assert not pending.path.exists()
-
-
-def test_completed_writer_journal_recovers_receipt_for_pending_telemetry(
-    tmp_path,
-) -> None:
-    receipt = _receipt()
-    journal = tmp_path / "direct-writer" / "state.json"
-    journal.parent.mkdir(mode=0o700)
-    journal.write_bytes(
-        canonical_document_bytes(
-            {
-                "schema": "cathedral_direct_validator_state_v1",
-                "pending": None,
-                "last_attempt": {
-                    "attempt_id": receipt.attempt_id,
-                    "status": receipt.status,
-                    "identity": _plan().identity(),
-                    "intent": {},
-                    "receipt": receipt.as_document(),
-                },
-            }
-        )
-    )
-    journal.chmod(0o600)
-
-    pending = PendingTelemetryStore(
-        TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
-    )
-    pending.prepare(
-        build_telemetry_candidate(
-            result_rows=(
-                _row(41, TDX_MINER_KEYPAIR.ss58_address, "tdx", 10),
-                _row(42, SNP_MINER_KEYPAIR.ss58_address, "sev_snp", 20),
-            ),
-            plan=_plan(),
-        ),
-        _plan(),
-    )
-    plan_identity_sha256 = pending.plan_identity_sha256()
-    assert plan_identity_sha256 is not None
-    recovered = journal_receipt_for_plan(journal, plan_identity_sha256)
-
-    assert recovered == receipt
 
 
 def test_shared_spool_exposes_only_sanitized_events_to_the_reader_group(
