@@ -258,6 +258,19 @@ def canonical_state_path(keypair: Any) -> Path:
     return DIRECT_STATE_ROOT / DIRECT_STATE_SCOPE / hotkey / "state.json"
 
 
+def cycle_lock_path_for_state(state_path: Path) -> Path:
+    """Return the lock shared by one signer cycle and the local updater.
+
+    The path is derived from the journal rather than configuration so a root
+    updater cannot accidentally lock a different signer from the validator it
+    restarts.
+    """
+
+    if not state_path.is_absolute() or state_path.name != "state.json":
+        raise DirectValidatorError("direct state path is not canonical")
+    return state_path.with_name("cycle.lock")
+
+
 class DirectWeightWriter:
     """One in-process writer. The journal is its sole retry authority."""
 
@@ -286,6 +299,67 @@ class DirectWeightWriter:
         metadata = parent.stat()
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
             raise DirectValidatorError("direct state parent is not owner-controlled")
+
+    @contextmanager
+    def _exclusive_runtime_lock(
+        self, path: Path, *, label: str, wait: bool
+    ) -> Iterator[None]:
+        """Hold one owner-only process lock, optionally waiting for handoff.
+
+        Cycle locking is intentionally outside the narrower journal lock.  It
+        covers recovery, evidence collection, signing, submission, and final
+        confirmation as one indivisible updater boundary.
+        """
+
+        self._prepare_parent()
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise DirectSubmissionAmbiguous(f"{label} lock is unavailable") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise DirectSubmissionAmbiguous(f"{label} lock is not owner-only")
+            if wait:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            else:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise DirectSubmissionAmbiguous(
+                        f"another process holds the direct {label} lock"
+                    ) from exc
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    @contextmanager
+    def cycle_locked(self) -> Iterator[None]:
+        """Exclude a local update for this signer's complete direct cycle."""
+
+        with self._exclusive_runtime_lock(
+            cycle_lock_path_for_state(self.state_path), label="cycle", wait=True
+        ):
+            yield
+
+    @contextmanager
+    def process_locked(self) -> Iterator[None]:
+        """Ensure one recurring direct-validator process per signer."""
+
+        with self._exclusive_runtime_lock(
+            self.state_path.with_name("process.lock"), label="process", wait=False
+        ):
+            yield
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -1314,4 +1388,5 @@ __all__ = [
     "STATUS_EXPIRED",
     "STATUS_RECOVERED",
     "canonical_state_path",
+    "cycle_lock_path_for_state",
 ]

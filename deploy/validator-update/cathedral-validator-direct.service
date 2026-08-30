@@ -1,0 +1,56 @@
+[Unit]
+Description=Cathedral SN39 direct validator
+Wants=network-online.target
+After=network-online.target
+Conflicts=cathedral-validator-sn39.service cathedral-validator-sn39-relay.service cathedral-confidential-validator.service cathedral-confidential-validator-sn39.service
+ConditionPathExists=/etc/cathedral-validator/direct.env
+ConditionPathExists=/etc/cathedral-validator/validator-hotkey
+ConditionPathExists=/etc/cathedral-validator/snp-policy.json
+ConditionFileIsExecutable=/usr/local/lib/cathedral-validator/snpguest
+ConditionFileIsExecutable=/usr/bin/python3.12
+ConditionPathExists=/opt/cathedral-validator/current/bin/cathedral-validator
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=cathedral-validator
+Group=cathedral-validator
+Environment=HOME=/var/lib/cathedral-validator
+Environment=PEX_ROOT=/run/cathedral-validator-pex
+Environment=CATHEDRAL_VALIDATOR_TELEMETRY_ARGS=
+EnvironmentFile=/etc/cathedral-validator/direct.env
+EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env
+LoadCredential=validator-hotkey:/etc/cathedral-validator/validator-hotkey
+RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex
+RuntimeDirectoryMode=0700
+StateDirectory=cathedral-validator
+StateDirectoryMode=0700
+ExecStartPre=/usr/bin/install -d -m 0700 /run/cathedral-validator-wallet/validator/hotkeys
+ExecStartPre=/usr/bin/install -m 0400 ${CREDENTIALS_DIRECTORY}/validator-hotkey /run/cathedral-validator-wallet/validator/hotkeys/default
+ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator --network=finney --wallet-name=validator --wallet-hotkey=default --wallet-path=/run/cathedral-validator-wallet --qvl=${CATHEDRAL_VALIDATOR_QVL} --snp-policy=${CATHEDRAL_SNP_POLICY} --snpguest=${CATHEDRAL_SNPGUEST} --interval-seconds=${CATHEDRAL_VALIDATOR_INTERVAL_SECONDS} --confirm-direct-write $CATHEDRAL_VALIDATOR_TELEMETRY_ARGS
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=15s
+TimeoutStartSec=120s
+TimeoutStopSec=150s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ReadOnlyPaths=/opt/cathedral-validator/current
+ReadWritePaths=/var/lib/cathedral-validator /run/cathedral-validator-wallet /run/cathedral-validator-pex -/var/lib/cathedral-validator-telemetry
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

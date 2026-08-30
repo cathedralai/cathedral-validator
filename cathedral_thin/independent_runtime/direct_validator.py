@@ -13,7 +13,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import socket
 import time
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Sequence
 
 import bittensor as bt
@@ -59,6 +63,25 @@ _REPORTED_EXCLUSION_CATEGORIES = (
     "duplicate_hardware",
     "other",
 )
+
+
+def _notify_ready() -> None:
+    """Tell systemd initialization finished before any cycle or chain write."""
+
+    notify_socket = os.environ.get("NOTIFY_SOCKET")
+    if not notify_socket:
+        return
+    address = (
+        "\0" + notify_socket[1:] if notify_socket.startswith("@") else notify_socket
+    )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.connect(address)
+            client.sendall(
+                b"READY=1\nSTATUS=initialized; waiting for the next direct cycle"
+            )
+    except OSError as exc:
+        raise SystemExit("systemd readiness notification failed") from exc
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -346,7 +369,7 @@ def _evidence_cycle_summary(
     }
 
 
-def run_direct_cycle(
+def _run_direct_cycle_unlocked(
     *,
     subtensor: Any,
     keypair: Any,
@@ -396,11 +419,38 @@ def run_direct_cycle(
     }
 
 
+def run_direct_cycle(
+    *,
+    subtensor: Any,
+    keypair: Any,
+    verifier_adapter: ComputeAdapter,
+    writer: Any,
+    snp_verifier: SnpProductionVerifier | None = None,
+) -> dict[str, Any]:
+    """Run one complete cycle while excluding a release activation.
+
+    Test doubles without a cycle lock remain usable, while the installed
+    ``DirectWeightWriter`` always supplies the per-signer flock.
+    """
+
+    lock = getattr(writer, "cycle_locked", None)
+    context = lock() if callable(lock) else nullcontext()
+    with context:
+        return _run_direct_cycle_unlocked(
+            subtensor=subtensor,
+            keypair=keypair,
+            verifier_adapter=verifier_adapter,
+            writer=writer,
+            snp_verifier=snp_verifier,
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
     parser.add_argument("--network", default="finney")
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
+    parser.add_argument("--wallet-path", type=Path)
     parser.add_argument("--qvl", required=True)
     parser.add_argument(
         "--snp-policy",
@@ -450,7 +500,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
-    wallet = make_wallet(bt, name=options.wallet_name, hotkey=options.wallet_hotkey)
+    wallet = make_wallet(
+        bt,
+        name=options.wallet_name,
+        hotkey=options.wallet_hotkey,
+        path=str(options.wallet_path) if options.wallet_path is not None else None,
+    )
     keypair = wallet.hotkey
     if not callable(getattr(keypair, "sign", None)):
         raise SystemExit("validator hotkey cannot sign")
@@ -467,50 +522,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
     )
-    while True:
-        try:
-            event = run_direct_cycle(
-                subtensor=subtensor,
-                keypair=keypair,
-                verifier_adapter=adapter,
-                snp_verifier=snp_verifier,
-                writer=writer,
-            )
-            print(json.dumps(event, sort_keys=True, default=str), flush=True)
-        except DirectSubmissionContradiction as exc:
-            print(
-                json.dumps(
-                    {"status": "CONTRADICTION_STOPPED", "error": str(exc)},
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            return 2
-        except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
-            print(
-                json.dumps({"status": "NOT_PROVEN", "error": str(exc)}, sort_keys=True),
-                flush=True,
-            )
-            if options.once:
-                return 2
-        except Exception as exc:
+    process_lock = getattr(writer, "process_locked", None)
+    process_context = process_lock() if callable(process_lock) else nullcontext()
+    with process_context:
+        # This read-only recovery preflight validates the durable journal and
+        # any unresolved chain identity before systemd treats the release as
+        # ready.  During an update, the root updater still owns cycle.lock, so
+        # no fresh scoring or signing cycle can begin before activation commits.
+        startup_recovery = writer.recover()
+        _notify_ready()
+        if startup_recovery is not None:
             print(
                 json.dumps(
                     {
-                        "status": "NOT_PROVEN",
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "status": startup_recovery.status,
+                        "recovery": startup_recovery.as_document(),
                     },
                     sort_keys=True,
+                    default=str,
                 ),
                 flush=True,
             )
             if options.once:
+                return (
+                    0
+                    if startup_recovery.status in {STATUS_CONFIRMED, STATUS_RECOVERED}
+                    else 2
+                )
+            time.sleep(options.interval_seconds)
+        while True:
+            try:
+                event = run_direct_cycle(
+                    subtensor=subtensor,
+                    keypair=keypair,
+                    verifier_adapter=adapter,
+                    writer=writer,
+                    snp_verifier=snp_verifier,
+                )
+                print(json.dumps(event, sort_keys=True, default=str), flush=True)
+            except DirectSubmissionContradiction as exc:
+                print(
+                    json.dumps(
+                        {"status": "CONTRADICTION_STOPPED", "error": str(exc)},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
                 return 2
-        if options.once:
-            return (
-                0 if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED} else 2
-            )
-        time.sleep(options.interval_seconds)
+            except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
+                print(
+                    json.dumps(
+                        {"status": "NOT_PROVEN", "error": str(exc)},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                if options.once:
+                    return 2
+            except Exception as exc:
+                print(
+                    json.dumps(
+                        {
+                            "status": "NOT_PROVEN",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                if options.once:
+                    return 2
+            if options.once:
+                return (
+                    0
+                    if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED}
+                    else 2
+                )
+            time.sleep(options.interval_seconds)
 
 
 __all__ = [
