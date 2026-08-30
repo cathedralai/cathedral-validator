@@ -405,31 +405,12 @@ def _run_direct_cycle_unlocked(
     )
     recovered = writer.recover()
     if recovered is not None:
-        event = {"status": recovered.status, "recovery": recovered.as_document()}
-        if pending_telemetry is not None:
-            try:
-                pending_plan = pending_telemetry.plan_identity_sha256()
-                journal_receipt = (
-                    journal_receipt_for_plan(writer.state_path, pending_plan)
-                    if pending_plan is not None
-                    else None
-                )
-                telemetry = (
-                    pending_telemetry.finalize(
-                        keypair=keypair,
-                        expected_receipt=recovered,
-                    )
-                    if journal_receipt == recovered
-                    else None
-                )
-                event["telemetry"] = (
-                    {"status": "SPOOLED", "event_id": telemetry["event_id"]}
-                    if telemetry is not None
-                    else {"status": "NO_FINALIZED_EVENT"}
-                )
-            except Exception:
-                event["telemetry"] = {"status": "FAILED"}
-        return event
+        return _recovered_cycle_event(
+            recovered=recovered,
+            writer=writer,
+            keypair=keypair,
+            telemetry_sink=telemetry_sink,
+        )
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -538,6 +519,44 @@ def _run_direct_cycle_unlocked(
             event["telemetry"] = {"status": "FAILED"}
     if reconciled_event_id is not None:
         event["reconciled_telemetry_event_id"] = reconciled_event_id
+    return event
+
+
+def _recovered_cycle_event(
+    *,
+    recovered: Any,
+    writer: Any,
+    keypair: Any,
+    telemetry_sink: TelemetrySpool | None,
+) -> dict[str, Any]:
+    """Project one already-finalized writer recovery without chain access."""
+
+    event = {"status": recovered.status, "recovery": recovered.as_document()}
+    if telemetry_sink is None:
+        return event
+    pending_telemetry = PendingTelemetryStore(telemetry_sink)
+    try:
+        pending_plan = pending_telemetry.plan_identity_sha256()
+        journal_receipt = (
+            journal_receipt_for_plan(writer.state_path, pending_plan)
+            if pending_plan is not None
+            else None
+        )
+        telemetry = (
+            pending_telemetry.finalize(
+                keypair=keypair,
+                expected_receipt=recovered,
+            )
+            if journal_receipt == recovered
+            else None
+        )
+        event["telemetry"] = (
+            {"status": "SPOOLED", "event_id": telemetry["event_id"]}
+            if telemetry is not None
+            else {"status": "NO_FINALIZED_EVENT"}
+        )
+    except Exception:
+        event["telemetry"] = {"status": "FAILED"}
     return event
 
 
@@ -690,12 +709,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         startup_recovery = writer.recover()
         _notify_ready()
         if startup_recovery is not None:
+            startup_event = _recovered_cycle_event(
+                recovered=startup_recovery,
+                writer=writer,
+                keypair=keypair,
+                telemetry_sink=telemetry_sink,
+            )
             print(
                 json.dumps(
-                    {
-                        "status": startup_recovery.status,
-                        "recovery": startup_recovery.as_document(),
-                    },
+                    startup_event,
                     sort_keys=True,
                     default=str,
                 ),

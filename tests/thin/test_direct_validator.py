@@ -2111,6 +2111,78 @@ def test_cli_recovers_journal_before_reporting_ready(monkeypatch) -> None:
     assert order == ["recover", "ready"]
 
 
+def test_cli_reconciles_startup_telemetry_after_reporting_ready(
+    monkeypatch, tmp_path: Path
+) -> None:
+    order: list[str] = []
+    _stub_cli_runtime(monkeypatch, [])
+    recovered_receipt = DirectSubmissionReceipt(
+        status=STATUS_RECOVERED,
+        attempt_id="sha256:" + "1" * 64,
+        extrinsic_hash="0x" + "2" * 64,
+        block_hash="0x" + "3" * 64,
+        block_number=ANCHOR_NUMBER,
+        recovered=True,
+    )
+    writer = SimpleNamespace(
+        state_path=tmp_path / "direct-writer" / "state.json",
+        recover=lambda: order.append("recover") or recovered_receipt,
+    )
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: writer,
+    )
+    monkeypatch.setattr(runtime, "_notify_ready", lambda: order.append("ready"))
+    monkeypatch.setattr(
+        runtime.grp,
+        "getgrnam",
+        lambda group: (
+            SimpleNamespace(gr_gid=1234)
+            if group == "cathedral-telemetry"
+            else pytest.fail("unexpected telemetry group")
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def recovered_cycle_event(**kwargs):
+        order.append("telemetry")
+        captured.update(kwargs)
+        return {
+            "status": recovered_receipt.status,
+            "recovery": recovered_receipt.as_document(),
+            "telemetry": {"status": "SPOOLED", "event_id": "sha256:event"},
+        }
+
+    monkeypatch.setattr(runtime, "_recovered_cycle_event", recovered_cycle_event)
+    spool_path = (tmp_path / "telemetry" / "events.jsonl").resolve()
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                f"--telemetry-spool={spool_path}",
+                "--telemetry-reader-group=cathedral-telemetry",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 0
+    )
+    assert order == ["recover", "ready", "telemetry"]
+    assert captured["recovered"] == recovered_receipt
+    assert captured["writer"] is writer
+    assert captured["keypair"].ss58_address == VALIDATOR
+    assert isinstance(captured["telemetry_sink"], TelemetrySpool)
+    assert captured["telemetry_sink"].path == spool_path
+
+
 @pytest.mark.parametrize(
     "status,expected",
     (
