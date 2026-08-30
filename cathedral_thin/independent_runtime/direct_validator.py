@@ -562,6 +562,8 @@ def _reconcile_pending_telemetry(
             expected_receipt is not None and journal_receipt != expected_receipt
         ):
             return {"status": "NO_FINALIZED_EVENT"}
+        if not pending_telemetry.bind_receipt(pending_plan, journal_receipt):
+            return {"status": "NO_FINALIZED_EVENT"}
         telemetry = pending_telemetry.finalize(
             keypair=keypair,
             expected_receipt=journal_receipt,

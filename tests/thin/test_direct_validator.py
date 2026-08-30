@@ -1678,32 +1678,9 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
     assert append_attempts == 1
     assert pending_path.exists()
     assert not spool.path.exists()
-
-    second_startup_writer = SimpleNamespace(
-        state_path=writer_state,
-        recover=lambda: None,
+    assert json.loads(pending_path.read_text())["receipt"] == (
+        recovered_receipt.as_document()
     )
-    monkeypatch.setattr(
-        writer_runtime,
-        "DirectWeightWriter",
-        lambda **_kwargs: second_startup_writer,
-    )
-    monkeypatch.setattr(
-        runtime,
-        "run_direct_cycle",
-        lambda **_kwargs: {"status": STATUS_CONFIRMED},
-    )
-
-    assert runtime.main(cli_args) == 0
-    assert append_attempts == 2
-    assert not pending_path.exists()
-    first_event = json.loads(spool.path.read_text())
-    assert first_event["submission"] == {
-        "block_hash": recovered_receipt.block_hash,
-        "block_number": recovered_receipt.block_number,
-        "recovered": True,
-        "status": STATUS_RECOVERED,
-    }
 
     current_observed = replace(
         snapshot(ANCHOR_NUMBER + 1, miners=(MINER_ONE_AXON,)),
@@ -1747,11 +1724,17 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
 
     events = [json.loads(line) for line in spool.path.read_text().splitlines()]
     assert current["status"] == STATUS_CONFIRMED
+    assert append_attempts == 3
     assert [event["submission"]["block_number"] for event in events] == [
         ANCHOR_NUMBER,
         ANCHOR_NUMBER + 1,
     ]
-    assert events[0] == first_event
+    assert events[0]["submission"] == {
+        "block_hash": recovered_receipt.block_hash,
+        "block_number": recovered_receipt.block_number,
+        "recovered": True,
+        "status": STATUS_RECOVERED,
+    }
     assert not pending_path.exists()
 
 

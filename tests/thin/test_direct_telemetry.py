@@ -451,6 +451,34 @@ def test_pending_candidate_survives_until_the_finalized_receipt(tmp_path) -> Non
     assert not pending.path.exists()
 
 
+def test_pending_candidate_durably_binds_a_recovered_receipt(tmp_path) -> None:
+    plan = _plan()
+    candidate = build_telemetry_candidate(
+        result_rows=(
+            _row(41, TDX_MINER_KEYPAIR.ss58_address, "tdx", 10),
+            _row(42, SNP_MINER_KEYPAIR.ss58_address, "sev_snp", 20),
+        ),
+        plan=plan,
+    )
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    pending = PendingTelemetryStore(spool)
+    receipt = _receipt()
+    plan_identity_sha256 = (
+        "sha256:"
+        + hashlib.sha256(canonical_document_bytes(plan.identity())).hexdigest()
+    )
+
+    pending.prepare(candidate, plan, None)
+    assert pending.bind_receipt(plan_identity_sha256, receipt) is True
+    assert json.loads(pending.path.read_text())["receipt"] == receipt.as_document()
+
+    event = pending.finalize(keypair=VALIDATOR_KEYPAIR)
+    assert event is not None
+    assert event["submission"]["block_number"] == receipt.block_number
+    assert latest_telemetry_event(spool.path) == event
+    assert not pending.path.exists()
+
+
 def test_shared_spool_exposes_only_sanitized_events_to_the_reader_group(
     tmp_path,
 ) -> None:

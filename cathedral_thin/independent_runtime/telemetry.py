@@ -706,6 +706,39 @@ class PendingTelemetryStore:
             "candidate": dict(candidate),
             "receipt": receipt.as_document() if receipt is not None else None,
         }
+        self._persist(document)
+
+    def bind_receipt(
+        self,
+        plan_identity_sha256: str,
+        receipt: DirectSubmissionReceipt,
+    ) -> bool:
+        """Durably attach the writer's finalized result before spooling it."""
+
+        if not isinstance(
+            receipt, DirectSubmissionReceipt
+        ) or receipt.status not in FINALIZED_SUBMISSION_STATUSES | {
+            "EXPIRED_WITHOUT_INCLUSION"
+        }:
+            raise TelemetryError("pending telemetry requires a terminal receipt")
+        document = self._load()
+        if document is None:
+            return False
+        if document["plan_identity_sha256"] != plan_identity_sha256:
+            raise TelemetryError("pending telemetry plan differs from the writer")
+        stored = (
+            _stored_submission_receipt(document["receipt"])
+            if document["receipt"] is not None
+            else None
+        )
+        if stored is not None and stored != receipt:
+            raise TelemetryError("pending telemetry receipt differs from the writer")
+        if stored is None:
+            document["receipt"] = receipt.as_document()
+            self._persist(document)
+        return True
+
+    def _persist(self, document: Mapping[str, Any]) -> None:
         body = canonical_document_bytes(document)
         if len(body) > MAX_TELEMETRY_EVENT_BYTES:
             raise TelemetryError("pending telemetry exceeds its bound")
