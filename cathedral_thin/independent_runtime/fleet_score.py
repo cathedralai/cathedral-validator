@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -694,41 +694,72 @@ def score_multicompute_round(
             max_workers=min(len(scheduled_axons), MAX_CONCURRENT_MINERS),
             thread_name_prefix="cathedral-miner",
         )
-        future_axons = {
-            bounded_executor.submit(
-                _collect_miner_evidence,
-                axon=axon,
-                keypair=keypair,
-                validator_ss58=validator_ss58,
-                anchor_hash=anchor_hash,
-                verifier_adapter=verifier_adapter,
-                snp_verifier=snp_verifier,
-                deadline_monotonic=discovery_deadline,
-            ): axon
-            for axon in scheduled_axons
-        }
-        done, pending = wait(
-            future_axons,
-            timeout=max(0.0, discovery_deadline - time.monotonic()),
-        )
-        unexpected: Exception | None = None
-        for future in done:
-            axon = future_axons[future]
-            try:
-                result = future.result()
-            except IndependentLiveError as exc:
-                result = _deadline_miner_evidence(axon, f"{type(exc).__name__}: {exc}")
-            except Exception as exc:
-                unexpected = exc
-                continue
-            if result.finished_monotonic > discovery_deadline:
-                result = _deadline_miner_evidence(
-                    axon, "discovery_response_deadline_exceeded"
+        future_axons: dict[Future[_MinerEvidence], ServingAxon] = {}
+        next_axon_index = 0
+
+        def submit_next_axon() -> bool:
+            nonlocal next_axon_index
+            if next_axon_index >= len(scheduled_axons):
+                return False
+            axon = scheduled_axons[next_axon_index]
+            next_axon_index += 1
+            future_axons[
+                bounded_executor.submit(
+                    _collect_miner_evidence,
+                    axon=axon,
+                    keypair=keypair,
+                    validator_ss58=validator_ss58,
+                    anchor_hash=anchor_hash,
+                    verifier_adapter=verifier_adapter,
+                    snp_verifier=snp_verifier,
+                    deadline_monotonic=discovery_deadline,
                 )
-            miner_results[axon.uid] = result
-        for future in pending:
-            axon = future_axons[future]
+            ] = axon
+            return True
+
+        for _ in range(min(len(scheduled_axons), MAX_CONCURRENT_MINERS)):
+            submit_next_axon()
+
+        unexpected: Exception | None = None
+        while future_axons and time.monotonic() < discovery_deadline:
+            done, _pending = wait(
+                tuple(future_axons),
+                timeout=max(0.0, discovery_deadline - time.monotonic()),
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            completed_slots = 0
+            for future in done:
+                axon = future_axons.pop(future)
+                try:
+                    result = future.result()
+                except IndependentLiveError as exc:
+                    result = _deadline_miner_evidence(
+                        axon, f"{type(exc).__name__}: {exc}"
+                    )
+                except Exception as exc:
+                    unexpected = exc
+                    continue
+                if result.finished_monotonic > discovery_deadline:
+                    result = _deadline_miner_evidence(
+                        axon, "discovery_response_deadline_exceeded"
+                    )
+                miner_results[axon.uid] = result
+                completed_slots += 1
+            if unexpected is not None:
+                break
+            for _ in range(completed_slots):
+                if time.monotonic() >= discovery_deadline:
+                    break
+                submit_next_axon()
+
+        for future, axon in future_axons.items():
             future.cancel()
+            miner_results[axon.uid] = _deadline_miner_evidence(
+                axon, "discovery_response_deadline_exceeded"
+            )
+        for axon in scheduled_axons[next_axon_index:]:
             miner_results[axon.uid] = _deadline_miner_evidence(
                 axon, "discovery_response_deadline_exceeded"
             )
