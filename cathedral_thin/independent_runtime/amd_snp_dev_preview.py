@@ -22,6 +22,7 @@ import re
 import ssl
 import stat
 import sys
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +48,8 @@ from cathedral_thin.independent_runtime.validator_request import (
 )
 
 # Exact reviewed cathedral-sandbox merge commit from cathedral-sandbox#189.
-# Runtime provenance checks prevent a local, mutable, wheel-only, or different
-# Compute tree from silently becoming this verifier contract.
+# provenance checks prevent a local, mutable, wheel-only, or different Compute
+# tree from silently becoming this verifier contract.
 COMPUTE_CONTRACT_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
 
 CONFIG_SCHEMA = "cathedral_amd_sev_snp_development_preview_config_v1"
@@ -62,6 +63,8 @@ MAX_PATH_BYTES = 4096
 MAX_COMPUTE_MODULE_BYTES = 8 * 1024 * 1024
 MAX_TLS_CA_BYTES = 1024 * 1024
 MAX_TARGETS = MULTICOMPUTE_FLEET_CAP
+MAX_PEX_INFO_BYTES = 1024 * 1024
+PEX_METADATA_OWNER_UID = 0
 EXPECTED_WORK_UNITS = 20
 AMD_GUEST_POLICY_SINGLE_SOCKET = 1 << 20
 PROCESSOR_GENERATIONS = frozenset({"milan", "genoa", "turin"})
@@ -76,6 +79,19 @@ _COMPUTE_REPOSITORY_URLS = frozenset(
         "https://github.com/cathedralai/cathedral-sandbox",
         "https://github.com/cathedralai/cathedral-sandbox.git",
     }
+)
+_PEX_ENTRY_POINT = "cathedral_thin.independent_runtime.direct_validator:main"
+_PEX_COMPUTE_REQUIREMENT = (
+    "cathedral@git+https://github.com/cathedralai/"
+    f"cathedral-sandbox.git@{COMPUTE_CONTRACT_COMMIT}"
+)
+_PEX_PRODUCTION_REQUIREMENT_PREFIX = "cathedral-scaffold[snp-production]@file://"
+_PEX_REQUIRED_DISTRIBUTIONS = (
+    "bittensor-",
+    "cathedral-",
+    "cathedral_scaffold-",
+    "cryptography-",
+    "numpy-",
 )
 _REQUIRED_COMPUTE_FILES = frozenset(
     {
@@ -433,14 +449,118 @@ def load_config(path: Path) -> DevPreviewConfig:
     return parse_config_document(document)
 
 
+def _running_pex_compute_provenance() -> str | None:
+    """Return the PEX contract pin, or None outside a PEX production release.
+
+    A signed updater stores the PEX in its signed, root-owned release tree.
+    PEX-INFO therefore supplies production provenance without relying on the
+    installer-local PEP 610 file. A readable zipapp with PEX-INFO is a claimed
+    production PEX and any malformed or non-root-controlled claim is refused.
+    """
+
+    runtime_pex = os.environ.get("PEX")
+    claimed_runtime_pex = runtime_pex is not None
+    executable = Path(runtime_pex if claimed_runtime_pex else sys.argv[0])
+    if not executable.is_absolute():
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError("production PEX metadata path is not absolute")
+        return None
+    try:
+        resolved = executable.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError(
+                "production PEX metadata is unreadable"
+            ) from exc
+        return None
+    try:
+        with zipfile.ZipFile(resolved, mode="r") as bundle:
+            entries = [
+                entry for entry in bundle.infolist() if entry.filename == "PEX-INFO"
+            ]
+            if not entries:
+                if claimed_runtime_pex:
+                    raise AmdSnpDevPreviewError("production PEX metadata is invalid")
+                return None
+            if len(entries) != 1 or entries[0].file_size > MAX_PEX_INFO_BYTES:
+                raise AmdSnpDevPreviewError("production PEX metadata is invalid")
+            metadata = resolved.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != PEX_METADATA_OWNER_UID
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise AmdSnpDevPreviewError(
+                    "production PEX metadata is not root-controlled"
+                )
+            raw = bundle.read(entries[0])
+    except AmdSnpDevPreviewError:
+        raise
+    except zipfile.BadZipFile as exc:
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError("production PEX metadata is invalid") from exc
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise AmdSnpDevPreviewError("production PEX metadata is unreadable") from exc
+    try:
+        document = json.loads(raw.decode("utf-8"))
+        if not isinstance(document, Mapping):
+            raise ValueError
+        if document.get("entry_point") != _PEX_ENTRY_POINT:
+            raise ValueError
+        if (
+            document.get("inherit_path") != "false"
+            or document.get("pex_path") not in (None, "")
+            or document.get("pex_paths") not in (None, [], ())
+            or document.get("inject_env") not in (None, {}, ())
+            or document.get("strip_pex_env") is not True
+        ):
+            raise ValueError
+        distributions = document.get("distributions")
+        if not isinstance(distributions, Mapping) or not distributions:
+            raise ValueError
+        names = tuple(name.lower() for name in distributions)
+        if any(
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or _HEX_32_RE.fullmatch(digest) is None
+            for name, digest in distributions.items()
+        ) or any(
+            not any(name.startswith(prefix) for name in names)
+            for prefix in _PEX_REQUIRED_DISTRIBUTIONS
+        ):
+            raise ValueError
+        requirements = document.get("requirements")
+        if not isinstance(requirements, list) or not all(
+            isinstance(requirement, str) for requirement in requirements
+        ):
+            raise ValueError
+        normalized = {
+            "".join(requirement.lower().split()) for requirement in requirements
+        }
+        if _PEX_COMPUTE_REQUIREMENT not in normalized or not any(
+            requirement.startswith(_PEX_PRODUCTION_REQUIREMENT_PREFIX)
+            for requirement in normalized
+        ):
+            raise ValueError
+    except (UnicodeDecodeError, TypeError, ValueError):
+        raise AmdSnpDevPreviewError(
+            "production PEX lacks the exact SNP provenance contract"
+        ) from None
+    return COMPUTE_CONTRACT_COMMIT
+
+
 def _installed_compute_provenance() -> tuple[str, Any]:
     expected = COMPUTE_CONTRACT_COMMIT
     if _COMMIT_RE.fullmatch(expected) is None:
         raise AmdSnpDevPreviewError(
             "the snp-dev Compute dependency pin has not been replaced with a reviewed commit"
         )
+    pex_commit = _running_pex_compute_provenance()
     try:
         distribution = importlib.metadata.distribution("cathedral")
+        if pex_commit is not None:
+            return pex_commit, distribution
         direct_url = distribution.read_text("direct_url.json")
         document = json.loads(direct_url or "")
         if not isinstance(document, Mapping) or frozenset(document) != {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import stat
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -737,6 +739,19 @@ def test_writer_uses_one_canonical_signer_network_path(
     )
 
 
+def test_writer_process_lock_allows_only_one_recurring_instance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    first = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
+    second = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
+
+    with first.process_locked():
+        with pytest.raises(DirectSubmissionAmbiguous, match="process lock"):
+            with second.process_locked():
+                pytest.fail("second recurring validator acquired the signer lock")
+
+
 def test_default_state_root_is_deterministic_per_user() -> None:
     assert writer_runtime.DIRECT_STATE_ROOT == (
         Path.home() / ".local/state/cathedral-validator/direct-writer"
@@ -1292,6 +1307,60 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     assert submitted[0].raw_scores == ((19, 1), (20, 1))
 
 
+def test_cycle_lock_covers_recovery_collection_and_submission(monkeypatch) -> None:
+    held = [False]
+    observed = snapshot()
+    scored = round_result(machine_row("1"))
+    receipt = SimpleNamespace(
+        status=STATUS_CONFIRMED,
+        as_document=lambda: {"status": STATUS_CONFIRMED},
+    )
+
+    @contextmanager
+    def cycle_locked():
+        assert held[0] is False
+        held[0] = True
+        try:
+            yield
+        finally:
+            held[0] = False
+
+    def recover():
+        assert held[0] is True
+        return None
+
+    def submit(_plan, **_kwargs):
+        assert held[0] is True
+        return receipt
+
+    monkeypatch.setattr(
+        runtime,
+        "finalized_serving_miners_snapshot",
+        lambda *_args: observed if held[0] else pytest.fail("collection outside lock"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: scored if held[0] else pytest.fail("scoring outside lock"),
+    )
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(
+            cycle_locked=cycle_locked,
+            recover=recover,
+            submit=submit,
+        ),
+    )
+
+    assert result["status"] == STATUS_CONFIRMED
+    assert held[0] is False
+
+
 def test_cycle_refuses_an_adapter_with_another_qvl_pin(monkeypatch) -> None:
     writer_object = SimpleNamespace(recover=lambda: None)
     monkeypatch.setattr(
@@ -1396,6 +1465,7 @@ def test_cli_refuses_before_wallet_or_chain_access(monkeypatch) -> None:
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
             ]
         )
 
@@ -1420,6 +1490,7 @@ def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
                 "/reviewed/snpguest",
                 "--network",
                 "local",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )
@@ -1434,6 +1505,7 @@ def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
                     "--snpguest",
                     "/reviewed/snpguest",
                     f"--interval-seconds={interval}",
+                    f"--expected-hotkey={VALIDATOR}",
                     "--confirm-direct-write",
                 ]
             )
@@ -1460,9 +1532,27 @@ def test_cli_checks_direct_qvl_pin_before_wallet_or_chain_access(monkeypatch) ->
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )
+
+
+def test_systemd_readiness_datagram_is_exact(tmp_path: Path, monkeypatch) -> None:
+    notify_path = Path("/tmp") / f"cv-notify-{id(tmp_path):x}.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as server:
+            server.bind(str(notify_path))
+            server.settimeout(1.0)
+            monkeypatch.setenv("NOTIFY_SOCKET", str(notify_path))
+
+            runtime._notify_ready()
+
+            assert server.recv(512) == (
+                b"READY=1\nSTATUS=initialized; waiting for the next direct cycle"
+            )
+    finally:
+        notify_path.unlink(missing_ok=True)
 
 
 def _stub_cli_runtime(monkeypatch, events):
@@ -1493,7 +1583,7 @@ def _stub_cli_runtime(monkeypatch, events):
     monkeypatch.setattr(
         writer_runtime,
         "DirectWeightWriter",
-        lambda **_kwargs: object(),
+        lambda **_kwargs: SimpleNamespace(recover=lambda: None),
     )
 
     def cycle(**_kwargs):
@@ -1503,6 +1593,100 @@ def _stub_cli_runtime(monkeypatch, events):
         return value
 
     monkeypatch.setattr(runtime, "run_direct_cycle", cycle)
+
+
+def test_cli_refuses_mismatched_hotkey_before_chain_access(monkeypatch) -> None:
+    _stub_cli_runtime(monkeypatch, [])
+    monkeypatch.setattr(
+        runtime,
+        "make_wallet",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            hotkey=SimpleNamespace(
+                ss58_address="5DifferentValidator",
+                sign=lambda _body: b"signature",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "make_subtensor",
+        lambda *_args, **_kwargs: pytest.fail("chain accessed after identity mismatch"),
+    )
+
+    with pytest.raises(SystemExit, match="does not match --expected-hotkey"):
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "expected_hotkey",
+    ("", "../other", "5Validator/other", "5 validator", "\N{SNOWMAN}", "x" * 65),
+)
+def test_cli_rejects_unsafe_expected_hotkey_before_wallet_access(
+    monkeypatch, expected_hotkey: str
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "make_wallet",
+        lambda *_args, **_kwargs: pytest.fail("wallet opened for unsafe identity"),
+    )
+
+    with pytest.raises(SystemExit, match="path-safe public SS58 address"):
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={expected_hotkey}",
+                "--confirm-direct-write",
+            ]
+        )
+
+
+def test_cli_recovers_journal_before_reporting_ready(monkeypatch) -> None:
+    order: list[str] = []
+    events = [{"status": STATUS_CONFIRMED}]
+    _stub_cli_runtime(monkeypatch, events)
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: SimpleNamespace(
+            recover=lambda: order.append("recover") or None
+        ),
+    )
+    monkeypatch.setattr(runtime, "_notify_ready", lambda: order.append("ready"))
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 0
+    )
+    assert order == ["recover", "ready"]
 
 
 @pytest.mark.parametrize(
@@ -1527,6 +1711,7 @@ def test_cli_once_succeeds_only_after_exact_confirmation(
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1547,6 +1732,7 @@ def test_cli_once_returns_nonzero_for_expected_chain_failure(monkeypatch) -> Non
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1572,6 +1758,7 @@ def test_recurring_cli_continues_after_expected_chain_failure(monkeypatch) -> No
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )
@@ -1597,6 +1784,7 @@ def test_recurring_cli_reports_unexpected_exception_and_continues(
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )
@@ -1621,6 +1809,7 @@ def test_cli_once_returns_nonzero_for_unexpected_exception(monkeypatch) -> None:
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1643,6 +1832,7 @@ def test_cli_final_exception_handler_does_not_catch_process_control(
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )
@@ -1661,6 +1851,7 @@ def test_recurring_cli_stops_on_submission_contradiction(monkeypatch) -> None:
                 "/reviewed/snp-policy.json",
                 "--snpguest",
                 "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
                 "--confirm-direct-write",
             ]
         )

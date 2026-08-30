@@ -1,0 +1,26 @@
+[Unit]
+Description=Install a verified Cathedral validator stable release
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/cathedral-validator/update.env
+ConditionPathExists=/etc/cathedral-validator/identity.env
+ConditionPathExists=/etc/cathedral-validator/update-public-key.pem
+ConditionFileIsExecutable=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/cathedral-validator/update.env
+ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=stable --metadata-url=${CATHEDRAL_VALIDATOR_STABLE_METADATA_URL} --public-key=/etc/cathedral-validator/update-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=${CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE}
+TimeoutStartSec=480s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/cathedral-validator/validator-hotkey -/var/lib/cathedral-validator/.bittensor -/run/cathedral-validator-wallet -/run/cathedral-validator-pex
+ReadWritePaths=/opt/cathedral-validator /var/lib/cathedral-validator-update /var/lib/cathedral-validator
+ReadOnlyPaths=/etc/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true

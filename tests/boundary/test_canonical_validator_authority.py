@@ -27,6 +27,9 @@ def test_validator_console_script_belongs_to_this_repository() -> None:
         "cathedral-validator": (
             "cathedral_thin.independent_runtime.direct_validator:main"
         ),
+        "cathedral-validator-update": (
+            "cathedral_thin.independent_runtime.updater:main"
+        ),
         "cathedral-amd-sev-snp-dev-preview": (
             "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
         ),

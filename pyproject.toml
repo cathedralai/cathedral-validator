@@ -108,7 +108,9 @@ snp-dev = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
 # Production direct-validator SNP verification uses the same exact reviewed
-# contract.  Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT.
+# contract. Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT. The signed
+# updater accepts only PEX-INFO which carries this extra and the same immutable
+# Cathedral Sandbox VCS requirement.
 snp-production = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
@@ -117,6 +119,7 @@ snp-production = [
 # its worker-side service and must not claim `cathedral-validator`.
 [project.scripts]
 cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"
+cathedral-validator-update = "cathedral_thin.independent_runtime.updater:main"
 # Legacy relay, publisher, candidate-snapshot, and one-shot writer modules stay
 # importable for tests and historical recovery. They install no operator command.
 # Development-only AMD SEV-SNP preview. It has no writer mode and loads the

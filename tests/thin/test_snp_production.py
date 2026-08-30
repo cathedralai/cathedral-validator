@@ -55,7 +55,14 @@ def test_snp_policy_requires_a_narrow_generation_measurement_and_tcb(tmp_path):
 def test_production_cli_requires_both_snp_policy_and_verifier() -> None:
     parser = direct_validator._parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--qvl", "/reviewed/qvl"])
+        parser.parse_args(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--expected-hotkey",
+                "5Validator",
+            ]
+        )
     options = parser.parse_args(
         [
             "--qvl",
@@ -64,6 +71,8 @@ def test_production_cli_requires_both_snp_policy_and_verifier() -> None:
             "/reviewed/snp-policy.json",
             "--snpguest",
             "/reviewed/snpguest",
+            "--expected-hotkey",
+            "5Validator",
         ]
     )
     assert options.snp_policy == "/reviewed/snp-policy.json"
