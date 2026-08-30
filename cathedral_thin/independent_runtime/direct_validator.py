@@ -1,9 +1,10 @@
 """Small direct SN39 validator built from the independent fleet primitives.
 
-One cycle reads one finalized metagraph, asks every serving miner for its
-signed fleet, verifies every machine, runs the existing SAT challenge, applies
-the existing order-independent duplicate rules, and builds one zero-burn
-mechanism-weight vector.  The vector is derived locally from raw machine counts.
+One cycle reads one finalized metagraph, sends a signed validator request to
+every serving miner for its fleet, verifies every machine, runs the existing
+SAT challenge, applies the existing order-independent duplicate rules, and
+builds one zero-burn mechanism-weight vector. The vector is derived locally
+from raw machine counts.
 """
 
 from __future__ import annotations
@@ -34,7 +35,15 @@ from .direct_contract import (
     FinalizedMetagraphSnapshot,
     zero_burn_vector,
 )
-from .fleet_score import MultiComputeRound, score_multicompute_round
+from .errors import IndependentLiveError
+from .fleet_score import (
+    DISCOVERY_RESPONSE_DEADLINE_SECONDS,
+    FULL_CYCLE_RESPONSE_DEADLINE_SECONDS,
+    MAX_CONCURRENT_MINERS,
+    MINER_RESPONSE_DEADLINE_SECONDS,
+    MultiComputeRound,
+    score_multicompute_round,
+)
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 
@@ -227,6 +236,13 @@ def build_direct_plan(
         "machines": rows,
         "exclusions": list(result.exclusions),
         "sat_rule": SAT_WORK_UNIT_RULE,
+        "response_deadlines_seconds": {
+            "discovery": DISCOVERY_RESPONSE_DEADLINE_SECONDS,
+            "miner_total": MINER_RESPONSE_DEADLINE_SECONDS,
+            "full_cycle": FULL_CYCLE_RESPONSE_DEADLINE_SECONDS,
+        },
+        "max_concurrent_miners": MAX_CONCURRENT_MINERS,
+        "scheduling_order": "finalized_anchor_hash_rotation",
     }
     evidence_digest = (
         "sha256:" + hashlib.sha256(canonical_document_bytes(evidence)).hexdigest()
@@ -263,14 +279,21 @@ def run_direct_cycle(
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
         )
+    cycle_started = time.monotonic()
+    cycle_deadline = cycle_started + FULL_CYCLE_RESPONSE_DEADLINE_SECONDS
     snapshot = finalized_serving_miners_snapshot(subtensor, keypair)
+    if time.monotonic() >= cycle_deadline:
+        raise DirectValidatorError("full evidence cycle expired during discovery")
     result = score_multicompute_round(
         axons=snapshot.miners,
         keypair=keypair,
         anchor_hash=snapshot.block_hash,
         verifier_adapter=verifier_adapter,
+        cycle_deadline_monotonic=cycle_deadline,
     )
     plan = build_direct_plan(snapshot, result)
+    if time.monotonic() >= cycle_deadline:
+        raise DirectValidatorError("full evidence cycle expired before submission")
     receipt = writer.submit(plan)
     return {
         "status": receipt.status,
@@ -279,6 +302,9 @@ def run_direct_cycle(
         "wire_uids": list(plan.wire_uids),
         "wire_weights": list(plan.wire_weights),
         "evidence_digest": plan.evidence_digest,
+        "evidence_cycle_elapsed_ms": max(
+            0, int((time.monotonic() - cycle_started) * 1000)
+        ),
         "receipt": receipt.as_document(),
     }
 
@@ -325,6 +351,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         DirectSubmissionAmbiguous,
         DirectSubmissionContradiction,
         DirectWeightWriter,
+        STATUS_CONFIRMED,
+        STATUS_RECOVERED,
     )
 
     writer = DirectWeightWriter(
@@ -349,7 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
             return 2
-        except (DirectSubmissionAmbiguous, DirectValidatorError) as exc:
+        except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
             print(
                 json.dumps({"status": "NOT_PROVEN", "error": str(exc)}, sort_keys=True),
                 flush=True,
@@ -357,7 +385,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if options.once:
                 return 2
         if options.once:
-            return 0
+            return (
+                0 if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED} else 2
+            )
         time.sleep(options.interval_seconds)
 
 

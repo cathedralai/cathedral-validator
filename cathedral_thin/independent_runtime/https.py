@@ -136,14 +136,27 @@ def require_cert_chain_matches_peer(
 class HttpsEvidenceTransport:
     """Injected EvidenceTransport that dials public HTTPS and records SPKI."""
 
-    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        deadline_monotonic: float | None = None,
+    ) -> None:
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
             or timeout <= 0
         ):
             raise IndependentLiveError("evidence transport timeout must be positive")
+        if deadline_monotonic is not None and (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+        ):
+            raise IndependentLiveError("evidence transport deadline must be numeric")
         self.timeout = float(timeout)
+        self.deadline_monotonic = (
+            None if deadline_monotonic is None else float(deadline_monotonic)
+        )
         self.last_spki: bytes | None = None
 
     def observe_binding(self, url: str) -> ChannelBinding:
@@ -192,6 +205,8 @@ class HttpsEvidenceTransport:
     ) -> tuple[int, bytes]:
         endpoint = validate_policy_url(url)
         deadline = time.monotonic() + self.timeout
+        if self.deadline_monotonic is not None:
+            deadline = min(deadline, self.deadline_monotonic)
 
         def remaining() -> float:
             left = deadline - time.monotonic()

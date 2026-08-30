@@ -30,7 +30,6 @@ def test_validator_console_script_belongs_to_this_repository() -> None:
         "cathedral-amd-sev-snp-dev-preview": (
             "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
         ),
-        "cathedral-uid30-fleet-preview": "cathedral_thin.uid30_fleet_preview:main",
     }
 
 
@@ -87,6 +86,7 @@ def test_active_operator_docs_do_not_advertise_retired_console_commands() -> Non
         "cathedral-multicompute-preview",
         "cathedral-miner-axon-recover",
         "cathedral-uid30-recover",
+        "cathedral-uid30-fleet-preview",
         "cathedral-verifyml",
     )
     active_docs = [*ROOT.glob("*.md"), *(ROOT / "docs").glob("*.md")]

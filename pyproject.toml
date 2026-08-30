@@ -117,9 +117,6 @@ cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"
 # Development-only AMD SEV-SNP preview. It has no writer mode and loads the
 # exact Compute verifier/client dependency lazily.
 cathedral-amd-sev-snp-dev-preview = "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
-# Preview-only proof for two distinct physical machines behind the pinned miner
-# UID. This entry point has no submit, recover, confirm, or chain-writer mode.
-cathedral-uid30-fleet-preview = "cathedral_thin.uid30_fleet_preview:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]

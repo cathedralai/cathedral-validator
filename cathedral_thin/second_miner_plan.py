@@ -521,8 +521,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cathedral-second-miner-plan",
         description=(
-            "RETIRED: use cathedral-uid30-fleet-preview for the supported "
-            "same-UID no-write proof"
+            "RETIRED: the historical same-UID no-write module remains "
+            "importable; use cathedral-validator for the supported path"
         ),
     )
     parser.add_argument(
@@ -549,7 +549,7 @@ def main(
                 "status": "RETIRED_NO_CHAIN_WRITE",
                 "error": (
                     "the dedicated second-UID planner is retired; use "
-                    "cathedral-uid30-fleet-preview"
+                    "cathedral-validator"
                 ),
                 "authorized_for_chain_write": False,
                 "chain_write_submitted": False,

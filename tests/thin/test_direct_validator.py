@@ -38,8 +38,13 @@ from cathedral_thin.independent_runtime.direct_writer import (
     STATUS_RECOVERED,
     canonical_state_path,
 )
-from cathedral_thin.independent_runtime.fleet_score import MultiComputeRound
-from cathedral_thin.independent_runtime.errors import QuoteVerifyError
+from cathedral_thin.independent_runtime.errors import ChainClientError, QuoteVerifyError
+from cathedral_thin.independent_runtime.fleet_score import (
+    DISCOVERY_RESPONSE_DEADLINE_SECONDS,
+    FULL_CYCLE_RESPONSE_DEADLINE_SECONDS,
+    MINER_RESPONSE_DEADLINE_SECONDS,
+    MultiComputeRound,
+)
 
 VALIDATOR = "5Validator"
 MINER_ONE = "5MinerOne"
@@ -297,6 +302,27 @@ def test_plan_tie_break_and_duplicate_zeroing_are_deterministic() -> None:
     assert planned.raw_scores == ((19, 1), (20, 1))
     assert planned.wire_uids == (19, 20)
     assert planned.wire_weights == (32768, 32767)
+
+
+def test_phase_latency_is_evidence_only_and_never_changes_score() -> None:
+    source = machine_row("1")
+    fast = round_result(source)
+    slow_row = dict(source)
+    slow_row["phase_timings_ms"] = {
+        "binding": 10_000,
+        "evidence": 20_000,
+        "fleet": 30_000,
+        "qvl": 40_000,
+        "sat": 50_000,
+    }
+    slow = round_result(slow_row)
+
+    fast_plan = build_direct_plan(snapshot(), fast)
+    slow_plan = build_direct_plan(snapshot(), slow)
+
+    assert slow_plan.raw_scores == fast_plan.raw_scores == ((19, 1),)
+    assert slow_plan.wire_uids == fast_plan.wire_uids == (19,)
+    assert slow_plan.wire_weights == fast_plan.wire_weights == (W,)
 
 
 def test_legacy_singleton_fleet_earns_zero_without_blocking_other_miners() -> None:
@@ -876,6 +902,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     )
     submitted: list[DirectWeightPlan] = []
     seen_axons: list[tuple[ServingAxon, ...]] = []
+    seen_deadlines: list[float] = []
     receipt = SimpleNamespace(
         status=STATUS_CONFIRMED,
         as_document=lambda: {"status": STATUS_CONFIRMED},
@@ -890,6 +917,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
 
     def score(**kwargs):
         seen_axons.append(tuple(kwargs["axons"]))
+        seen_deadlines.append(float(kwargs["cycle_deadline_monotonic"]))
         return scored
 
     monkeypatch.setattr(runtime, "score_multicompute_round", score)
@@ -904,6 +932,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     )
 
     assert seen_axons == [miners]
+    assert seen_deadlines[0] > runtime.time.monotonic()
     assert result["status"] == STATUS_CONFIRMED
     assert result["raw_scores"] == [[19, 1], [20, 1]]
     assert result["wire_uids"] == [19, 20]
@@ -926,6 +955,40 @@ def test_cycle_refuses_an_adapter_with_another_qvl_pin(monkeypatch) -> None:
             verifier_adapter=SimpleNamespace(qvl_digest="0" * 64),
             writer=writer_object,
         )
+
+
+def test_snapshot_and_scoring_share_one_end_to_end_presign_deadline(
+    monkeypatch,
+) -> None:
+    submitted: list[DirectWeightPlan] = []
+    writer_object = SimpleNamespace(
+        recover=lambda: None,
+        submit=lambda value: submitted.append(value),
+    )
+    now = [100.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+
+    def read_snapshot(*_args):
+        now[0] = 140.0
+        return snapshot()
+
+    def slow_score(**kwargs):
+        assert kwargs["cycle_deadline_monotonic"] == 220.0
+        now[0] = 221.0
+        return round_result(machine_row("1"))
+
+    monkeypatch.setattr(runtime, "finalized_serving_miners_snapshot", read_snapshot)
+    monkeypatch.setattr(runtime, "score_multicompute_round", slow_score)
+    with pytest.raises(DirectValidatorError, match="expired before submission"):
+        run_direct_cycle(
+            subtensor=object(),
+            keypair=FakeKeypair(),
+            verifier_adapter=SimpleNamespace(
+                qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+            ),
+            writer=writer_object,
+        )
+    assert submitted == []
 
 
 def test_cli_refuses_before_wallet_or_chain_access(monkeypatch) -> None:
@@ -990,6 +1053,110 @@ def test_cli_checks_direct_qvl_pin_before_wallet_or_chain_access(monkeypatch) ->
                 "--confirm-direct-write",
             ]
         )
+
+
+def _stub_cli_runtime(monkeypatch, events):
+    monkeypatch.setattr(
+        runtime,
+        "load_direct_validator_verifier",
+        lambda _path: SimpleNamespace(digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "ComputeAdapter",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "make_wallet",
+        lambda *_args, **_kwargs: SimpleNamespace(hotkey=FakeKeypair()),
+    )
+    monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: object(),
+    )
+
+    def cycle(**_kwargs):
+        value = events.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(runtime, "run_direct_cycle", cycle)
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    (
+        (STATUS_CONFIRMED, 0),
+        (STATUS_RECOVERED, 0),
+        (STATUS_EXPIRED, 2),
+    ),
+)
+def test_cli_once_succeeds_only_after_exact_confirmation(
+    monkeypatch, status, expected
+) -> None:
+    _stub_cli_runtime(monkeypatch, [{"status": status}])
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == expected
+    )
+
+
+def test_cli_once_returns_nonzero_for_expected_chain_failure(monkeypatch) -> None:
+    _stub_cli_runtime(monkeypatch, [ChainClientError("finalized head unavailable")])
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 2
+    )
+
+
+def test_recurring_cli_continues_after_expected_chain_failure(monkeypatch) -> None:
+    class StopLoop(BaseException):
+        pass
+
+    events = [ChainClientError("finalized head unavailable"), StopLoop()]
+    _stub_cli_runtime(monkeypatch, events)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(StopLoop):
+        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
+    assert events == []
+
+
+def test_recurring_cli_stops_on_submission_contradiction(monkeypatch) -> None:
+    events = [DirectSubmissionContradiction("stored row differs"), {"status": "later"}]
+    _stub_cli_runtime(monkeypatch, events)
+
+    assert runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"]) == 2
+    assert events == [{"status": "later"}]
+
+
+def test_response_deadlines_are_observational_and_below_the_mortal_window() -> None:
+    assert DISCOVERY_RESPONSE_DEADLINE_SECONDS == 60.0
+    assert MINER_RESPONSE_DEADLINE_SECONDS == 90.0
+    assert FULL_CYCLE_RESPONSE_DEADLINE_SECONDS == 120.0
+    assert FULL_CYCLE_RESPONSE_DEADLINE_SECONDS < SN39_MORTAL_PERIOD_BLOCKS * 12.0
 
 
 def test_direct_runtime_has_no_relay_publisher_or_cybergym_dependency() -> None:

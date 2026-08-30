@@ -11,8 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from cathedral_thin.independent.compute import QuoteIdentityVerdict, QuoteVerdict
@@ -32,6 +34,7 @@ DIRECT_VALIDATOR_QVL_DIGEST = (
     "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148"
 )
 MAX_OUTPUT = 1_048_576
+MAX_BINARY_BYTES = 64 * 1024 * 1024
 TIMEOUT_SECONDS = 30
 
 
@@ -43,23 +46,123 @@ def digest_file(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    """Fields which prove the open inode and visible path are still identical."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 class SubprocessQuoteVerifier:
     """Runs ``command quote_path expected_report_data_hex`` and reads JSON."""
 
     def __init__(self, command: Path) -> None:
-        resolved = Path(command)
-        if not resolved.is_file():
-            raise QuoteVerifyError(f"QVL binary {resolved} is not a file")
-        if not os.access(resolved, os.X_OK):
-            raise QuoteVerifyError(f"QVL binary {resolved} is not executable")
-        self.command = resolved
-        self.digest = digest_file(resolved)
+        resolved = Path(command).absolute()
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            source_fd = os.open(resolved, flags)
+        except OSError as exc:
+            raise QuoteVerifyError(
+                f"QVL binary {resolved} could not be opened"
+            ) from exc
+        try:
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise QuoteVerifyError(f"QVL binary {resolved} is not a regular file")
+            if source_stat.st_uid not in {0, os.geteuid()}:
+                raise QuoteVerifyError(
+                    f"QVL binary {resolved} is not owned by root or this user"
+                )
+            if source_stat.st_mode & 0o022:
+                raise QuoteVerifyError(
+                    f"QVL binary {resolved} is writable by group or other users"
+                )
+            if not source_stat.st_mode & 0o111:
+                raise QuoteVerifyError(f"QVL binary {resolved} is not executable")
+            if source_stat.st_size <= 0 or source_stat.st_size > MAX_BINARY_BYTES:
+                raise QuoteVerifyError(
+                    f"QVL binary {resolved} is empty or exceeds {MAX_BINARY_BYTES} bytes"
+                )
+
+            private_dir = tempfile.TemporaryDirectory(prefix="cathedral-qvl-exec-")
+            private_path = Path(private_dir.name) / "verified-qvl"
+            destination_fd = os.open(
+                private_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o500,
+            )
+            digest = hashlib.sha256()
+            copied = 0
+            try:
+                while True:
+                    chunk = os.read(source_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > MAX_BINARY_BYTES:
+                        raise QuoteVerifyError(
+                            f"QVL binary {resolved} exceeds {MAX_BINARY_BYTES} bytes"
+                        )
+                    digest.update(chunk)
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(destination_fd, view)
+                        if written <= 0:
+                            raise OSError("short QVL copy")
+                        view = view[written:]
+                os.fsync(destination_fd)
+                os.fchmod(destination_fd, 0o500)
+            finally:
+                os.close(destination_fd)
+            if copied != source_stat.st_size or _stat_identity(
+                os.fstat(source_fd)
+            ) != _stat_identity(source_stat):
+                raise QuoteVerifyError(f"QVL binary {resolved} changed while loading")
+        except Exception:
+            os.close(source_fd)
+            raise
+
+        self._source_path = resolved
+        self._source_fd = source_fd
+        self._source_stat = source_stat
+        self._private_dir = private_dir
+        self.command = private_path
+        self.digest = digest.hexdigest()
+
+    def _source_unchanged(self) -> bool:
+        """Refuse if the operator-visible QVL path changed after pinning."""
+
+        try:
+            current_path = os.stat(self._source_path, follow_symlinks=False)
+            current_fd = os.fstat(self._source_fd)
+        except OSError:
+            return False
+        expected = _stat_identity(self._source_stat)
+        return (
+            _stat_identity(current_path) == expected
+            and _stat_identity(current_fd) == expected
+        )
 
     def _claims(
-        self, quote: bytes, *, expected_report_data: bytes
+        self,
+        quote: bytes,
+        *,
+        expected_report_data: bytes,
+        deadline_monotonic: float | None = None,
     ) -> tuple[QuoteVerdict, dict[str, object] | None]:
         if not quote or not expected_report_data:
             return QuoteVerdict.FAIL, None
+        if not self._source_unchanged():
+            return QuoteVerdict.INFRA, None
         handle = None
         quote_path = None
         try:
@@ -70,10 +173,15 @@ class SubprocessQuoteVerifier:
             os.fsync(handle)
             os.close(handle)
             handle = None
+            timeout = float(TIMEOUT_SECONDS)
+            if deadline_monotonic is not None:
+                timeout = min(timeout, deadline_monotonic - time.monotonic())
+                if timeout <= 0:
+                    return QuoteVerdict.INFRA, None
             completed = subprocess.run(
                 [str(self.command), quote_path, expected_report_data.hex()],
                 capture_output=True,
-                timeout=TIMEOUT_SECONDS,
+                timeout=timeout,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -83,6 +191,8 @@ class SubprocessQuoteVerifier:
                 os.close(handle)
             if quote_path is not None and os.path.exists(quote_path):
                 os.unlink(quote_path)
+        if not self._source_unchanged():
+            return QuoteVerdict.INFRA, None
         if len(completed.stdout) + len(completed.stderr) > MAX_OUTPUT:
             return QuoteVerdict.INFRA, None
         if completed.returncode != 0:
@@ -99,16 +209,28 @@ class SubprocessQuoteVerifier:
             return QuoteVerdict.FAIL, claims
         return QuoteVerdict.PASS, claims
 
-    def verify(self, quote: bytes, *, expected_report_data: bytes) -> QuoteVerdict:
+    def verify(
+        self,
+        quote: bytes,
+        *,
+        expected_report_data: bytes,
+        deadline_monotonic: float | None = None,
+    ) -> QuoteVerdict:
         """Retain the reviewed single-machine PASS/FAIL/INFRA contract."""
 
         verdict, _claims = self._claims(
-            quote, expected_report_data=expected_report_data
+            quote,
+            expected_report_data=expected_report_data,
+            deadline_monotonic=deadline_monotonic,
         )
         return verdict
 
     def verify_with_identity(
-        self, quote: bytes, *, expected_report_data: bytes
+        self,
+        quote: bytes,
+        *,
+        expected_report_data: bytes,
+        deadline_monotonic: float | None = None,
     ) -> QuoteIdentityVerdict:
         """Return PASS plus a strict PCK/PPID-derived stable platform id.
 
@@ -118,7 +240,11 @@ class SubprocessQuoteVerifier:
         continue under its existing contract.
         """
 
-        verdict, claims = self._claims(quote, expected_report_data=expected_report_data)
+        verdict, claims = self._claims(
+            quote,
+            expected_report_data=expected_report_data,
+            deadline_monotonic=deadline_monotonic,
+        )
         if verdict is not QuoteVerdict.PASS or claims is None:
             return QuoteIdentityVerdict(verdict, None, False)
         stable = claims.get("stable_platform_id")

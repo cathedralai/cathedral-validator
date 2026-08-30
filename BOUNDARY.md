@@ -18,8 +18,10 @@ Registration, uptime, hardware ownership, attestation, or a self-reported score
 does not earn weight. Only work which passes the active verification and policy
 checks is eligible.
 
-The supported recurring validator does not consume a signed vector, publisher,
-or relay. It derives the full vector locally and submits it directly.
+The supported recurring validator does not consume a signed weight vector or
+use a weight publisher or relay. It derives the full vector locally and submits
+it directly. Miners still require their fresh signed validator-access snapshot
+before serving validator-authenticated fleet and evidence requests.
 
 Historical v3 code still shares the `V3_CYBERGYM_LANE_FIELDS` shape. It is not
 an input to the supported direct recurring validator. `cathedralai/cathedral`

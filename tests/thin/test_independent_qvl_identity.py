@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
+import time
+
 import pytest
 
 from cathedral_thin.independent.compute import QuoteVerdict
+from cathedral_thin.independent_runtime.errors import QuoteVerifyError
 from cathedral_thin.independent_runtime.qvl import SubprocessQuoteVerifier
 
 
@@ -104,3 +108,68 @@ def test_qvl_identity_requires_stable_quote_bound_verified_claims(tmp_path, chan
     assert result.verdict is QuoteVerdict.PASS
     assert result.stable_platform_id is None
     assert result.platform_identity_verified is False
+
+
+def test_qvl_replacement_after_load_is_infrastructure_failure(tmp_path):
+    path = verifier_script(
+        tmp_path, {"intel_verified": True, "report_data_match": True}
+    )
+    verifier = SubprocessQuoteVerifier(path)
+    replacement = tmp_path / "replacement"
+    replacement.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    replacement.chmod(0o700)
+    os.replace(replacement, path)
+
+    assert (
+        verifier.verify(b"quote", expected_report_data=b"r" * 64) is QuoteVerdict.INFRA
+    )
+
+
+def test_qvl_executes_an_owner_only_private_inode(tmp_path):
+    path = verifier_script(
+        tmp_path, {"intel_verified": True, "report_data_match": True}
+    )
+    verifier = SubprocessQuoteVerifier(path)
+
+    assert verifier.command != path.absolute()
+    private_stat = verifier.command.stat()
+    source_stat = path.stat()
+    assert (private_stat.st_dev, private_stat.st_ino) != (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    )
+    assert private_stat.st_mode & 0o777 == 0o500
+    assert verifier.command.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_qvl_refuses_group_or_other_writable_source(tmp_path):
+    path = verifier_script(
+        tmp_path, {"intel_verified": True, "report_data_match": True}
+    )
+    path.chmod(0o722)
+
+    with pytest.raises(QuoteVerifyError, match="writable by group or other"):
+        SubprocessQuoteVerifier(path)
+
+
+def test_qvl_subprocess_consumes_only_the_remaining_candidate_budget(tmp_path):
+    path = tmp_path / "slow-qvl"
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, time\n"
+        "time.sleep(1)\n"
+        "print(json.dumps({'intel_verified': True, 'report_data_match': True}))\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+    verifier = SubprocessQuoteVerifier(path)
+    started = time.monotonic()
+
+    verdict = verifier.verify(
+        b"quote",
+        expected_report_data=b"r" * 64,
+        deadline_monotonic=time.monotonic() + 0.05,
+    )
+
+    assert verdict is QuoteVerdict.INFRA
+    assert time.monotonic() - started < 0.3

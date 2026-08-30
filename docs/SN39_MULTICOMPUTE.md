@@ -122,16 +122,10 @@ It currently resolves to UID124 with root axon `35.222.166.235:8081`. The
 current UID8 machine is evidence for a different hotkey until it is deliberately
 reconfigured into this signed UID124 fleet.
 
-```bash
-install -d -m 0700 "$HOME/.cathedral/uid30-fleet"
-cathedral-uid30-fleet-preview \
-  --qvl /absolute/path/to/reviewed/cathedral-tdx-verifier \
-  --output "$HOME/.cathedral/uid30-fleet/two-machine-proof.json"
-```
-
-The command records the complete current UID30 row and all weighted serving
-UIDs. It separately evaluates the consolidation target. A complete target
-requires:
+The historical `cathedral_thin.uid30_fleet_preview` module remains importable
+for artifact recovery, but it has no installed console command. The supported
+operator path is `cathedral-validator`, which evaluates every serving miner.
+The preserved historical proof required:
 
 - Exactly two signed fleet endpoints rooted at the pinned miner's chain axon.
 - Two distinct endpoints, TLS SPKIs, stable platform identities, internal

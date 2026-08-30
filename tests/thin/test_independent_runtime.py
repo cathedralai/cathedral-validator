@@ -10,6 +10,7 @@ import json
 import ssl
 import stat
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -504,6 +505,25 @@ def _stub_round_trip_peers(monkeypatch, peer_ips: list[str]) -> None:
     )
     monkeypatch.setattr(https_mod, "getaddrinfo_bounded", lambda *args, **kwargs: [])
     monkeypatch.setattr(https_mod, "validated_peer_ips", lambda infos: list(peer_ips))
+
+
+def test_round_trip_reuses_one_absolute_candidate_deadline(monkeypatch):
+    _stub_round_trip_peers(monkeypatch, ["203.0.113.9"])
+    cutoff = time.monotonic() + 0.2
+    transport = HttpsEvidenceTransport(timeout=30.0, deadline_monotonic=cutoff)
+    observed: list[float] = []
+
+    def fake_post_peer(endpoint, peer_ip, body, remaining):
+        del endpoint, peer_ip, body
+        observed.append(remaining())
+        return 200, b"ok"
+
+    monkeypatch.setattr(transport, "_post_peer", fake_post_peer)
+    transport.post("https://203.0.113.9:8443/v1/sat-work", {"first": True})
+    time.sleep(0.02)
+    transport.post("https://203.0.113.9:8443/v1/sat-work", {"second": True})
+
+    assert 0 < observed[1] < observed[0] <= 0.2
 
 
 def test_round_trip_does_not_failover_a_sat_oversize_refusal(monkeypatch):

@@ -347,7 +347,8 @@ def test_retired_cli_help_does_not_advertise_the_old_preview(capsys) -> None:
     assert result.value.code == 0
     help_text = capsys.readouterr().out
     assert "RETIRED" in help_text
-    assert "cathedral-uid30-fleet-preview" in help_text
+    assert "cathedral-validator" in help_text
+    assert "cathedral-uid30-fleet-preview" not in help_text
     assert "{preview}" not in help_text
     assert "read finalized SN39 state" not in help_text
 

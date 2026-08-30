@@ -62,16 +62,20 @@ def test_false_launch_design_page_is_not_active() -> None:
 def test_readme_is_the_small_public_guide() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     words = " ".join(guide.split())
-    assert guide.count("## ") == 3
+    assert guide.count("## ") == 4
     assert guide.startswith("# Cathedral Validator\n")
     assert "## One recurring path" in guide
-    assert "## Run one proof" in guide
+    assert "## Run the validator" in guide
+    assert "## QVL download pending" in guide
     assert "## Current proof boundary" in guide
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
     assert "does not download a signed weight vector" in words
     assert "scored every serving miner" not in guide
     assert "scores every serving miner" in guide
+    assert "YOUR_WALLET" in guide
+    assert "YOUR_HOTKEY" in guide
+    assert "issue #185" in guide
     assert "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148" in guide
     assert "not self-service" not in guide
     assert "authorized Cathedral operator" not in guide
