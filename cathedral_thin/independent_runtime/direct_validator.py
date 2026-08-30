@@ -723,8 +723,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         # any unresolved chain identity before systemd treats the release as
         # ready.  During an update, the root updater still owns cycle.lock, so
         # no fresh scoring or signing cycle can begin before activation commits.
-        startup_recovery = writer.recover()
-        _notify_ready()
+        startup_ambiguity: DirectSubmissionAmbiguous | None = None
+        try:
+            startup_recovery = writer.recover()
+        except DirectSubmissionContradiction as exc:
+            print(
+                json.dumps(
+                    {"status": "CONTRADICTION_STOPPED", "error": str(exc)},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return 2
+        except DirectSubmissionAmbiguous as exc:
+            startup_recovery = None
+            startup_ambiguity = exc
+        if startup_ambiguity is not None:
+            print(
+                json.dumps(
+                    {"status": "NOT_PROVEN", "error": str(startup_ambiguity)},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            if options.once:
+                return 2
+            # A pending signed intent is never replaced. Keep the same process
+            # alive so its next paced cycle calls recover() again instead of
+            # letting a restart supervisor create a tight RPC loop.
+            _notify_ready()
+            time.sleep(options.interval_seconds)
+        else:
+            _notify_ready()
         if startup_recovery is not None:
             startup_event = _recovered_cycle_event(
                 recovered=startup_recovery,
@@ -747,7 +777,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else 2
                 )
             time.sleep(options.interval_seconds)
-        elif telemetry_sink is not None:
+        elif startup_ambiguity is None and telemetry_sink is not None:
             # A prior process can stop after writer recovery commits the
             # receipt but before the non-authoritative telemetry projection
             # succeeds. Retry that exact plan from last_attempt only during
