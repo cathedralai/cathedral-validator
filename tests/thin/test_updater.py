@@ -960,13 +960,16 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "PEX_INTERPRETER=1" in release_job
     assert "PEX_ROOT=/tmp/cathedral-validator-pex-root" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=" in release_job
+    assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT=" in release_job
     assert "sudo -u nobody env" in release_job
     assert "tests/release_smoke/run_real_validator.py" in release_job
+    assert "/tmp/cathedral-validator-release-smoke.py" in release_job
 
     smoke = (root / "tests" / "release_smoke" / "run_real_validator.py").read_text()
     assert "snp_production.load_compute_contract()" in smoke
     assert "module_path.is_relative_to(pex_root)" in smoke
     assert "module_path.is_relative_to(checkout)" in smoke
+    assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT" in smoke
 
     docs = (root / "docs" / "AUTO_UPDATE.md").read_text()
     assert "Installation is not self-service or\nlaunch-ready" in docs

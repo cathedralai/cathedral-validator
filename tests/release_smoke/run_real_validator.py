@@ -43,7 +43,12 @@ def _require_ephemeral_pex_import(module: ModuleType) -> None:
         raise SystemExit(f"{module.__name__} has no packaged PEX origin")
     module_path = Path(module_file).resolve()
     pex_root = Path(pex_root_raw).resolve()
-    checkout = Path(__file__).resolve().parents[2]
+    checkout_raw = os.environ.get("CATHEDRAL_RELEASE_SMOKE_CHECKOUT")
+    checkout = (
+        Path(checkout_raw).resolve()
+        if checkout_raw
+        else Path(__file__).resolve().parents[2]
+    )
     if not module_path.is_relative_to(pex_root):
         raise SystemExit(
             f"{module.__name__} resolved outside ephemeral PEX_ROOT: {module_path}"
