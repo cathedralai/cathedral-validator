@@ -513,6 +513,8 @@ def verify_collected(
         raise CollectError("verify_collected takes CollectedEvidence")
     if not isinstance(adapter, ComputeAdapter):
         raise CollectError("verify_collected takes a ComputeAdapter")
+    if collected.kind != EVIDENCE_KIND_TDX:
+        raise CollectError("verify_collected accepts TDX evidence only")
     return adapter.verify_quote(
         collected.quote, expected_report_data=collected.report_data
     )

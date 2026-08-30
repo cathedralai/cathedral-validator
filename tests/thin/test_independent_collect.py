@@ -378,6 +378,16 @@ def test_a_failing_verdict_is_reported_rather_than_swallowed():
     assert verify_collected(gated, collect(transport_for())) is QuoteVerdict.FAIL
 
 
+def test_the_retained_qvl_helper_refuses_snp_before_calling_intel_qvl():
+    gated, verifier = adapter(QuoteVerdict.PASS)
+    collected = collect(transport_for(kind="sev_snp"))
+
+    with pytest.raises(CollectError, match="TDX evidence only"):
+        verify_collected(gated, collected)
+
+    assert verifier.calls == []
+
+
 def test_verify_collected_takes_the_gated_adapter_and_real_evidence():
     gated, _verifier = adapter()
     with pytest.raises(CollectError, match="CollectedEvidence"):

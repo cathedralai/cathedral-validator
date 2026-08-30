@@ -31,6 +31,7 @@ from typing import Any, Callable, Iterator, Mapping
 from bittensor_wallet import Keypair
 
 from cathedral_thin.bt_compat import listify, make_axon
+from cathedral_thin.independent.collect import EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
@@ -579,6 +580,10 @@ def collect_endpoint_proof(
         )
     if collected.assigned_hotkey != contract.miner_hotkey:
         raise MinerAxonError("collected quote is assigned to a different miner")
+    if collected.kind != EVIDENCE_KIND_TDX:
+        raise MinerAxonError(
+            "the retained miner announcement helper accepts TDX evidence only"
+        )
     verifier = load_verifier(qvl_path)
     verdict = ComputeAdapter(
         verifier,

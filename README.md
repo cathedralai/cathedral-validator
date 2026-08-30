@@ -22,10 +22,10 @@ Each cycle:
    into one u16 vector with zero burn.
 7. Writes the vector directly with the validator hotkey.
 
-For AMD, a pass proves an admitted boot measurement, distinct hardware, the
-fresh validator challenge, the bound HTTPS key, and returned SAT work. It does
-not prove the miner's OCI image digest or continuous runtime integrity after
-boot. The miner's immutable-image check is local to its launcher.
+For AMD, a credited machine proves an admitted boot measurement, distinct
+hardware, the fresh validator challenge, the bound HTTPS key, and returned SAT
+work. It does not prove the miner's OCI image digest or continuous runtime
+integrity after boot. The miner's immutable-image check is local to its launcher.
 
 One 120-second pre-sign budget starts before the finalized snapshot. No new
 discovery result is accepted after 60 seconds, and no miner SAT result is
