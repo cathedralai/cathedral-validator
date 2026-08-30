@@ -458,12 +458,20 @@ def _running_pex_compute_provenance() -> str | None:
     production PEX and any malformed or non-root-controlled claim is refused.
     """
 
-    executable = Path(sys.argv[0])
+    runtime_pex = os.environ.get("PEX")
+    claimed_runtime_pex = runtime_pex is not None
+    executable = Path(runtime_pex if claimed_runtime_pex else sys.argv[0])
     if not executable.is_absolute():
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError("production PEX metadata path is not absolute")
         return None
     try:
         resolved = executable.resolve(strict=True)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError) as exc:
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError(
+                "production PEX metadata is unreadable"
+            ) from exc
         return None
     try:
         with zipfile.ZipFile(resolved, mode="r") as bundle:
@@ -471,6 +479,8 @@ def _running_pex_compute_provenance() -> str | None:
                 entry for entry in bundle.infolist() if entry.filename == "PEX-INFO"
             ]
             if not entries:
+                if claimed_runtime_pex:
+                    raise AmdSnpDevPreviewError("production PEX metadata is invalid")
                 return None
             if len(entries) != 1 or entries[0].file_size > MAX_PEX_INFO_BYTES:
                 raise AmdSnpDevPreviewError("production PEX metadata is invalid")
@@ -486,7 +496,9 @@ def _running_pex_compute_provenance() -> str | None:
             raw = bundle.read(entries[0])
     except AmdSnpDevPreviewError:
         raise
-    except zipfile.BadZipFile:
+    except zipfile.BadZipFile as exc:
+        if claimed_runtime_pex:
+            raise AmdSnpDevPreviewError("production PEX metadata is invalid") from exc
         return None
     except (OSError, RuntimeError) as exc:
         raise AmdSnpDevPreviewError("production PEX metadata is unreadable") from exc

@@ -729,6 +729,29 @@ def test_production_pex_provenance_requires_root_metadata_and_exact_contract(
         preview._running_pex_compute_provenance()
 
 
+def test_production_pex_provenance_uses_runtime_pex_when_interpreting_a_script(
+    monkeypatch, tmp_path
+):
+    pex = tmp_path / "cathedral-validator.pex"
+    _production_pex(pex, _production_pex_info())
+    script = tmp_path / "release-smoke.py"
+    script.write_text("raise SystemExit('not executed')\n")
+    monkeypatch.setattr(preview, "PEX_METADATA_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(sys, "argv", [str(script)])
+    monkeypatch.setenv("PEX", str(pex))
+
+    assert preview._running_pex_compute_provenance() == preview.COMPUTE_CONTRACT_COMMIT
+
+
+def test_claimed_runtime_pex_fails_closed_when_it_is_not_a_pex(monkeypatch, tmp_path):
+    script = tmp_path / "release-smoke.py"
+    script.write_text("print('not a PEX')\n")
+    monkeypatch.setenv("PEX", str(script))
+
+    with pytest.raises(preview.AmdSnpDevPreviewError, match="metadata is invalid"):
+        preview._running_pex_compute_provenance()
+
+
 def test_production_pex_provenance_refuses_wrong_entrypoint_or_requirement(
     monkeypatch, tmp_path
 ):
