@@ -7,6 +7,8 @@ readonly UPSTREAM="https://github.com/cathedralai/cathedral-validator.git"
 readonly SERVICE="cathedral-validator-sn39-relay.service"
 readonly ALERT_TIMER="cathedral-mismatch-alert.timer"
 readonly LEGACY_SERVICE="cathedral-thin-validator.service"
+readonly LEGACY_UNIT_PATH="/etc/systemd/system/${LEGACY_SERVICE}"
+readonly STARTUP_STABILITY_SECONDS=20
 readonly RELEASE_ROOT="/opt/cathedral-sn39/releases"
 readonly VENV_ROOT="/opt/cathedral-sn39/venvs"
 readonly INSTALL_ROOT="/etc/cathedral-validator"
@@ -62,6 +64,51 @@ restore_targets() {
     rm -f -- "${target}"
     if [[ -e "${saved}" || -L "${saved}" ]]; then
       cp -a -- "${saved}" "${target}"
+    fi
+  done
+}
+
+wait_for_service_stability() {
+  local elapsed active_state sub_state restart_count main_pid
+  local initial_main_pid=""
+  local snapshot key value
+
+  for ((elapsed = 0; elapsed <= STARTUP_STABILITY_SECONDS; elapsed++)); do
+    active_state=""
+    sub_state=""
+    restart_count=""
+    main_pid=""
+    if ! snapshot="$(systemctl show "${SERVICE}" \
+      --property=ActiveState \
+      --property=SubState \
+      --property=NRestarts \
+      --property=MainPID \
+      --no-pager)"; then
+      fail "cannot inspect validator startup state"
+    fi
+    while IFS='=' read -r key value; do
+      case "${key}" in
+        ActiveState) active_state="${value}" ;;
+        SubState) sub_state="${value}" ;;
+        NRestarts) restart_count="${value}" ;;
+        MainPID) main_pid="${value}" ;;
+      esac
+    done <<<"${snapshot}"
+
+    [[ "${active_state}" == "active" && "${sub_state}" == "running" ]] || \
+      fail "validator failed its startup check (state=${active_state:-unknown}/${sub_state:-unknown})"
+    [[ "${restart_count}" == "0" ]] || \
+      fail "validator restarted during its startup check (restarts=${restart_count:-unknown})"
+    [[ "${main_pid}" =~ ^[1-9][0-9]*$ ]] || \
+      fail "validator has no live main process during its startup check"
+    if [[ -z "${initial_main_pid}" ]]; then
+      initial_main_pid="${main_pid}"
+    elif [[ "${main_pid}" != "${initial_main_pid}" ]]; then
+      fail "validator main process changed during its startup check"
+    fi
+
+    if (( elapsed < STARTUP_STABILITY_SECONDS )); then
+      sleep 1
     fi
   done
 }
@@ -261,9 +308,11 @@ fi
 # Keep exact copies of every mutable install target. If any later operation
 # fails, the EXIT trap restores these bytes and restarts the prior service.
 backup_root="$(mktemp -d /var/tmp/cathedral-validator-install.XXXXXX)"
+[[ ! -e "${LEGACY_UNIT_PATH}" || -f "${LEGACY_UNIT_PATH}" || -L "${LEGACY_UNIT_PATH}" ]] || \
+  fail "the legacy unit path is not a regular file or symlink: ${LEGACY_UNIT_PATH}"
 for target in \
   /usr/local/libexec/cathedral-sn39-release \
-  /etc/systemd/system/cathedral-thin-validator.service \
+  "${LEGACY_UNIT_PATH}" \
   /etc/systemd/system/cathedral-validator-sn39-relay.service \
   /etc/sysusers.d/cathedral-sn39-validator.conf \
   /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf \
@@ -281,8 +330,17 @@ for target in \
 done
 install_mutated=true
 
-# Mask the retired writer before building the manifest. The current public
-# validator, if any, stays online until the replacement has passed verification.
+# The retired unit can be a regular file. systemd 255 refuses to replace one
+# with a mask even with --force, so remove the already-backed-up file first.
+# Leave an existing symlink in place; --force safely replaces conflicting links
+# while preserving an existing /dev/null mask until systemd confirms the mask.
+# The current public validator, if any, stays online until the replacement has
+# passed verification.
+if [[ -e "${LEGACY_UNIT_PATH}" && ! -L "${LEGACY_UNIT_PATH}" ]]; then
+  [[ -f "${LEGACY_UNIT_PATH}" ]] || \
+    fail "the legacy unit path changed during installation"
+  rm -f -- "${LEGACY_UNIT_PATH}"
+fi
 systemctl mask --now --force "${LEGACY_SERVICE}"
 
 install -D -o root -g root -m 0755 \
@@ -356,8 +414,9 @@ fi
 
 systemctl enable --now "${ALERT_TIMER}"
 systemctl enable "${SERVICE}"
+systemctl reset-failed "${SERVICE}"
 systemctl start "${SERVICE}"
-systemctl is-active --quiet "${SERVICE}" || fail "the validator service did not stay active"
+wait_for_service_stability
 install_complete=true
 
 printf '%s\n' \
