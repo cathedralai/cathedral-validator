@@ -665,11 +665,11 @@ def test_preview_import_graph_loads_no_writer():
 def test_packaging_keeps_the_compute_pin_exact():
     with (Path(__file__).parents[2] / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
-    expected = "5268443104fd7717b95ce4c398ddf6229ec4f461"
+    expected = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
     assert preview.COMPUTE_CONTRACT_COMMIT == expected
     assert project["optional-dependencies"]["snp-dev"] == [
         "cathedral @ git+https://github.com/cathedralai/"
-        f"cathedral-compute.git@{expected}"
+        f"cathedral-sandbox.git@{expected}"
     ]
     assert (
         project["scripts"]["cathedral-amd-sev-snp-dev-preview"]
@@ -687,7 +687,7 @@ def test_compute_contract_provenance_refuses_placeholder_and_wrong_commit(monkey
     distribution = SimpleNamespace(
         read_text=lambda _name: json.dumps(
             {
-                "url": "https://github.com/cathedralai/cathedral-compute.git",
+                "url": "https://github.com/cathedralai/cathedral-sandbox.git",
                 "vcs_info": {
                     "vcs": "git",
                     "requested_revision": expected,
@@ -704,7 +704,7 @@ def test_compute_contract_provenance_refuses_placeholder_and_wrong_commit(monkey
 
     distribution.read_text = lambda _name: json.dumps(
         {
-            "url": "https://github.com/cathedralai/cathedral-compute.git",
+            "url": "https://github.com/cathedralai/cathedral-sandbox.git",
             "vcs_info": {
                 "vcs": "git",
                 "requested_revision": expected,
@@ -804,7 +804,7 @@ def test_pythonpath_shadow_is_refused_before_top_level_code_executes(tmp_path):
     (dist_info / "direct_url.json").write_text(
         json.dumps(
             {
-                "url": "https://github.com/cathedralai/cathedral-compute.git",
+                "url": "https://github.com/cathedralai/cathedral-sandbox.git",
                 "vcs_info": {
                     "vcs": "git",
                     "requested_revision": expected,

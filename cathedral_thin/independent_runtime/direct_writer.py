@@ -60,6 +60,9 @@ _CHAIN_HASH_HEX = frozenset("0123456789abcdef")
 _LOCAL_LOCKS_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _STATUS_EXTRINSIC_FINALIZED = "EXTRINSIC_FINALIZED"
+_I32F32_ONE = 1 << 32
+_I32F32_HALF = 1 << 31
+_I32F32_UPSCALE_THRESHOLD = 32_768
 
 
 class DirectSubmissionAmbiguous(DirectValidatorError):
@@ -198,6 +201,45 @@ def _stored_weight_rows(value: Any) -> tuple[tuple[int, int], ...]:
             raise DirectSubmissionAmbiguous("stored mechanism weight value is invalid")
         result.append((uid, weight))
     return tuple(result)
+
+
+def _subtensor_max_upscale_to_u16(weights: tuple[int, ...]) -> tuple[int, ...]:
+    """Reproduce the pallet's Q32 max-upscale before comparing storage.
+
+    ``pallets/subtensor/src/subnets/weights.rs::internal_set_weights`` stores
+    ``vec_u16_max_upscale_to_u16(values)``, not the submitted values. The math
+    lives in ``pallets/subtensor/src/epoch/math.rs`` and uses I32F32 division,
+    a separate overflow-avoiding branch above 32768, and round-half-away from
+    zero. All inputs here are non-negative u16 values, so the exact operation
+    is integer Q32 arithmetic.
+    """
+
+    if any(
+        isinstance(weight, bool) or not isinstance(weight, int) or not 0 <= weight <= W
+        for weight in weights
+    ):
+        raise DirectSubmissionContradiction(
+            "confirmation weight vector is not a u16 vector"
+        )
+    if not weights:
+        return ()
+    maximum = max(weights)
+    if maximum == 0:
+        return tuple(0 for _weight in weights)
+
+    if maximum > _I32F32_UPSCALE_THRESHOLD:
+        # Mirrors e.saturating_mul(u16_max.safe_div(maximum)).round().
+        multiplier_q32 = (W * _I32F32_ONE) // maximum
+        return tuple(
+            (weight * multiplier_q32 + _I32F32_HALF) // _I32F32_ONE
+            for weight in weights
+        )
+
+    # Mirrors e.saturating_mul(u16_max).safe_div(maximum).round().
+    return tuple(
+        (((weight * W * _I32F32_ONE) // maximum) + _I32F32_HALF) // _I32F32_ONE
+        for weight in weights
+    )
 
 
 def _read_fresh_snapshot(subtensor: Any, keypair: Any) -> FinalizedMetagraphSnapshot:
@@ -844,7 +886,8 @@ class DirectWeightWriter:
                         "weighted miner mapping changed at finalized block "
                         f"{block_number}"
                     )
-        if stored_rows != tuple(zip(dests, weights)):
+        expected_stored_rows = tuple(zip(dests, _subtensor_max_upscale_to_u16(weights)))
+        if stored_rows != expected_stored_rows:
             raise DirectSubmissionContradiction(
                 f"stored mechanism row differs at finalized block {block_number}"
             )

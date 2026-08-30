@@ -43,6 +43,7 @@ from typing import Any
 
 from bittensor.utils import get_mechid_storage_index
 
+from cathedral_thin.independent.collect import EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
@@ -700,6 +701,10 @@ def collect_verified_endpoint(
         if collected is None:
             raise UID30LaunchError(
                 f"miner evidence collection failed: {row.get('error')}"
+            )
+        if collected.kind != EVIDENCE_KIND_TDX:
+            raise UID30LaunchError(
+                "the retained UID30 launch helper accepts TDX evidence only"
             )
         qvl = load_verifier(qvl_path)
         verdict = ComputeAdapter(

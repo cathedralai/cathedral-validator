@@ -378,6 +378,16 @@ def test_a_failing_verdict_is_reported_rather_than_swallowed():
     assert verify_collected(gated, collect(transport_for())) is QuoteVerdict.FAIL
 
 
+def test_the_retained_qvl_helper_refuses_snp_before_calling_intel_qvl():
+    gated, verifier = adapter(QuoteVerdict.PASS)
+    collected = collect(transport_for(kind="sev_snp"))
+
+    with pytest.raises(CollectError, match="TDX evidence only"):
+        verify_collected(gated, collected)
+
+    assert verifier.calls == []
+
+
 def test_verify_collected_takes_the_gated_adapter_and_real_evidence():
     gated, _verifier = adapter()
     with pytest.raises(CollectError, match="CollectedEvidence"):
@@ -418,7 +428,6 @@ def test_mixed_case_quote_hex_is_accepted_but_embedded_space_is_not():
         {"channel_binding_type": 7},
         {"channel_binding_digest_hex": DIGEST.hex()[:62]},
         {"kind": "gpu_cc"},
-        {"kind": "sev_snp"},
         {"kind": 7},
         {"report_data_version": 1},
         {"report_data_version": True},
@@ -437,6 +446,11 @@ def test_mixed_case_quote_hex_is_accepted_but_embedded_space_is_not():
 def test_an_answer_that_is_not_what_was_asked_for_is_refused(overrides):
     with pytest.raises(CollectError):
         collect(transport_for(**overrides))
+
+
+def test_a_strict_sev_snp_answer_is_collected_without_tdx_fallback():
+    evidence = collect(transport_for(kind="sev_snp"))
+    assert evidence.kind == "sev_snp"
 
 
 def test_a_v1_answer_is_refused_because_it_binds_no_channel():

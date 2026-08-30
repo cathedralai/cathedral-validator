@@ -3187,6 +3187,7 @@ def test_collect_proof_uses_uid30_nonce_qvl_pin_and_canonical_sat(
     monkeypatch,
 ):
     collected = SimpleNamespace(
+        kind="tdx",
         assigned_hotkey=axon.MINER_HOTKEY,
         quote=b"fresh-tdx-quote",
         report_data=b"r" * 64,
@@ -3240,6 +3241,7 @@ def test_collect_proof_uses_uid30_nonce_qvl_pin_and_canonical_sat(
 
 def test_collect_proof_refuses_nonpassing_qvl_before_sat(monkeypatch):
     collected = SimpleNamespace(
+        kind="tdx",
         assigned_hotkey=axon.MINER_HOTKEY,
         quote=b"fresh-tdx-quote",
         report_data=b"r" * 64,
@@ -3273,6 +3275,34 @@ def test_collect_proof_refuses_nonpassing_qvl_before_sat(monkeypatch):
         axon.collect_endpoint_proof(
             FakeSubtensor(),
             qvl_path="/reviewed/qvl",
+            ip=SERVICE_IP,
+            port=8081,
+        )
+
+
+def test_retained_axon_helper_refuses_snp_before_intel_qvl(monkeypatch):
+    collected = SimpleNamespace(
+        kind="sev_snp",
+        assigned_hotkey=axon.MINER_HOTKEY,
+    )
+    monkeypatch.setattr(
+        axon,
+        "snapshot_epoch",
+        lambda _subtensor: SimpleNamespace(
+            anchor=SimpleNamespace(anchor_number=90, anchor_hash=chain_hash(90))
+        ),
+    )
+    monkeypatch.setattr(axon, "_try_collect", lambda *_args: {"collected": collected})
+    monkeypatch.setattr(
+        axon,
+        "load_verifier",
+        lambda *_args: pytest.fail("SNP evidence must not reach Intel QVL"),
+    )
+
+    with pytest.raises(axon.MinerAxonError, match="TDX evidence only"):
+        axon.collect_endpoint_proof(
+            FakeSubtensor(),
+            qvl_path="/not/read",
             ip=SERVICE_IP,
             port=8081,
         )

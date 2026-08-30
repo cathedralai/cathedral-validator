@@ -15,8 +15,9 @@ What this collect refuses, all fail-closed:
   nonce and a hotkey but not the key that owns the transport, so a v1 quote
   proves a machine answered, not that THIS connection reached it;
 * evidence *bundles* (``{"evidence": [tdx, gpu]}``) and any ``kind`` other than
-  ``tdx``. The GPU path has its own collateral story and this lineage does not
-  have it;
+  the explicit CPU kinds ``tdx`` and ``sev_snp``. Each kind is dispatched to
+  its own pinned verifier later. GPU evidence has its own collateral story and
+  this lineage does not have it;
 * any status other than 200, redirects included and named as such, so a 302 to
   somewhere else is a refusal rather than a hop;
 * an unknown or missing key in either direction, a nonce or hotkey or binding
@@ -74,6 +75,8 @@ CHANNEL_BINDING_TYPE_TLS = "tls_spki_sha256"
 CHANNEL_BINDING_CANONICAL_PREFIX = b"cathedral.channel-binding\x00"
 
 EVIDENCE_KIND_TDX = "tdx"
+EVIDENCE_KIND_SEV_SNP = "sev_snp"
+SUPPORTED_EVIDENCE_KINDS = frozenset({EVIDENCE_KIND_TDX, EVIDENCE_KIND_SEV_SNP})
 EVIDENCE_PATH = "/v1/evidence"
 
 REPORT_DATA_V2_DOMAIN = b"cathedral.report-data\x00"
@@ -149,7 +152,7 @@ class ChannelBinding:
 
 @dataclass(frozen=True)
 class CollectedEvidence:
-    """One miner's TDX evidence, checked against what was asked for.
+    """One miner's admitted CPU evidence, checked against what was asked for.
 
     ``report_data`` is derived from the request's nonce, hotkey, and binding --
     never read off the response -- so the value handed to a quote verifier is
@@ -428,9 +431,10 @@ def collect_evidence(
         raise CollectError("the evidence response hotkey does not match the request")
     if _response_channel_binding(response) != channel_binding:
         raise CollectError("the evidence response channel binding does not match")
-    if response["kind"] != EVIDENCE_KIND_TDX:
+    if response["kind"] not in SUPPORTED_EVIDENCE_KINDS:
         raise CollectError(
-            f"collect accepts kind {EVIDENCE_KIND_TDX!r} only, not {response['kind']!r}"
+            "collect accepts only strict evidence kinds "
+            f"{sorted(SUPPORTED_EVIDENCE_KINDS)!r}, not {response['kind']!r}"
         )
 
     quote = _decode_hex(response["quote_hex"], "quote_hex", max_bytes=MAX_QUOTE_BYTES)
@@ -445,7 +449,7 @@ def collect_evidence(
         for entry in chain_raw
     )
     return CollectedEvidence(
-        kind=EVIDENCE_KIND_TDX,
+        kind=response["kind"],
         quote=quote,
         nonce=challenge,
         assigned_hotkey=hotkey,
@@ -509,6 +513,8 @@ def verify_collected(
         raise CollectError("verify_collected takes CollectedEvidence")
     if not isinstance(adapter, ComputeAdapter):
         raise CollectError("verify_collected takes a ComputeAdapter")
+    if collected.kind != EVIDENCE_KIND_TDX:
+        raise CollectError("verify_collected accepts TDX evidence only")
     return adapter.verify_quote(
         collected.quote, expected_report_data=collected.report_data
     )
@@ -519,6 +525,8 @@ __all__ = [
     "CHANNEL_BINDING_DIGEST_BYTES",
     "CHANNEL_BINDING_TYPE_TLS",
     "EVIDENCE_KIND_TDX",
+    "EVIDENCE_KIND_SEV_SNP",
+    "SUPPORTED_EVIDENCE_KINDS",
     "EVIDENCE_PATH",
     "EVIDENCE_V2_REQUEST_KEYS",
     "EVIDENCE_V2_RESPONSE_KEYS",

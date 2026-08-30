@@ -57,6 +57,23 @@ EXTRINSIC_HASH = "0x" + "c" * 64
 INCLUSION_HASH = "0x" + "d" * 64
 MINER_ONE_AXON = ServingAxon(19, MINER_ONE, "1.1.1.1", 8081)
 MINER_TWO_AXON = ServingAxon(20, MINER_TWO, "8.8.8.8", 8081)
+_Q32 = 1 << 32
+
+
+def pallet_storage_weights(weights: list[int] | tuple[int, ...]) -> list[int]:
+    """Independent oracle for Subtensor's I32F32 max-upscale storage step."""
+
+    if not weights:
+        return []
+    maximum = max(weights)
+    if maximum == 0:
+        return [0] * len(weights)
+    if maximum > 32_768:
+        multiplier_q32 = (W * _Q32) // maximum
+        return [(weight * multiplier_q32 + _Q32 // 2) // _Q32 for weight in weights]
+    return [
+        (((weight * W * _Q32) // maximum) + _Q32 // 2) // _Q32 for weight in weights
+    ]
 
 
 class FakeKeypair:
@@ -343,6 +360,7 @@ def test_phase_latency_is_evidence_only_and_never_changes_score() -> None:
         "evidence": 20_000,
         "fleet": 30_000,
         "qvl": 40_000,
+        "snp": None,
         "sat": 50_000,
     }
     slow = round_result(slow_row)
@@ -362,6 +380,7 @@ def test_evidence_summary_is_fixed_shape_deterministic_and_bounded() -> None:
         "evidence": 8,
         "fleet": 12,
         "qvl": 16,
+        "snp": None,
         "sat": 20,
     }
     second = machine_row("2", paid=False)
@@ -370,6 +389,7 @@ def test_evidence_summary_is_fixed_shape_deterministic_and_bounded() -> None:
         "evidence": None,
         "fleet": 12,
         "qvl": 18,
+        "snp": None,
         "sat": None,
     }
     exclusions = (
@@ -406,6 +426,7 @@ def test_evidence_summary_is_fixed_shape_deterministic_and_bounded() -> None:
         "evidence": {"samples": 1, "minimum": 8, "maximum": 8, "sample_sum": 8},
         "fleet": {"samples": 1, "minimum": 12, "maximum": 12, "sample_sum": 12},
         "qvl": {"samples": 2, "minimum": 16, "maximum": 18, "sample_sum": 34},
+        "snp": {"samples": 0, "minimum": None, "maximum": None, "sample_sum": 0},
         "sat": {"samples": 1, "minimum": 20, "maximum": 20, "sample_sum": 20},
     }
     assert summary["exclusions"] == {
@@ -587,7 +608,9 @@ class WriterSubstrate:
         assert storage_function == "Weights"
         assert params[1] == 7
         self.get_block_number(block_hash)
-        weights = [1] if self.wrong_storage else self.expected_weights
+        weights = (
+            [1] if self.wrong_storage else pallet_storage_weights(self.expected_weights)
+        )
         return list(zip(self.expected_uids, weights))
 
 
@@ -754,6 +777,59 @@ def test_multi_uid_writer_persists_exact_intent_and_confirms_three_heads(
     assert state["last_attempt"]["intent"]["kwargs"]["weights"] == [43690, 21845]
     assert state["last_attempt"]["intent"]["eligibility"]["weights_rate_limit"] == 20
     assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_writer_confirms_subtensor_max_upscaled_tied_weights(
+    tmp_path: Path, monkeypatch
+) -> None:
+    miners = (MINER_ONE_AXON, MINER_TWO_AXON)
+    planned = plan(
+        miners=miners,
+        rows=(
+            machine_row("1"),
+            machine_row("2", uid=20, hotkey=MINER_TWO),
+        ),
+    )
+    assert planned.wire_weights == (32_768, 32_767)
+    assert pallet_storage_weights(planned.wire_weights) == [65_535, 65_533]
+    instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert subtensor.substrate.expected_weights == [32_768, 32_767]
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["last_attempt"]["intent"]["kwargs"]["weights"] == [
+        32_768,
+        32_767,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("submitted", "stored"),
+    (
+        ((32_768, 32_767), (65_535, 65_533)),
+        ((40_000, 20_000, 5_535), (65_535, 32_767, 9_068)),
+        ((43_690, 21_845), (65_535, 32_768)),
+        ((65_534, 32_767), (65_535, 32_767)),
+    ),
+)
+def test_subtensor_max_upscale_q32_regressions(
+    submitted: tuple[int, ...], stored: tuple[int, ...]
+) -> None:
+    assert writer_runtime._subtensor_max_upscale_to_u16(submitted) == stored
+    assert tuple(pallet_storage_weights(submitted)) == stored
+
+
+def test_subtensor_max_upscale_properties_across_every_u16_maximum() -> None:
+    for maximum in range(1, W + 1):
+        submitted = tuple(sorted((0, 1, maximum // 2, max(0, maximum - 1), maximum)))
+        stored = writer_runtime._subtensor_max_upscale_to_u16(submitted)
+
+        assert stored == tuple(pallet_storage_weights(submitted))
+        assert stored[-1] == W
+        assert all(0 <= weight <= W for weight in stored)
+        assert all(left <= right for left, right in zip(stored, stored[1:]))
 
 
 def test_cooldown_refuses_before_signing_or_journaling(
@@ -1312,7 +1388,16 @@ def test_cli_refuses_before_wallet_or_chain_access(monkeypatch) -> None:
     )
 
     with pytest.raises(SystemExit, match="confirm-direct-write"):
-        runtime.main(["--qvl", "/reviewed/qvl"])
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+            ]
+        )
 
 
 def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
@@ -1329,6 +1414,10 @@ def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
             [
                 "--qvl",
                 "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--network",
                 "local",
                 "--confirm-direct-write",
@@ -1340,6 +1429,10 @@ def test_cli_refuses_non_finney_and_bad_interval_before_wallet_access(
                 [
                     "--qvl",
                     "/reviewed/qvl",
+                    "--snp-policy",
+                    "/reviewed/snp-policy.json",
+                    "--snpguest",
+                    "/reviewed/snpguest",
                     f"--interval-seconds={interval}",
                     "--confirm-direct-write",
                 ]
@@ -1363,6 +1456,10 @@ def test_cli_checks_direct_qvl_pin_before_wallet_or_chain_access(monkeypatch) ->
             [
                 "--qvl",
                 "/retired/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--confirm-direct-write",
             ]
         )
@@ -1380,6 +1477,12 @@ def _stub_cli_runtime(monkeypatch, events):
         lambda *_args, **_kwargs: SimpleNamespace(
             qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
         ),
+    )
+    monkeypatch.setattr(runtime, "load_snp_policy", lambda _path: object())
+    monkeypatch.setattr(
+        runtime,
+        "SnpProductionVerifier",
+        lambda **_kwargs: object(),
     )
     monkeypatch.setattr(
         runtime,
@@ -1420,6 +1523,10 @@ def test_cli_once_succeeds_only_after_exact_confirmation(
             [
                 "--qvl",
                 "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1436,6 +1543,10 @@ def test_cli_once_returns_nonzero_for_expected_chain_failure(monkeypatch) -> Non
             [
                 "--qvl",
                 "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1453,7 +1564,17 @@ def test_recurring_cli_continues_after_expected_chain_failure(monkeypatch) -> No
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(StopLoop):
-        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                "--confirm-direct-write",
+            ]
+        )
     assert events == []
 
 
@@ -1468,7 +1589,17 @@ def test_recurring_cli_reports_unexpected_exception_and_continues(
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(StopLoop):
-        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                "--confirm-direct-write",
+            ]
+        )
 
     event = json.loads(capsys.readouterr().out.splitlines()[0])
     assert event == {
@@ -1486,6 +1617,10 @@ def test_cli_once_returns_nonzero_for_unexpected_exception(monkeypatch) -> None:
             [
                 "--qvl",
                 "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
                 "--once",
                 "--confirm-direct-write",
             ]
@@ -1500,14 +1635,37 @@ def test_cli_final_exception_handler_does_not_catch_process_control(
     _stub_cli_runtime(monkeypatch, [KeyboardInterrupt()])
 
     with pytest.raises(KeyboardInterrupt):
-        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                "--confirm-direct-write",
+            ]
+        )
 
 
 def test_recurring_cli_stops_on_submission_contradiction(monkeypatch) -> None:
     events = [DirectSubmissionContradiction("stored row differs"), {"status": "later"}]
     _stub_cli_runtime(monkeypatch, events)
 
-    assert runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"]) == 2
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                "--confirm-direct-write",
+            ]
+        )
+        == 2
+    )
     assert events == [{"status": "later"}]
 
 

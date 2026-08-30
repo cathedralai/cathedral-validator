@@ -49,6 +49,7 @@ from .fleet_score import (
 )
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
+from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
 _REPORTED_EXCLUSION_CATEGORIES = (
@@ -147,7 +148,12 @@ def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if result.feature_blocked or result.blockers or result.qvl_infra_count:
+    if (
+        result.feature_blocked
+        or result.blockers
+        or result.qvl_infra_count
+        or result.snp_infra_count
+    ):
         raise DirectValidatorError("machine verification round is not fully proven")
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
@@ -346,6 +352,7 @@ def run_direct_cycle(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    snp_verifier: SnpProductionVerifier | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector."""
 
@@ -366,6 +373,7 @@ def run_direct_cycle(
         keypair=keypair,
         anchor_hash=snapshot.block_hash,
         verifier_adapter=verifier_adapter,
+        snp_verifier=snp_verifier,
         cycle_deadline_monotonic=cycle_deadline,
     )
     plan = build_direct_plan(snapshot, result)
@@ -394,6 +402,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--qvl", required=True)
+    parser.add_argument(
+        "--snp-policy",
+        required=True,
+        help="owner-controlled AMD SEV-SNP production policy JSON",
+    )
+    parser.add_argument(
+        "--snpguest",
+        required=True,
+        help="pinned AMD snpguest verifier",
+    )
     parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
     )
@@ -425,6 +443,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         collateral_base_url=INTEL_COLLATERAL,
         qvl_digest=verifier.digest,
     )
+    try:
+        snp_verifier = SnpProductionVerifier(
+            policy=load_snp_policy(options.snp_policy),
+            snpguest_path=options.snpguest,
+        )
+    except SnpProductionError as exc:
+        raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
     wallet = make_wallet(bt, name=options.wallet_name, hotkey=options.wallet_hotkey)
     keypair = wallet.hotkey
     if not callable(getattr(keypair, "sign", None)):
@@ -448,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 subtensor=subtensor,
                 keypair=keypair,
                 verifier_adapter=adapter,
+                snp_verifier=snp_verifier,
                 writer=writer,
             )
             print(json.dumps(event, sort_keys=True, default=str), flush=True)

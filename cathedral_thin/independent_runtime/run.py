@@ -30,6 +30,7 @@ import bittensor as bt
 from cathedral_thin.independent.canary import submit_canary_once
 from cathedral_thin.independent.collect import (
     CollectedEvidence,
+    EVIDENCE_KIND_TDX,
     collect_evidence,
     mint_nonce,
 )
@@ -604,6 +605,12 @@ def cmd_run(options: argparse.Namespace) -> int:
         for row in collect_hits:
             collected = row.get("collected")
             if collected is None:
+                continue
+            if collected.kind != EVIDENCE_KIND_TDX:
+                # This retired audit path has no production SNP verifier. It
+                # must never reinterpret AMD evidence as an Intel quote.
+                row["verdict"] = QuoteVerdict.FAIL.value
+                row["identity_error"] = "legacy audit path accepts TDX evidence only"
                 continue
             verdict = verifier_adapter.verify_quote(
                 collected.quote, expected_report_data=collected.report_data

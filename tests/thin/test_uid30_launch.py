@@ -685,6 +685,34 @@ def test_private_or_wrong_port_axon_is_refused_before_dial(
         assert dialed == []
 
 
+def test_retained_uid30_helper_refuses_snp_before_intel_qvl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        launch,
+        "_try_collect",
+        lambda *_args: {"collected": SimpleNamespace(kind="sev_snp")},
+    )
+    monkeypatch.setattr(
+        launch,
+        "load_verifier",
+        lambda *_args: pytest.fail("SNP evidence must not reach Intel QVL"),
+    )
+
+    with pytest.raises(launch.UID30LaunchError, match="TDX evidence only"):
+        launch.collect_verified_endpoint(
+            state=_state(),
+            axon=launch.ServingAxon(
+                uid=61,
+                hotkey=launch.MINER_HOTKEY,
+                ip="8.8.8.8",
+                port=8081,
+            ),
+            miner_hotkey=launch.MINER_HOTKEY,
+            qvl_path="/not/read",
+        )
+
+
 def test_fresh_miner_requires_same_current_finalized_axon(tmp_path: Path) -> None:
     path, digest, _runtime_root = _preview_files(tmp_path)
     preview, _observed = launch.load_reviewed_preview(path, reviewed_sha256=digest)

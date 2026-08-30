@@ -10,12 +10,14 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 from cathedral_thin.independent.collect import (
     CollectedEvidence,
+    EVIDENCE_KIND_SEV_SNP,
+    EVIDENCE_KIND_TDX,
     collect_evidence,
     mint_nonce,
 )
@@ -50,6 +52,7 @@ from .multicompute import (
     duplicate_hardware_indexes,
 )
 from .qvl import TIMEOUT_SECONDS as QVL_TIMEOUT_SECONDS
+from .snp_production import SnpProductionVerifier
 from .validator_request import (
     SignedValidatorTransport,
     fetch_worker_fleet,
@@ -60,8 +63,10 @@ DISCOVERY_RESPONSE_DEADLINE_SECONDS = 60.0
 MINER_RESPONSE_DEADLINE_SECONDS = 90.0
 FULL_CYCLE_RESPONSE_DEADLINE_SECONDS = 120.0
 MAX_CONCURRENT_MINERS = 32
-PHASE_TIMING_FIELDS = ("binding", "evidence", "fleet", "qvl", "sat")
+PHASE_TIMING_FIELDS = ("binding", "evidence", "fleet", "qvl", "snp", "sat")
 QVL_DEADLINE_MARGIN_SECONDS = 0.5
+SNP_VERIFIER_RESERVED_SECONDS = 20.0
+SNP_DEADLINE_MARGIN_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,7 @@ class MultiComputeRound:
     feature_blocked: bool
     exclusions: tuple[str, ...]
     blockers: tuple[str, ...]
+    snp_infra_count: int = 0
 
 
 @dataclass
@@ -96,6 +102,7 @@ class _MinerEvidence:
     pass_count: int
     qvl_infra_count: int
     finished_monotonic: float
+    snp_infra_count: int = 0
 
 
 def _empty_phase_timings() -> dict[str, int | None]:
@@ -237,6 +244,7 @@ def _collect_candidate(
     validator_ss58: str,
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
+    snp_verifier: SnpProductionVerifier | None,
     deadline_monotonic: float | None = None,
 ) -> tuple[dict[str, Any], MachineWorkObservation, CollectedEvidence | None, bool]:
     evidence_url, sat_url = _candidate_urls(candidate.endpoint)
@@ -265,47 +273,105 @@ def _collect_candidate(
     if isinstance(collected, CollectedEvidence):
         row["quote_sha256"] = hashlib.sha256(collected.quote).hexdigest()
         row["report_data_sha256"] = hashlib.sha256(collected.report_data).hexdigest()
-        qvl_deadline = deadline_monotonic
-        if deadline_monotonic is not None and (
-            deadline_monotonic - time.monotonic()
-            <= QVL_TIMEOUT_SECONDS + QVL_DEADLINE_MARGIN_SECONDS
-        ):
-            row["deadline_error"] = "insufficient discovery budget for bounded QVL"
-        else:
-            started = _phase_started()
-            verify_kwargs: dict[str, Any] = {
-                "expected_report_data": collected.report_data
-            }
-            if qvl_deadline is not None:
-                verify_kwargs["deadline_monotonic"] = (
-                    qvl_deadline - QVL_DEADLINE_MARGIN_SECONDS
-                )
-            try:
-                identity = verifier_adapter.verify_quote_with_identity(
-                    collected.quote, **verify_kwargs
-                )
-            finally:
-                timings["qvl"] = _phase_finished(started)
-            row["verdict"] = identity.verdict.value
-            verdict_pass = identity.verdict is QuoteVerdict.PASS
-            if verdict_pass:
-                if (
-                    not identity.platform_identity_verified
-                    or identity.stable_platform_id is None
-                ):
-                    row["identity_error"] = (
-                        "QVL PASS did not carry a quote-bound verified "
-                        "stable_platform_id; this machine earns zero"
+        if collected.kind == EVIDENCE_KIND_TDX:
+            row["tee_kind"] = EVIDENCE_KIND_TDX
+            row["verifier_digest"] = getattr(verifier_adapter, "qvl_digest", None)
+            qvl_deadline = deadline_monotonic
+            if deadline_monotonic is not None and (
+                deadline_monotonic - time.monotonic()
+                <= QVL_TIMEOUT_SECONDS + QVL_DEADLINE_MARGIN_SECONDS
+            ):
+                row["deadline_error"] = "insufficient discovery budget for bounded QVL"
+            else:
+                started = _phase_started()
+                verify_kwargs: dict[str, Any] = {
+                    "expected_report_data": collected.report_data
+                }
+                if qvl_deadline is not None:
+                    verify_kwargs["deadline_monotonic"] = (
+                        qvl_deadline - QVL_DEADLINE_MARGIN_SECONDS
                     )
-                else:
-                    machine_id = machine_id_from_stable_platform_id(
-                        identity.stable_platform_id
+                try:
+                    identity = verifier_adapter.verify_quote_with_identity(
+                        collected.quote, **verify_kwargs
                     )
+                finally:
+                    timings["qvl"] = _phase_finished(started)
+                row["verdict"] = identity.verdict.value
+                verdict_pass = identity.verdict is QuoteVerdict.PASS
+                if verdict_pass:
+                    if (
+                        not identity.platform_identity_verified
+                        or identity.stable_platform_id is None
+                    ):
+                        row["identity_error"] = (
+                            "QVL PASS did not carry a quote-bound verified stable_platform_id; this machine earns zero"
+                        )
+                    else:
+                        machine_id = machine_id_from_stable_platform_id(
+                            identity.stable_platform_id
+                        )
+                        hardware_verified = True
+                        row["stable_platform_id"] = identity.stable_platform_id
+        elif collected.kind == EVIDENCE_KIND_SEV_SNP:
+            row["tee_kind"] = EVIDENCE_KIND_SEV_SNP
+            if snp_verifier is None:
+                row.update(
+                    {
+                        "verdict": QuoteVerdict.INFRA.value,
+                        "identity_error": "SNP verifier is not configured",
+                        "verifier_digest": None,
+                        "policy_digest": None,
+                    }
+                )
+            elif deadline_monotonic is not None and (
+                deadline_monotonic - time.monotonic()
+                <= SNP_VERIFIER_RESERVED_SECONDS + SNP_DEADLINE_MARGIN_SECONDS
+            ):
+                # A miner which consumes the verifier's reserved time misses
+                # its own response deadline. It must not turn that late answer
+                # into validator-wide AMD infrastructure failure.
+                row.update(
+                    {
+                        "verdict": QuoteVerdict.FAIL.value,
+                        "identity_error": "snp_response_left_insufficient_verification_budget",
+                        "deadline_error": "insufficient discovery budget for bounded SNP verification",
+                        "verifier_digest": snp_verifier.digest,
+                        "policy_digest": snp_verifier.policy_digest,
+                    }
+                )
+            else:
+                started = _phase_started()
+                try:
+                    result = snp_verifier.verify(
+                        collected, deadline_monotonic=deadline_monotonic
+                    )
+                finally:
+                    timings["snp"] = _phase_finished(started)
+                row.update(
+                    {
+                        "verdict": result.verdict.value,
+                        "verifier_digest": result.verifier_digest,
+                        "policy_digest": result.policy_digest,
+                    }
+                )
+                verdict_pass = result.verdict is QuoteVerdict.PASS
+                if verdict_pass and result.machine_id is not None:
+                    machine_id = result.machine_id
                     hardware_verified = True
-                    row["stable_platform_id"] = identity.stable_platform_id
-                    row["machine_id"] = machine_id
-                    row["channel_id"] = collected.channel_binding.digest.hex()
-                    row["platform_identity_verified"] = True
+                elif result.reason is not None:
+                    row["identity_error"] = result.reason
+        else:  # collect_evidence has already refused this. Keep the scorer fail-closed.
+            row.update(
+                {
+                    "verdict": QuoteVerdict.FAIL.value,
+                    "identity_error": "unsupported evidence kind",
+                }
+            )
+        if hardware_verified:
+            row["machine_id"] = machine_id
+            row["channel_id"] = collected.channel_binding.digest.hex()
+            row["platform_identity_verified"] = True
     observation = MachineWorkObservation(
         scoring_window=anchor_hash,
         uid=candidate.uid,
@@ -332,6 +398,7 @@ def _collect_miner_evidence(
     validator_ss58: str,
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
+    snp_verifier: SnpProductionVerifier | None,
     deadline_monotonic: float | None,
 ) -> _MinerEvidence:
     """Collect one miner into local state which late workers cannot publish."""
@@ -344,21 +411,26 @@ def _collect_miner_evidence(
     exclusions: list[str] = []
     pass_count = 0
     qvl_infra_count = 0
+    snp_infra_count = 0
     primary = axon_origin(axon.ip, axon.port)
     root = FleetCandidate(axon.uid, axon.hotkey, primary)
 
     def collect(candidate: FleetCandidate) -> None:
-        nonlocal pass_count, qvl_infra_count
+        nonlocal pass_count, qvl_infra_count, snp_infra_count
         row, observation, collected, verdict_pass = _collect_candidate(
             candidate=candidate,
             keypair=keypair,
             validator_ss58=validator_ss58,
             anchor_hash=anchor_hash,
             verifier_adapter=verifier_adapter,
+            snp_verifier=snp_verifier,
             deadline_monotonic=deadline_monotonic,
         )
         if row.get("verdict") == QuoteVerdict.INFRA.value:
-            qvl_infra_count += 1
+            if row.get("tee_kind") == EVIDENCE_KIND_SEV_SNP:
+                snp_infra_count += 1
+            else:
+                qvl_infra_count += 1
         if verdict_pass:
             pass_count += 1
         key = (candidate.uid, candidate.endpoint)
@@ -374,10 +446,14 @@ def _collect_miner_evidence(
         validator_ss58=validator_ss58,
         anchor_hash=anchor_hash,
         verifier_adapter=verifier_adapter,
+        snp_verifier=snp_verifier,
         deadline_monotonic=deadline_monotonic,
     )
     if root_row.get("verdict") == QuoteVerdict.INFRA.value:
-        qvl_infra_count += 1
+        if root_row.get("tee_kind") == EVIDENCE_KIND_SEV_SNP:
+            snp_infra_count += 1
+        else:
+            qvl_infra_count += 1
     if root_pass:
         pass_count += 1
     if not root_observation.hardware_verified or root_collected is None:
@@ -410,6 +486,7 @@ def _collect_miner_evidence(
             pass_count,
             qvl_infra_count,
             time.monotonic(),
+            snp_infra_count,
         )
 
     transport = SignedValidatorTransport(
@@ -458,6 +535,7 @@ def _collect_miner_evidence(
             pass_count,
             qvl_infra_count,
             time.monotonic(),
+            snp_infra_count,
         )
 
     fleet_ms = _phase_finished(fleet_started)
@@ -495,6 +573,7 @@ def _collect_miner_evidence(
         pass_count,
         qvl_infra_count,
         time.monotonic(),
+        snp_infra_count,
     )
 
 
@@ -518,6 +597,7 @@ def _deadline_miner_evidence(axon: ServingAxon, reason: str) -> _MinerEvidence:
         exclusions=[f"fleet uid {axon.uid}: {reason}"],
         pass_count=0,
         qvl_infra_count=0,
+        snp_infra_count=0,
         finished_monotonic=time.monotonic(),
     )
 
@@ -528,6 +608,7 @@ def score_multicompute_round(
     keypair: Any,
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
+    snp_verifier: SnpProductionVerifier | None = None,
     cycle_deadline_monotonic: float | None = None,
 ) -> MultiComputeRound:
     """Attest roots, discover fleets, deduplicate, challenge, and aggregate."""
@@ -539,6 +620,7 @@ def score_multicompute_round(
             verified_units={},
             pass_count=0,
             qvl_infra_count=0,
+            snp_infra_count=0,
             feature_blocked=True,
             exclusions=(),
             blockers=(
@@ -591,6 +673,7 @@ def score_multicompute_round(
     non_scoreable_keys: set[tuple[int, str]] = set()
     pass_count = 0
     qvl_infra_count = 0
+    snp_infra_count = 0
     ordered_axons = tuple(sorted(axons, key=lambda item: (item.uid, item.hotkey)))
     scheduled_axons = _anchor_rotated_axons(ordered_axons, anchor_hash)
     miner_results: dict[int, _MinerEvidence] = {}
@@ -611,40 +694,72 @@ def score_multicompute_round(
             max_workers=min(len(scheduled_axons), MAX_CONCURRENT_MINERS),
             thread_name_prefix="cathedral-miner",
         )
-        future_axons = {
-            bounded_executor.submit(
-                _collect_miner_evidence,
-                axon=axon,
-                keypair=keypair,
-                validator_ss58=validator_ss58,
-                anchor_hash=anchor_hash,
-                verifier_adapter=verifier_adapter,
-                deadline_monotonic=discovery_deadline,
-            ): axon
-            for axon in scheduled_axons
-        }
-        done, pending = wait(
-            future_axons,
-            timeout=max(0.0, discovery_deadline - time.monotonic()),
-        )
-        unexpected: Exception | None = None
-        for future in done:
-            axon = future_axons[future]
-            try:
-                result = future.result()
-            except IndependentLiveError as exc:
-                result = _deadline_miner_evidence(axon, f"{type(exc).__name__}: {exc}")
-            except Exception as exc:
-                unexpected = exc
-                continue
-            if result.finished_monotonic > discovery_deadline:
-                result = _deadline_miner_evidence(
-                    axon, "discovery_response_deadline_exceeded"
+        future_axons: dict[Future[_MinerEvidence], ServingAxon] = {}
+        next_axon_index = 0
+
+        def submit_next_axon() -> bool:
+            nonlocal next_axon_index
+            if next_axon_index >= len(scheduled_axons):
+                return False
+            axon = scheduled_axons[next_axon_index]
+            next_axon_index += 1
+            future_axons[
+                bounded_executor.submit(
+                    _collect_miner_evidence,
+                    axon=axon,
+                    keypair=keypair,
+                    validator_ss58=validator_ss58,
+                    anchor_hash=anchor_hash,
+                    verifier_adapter=verifier_adapter,
+                    snp_verifier=snp_verifier,
+                    deadline_monotonic=discovery_deadline,
                 )
-            miner_results[axon.uid] = result
-        for future in pending:
-            axon = future_axons[future]
+            ] = axon
+            return True
+
+        for _ in range(min(len(scheduled_axons), MAX_CONCURRENT_MINERS)):
+            submit_next_axon()
+
+        unexpected: Exception | None = None
+        while future_axons and time.monotonic() < discovery_deadline:
+            done, _pending = wait(
+                tuple(future_axons),
+                timeout=max(0.0, discovery_deadline - time.monotonic()),
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            completed_slots = 0
+            for future in done:
+                axon = future_axons.pop(future)
+                try:
+                    result = future.result()
+                except IndependentLiveError as exc:
+                    result = _deadline_miner_evidence(
+                        axon, f"{type(exc).__name__}: {exc}"
+                    )
+                except Exception as exc:
+                    unexpected = exc
+                    continue
+                if result.finished_monotonic > discovery_deadline:
+                    result = _deadline_miner_evidence(
+                        axon, "discovery_response_deadline_exceeded"
+                    )
+                miner_results[axon.uid] = result
+                completed_slots += 1
+            if unexpected is not None:
+                break
+            for _ in range(completed_slots):
+                if time.monotonic() >= discovery_deadline:
+                    break
+                submit_next_axon()
+
+        for future, axon in future_axons.items():
             future.cancel()
+            miner_results[axon.uid] = _deadline_miner_evidence(
+                axon, "discovery_response_deadline_exceeded"
+            )
+        for axon in scheduled_axons[next_axon_index:]:
             miner_results[axon.uid] = _deadline_miner_evidence(
                 axon, "discovery_response_deadline_exceeded"
             )
@@ -659,6 +774,7 @@ def score_multicompute_round(
                 validator_ss58=validator_ss58,
                 anchor_hash=anchor_hash,
                 verifier_adapter=verifier_adapter,
+                snp_verifier=snp_verifier,
                 deadline_monotonic=None,
             )
 
@@ -673,6 +789,7 @@ def score_multicompute_round(
         exclusions.extend(result.exclusions)
         pass_count += result.pass_count
         qvl_infra_count += result.qvl_infra_count
+        snp_infra_count += result.snp_infra_count
 
     rows.sort(key=lambda row: (int(row["uid"]), str(row["endpoint"])))
     observations.sort(key=lambda row: (row.uid, row.endpoint))
@@ -828,6 +945,7 @@ def score_multicompute_round(
         verified_units=score.hotkey_units,
         pass_count=pass_count,
         qvl_infra_count=qvl_infra_count,
+        snp_infra_count=snp_infra_count,
         feature_blocked=False,
         exclusions=tuple(exclusions),
         blockers=tuple(blockers),
@@ -837,6 +955,7 @@ def score_multicompute_round(
 __all__ = [
     "DISCOVERY_RESPONSE_DEADLINE_SECONDS",
     "FULL_CYCLE_RESPONSE_DEADLINE_SECONDS",
+    "SNP_VERIFIER_RESERVED_SECONDS",
     "MAX_CONCURRENT_MINERS",
     "MINER_RESPONSE_DEADLINE_SECONDS",
     "MultiComputeRound",
