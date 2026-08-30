@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+# Install and start one immutable public Cathedral SN39 validator release.
+set -euo pipefail
+umask 022
+
+readonly UPSTREAM="https://github.com/cathedralai/cathedral-validator.git"
+readonly SERVICE="cathedral-validator-sn39-relay.service"
+readonly ALERT_TIMER="cathedral-mismatch-alert.timer"
+readonly LEGACY_SERVICE="cathedral-thin-validator.service"
+readonly RELEASE_ROOT="/opt/cathedral-sn39/releases"
+readonly VENV_ROOT="/opt/cathedral-sn39/venvs"
+readonly INSTALL_ROOT="/etc/cathedral-validator"
+readonly RUNTIME_ROOT="/var/lib/cathedral-validator"
+readonly HOTKEY_TARGET="${RUNTIME_ROOT}/.bittensor/wallets/validator/hotkeys/default"
+
+hotkey_source=""
+staged_release=""
+staged_venv=""
+manifest_tmp=""
+backup_root=""
+install_mutated=false
+install_complete=false
+cutover_started=false
+previous_service_active=false
+previous_service_enabled=false
+previous_alert_active=false
+previous_alert_enabled=false
+previous_legacy_active=false
+previous_legacy_enabled=false
+declare -a backed_up_targets=()
+
+usage() {
+  printf '%s\n' \
+    "Usage: sudo ./deploy/sn39/install-validator --hotkey /absolute/path/to/hotkey" \
+    "" \
+    "Installs the exact checked-out commit and starts the Cathedral SN39 validator." \
+    "Pass a Bittensor hotkey file. Never pass a coldkey, mnemonic, or wallet directory."
+}
+
+fail() {
+  printf 'install failed: %s\n' "$*" >&2
+  exit 1
+}
+
+backup_target() {
+  local target="$1"
+  local relative="${target#/}"
+  local saved="${backup_root}/${relative}"
+  install -d -o root -g root -m 0700 "${saved%/*}"
+  if [[ -e "${target}" || -L "${target}" ]]; then
+    cp -a -- "${target}" "${saved}"
+  fi
+  backed_up_targets+=("${target}")
+}
+
+restore_targets() {
+  local index target relative saved
+  for ((index = ${#backed_up_targets[@]} - 1; index >= 0; index--)); do
+    target="${backed_up_targets[index]}"
+    relative="${target#/}"
+    saved="${backup_root}/${relative}"
+    rm -f -- "${target}"
+    if [[ -e "${saved}" || -L "${saved}" ]]; then
+      cp -a -- "${saved}" "${target}"
+    fi
+  done
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
+  if [[ "${install_mutated}" == true && "${install_complete}" != true ]]; then
+    if [[ "${cutover_started}" == true ]]; then
+      systemctl stop "${SERVICE}" >/dev/null 2>&1
+    fi
+    restore_targets
+    systemctl daemon-reload >/dev/null 2>&1
+    if [[ "${previous_service_enabled}" != true ]]; then
+      systemctl disable "${SERVICE}" >/dev/null 2>&1
+    fi
+    if [[ "${previous_alert_enabled}" != true ]]; then
+      systemctl disable "${ALERT_TIMER}" >/dev/null 2>&1
+    fi
+    if [[ "${previous_alert_active}" == true ]]; then
+      systemctl start "${ALERT_TIMER}" >/dev/null 2>&1
+    else
+      systemctl stop "${ALERT_TIMER}" >/dev/null 2>&1
+    fi
+    if [[ "${previous_service_active}" == true ]]; then
+      systemctl start "${SERVICE}" >/dev/null 2>&1
+    fi
+    if [[ "${previous_legacy_enabled}" == true ]]; then
+      systemctl enable "${LEGACY_SERVICE}" >/dev/null 2>&1
+    else
+      systemctl disable "${LEGACY_SERVICE}" >/dev/null 2>&1
+    fi
+    if [[ "${previous_legacy_active}" == true ]]; then
+      systemctl start "${LEGACY_SERVICE}" >/dev/null 2>&1
+    fi
+  fi
+  if [[ -n "${staged_release}" && -d "${staged_release}" ]]; then
+    rm -rf -- "${staged_release}"
+  fi
+  if [[ -n "${staged_venv}" && -d "${staged_venv}" ]]; then
+    rm -rf -- "${staged_venv}"
+  fi
+  if [[ -n "${manifest_tmp}" && -f "${manifest_tmp}" ]]; then
+    rm -f -- "${manifest_tmp}"
+  fi
+  if [[ -n "${backup_root}" && -d "${backup_root}" ]]; then
+    rm -rf -- "${backup_root}"
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
+
+while (($#)); do
+  case "$1" in
+    --hotkey)
+      (($# >= 2)) || fail "--hotkey needs an absolute file path"
+      hotkey_source="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ "${EUID}" -eq 0 ]] || fail "run this installer with sudo"
+[[ "$(uname -s)" == "Linux" ]] || fail "a Linux host with systemd is required"
+[[ "$(uname -m)" == "x86_64" ]] || fail "an x86-64 host is required"
+[[ -d /run/systemd/system ]] || fail "systemd is not running"
+
+for command in cp git install mktemp realpath systemctl systemd-sysusers systemd-tmpfiles; do
+  command -v "${command}" >/dev/null 2>&1 || fail "${command} is required"
+done
+[[ -x /usr/bin/python3.12 ]] || fail "/usr/bin/python3.12 is required"
+/usr/bin/python3.12 -m venv --help >/dev/null 2>&1 || \
+  fail "the Python 3.12 venv module is required"
+
+[[ -n "${hotkey_source}" ]] || fail "--hotkey is required"
+[[ "${hotkey_source}" == /* ]] || fail "--hotkey must be an absolute path"
+[[ -f "${hotkey_source}" && ! -L "${hotkey_source}" ]] || \
+  fail "--hotkey must name a regular file, not a directory or symlink"
+[[ -r "${hotkey_source}" ]] || fail "the hotkey file is not readable"
+hotkey_source="$(realpath -e -- "${hotkey_source}")"
+[[ -f "${hotkey_source}" && ! -L "${hotkey_source}" ]] || \
+  fail "--hotkey must resolve to a regular file, not a directory or symlink"
+case "${hotkey_source}" in
+  */wallets/*/hotkeys/*) ;;
+  *) fail "the supplied file is not inside a Bittensor hotkeys directory" ;;
+esac
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
+[[ -d "${REPO_ROOT}/.git" ]] || fail "run this from a Git clone of cathedral-validator"
+[[ -z "$(git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
+  fail "the source checkout has local changes; install a committed release"
+RELEASE_SHA="$(git -C "${REPO_ROOT}" rev-parse --verify HEAD)"
+readonly RELEASE_SHA
+[[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "cannot resolve the source commit"
+
+# A public relay never holds Cathedral's origin-only launch material. Refuse
+# before creating or replacing any installation path.
+for path in \
+  /var/lib/cathedral-validator-controlled-sn39/current \
+  /opt/cathedral-sn39/bin/cathedral-tdx-verifier \
+  /etc/cathedral-validator/sn39-launch-approval.json; do
+  [[ ! -e "${path}" && ! -L "${path}" ]] || \
+    fail "this host contains Cathedral origin launch material at ${path}"
+done
+
+readonly RELEASE="${RELEASE_ROOT}/${RELEASE_SHA}"
+readonly VENV="${VENV_ROOT}/${RELEASE_SHA}"
+
+install -d -o root -g root -m 0755 "${RELEASE_ROOT}" "${VENV_ROOT}"
+if [[ -e "${RELEASE}" || -L "${RELEASE}" ]]; then
+  [[ -d "${RELEASE}" && ! -L "${RELEASE}" ]] || \
+    fail "the release path exists but is not a directory: ${RELEASE}"
+  [[ "$(git -C "${RELEASE}" rev-parse --verify HEAD 2>/dev/null)" == "${RELEASE_SHA}" ]] || \
+    fail "the existing release directory is not the requested commit"
+else
+  staged_release="$(mktemp -d "${RELEASE_ROOT}/.${RELEASE_SHA}.XXXXXX")"
+  git clone --no-checkout "${UPSTREAM}" "${staged_release}"
+  git -C "${staged_release}" checkout --detach "${RELEASE_SHA}"
+  mv "${staged_release}" "${RELEASE}"
+  staged_release=""
+fi
+
+[[ -z "$(git -C "${RELEASE}" status --porcelain=v1 --untracked-files=all --ignored=matching)" ]] || \
+  fail "the versioned release checkout is not pristine"
+chown -R root:root "${RELEASE}"
+find "${RELEASE}" -type d -exec chmod a+rx,go-w {} +
+find "${RELEASE}" -type f -exec chmod a+r,go-w {} +
+
+if [[ -e "${VENV}" || -L "${VENV}" ]]; then
+  [[ -d "${VENV}" && ! -L "${VENV}" && -x "${VENV}/bin/python" ]] || \
+    fail "the versioned environment exists but is incomplete: ${VENV}"
+else
+  staged_venv="$(mktemp -d "${VENV_ROOT}/.${RELEASE_SHA}.XXXXXX")"
+  /usr/bin/python3.12 -m venv "${staged_venv}"
+  "${staged_venv}/bin/python" -m pip install \
+    --require-hashes -r "${RELEASE}/requirements/sn39-build.lock"
+  "${staged_venv}/bin/python" -m pip install --no-build-isolation \
+    --require-hashes -r "${RELEASE}/requirements/sn39-reproduction.lock"
+  chown -R root:root "${staged_venv}"
+  find "${staged_venv}" -type d -exec chmod a+rx,go-w {} +
+  find "${staged_venv}" -type f -exec chmod a+r,go-w {} +
+  mv "${staged_venv}" "${VENV}"
+  staged_venv=""
+fi
+chown -R root:root "${VENV}"
+find "${VENV}" -type d -exec chmod a+rx,go-w {} +
+find "${VENV}" -type f -exec chmod a+r,go-w {} +
+
+# Fail before changing the current installation if this is not a usable,
+# non-interactive Bittensor keyfile. The service cannot answer a password prompt.
+"${VENV}/bin/python" -I - "${hotkey_source}" <<'PY'
+import sys
+
+from bittensor_wallet import Keyfile
+
+keyfile = Keyfile(path=sys.argv[1])
+if not keyfile.exists_on_device():
+    raise SystemExit("the hotkey file does not exist")
+if keyfile.is_encrypted():
+    raise SystemExit("the hotkey is encrypted; the system service cannot prompt")
+try:
+    keypair = keyfile.get_keypair()
+except Exception as exc:
+    raise SystemExit("the hotkey file is not a usable Bittensor keyfile") from exc
+if not getattr(keypair, "ss58_address", None):
+    raise SystemExit("the hotkey file has no Bittensor address")
+PY
+
+if systemctl is-active --quiet "${SERVICE}"; then
+  previous_service_active=true
+fi
+if systemctl is-enabled --quiet "${SERVICE}"; then
+  previous_service_enabled=true
+fi
+if systemctl is-active --quiet "${ALERT_TIMER}"; then
+  previous_alert_active=true
+fi
+if systemctl is-enabled --quiet "${ALERT_TIMER}"; then
+  previous_alert_enabled=true
+fi
+if systemctl is-active --quiet "${LEGACY_SERVICE}"; then
+  previous_legacy_active=true
+fi
+if systemctl is-enabled --quiet "${LEGACY_SERVICE}"; then
+  previous_legacy_enabled=true
+fi
+
+# Keep exact copies of every mutable install target. If any later operation
+# fails, the EXIT trap restores these bytes and restarts the prior service.
+backup_root="$(mktemp -d /var/tmp/cathedral-validator-install.XXXXXX)"
+for target in \
+  /usr/local/libexec/cathedral-sn39-release \
+  /etc/systemd/system/cathedral-thin-validator.service \
+  /etc/systemd/system/cathedral-validator-sn39-relay.service \
+  /etc/sysusers.d/cathedral-sn39-validator.conf \
+  /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf \
+  "${INSTALL_ROOT}/validator-thin-sn39-relay.toml" \
+  "${INSTALL_ROOT}/provenance/registry-keys.json" \
+  "${INSTALL_ROOT}/provenance/report-keys.json" \
+  "${INSTALL_ROOT}/provenance/index-keys.json" \
+  /usr/local/bin/cathedral-mismatch-check \
+  /etc/systemd/system/cathedral-mismatch-alert.service \
+  /etc/systemd/system/cathedral-mismatch-alert.timer \
+  /etc/logrotate.d/cathedral-validator \
+  "${INSTALL_ROOT}/sn39-release-manifest.json" \
+  "${HOTKEY_TARGET}"; do
+  backup_target "${target}"
+done
+install_mutated=true
+
+# Mask the retired writer before building the manifest. The current public
+# validator, if any, stays online until the replacement has passed verification.
+systemctl mask --now --force "${LEGACY_SERVICE}"
+
+install -D -o root -g root -m 0755 \
+  "${RELEASE}/deploy/sn39/cathedral-sn39-release-launcher.py" \
+  /usr/local/libexec/cathedral-sn39-release
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-validator-sn39-relay.service" \
+  /etc/systemd/system/cathedral-validator-sn39-relay.service
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-sn39-validator.sysusers" \
+  /etc/sysusers.d/cathedral-sn39-validator.conf
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-sn39-validator-relay.tmpfiles" \
+  /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/config/validator-thin-sn39-relay.toml" \
+  "${INSTALL_ROOT}/validator-thin-sn39-relay.toml"
+for key in registry report index; do
+  install -D -o root -g root -m 0644 \
+    "${RELEASE}/config/provenance/${key}-keys.json" \
+    "${INSTALL_ROOT}/provenance/${key}-keys.json"
+done
+install -D -o root -g root -m 0755 \
+  "${RELEASE}/deploy/sn39/cathedral-mismatch-check" \
+  /usr/local/bin/cathedral-mismatch-check
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-mismatch-alert.service" \
+  /etc/systemd/system/cathedral-mismatch-alert.service
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-mismatch-alert.timer" \
+  /etc/systemd/system/cathedral-mismatch-alert.timer
+install -D -o root -g root -m 0644 \
+  "${RELEASE}/deploy/sn39/cathedral-validator.logrotate" \
+  /etc/logrotate.d/cathedral-validator
+
+systemd-sysusers /etc/sysusers.d/cathedral-sn39-validator.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/cathedral-sn39-validator-relay.conf
+
+manifest_tmp="$(mktemp "${INSTALL_ROOT}/sn39-release-manifest.json.XXXXXX")"
+/usr/bin/python3.12 -I -E -s \
+  "${RELEASE}/scripts/build_sn39_release_manifest.py" \
+  --relay --release "${RELEASE}" --release-sha "${RELEASE_SHA}" \
+  --venv "${VENV}" >"${manifest_tmp}"
+chown root:root "${manifest_tmp}"
+chmod 0644 "${manifest_tmp}"
+mv "${manifest_tmp}" "${INSTALL_ROOT}/sn39-release-manifest.json"
+manifest_tmp=""
+
+systemctl daemon-reload
+/usr/local/libexec/cathedral-sn39-release verify
+cutover_started=true
+if systemctl is-active --quiet "${SERVICE}"; then
+  systemctl stop "${SERVICE}"
+fi
+
+# The validator signs its own weight submissions. It needs this hotkey and no
+# coldkey. Copy it only after the replacement release verifies and the prior
+# process has stopped, so a running validator never observes a half-cutover key.
+install -d -o cathedral-validator -g cathedral-validator -m 0700 \
+  "${RUNTIME_ROOT}/.bittensor" \
+  "${RUNTIME_ROOT}/.bittensor/wallets" \
+  "${RUNTIME_ROOT}/.bittensor/wallets/validator" \
+  "${RUNTIME_ROOT}/.bittensor/wallets/validator/hotkeys"
+if [[ "${hotkey_source}" != "${HOTKEY_TARGET}" ]]; then
+  install -o cathedral-validator -g cathedral-validator -m 0600 \
+    "${hotkey_source}" "${HOTKEY_TARGET}"
+else
+  chown cathedral-validator:cathedral-validator "${HOTKEY_TARGET}"
+  chmod 0600 "${HOTKEY_TARGET}"
+fi
+
+systemctl enable --now "${ALERT_TIMER}"
+systemctl enable "${SERVICE}"
+systemctl start "${SERVICE}"
+systemctl is-active --quiet "${SERVICE}" || fail "the validator service did not stay active"
+install_complete=true
+
+printf '%s\n' \
+  "Cathedral Validator service is active." \
+  "Release: ${RELEASE_SHA}" \
+  "A WEIGHTS_SUBMITTED event confirms a successful weight submission." \
+  "Watch the validator:" \
+  "  sudo journalctl -u ${SERVICE} -f"

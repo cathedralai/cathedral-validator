@@ -176,7 +176,7 @@ fi
 #
 # Recovery is "the next audit completed with any outcome other than FAIL", NOT
 # "a PASS". PROVENANCE_AUDIT_PASS is emitted only when the audit reaches the
-# configured min_assurance (default rewarded_set_proven). An authorized relay
+# configured min_assurance (default rewarded_set_proven). A public validator
 # (config/validator-thin-sn39-relay.toml) ships no controlled raw-evidence
 # package and no evidence group, so its audit is receipts_only and its steady
 # state is PROVENANCE_AUDIT_NOT_PROVEN on EVERY tick, permanently, by design —

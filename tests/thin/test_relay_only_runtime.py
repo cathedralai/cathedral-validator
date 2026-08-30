@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import inspect
 import json
 import pathlib
@@ -20,15 +21,18 @@ from scaffold import validator_thin as vt
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+RELEASE_SHA = "a" * 40
+CONFIG_DIGEST = "sha256:" + "b" * 64
+
+
+def _installed_context(monkeypatch) -> None:
+    monkeypatch.setattr(vt, "installed_recurring_context", lambda: True)
 
 
 def _serve_namespace(*, config: str | None = None) -> argparse.Namespace:
     return argparse.Namespace(
         config=config,
-        dry_run=False,
-        broadcast=False,
         once=False,
-        offline=False,
     )
 
 
@@ -62,23 +66,139 @@ def test_console_serve_does_not_expose_a_mode_switch(flag: str, capsys) -> None:
     assert "unrecognized arguments" in error or "ambiguous option" in error
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--dry-run",
+        "--broadcast",
+        "--offline",
+        "--require-full-provenance-for-broadcast",
+        "--require-completed-launch-for-broadcast",
+    ],
+)
+def test_console_serve_has_no_non_writing_mode(flag: str, capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["serve", flag])
+    assert caught.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
+def test_console_serve_always_enables_submission(monkeypatch) -> None:
+    _installed_context(monkeypatch)
+    seen: list[SimpleNamespace] = []
+    monkeypatch.setattr(vt, "_validate_runtime_contract", lambda _cfg: None)
+    monkeypatch.setattr(vt, "run", lambda cfg: seen.append(cfg) or 0)
+    assert (
+        cli.main(["serve", "--public-key-hex", vt.DEFAULT_PUBLIC_KEY_HEX, "--once"])
+        == 0
+    )
+    assert seen[0].broadcast is True
+    assert seen[0].offline is False
+
+
 def test_direct_module_parser_does_not_expose_authority() -> None:
     parser = vt.build_parser()
     assert parser.parse_args([]).provenance == "shadow"
+    assert parser.parse_args([]).broadcast is True
+    assert parser.parse_args([]).offline is False
     with pytest.raises(SystemExit) as caught:
         parser.parse_args(["--provenance", "authority"])
+    assert caught.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--dry-run",
+        "--broadcast",
+        "--offline",
+        "--require-full-provenance-for-broadcast",
+    ],
+)
+def test_direct_module_has_no_non_writing_mode(flag: str) -> None:
+    with pytest.raises(SystemExit) as caught:
+        vt.build_parser().parse_args([flag])
     assert caught.value.code == 2
 
 
 def test_direct_module_environment_override_is_explicitly_refused(
     monkeypatch, capsys
 ) -> None:
+    _installed_context(monkeypatch)
     monkeypatch.setenv("CATHEDRAL_VALIDATOR_PROVENANCE", "authority")
     monkeypatch.setattr(sys, "argv", ["validator_thin"])
     with pytest.raises(SystemExit) as caught:
         vt.main()
     assert caught.value.code == 2
     assert "authority/full was refused" in capsys.readouterr().err
+
+
+def test_legacy_manual_console_start_is_refused(monkeypatch, capsys) -> None:
+    monkeypatch.delenv(vt.SN39_RELEASE_SHA_ENV, raising=False)
+    monkeypatch.delenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
+    monkeypatch.setattr(vt, "run", lambda _cfg: pytest.fail("manual start wrote"))
+    assert cli.main(["serve"]) == 2
+    assert "manual recurring starts are retired" in capsys.readouterr().err
+
+
+def test_legacy_manual_direct_start_is_refused(monkeypatch, capsys) -> None:
+    monkeypatch.delenv(vt.SN39_RELEASE_SHA_ENV, raising=False)
+    monkeypatch.delenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
+    monkeypatch.setattr(sys, "argv", ["validator_thin"])
+    monkeypatch.setattr(vt, "run", lambda _cfg: pytest.fail("manual start wrote"))
+    with pytest.raises(SystemExit) as caught:
+        vt.main()
+    assert caught.value.code == 2
+    assert "manual recurring starts are retired" in capsys.readouterr().err
+
+
+def test_installed_context_binds_release_venv_manifest_and_config(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    release_root = tmp_path / "releases"
+    venv_root = tmp_path / "venvs"
+    release = release_root / RELEASE_SHA
+    venv = venv_root / RELEASE_SHA
+    release.mkdir(parents=True)
+    venv.mkdir(parents=True)
+    config = tmp_path / "validator.toml"
+    config.write_text("[network]\nnetuid = 39\n", encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    init_comm = tmp_path / "init-comm"
+    self_cgroup = tmp_path / "self-cgroup"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "cathedral_sn39_release_install_v3",
+                "release_sha": RELEASE_SHA,
+                "external_files": {str(config): digest},
+            }
+        ),
+        encoding="utf-8",
+    )
+    init_comm.write_text("systemd\n", encoding="utf-8")
+    self_cgroup.write_text(
+        f"0::/system.slice/{vt.SN39_SYSTEMD_UNIT}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(vt, "SN39_INSTALLED_RELEASE_ROOT", release_root)
+    monkeypatch.setattr(vt, "SN39_INSTALLED_VENV_ROOT", venv_root)
+    monkeypatch.setattr(vt, "SN39_INSTALLED_MANIFEST", manifest)
+    monkeypatch.setattr(vt, "SN39_INSTALLED_CONFIG", config)
+    monkeypatch.setattr(vt, "SN39_PROC_INIT_COMM", init_comm)
+    monkeypatch.setattr(vt, "SN39_PROC_SELF_CGROUP", self_cgroup)
+    monkeypatch.setattr(vt.os, "getppid", lambda: 1)
+    monkeypatch.setattr(vt.sys, "prefix", str(venv))
+    monkeypatch.chdir(release)
+    monkeypatch.setenv(vt.SN39_RELEASE_SHA_ENV, RELEASE_SHA)
+    monkeypatch.setenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, digest)
+
+    assert vt.installed_recurring_context() is True
+    config.write_text("[network]\nnetuid = 1\n", encoding="utf-8")
+    assert vt.installed_recurring_context() is False
+    config.write_text("[network]\nnetuid = 39\n", encoding="utf-8")
+    self_cgroup.write_text("0::/user.slice/session.scope\n", encoding="utf-8")
+    assert vt.installed_recurring_context() is False
 
 
 def test_run_refuses_non_shadow_before_startup(monkeypatch) -> None:
@@ -93,8 +213,9 @@ def test_run_refuses_non_shadow_before_startup(monkeypatch) -> None:
 
 @pytest.mark.parametrize("mode", ["authority", "full", "thin", "off"])
 def test_toml_mode_override_is_explicitly_refused(
-    mode: str, tmp_path: pathlib.Path, capsys
+    mode: str, tmp_path: pathlib.Path, monkeypatch, capsys
 ) -> None:
+    _installed_context(monkeypatch)
     config = tmp_path / "validator.toml"
     config.write_text(f'[provenance]\nmode = "{mode}"\n', encoding="utf-8")
     assert cli._cmd_serve(_serve_namespace(config=str(config))) == 2
@@ -104,6 +225,7 @@ def test_toml_mode_override_is_explicitly_refused(
 
 
 def test_environment_mode_override_is_explicitly_refused(monkeypatch, capsys) -> None:
+    _installed_context(monkeypatch)
     monkeypatch.setenv("CATHEDRAL_VALIDATOR_PROVENANCE", "authority")
     assert cli._cmd_serve(_serve_namespace()) == 2
     assert "supports only the shadow relay runtime" in capsys.readouterr().err
@@ -190,8 +312,9 @@ def test_status_loads_toml_with_retired_feed_fallback(
     ],
 )
 def test_serve_and_launch_still_reject_retired_feed_fallback(
-    argv: list[str], tmp_path: pathlib.Path, capsys
+    argv: list[str], tmp_path: pathlib.Path, monkeypatch, capsys
 ) -> None:
+    _installed_context(monkeypatch)
     config = _retired_feed_fallback_config(tmp_path)
     assert cli.main([part.format(config=config) for part in argv]) == 2
     err = capsys.readouterr().err

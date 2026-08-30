@@ -114,13 +114,16 @@ def test_an_unopenable_journal_is_reported_not_raised_raw(tmp_path):
     assert str(journal) in str(caught.value)
 
 
-def test_the_cli_prints_the_fix_instead_of_a_traceback(tmp_path, capsys):
+def test_the_cli_prints_the_fix_instead_of_a_traceback(tmp_path, monkeypatch, capsys):
     """`cathedral-validator serve` must exit 2 with one line, not a traceback.
 
     Non-zero, so a supervising unit still treats it as a failed start; the
     point is only that the operator gets the remediation rather than a stack.
     """
     from scaffold import cli
+    from scaffold import validator_thin as vt
+
+    monkeypatch.setattr(vt, "installed_recurring_context", lambda: True)
 
     blocked = tmp_path / "blocked"
     blocked.mkdir(mode=0o500)
@@ -137,7 +140,7 @@ def test_the_cli_prints_the_fix_instead_of_a_traceback(tmp_path, capsys):
     )
 
     try:
-        code = cli.main(["serve", "--config", str(config), "--offline", "--once"])
+        code = cli.main(["serve", "--config", str(config), "--once"])
     finally:
         os.chmod(blocked, 0o700)
 

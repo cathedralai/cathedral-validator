@@ -25,6 +25,6 @@ The v3 CyberGym lane shape is shared through
 `V3_CYBERGYM_LANE_FIELDS`. Every value is independently derived by this
 repository. `cathedralai/cathedral` is not a v3 allocation source.
 
-Public validator operation is not self-service during live testing. Historical
-documents, tests, previews, and local runs do not authorize a chain write or
-prove current deployment state.
+Anyone may install and run the public validator. Starting the installed service
+permits it to submit weights. Historical documents, tests, and local runs do not
+prove a current deployment or a successful on-chain submission.

@@ -1,4 +1,4 @@
-# The authorized relay unit. Installed as
+# The public validator unit. Installed as
 # /etc/systemd/system/cathedral-validator-sn39-relay.service.
 #
 # This is cathedral-validator-sn39.service with the producer-only requirements
@@ -38,7 +38,7 @@
 # UID-replacement safety, and the single-writer guard all run in the validator
 # on every tick regardless of which unit started it.
 [Unit]
-Description=Cathedral SN39 authorized relay validator
+Description=Cathedral SN39 validator
 After=network-online.target cathedral-thin-validator.service cathedral-validator-sn39.service cathedral-confidential-validator-sn39.service cathedral-confidential-validator.service cathedral-validator.service
 Wants=network-online.target
 # cathedral-validator-sn39.service is listed because one host must never run

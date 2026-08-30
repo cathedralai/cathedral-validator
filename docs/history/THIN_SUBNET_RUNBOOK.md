@@ -327,9 +327,9 @@ Before increasing dimensions or subnet size:
 > [!IMPORTANT]
 > This section is about `cathedral-thin-validator`, the owner-independent
 > challenge validator this document describes — its flags and its state file.
-> It does **not** apply to `cathedral-validator serve`, the SN39 relay. The
-> current relay keeps different durable state. Public operation and recovery
-> are not self-service during live testing.
+> It does **not** apply to `cathedral-validator serve`, the SN39 validator. The
+> current validator keeps different durable state. Use `VALIDATOR.md` for the
+> public install and run path.
 
 The validator state file contains the private challenge master secret, EMA
 scores, last completed round, external source high-water checkpoints, and
