@@ -242,6 +242,36 @@ def test_finalized_snapshot_discovers_all_miners_and_excludes_all_validators() -
     assert all(miner.hotkey != OTHER_VALIDATOR for miner in observed.miners)
 
 
+def test_finalized_snapshot_skips_private_miner_without_losing_healthy_miner() -> None:
+    private = ServingAxon(21, "5PrivateMiner", "10.0.0.1", 8081)
+    graph = Metagraph(miners=(private, MINER_ONE_AXON))
+
+    observed = finalized_serving_miners_snapshot(
+        SnapshotSubtensor(graph), FakeKeypair()
+    )
+
+    assert observed.miners == (MINER_ONE_AXON,)
+    assert observed.skipped_axons["unroutable"] == 1
+
+
+def test_cycle_with_only_unroutable_miners_refuses_without_writer_submit() -> None:
+    private = ServingAxon(21, "5PrivateMiner", "10.0.0.1", 8081)
+    writer_object = SimpleNamespace(
+        recover=lambda: None,
+        submit=lambda *_args, **_kwargs: pytest.fail("unroutable miner reached writer"),
+    )
+
+    with pytest.raises(DirectValidatorError, match="no serving miner"):
+        run_direct_cycle(
+            subtensor=SnapshotSubtensor(Metagraph(miners=(private,))),
+            keypair=FakeKeypair(),
+            verifier_adapter=SimpleNamespace(
+                qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+            ),
+            writer=writer_object,
+        )
+
+
 def test_finalized_snapshot_refuses_no_serving_miners_or_missing_permit() -> None:
     no_miner = Metagraph(miners=())
     no_permit = Metagraph()
@@ -323,6 +353,84 @@ def test_phase_latency_is_evidence_only_and_never_changes_score() -> None:
     assert slow_plan.raw_scores == fast_plan.raw_scores == ((19, 1),)
     assert slow_plan.wire_uids == fast_plan.wire_uids == (19,)
     assert slow_plan.wire_weights == fast_plan.wire_weights == (W,)
+
+
+def test_evidence_summary_is_fixed_shape_deterministic_and_bounded() -> None:
+    first = machine_row("1")
+    first["phase_timings_ms"] = {
+        "binding": 4,
+        "evidence": 8,
+        "fleet": 12,
+        "qvl": 16,
+        "sat": 20,
+    }
+    second = machine_row("2", paid=False)
+    second["phase_timings_ms"] = {
+        "binding": 6,
+        "evidence": None,
+        "fleet": 12,
+        "qvl": 18,
+        "sat": None,
+    }
+    exclusions = (
+        "fleet uid 19: request failed with private detail",
+        "duplicate endpoints: 2 verified claimants zeroed",
+        "duplicate channels: 2 verified claimants zeroed",
+        "duplicate hardware: 2 verified claimants zeroed",
+        "unexpected private detail",
+    )
+    result = replace(
+        round_result(first, second),
+        exclusions=exclusions,
+    )
+    result = replace(
+        result,
+        fleet=tuple({**row, "phase_timings_ms": {"fleet": 12}} for row in result.fleet),
+    )
+    observed = replace(
+        snapshot(),
+        skipped_axons={**snapshot().skipped_axons, "unroutable": 2},
+    )
+
+    planned = build_direct_plan(observed, result)
+    summary = runtime._evidence_cycle_summary(observed, result, planned)
+    reordered = runtime._evidence_cycle_summary(
+        observed,
+        replace(result, rows=tuple(reversed(result.rows)), exclusions=exclusions[::-1]),
+        planned,
+    )
+
+    assert reordered == summary
+    assert summary["phase_timings_ms"] == {
+        "binding": {"samples": 2, "minimum": 4, "maximum": 6, "sample_sum": 10},
+        "evidence": {"samples": 1, "minimum": 8, "maximum": 8, "sample_sum": 8},
+        "fleet": {"samples": 1, "minimum": 12, "maximum": 12, "sample_sum": 12},
+        "qvl": {"samples": 2, "minimum": 16, "maximum": 18, "sample_sum": 34},
+        "sat": {"samples": 1, "minimum": 20, "maximum": 20, "sample_sum": 20},
+    }
+    assert summary["exclusions"] == {
+        "skipped_axons": {
+            "refuse_or_canary": 0,
+            "port_zero": 0,
+            "not_serving": 0,
+            "unroutable": 2,
+            "unusable_ip": 0,
+        },
+        "failed_fleets": 0,
+        "excluded_machine_rows": 1,
+        "reported": 5,
+        "reported_categories": {
+            "fleet": 1,
+            "duplicate_endpoint": 1,
+            "duplicate_channel": 1,
+            "duplicate_hardware": 1,
+            "other": 1,
+        },
+    }
+    encoded = json.dumps(summary, sort_keys=True)
+    assert "private detail" not in encoded
+    assert len(encoded) < 1_000
+    assert planned.raw_scores == ((19, 1),)
 
 
 def test_legacy_singleton_fleet_earns_zero_without_blocking_other_miners() -> None:
@@ -771,6 +879,40 @@ def test_inclusion_waits_for_two_later_heads_then_recovers_without_resubmit(
     assert subtensor.substrate.submit_calls == submitted
 
 
+def test_submit_confirmation_hash_rpc_failure_keeps_recoverable_pending_intent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    original = substrate.get_block_hash
+    reads = 0
+
+    def fail_during_confirmation(block: int) -> str:
+        nonlocal reads
+        if block == substrate.inclusion_block + 1:
+            reads += 1
+            if reads == 2:
+                raise ConnectionError("confirmation RPC disconnected")
+        return original(block)
+
+    monkeypatch.setattr(substrate, "get_block_hash", fail_during_confirmation)
+    with pytest.raises(
+        DirectSubmissionAmbiguous, match="confirmation block 103 hash is unavailable"
+    ):
+        submit_before_deadline(instance, planned)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == "included_awaiting_confirmation"
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+    monkeypatch.setattr(substrate, "get_block_hash", original)
+    receipt = instance.recover()
+
+    assert receipt is not None and receipt.status == STATUS_RECOVERED
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+
 def test_confirmation_poll_allows_once_style_submission_to_finish(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -809,6 +951,43 @@ def test_timeout_after_inclusion_recovers_hash_and_row_without_resubmit(
     assert subtensor.substrate.submit_calls == submitted
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert state["pending"] is None
+
+
+def test_recovery_confirmation_hash_rpc_failure_stays_recoverable_without_resign(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.raise_after_include = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(instance, planned)
+    original = substrate.get_block_hash
+    reads = 0
+
+    def fail_during_confirmation(block: int) -> str:
+        nonlocal reads
+        if block == substrate.inclusion_block + 1:
+            reads += 1
+            if reads == 2:
+                raise BrokenPipeError("confirmation RPC pipe closed")
+        return original(block)
+
+    monkeypatch.setattr(substrate, "get_block_hash", fail_during_confirmation)
+    with pytest.raises(
+        DirectSubmissionAmbiguous, match="confirmation block 103 hash is unavailable"
+    ):
+        instance.recover()
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == "included_awaiting_confirmation"
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+    monkeypatch.setattr(substrate, "get_block_hash", original)
+    receipt = instance.recover()
+
+    assert receipt is not None and receipt.status == STATUS_RECOVERED
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
 
 
 def test_unresolved_timeout_is_fenced_until_the_mortal_era_expires(
@@ -1033,6 +1212,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     assert result["raw_scores"] == [[19, 1], [20, 1]]
     assert result["wire_uids"] == [19, 20]
     assert result["wire_weights"] == [32768, 32767]
+    assert set(result["evidence_summary"]) == {"phase_timings_ms", "exclusions"}
     assert submitted[0].raw_scores == ((19, 1), (20, 1))
 
 
@@ -1275,6 +1455,52 @@ def test_recurring_cli_continues_after_expected_chain_failure(monkeypatch) -> No
     with pytest.raises(StopLoop):
         runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
     assert events == []
+
+
+def test_recurring_cli_reports_unexpected_exception_and_continues(
+    monkeypatch, capsys
+) -> None:
+    class StopLoop(BaseException):
+        pass
+
+    events = [RuntimeError("worker pool failed"), StopLoop()]
+    _stub_cli_runtime(monkeypatch, events)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(StopLoop):
+        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
+
+    event = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert event == {
+        "status": "NOT_PROVEN",
+        "error": "RuntimeError: worker pool failed",
+    }
+    assert events == []
+
+
+def test_cli_once_returns_nonzero_for_unexpected_exception(monkeypatch) -> None:
+    _stub_cli_runtime(monkeypatch, [RuntimeError("worker pool failed")])
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 2
+    )
+
+
+def test_cli_final_exception_handler_does_not_catch_process_control(
+    monkeypatch,
+) -> None:
+    _stub_cli_runtime(monkeypatch, [KeyboardInterrupt()])
+
+    with pytest.raises(KeyboardInterrupt):
+        runtime.main(["--qvl", "/reviewed/qvl", "--confirm-direct-write"])
 
 
 def test_recurring_cli_stops_on_submission_contradiction(monkeypatch) -> None:

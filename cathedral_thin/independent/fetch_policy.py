@@ -59,20 +59,22 @@ def is_globally_routable_address(
 ) -> bool:
     """Whether an address is public without an embedded IPv4 routing bypass.
 
-    ``ipaddress.is_global`` alone is insufficient for IPv6 transition forms.
-    Some Python releases classify NAT64 or IPv4-compatible literals as global
-    even when their embedded IPv4 destination is loopback or private.  The
-    validator never needs those transition encodings, so every such form is
-    refused rather than trying to recursively reason about the route chosen by
-    the host kernel.
+    ``ipaddress.is_global`` alone is insufficient for multicast, scoped IPv6,
+    and IPv6 transition forms. Some Python releases classify these as global
+    even when they are not one public unicast destination or their embedded
+    IPv4 destination is loopback or private. The validator never needs those
+    encodings, so every such form is refused rather than trying to recursively
+    reason about the route chosen by the host kernel.
     """
 
     if not isinstance(address, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
         return False
-    if not address.is_global:
+    if not address.is_global or address.is_multicast:
         return False
     if isinstance(address, ipaddress.IPv4Address):
         return True
+    if address.scope_id is not None:
+        return False
     if (
         address.ipv4_mapped is not None
         or address.sixtofour is not None

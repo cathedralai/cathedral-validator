@@ -865,7 +865,7 @@ class FakeMetagraph:
     def __init__(self, uids, hotkeys, *, port: int = 8443) -> None:
         self.uids = list(uids)
         self.hotkeys = list(hotkeys)
-        self.axons = [FakeAxon("203.0.113.9", port) for _ in self.uids]
+        self.axons = [FakeAxon("1.1.1.1", port) for _ in self.uids]
 
 
 class RowMetagraph:
@@ -882,14 +882,14 @@ RELAY_HOTKEY = sorted(REFUSE_HOTKEYS - {BURN_HOTKEY})[0]
 
 def test_scan_axons_counts_every_skip_reason_and_keeps_only_dialable_rows():
     """Empty serving_axons must still say why. Counts, never a refused URL."""
-    silent = FakeAxon("203.0.113.9", 0)
-    advertised_but_down = FakeAxon("203.0.113.9", 8443)
+    silent = FakeAxon("1.1.1.1", 0)
+    advertised_but_down = FakeAxon("1.1.1.1", 8443)
     advertised_but_down.is_serving = False
     loopback = FakeAxon("127.0.0.1", 8443)
     unspecified = FakeAxon("0.0.0.0", 8091)
     bad_ip = FakeAxon("", 8443)
     bad_ip.ip = None
-    live = FakeAxon("203.0.113.9", 8443)
+    live = FakeAxon("1.1.1.1", 8443)
     refuse_even_if_serving = FakeAxon("198.51.100.7", 8443)
     canary_even_if_serving = FakeAxon("198.51.100.8", 8443)
     scan = scan_axons(
@@ -922,8 +922,72 @@ def test_scan_axons_counts_every_skip_reason_and_keeps_only_dialable_rows():
         "unusable_ip": 1,
     }
     assert [axon.uid for axon in scan.serving] == [MINER_UID]
-    assert scan.serving[0].ip == "203.0.113.9"
+    assert scan.serving[0].ip == "1.1.1.1"
     assert scan.serving[0].port == 8443
+
+
+@pytest.mark.parametrize(
+    "ip",
+    (
+        "10.0.0.1",
+        "100.64.0.1",
+        "127.254.1.2",
+        "169.254.1.1",
+        "224.0.0.1",
+        "203.0.113.9",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+        "2001:4860:4860::8888%en0",
+        "::ffff:1.1.1.1",
+        "::1.1.1.1",
+        "64:ff9b::101:101",
+        "2002:0101:0101::",
+        "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+    ),
+)
+def test_scan_axons_skips_every_non_global_chain_address(ip: str) -> None:
+    scan = scan_axons(
+        RowMetagraph(
+            [
+                (
+                    MINER_UID,
+                    "5NonGlobalMinerHotkeyAAAAAAAAAAAAAAAAAAAAAAA",
+                    FakeAxon(ip, 8443),
+                )
+            ]
+        )
+    )
+
+    assert scan.serving == ()
+    assert scan.skipped["unroutable"] == 1
+
+
+def test_scan_axons_accepts_and_canonicalizes_global_ipv6() -> None:
+    scan = scan_axons(
+        RowMetagraph(
+            [
+                (
+                    MINER_UID,
+                    "5GlobalIpv6MinerHotkeyAAAAAAAAAAAAAAAAAAAAAAA",
+                    FakeAxon("2606:4700:4700:0:0:0:0:1111", 8443),
+                )
+            ]
+        )
+    )
+
+    assert scan.skipped["unroutable"] == 0
+    assert scan.serving == (
+        ServingAxon(
+            MINER_UID,
+            "5GlobalIpv6MinerHotkeyAAAAAAAAAAAAAAAAAAAAAAA",
+            "2606:4700:4700::1111",
+            8443,
+        ),
+    )
 
 
 def test_scan_axons_does_not_treat_the_live_relay_as_dialable():
@@ -1182,7 +1246,7 @@ def test_the_runner_snapshots_the_anchor_first_then_re_reads_at_the_head(
 
 
 SAT_UNITS = 20
-AXON_SAT_URL = "https://203.0.113.9:8443/v1/sat-work"
+AXON_SAT_URL = "https://1.1.1.1:8443/v1/sat-work"
 ONE_SPKI = bytes(range(32, 64))
 OTHER_SPKI = bytes(range(64, 96))
 SECOND_MINER_UID = 9
@@ -1329,7 +1393,7 @@ def test_re_derived_sat_units_are_what_makes_the_runner_compose(
     code = run_module.cmd_run(run_options(tmp_path))
     report = json.loads(capsys.readouterr().out)
 
-    assert seen["evidence_url"] == "https://203.0.113.9:8443/v1/evidence"
+    assert seen["evidence_url"] == "https://1.1.1.1:8443/v1/evidence"
     assert seen["sat_url"] == AXON_SAT_URL
     assert seen["asked"][0] == AXON_SAT_URL
     assert seen["asked"][1] == BOB

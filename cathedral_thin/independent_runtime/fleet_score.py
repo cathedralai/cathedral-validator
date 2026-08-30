@@ -748,7 +748,7 @@ def score_multicompute_round(
             outcomes.append((index, units, None, _phase_finished(started)))
         return outcomes
 
-    sat_outcomes: list[tuple[int, int | None, str | None, int]] = []
+    sat_outcomes: list[tuple[int, int | None, str | None, int | None]] = []
     if miner_deadline is None:
         for uid in sorted(sat_indexes_by_uid):
             sat_outcomes.extend(run_sat(sat_indexes_by_uid[uid]))
@@ -773,7 +773,7 @@ def score_multicompute_round(
                         index,
                         None,
                         "SatWorkError: miner_total_response_deadline_exceeded",
-                        0,
+                        None,
                     )
                 )
     if bounded_executor is not None:

@@ -69,6 +69,11 @@ The sole journal path is deterministic for the current user and signer:
 The parent directory and journal must remain owner-only. There is no command
 line state-path override.
 
+Run the recurring process under a restart supervisor. `CONTRADICTION_STOPPED`
+is a deliberate terminal exit. A supervisor must never clear the journal or
+the contradiction. Review the stored signed intent and finalized chain state
+before any manual journal clearance.
+
 ## Install the pinned QVL
 
 Download the immutable linux/amd64 asset from the

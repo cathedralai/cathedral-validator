@@ -39,6 +39,10 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "--once" not in run_block
     assert "Add `--once` only for a bounded" in guide
     assert "cathedral-tdx-verifier-v1.0.0" in guide
+    assert "restart supervisor" in guide
+    assert "`CONTRADICTION_STOPPED`" in guide
+    assert "must never clear the journal" in guide
+    assert "before any manual journal clearance" in guide
     assert (
         "https://github.com/cathedralai/cathedral-sandbox/releases/download/"
         "cathedral-tdx-verifier-v1.0.0/"

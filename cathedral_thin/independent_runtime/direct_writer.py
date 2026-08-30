@@ -885,12 +885,17 @@ class DirectWeightWriter:
         proven: list[tuple[int, str]] = []
         for block_number in block_numbers:
             try:
-                block_hash = _canonical_hash(
-                    self.subtensor.substrate.get_block_hash(block_number),
-                    label="confirmation block",
-                )
-            except DirectSubmissionAmbiguous:
-                raise
+                raw_block_hash = self.subtensor.substrate.get_block_hash(block_number)
+            except Exception as exc:
+                raise DirectSubmissionAmbiguous(
+                    f"confirmation block {block_number} hash is unavailable"
+                ) from exc
+            try:
+                block_hash = _canonical_hash(raw_block_hash, label="confirmation block")
+            except DirectSubmissionAmbiguous as exc:
+                raise DirectSubmissionAmbiguous(
+                    f"confirmation block {block_number} hash is invalid"
+                ) from exc
             if (
                 block_number == located.block_number
                 and block_hash != located.block_hash

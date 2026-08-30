@@ -23,6 +23,7 @@ from cathedral_thin.independent.compute import ComputeAdapter
 from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .axon import (
+    AXON_SKIP_REASONS,
     ServingAxon,
     finalized_head,
     metagraph_view,
@@ -43,12 +44,20 @@ from .fleet_score import (
     MAX_CONCURRENT_MINERS,
     MINER_RESPONSE_DEADLINE_SECONDS,
     MultiComputeRound,
+    PHASE_TIMING_FIELDS,
     score_multicompute_round,
 )
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
+_REPORTED_EXCLUSION_CATEGORIES = (
+    "fleet",
+    "duplicate_endpoint",
+    "duplicate_channel",
+    "duplicate_hardware",
+    "other",
+)
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -264,6 +273,73 @@ def build_direct_plan(
     return plan
 
 
+def _reported_exclusion_category(value: object) -> str:
+    if not isinstance(value, str):
+        return "other"
+    if value.startswith("fleet uid "):
+        return "fleet"
+    if value.startswith("duplicate endpoints:"):
+        return "duplicate_endpoint"
+    if value.startswith("duplicate channels:"):
+        return "duplicate_channel"
+    if value.startswith("duplicate hardware:"):
+        return "duplicate_hardware"
+    return "other"
+
+
+def _evidence_cycle_summary(
+    snapshot: FinalizedMetagraphSnapshot,
+    result: MultiComputeRound,
+    plan: DirectWeightPlan,
+) -> dict[str, object]:
+    """Return fixed-shape telemetry which never enters scoring.
+
+    ``sample_sum`` is cumulative task time across concurrent miners. The event's
+    ``evidence_cycle_elapsed_ms`` remains the sole end-to-end wall duration.
+    """
+
+    phase_summary: dict[str, dict[str, int | None]] = {}
+    for phase in PHASE_TIMING_FIELDS:
+        values: list[int] = []
+        sources = result.fleet if phase == "fleet" else result.rows
+        for row in sources:
+            timings = row.get("phase_timings_ms")
+            if not isinstance(timings, dict):
+                continue
+            value = timings.get(phase)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                values.append(value)
+        phase_summary[phase] = {
+            "samples": len(values),
+            "minimum": min(values) if values else None,
+            "maximum": max(values) if values else None,
+            "sample_sum": sum(values),
+        }
+
+    reported_categories = {name: 0 for name in _REPORTED_EXCLUSION_CATEGORIES}
+    for exclusion in result.exclusions:
+        reported_categories[_reported_exclusion_category(exclusion)] += 1
+    skipped_axons = {}
+    for reason in AXON_SKIP_REASONS:
+        value = snapshot.skipped_axons.get(reason, 0)
+        skipped_axons[reason] = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else 0
+        )
+    admitted_machine_rows = sum(count for _uid, count in plan.raw_scores)
+    return {
+        "phase_timings_ms": phase_summary,
+        "exclusions": {
+            "skipped_axons": skipped_axons,
+            "failed_fleets": sum(row.get("ok") is not True for row in result.fleet),
+            "excluded_machine_rows": max(0, len(result.rows) - admitted_machine_rows),
+            "reported": len(result.exclusions),
+            "reported_categories": reported_categories,
+        },
+    }
+
+
 def run_direct_cycle(
     *,
     subtensor: Any,
@@ -293,6 +369,7 @@ def run_direct_cycle(
         cycle_deadline_monotonic=cycle_deadline,
     )
     plan = build_direct_plan(snapshot, result)
+    evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -306,6 +383,7 @@ def run_direct_cycle(
         "wire_weights": list(plan.wire_weights),
         "evidence_digest": plan.evidence_digest,
         "evidence_cycle_elapsed_ms": evidence_cycle_elapsed_ms,
+        "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
 
@@ -385,6 +463,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
             print(
                 json.dumps({"status": "NOT_PROVEN", "error": str(exc)}, sort_keys=True),
+                flush=True,
+            )
+            if options.once:
+                return 2
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "status": "NOT_PROVEN",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    sort_keys=True,
+                ),
                 flush=True,
             )
             if options.once:
