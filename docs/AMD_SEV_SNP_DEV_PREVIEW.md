@@ -43,8 +43,8 @@ not a weight vector and is never accepted by a writer.
 ## Install boundary
 
 The optional `snp-dev` dependency is pinned to an immutable
-`cathedral-compute` commit:
-`5268443104fd7717b95ce4c398ddf6229ec4f461`. The command verifies the installed
+`cathedral-sandbox` commit:
+`8dde6eaca27116eed53386a1fa33ec70b74a01fb`. The command verifies the installed
 package's PEP 610 VCS provenance and refuses a different, local, mutable, or
 wheel-only tree.
 

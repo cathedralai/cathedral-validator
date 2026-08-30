@@ -101,11 +101,16 @@ integration = [
     "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b2ad1eddf9235921f8f680342605d5c8a84a8d87",
 ]
 # Development-only AMD SEV-SNP verifier/client contract. This is the exact
-# reviewed cathedral-compute merge commit from cathedral-sandbox#181. The
+# reviewed cathedral-sandbox merge commit from cathedral-sandbox#189. The
 # command also verifies PEP 610 VCS provenance at runtime and refuses a local,
 # wheel-only, mutable, or different tree.
 snp-dev = [
-    "cathedral @ git+https://github.com/cathedralai/cathedral-compute.git@5268443104fd7717b95ce4c398ddf6229ec4f461",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+]
+# Production direct-validator SNP verification uses the same exact reviewed
+# contract.  Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT.
+snp-production = [
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
 
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for

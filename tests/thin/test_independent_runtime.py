@@ -11,6 +11,7 @@ import ssl
 import stat
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1411,6 +1412,43 @@ def test_re_derived_sat_units_are_what_makes_the_runner_compose(
     assert code == 2
     assert any("--confirm-canary is required" in row for row in report["blockers"])
     assert subtensor.metagraph_blocks == [TEMPO_BLOCKS * 17_000 - 1, None]
+
+
+def test_retired_runner_never_sends_snp_evidence_to_intel_qvl(
+    monkeypatch, tmp_path, capsys
+):
+    prepared_runner(monkeypatch, TEMPO_BLOCKS * 17_000 + 41, bind_mass=False, port=8443)
+    collected = replace(collected_for(), kind="sev_snp")
+
+    class NeverQvl:
+        digest = PINNED_QVL
+
+        def verify(self, *_args, **_kwargs):
+            raise AssertionError("SNP evidence reached the Intel verifier")
+
+    monkeypatch.setattr(run_module, "load_verifier", lambda _path: NeverQvl())
+    monkeypatch.setattr(
+        run_module,
+        "_try_collect",
+        lambda url, hotkey, validator_ss58, sat_work_url_value: {
+            "url": url,
+            "sat_url": sat_work_url_value,
+            "ok": True,
+            "hotkey": hotkey,
+            "collected": collected,
+        },
+    )
+
+    code = run_module.cmd_run(run_options(tmp_path))
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert report["qvl_pass_count"] == 0
+    assert report["verified_units"] == {}
+    assert report["collect"][0]["verdict"] == "FAIL"
+    assert report["collect"][0]["identity_error"] == (
+        "legacy audit path accepts TDX evidence only"
+    )
 
 
 def test_a_refused_sat_round_admits_the_miner_and_pays_it_nothing(

@@ -167,10 +167,9 @@ def require_stable_platform_id(value: object) -> str:
 def machine_id_from_stable_platform_id(value: object) -> str:
     """Domain-preserving raw digest used by the profile-neutral aggregator.
 
-    Hashing the validated tagged identity avoids confusing a TDX PPID-derived
-    digest with a future SNP CHIP_ID-derived digest that happens to carry the
-    same 32 bytes.  The SNP verifier boundary is intentionally not enabled in
-    this release; it will use its own validated ``snp-chip-id:`` domain.
+    Hashing the validated tagged identity keeps the TDX PPID-derived digest
+    separate from the production SNP verifier's generation-bound CHIP_ID
+    domain, even if both preimages contain the same bytes.
     """
 
     stable = require_stable_platform_id(value)

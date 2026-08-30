@@ -46,10 +46,10 @@ from cathedral_thin.independent_runtime.validator_request import (
     validate_public_worker_endpoint,
 )
 
-# Exact reviewed cathedral-compute merge commit from cathedral-sandbox#181.
+# Exact reviewed cathedral-sandbox merge commit from cathedral-sandbox#189.
 # Runtime provenance checks prevent a local, mutable, wheel-only, or different
 # Compute tree from silently becoming this verifier contract.
-COMPUTE_CONTRACT_COMMIT = "5268443104fd7717b95ce4c398ddf6229ec4f461"
+COMPUTE_CONTRACT_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
 
 CONFIG_SCHEMA = "cathedral_amd_sev_snp_development_preview_config_v1"
 PREVIEW_SCHEMA = "cathedral_amd_sev_snp_development_preview_v1"
@@ -73,8 +73,8 @@ _TCB_RE = re.compile(r"0x[0-9a-f]{16}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _COMPUTE_REPOSITORY_URLS = frozenset(
     {
-        "https://github.com/cathedralai/cathedral-compute",
-        "https://github.com/cathedralai/cathedral-compute.git",
+        "https://github.com/cathedralai/cathedral-sandbox",
+        "https://github.com/cathedralai/cathedral-sandbox.git",
     }
 )
 _REQUIRED_COMPUTE_FILES = frozenset(
@@ -615,10 +615,13 @@ def load_compute_contract() -> Any:
     _verify_loaded_compute_imports(recorded)
     return SimpleNamespace(
         commit=commit,
+        ChannelBinding=common.ChannelBinding,
         ChannelBindingType=common.ChannelBindingType,
+        Evidence=common.Evidence,
         EvidenceKind=common.EvidenceKind,
         Policy=common.Policy,
         Tier=common.Tier,
+        evidence_report_data=common.evidence_report_data,
         issue_nonce=common.issue_nonce,
         SatLane=sat.SatLane,
         RemoteMiner=remote.RemoteMiner,

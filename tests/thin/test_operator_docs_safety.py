@@ -23,11 +23,12 @@ def test_readme_is_the_small_public_guide() -> None:
     words = " ".join(guide.split())
     run_block = guide.split("## Run the validator", 1)[1].split("```bash", 1)[1]
     run_block = run_block.split("```", 1)[0]
-    assert guide.count("## ") == 4
+    assert guide.count("## ") == 5
     assert guide.startswith("# Cathedral Validator\n")
     assert "## One recurring path" in guide
     assert "## Run the validator" in guide
     assert "## Install the pinned QVL" in guide
+    assert "## Install the pinned AMD verifier and policy" in guide
     assert "## Current proof boundary" in guide
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
@@ -53,6 +54,10 @@ def test_readme_is_the_small_public_guide() -> None:
     )
     assert "sha256sum --check -" in guide
     assert "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148" in guide
+    assert "70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0" in guide
+    assert "--snp-policy" in run_block
+    assert "--snpguest" in run_block
+    assert ".[snp-production]" in run_block
     assert "issue #185" not in guide
     assert "not self-service" not in guide
     assert "authorized Cathedral operator" not in guide

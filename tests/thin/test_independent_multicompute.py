@@ -361,6 +361,7 @@ def _bounded_miner_result(axon: ServingAxon, *, scoring_window: str = WINDOW):
             "evidence": 1,
             "fleet": 1,
             "qvl": 1,
+            "snp": None,
             "sat": None,
         },
     }

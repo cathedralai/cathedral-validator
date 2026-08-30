@@ -76,6 +76,77 @@ jobs:
       - name: Compile every tracked Python file
         run: git ls-files '*.py' | xargs python -m py_compile
 
+  snp-production:
+    name: AMD SEV-SNP production contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Keep this separate from the historical provenance extra. Both provide
+      # the `cathedral` distribution, but only this exact Sandbox revision is
+      # the reviewed production SNP contract.
+      - name: Install the exact production SNP contract
+        run: python -m pip install -e ".[test,snp-production]"
+
+      - name: Verify the pinned production dependency and vendor verifier
+        env:
+          SNPGUEST: ${{ runner.temp }}/snpguest
+          SNP_POLICY: ${{ runner.temp }}/amd-sev-snp-policy.json
+        run: |
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output "$SNPGUEST" \
+            https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest
+          printf '%s  %s\n' \
+            70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0 \
+            "$SNPGUEST" | sha256sum --check -
+          chmod 0500 "$SNPGUEST"
+          printf '%s\n' \
+            '{"schema":"cathedral_amd_sev_snp_policy_v1","generations":{"genoa":{"allowed_measurements":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"minimum_tcb":"0x0000000000000001"}}}' \
+            > "$SNP_POLICY"
+          chmod 0600 "$SNP_POLICY"
+          python - <<'PY'
+          import os
+          from cathedral_thin.independent.collect import ChannelBinding, CollectedEvidence
+          from cathedral_thin.independent.compute import QuoteVerdict
+          from cathedral_thin.independent_runtime.snp_production import (
+              SANDBOX_CONTRACT_COMMIT,
+              SnpProductionVerifier,
+              load_snp_policy,
+          )
+
+          verifier = SnpProductionVerifier(
+              policy=load_snp_policy(os.environ["SNP_POLICY"]),
+              snpguest_path=os.environ["SNPGUEST"],
+          )
+          assert verifier._contract.commit == SANDBOX_CONTRACT_COMMIT
+          assert verifier.digest.startswith("sha256:")
+          malformed = CollectedEvidence(
+              kind="sev_snp",
+              quote=b"malformed-miner-report",
+              nonce=b"n" * 32,
+              assigned_hotkey="miner-hotkey",
+              cert_chain=(),
+              channel_binding=ChannelBinding("tls_spki_sha256", b"c" * 32),
+              report_data=b"r" * 64,
+          )
+          result = verifier.verify(malformed)
+          assert result.verdict is QuoteVerdict.FAIL
+          print(f"production SNP contract {SANDBOX_CONTRACT_COMMIT} loaded")
+          PY
+
+      - name: AMD production verification tests
+        run: |
+          python -m pytest -q \
+            tests/thin/test_snp_production.py \
+            tests/thin/test_amd_snp_dev_preview.py \
+            tests/thin/test_direct_validator.py \
+            tests/thin/test_independent_collect.py
+
   publisher:
     # GATING for the validator-facing tests, advisory for the rest.
     #
