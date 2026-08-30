@@ -41,6 +41,9 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "cathedral-tdx-verifier-v1.0.0" in guide
     assert "restart supervisor" in guide
     assert "`CONTRADICTION_STOPPED`" in guide
+    assert "terminal exit with status 2" in guide
+    assert "`Restart=on-failure`" in guide
+    assert "`RestartPreventExitStatus=2`" in guide
     assert "must never clear the journal" in guide
     assert "before any manual journal clearance" in guide
     assert (

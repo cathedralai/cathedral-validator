@@ -70,8 +70,10 @@ The parent directory and journal must remain owner-only. There is no command
 line state-path override.
 
 Run the recurring process under a restart supervisor. `CONTRADICTION_STOPPED`
-is a deliberate terminal exit. A supervisor must never clear the journal or
-the contradiction. Review the stored signed intent and finalized chain state
+is a deliberate terminal exit with status 2. For systemd, use
+`Restart=on-failure` with `RestartPreventExitStatus=2` so that status is not
+restarted. A supervisor must never clear the journal or the contradiction.
+Review the stored signed intent and finalized chain state
 before any manual journal clearance.
 
 ## Install the pinned QVL
