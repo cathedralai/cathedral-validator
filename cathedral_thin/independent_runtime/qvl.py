@@ -25,6 +25,12 @@ from .errors import QuoteVerifyError
 # configs; hashing a real QVL file never yields that digest. Pinning the
 # implementation hash here would make every real binary unloadable.
 LAUNCH_QVL_DIGEST = "35bb55f89f411d5dcf5f72be90488e999ee68c41dfc0429a0dcb8cc2b448b6bb"
+# SHA-256 of the Go 1.25.13 linux/amd64 static verifier required by the
+# relay-free direct validator.  The older launch digest above remains frozen
+# for historical UID30 artifacts whose signed identities already bind it.
+DIRECT_VALIDATOR_QVL_DIGEST = (
+    "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148"
+)
 MAX_OUTPUT = 1_048_576
 TIMEOUT_SECONDS = 30
 
@@ -137,8 +143,9 @@ class SubprocessQuoteVerifier:
         return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True)
 
 
-def load_verifier(path: str | None) -> SubprocessQuoteVerifier:
-    """Load a QVL from ``path`` or ``CATHEDRAL_TDX_VERIFY_CMD``."""
+def _load_pinned_verifier(
+    path: str | None, *, expected_digest: str, pin_name: str
+) -> SubprocessQuoteVerifier:
     raw = path or os.environ.get("CATHEDRAL_TDX_VERIFY_CMD")
     if not raw:
         raise QuoteVerifyError(
@@ -146,8 +153,26 @@ def load_verifier(path: str | None) -> SubprocessQuoteVerifier:
         )
     command = Path(raw.split()[0] if " " in raw else raw)
     verifier = SubprocessQuoteVerifier(command)
-    if verifier.digest != LAUNCH_QVL_DIGEST:
+    if verifier.digest != expected_digest:
         raise QuoteVerifyError(
-            f"QVL digest {verifier.digest} is not the launch pin {LAUNCH_QVL_DIGEST}"
+            f"QVL digest {verifier.digest} is not the {pin_name} pin {expected_digest}"
         )
     return verifier
+
+
+def load_verifier(path: str | None) -> SubprocessQuoteVerifier:
+    """Load the verifier frozen into historical UID30 launch artifacts."""
+
+    return _load_pinned_verifier(
+        path, expected_digest=LAUNCH_QVL_DIGEST, pin_name="launch"
+    )
+
+
+def load_direct_validator_verifier(path: str | None) -> SubprocessQuoteVerifier:
+    """Load only the verifier binary reviewed for the direct validator."""
+
+    return _load_pinned_verifier(
+        path,
+        expected_digest=DIRECT_VALIDATOR_QVL_DIGEST,
+        pin_name="direct-validator",
+    )

@@ -32,7 +32,11 @@ from cathedral_thin.independent.constants import (
     VERSION_KEY,
     W,
 )
-from cathedral_thin.independent_runtime.axon import ServingAxon
+from cathedral_thin.independent_runtime.axon import (
+    ServingAxon,
+    finalized_head as _runtime_finalized_head,
+)
+from cathedral_thin.independent_runtime.errors import ChainClientError
 
 NETWORK = "finney"
 WALLET_NAME = "cathedral"
@@ -248,26 +252,10 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
 
 
 def _finalized_head(subtensor: Any) -> tuple[int, str]:
-    substrate = getattr(subtensor, "substrate", None)
-    if substrate is None:
-        raise UID30LaunchError("subtensor has no finalized-head reader")
     try:
-        block_hash = _canonical_hash(
-            substrate.get_chain_finalised_head(), label="finalized block hash"
-        )
-        block = _strict_nonnegative_int(
-            substrate.get_block_number(block_hash), label="finalized block"
-        )
-        reverse = _canonical_hash(
-            substrate.get_block_hash(block), label="canonical finalized block hash"
-        )
-    except UID30LaunchError:
-        raise
-    except Exception as exc:
-        raise UID30LaunchError("finalized chain head is unavailable") from exc
-    if reverse != block_hash:
-        raise UID30LaunchError("finalized block number and hash are not canonical")
-    return block, block_hash
+        return _runtime_finalized_head(subtensor)
+    except ChainClientError as exc:
+        raise UID30LaunchError(str(exc)) from exc
 
 
 def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:

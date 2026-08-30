@@ -30,6 +30,7 @@ AXON_SKIP_REASONS = (
     "unusable_ip",
 )
 _UNROUTABLE_IPS = frozenset({"0.0.0.0", "::", "127.0.0.1", "::1"})
+_CHAIN_HASH_HEX = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ def metagraph_view(metagraph: Any) -> MetagraphView:
     hotkeys = [str(hotkey) for hotkey in list(metagraph.hotkeys)]
     if len(uids) != len(hotkeys):
         raise ChainClientError("metagraph uids and hotkeys differ in length")
+    if len(set(uids)) != len(uids) or len(set(hotkeys)) != len(hotkeys):
+        raise ChainClientError("metagraph repeats a UID or hotkey")
     return MetagraphView.from_uid_map(dict(zip(uids, hotkeys)))
 
 
@@ -134,10 +137,48 @@ def observed_genesis_hash(subtensor: Any) -> str:
     return text
 
 
+def finalized_head(subtensor: Any) -> tuple[int, str]:
+    """Return one reverse-checked canonical finalized block number and hash."""
+
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is None:
+        raise ChainClientError("subtensor has no finalized-head reader")
+    try:
+        raw_hash = substrate.get_chain_finalised_head()
+        text = str(raw_hash).lower()
+        if not text.startswith("0x"):
+            text = "0x" + text
+        body = text[2:]
+        if len(body) != 64 or any(
+            character not in _CHAIN_HASH_HEX for character in body
+        ):
+            raise ChainClientError("finalized block hash is not canonical")
+        raw_number = substrate.get_block_number(text)
+        if (
+            isinstance(raw_number, bool)
+            or not isinstance(raw_number, int)
+            or raw_number < 0
+        ):
+            raise ChainClientError(
+                "finalized block number is not a non-negative integer"
+            )
+        reverse = str(substrate.get_block_hash(raw_number)).lower()
+        if not reverse.startswith("0x"):
+            reverse = "0x" + reverse
+    except ChainClientError:
+        raise
+    except Exception as exc:
+        raise ChainClientError("finalized chain head is unavailable") from exc
+    if reverse != text:
+        raise ChainClientError("finalized block number and hash are not canonical")
+    return raw_number, text
+
+
 __all__ = [
     "AXON_SKIP_REASONS",
     "AxonScan",
     "ServingAxon",
+    "finalized_head",
     "metagraph_view",
     "observed_genesis_hash",
     "scan_axons",

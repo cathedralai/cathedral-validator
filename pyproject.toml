@@ -5,11 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cathedral-scaffold"
 version = "4.0.0-rc.4"
-description = "Cathedral SN39 signed-vector relay validator"
+description = "Cathedral SN39 direct confidential-compute validator"
 requires-python = ">=3.11"
-# Validator-runtime deps only. The supported validator verifies and relays the
-# signed Cathedral vector through Bittensor. The publisher's server stack
-# (FastAPI, psycopg2, boto3) remains optional.
+# Validator-runtime deps only. The supported validator discovers miner fleets,
+# verifies their machines locally, and writes its own vector to Bittensor.
 dependencies = [
     "cryptography>=42",
     "bittensor>=10.4,<11",
@@ -110,30 +109,17 @@ snp-dev = [
 ]
 
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for
-# its worker-side score publisher and must not claim `cathedral-validator`.
+# its worker-side service and must not claim `cathedral-validator`.
 [project.scripts]
-cathedral-validator = "scaffold.cli:main"
-# Origin publisher service: serves scaffold.publisher.server:app (needs the
-# '.[publisher]' extra). A thin uvicorn.run wrapper; the deploy image and the
-# deploy/publisher/*.service units may also invoke uvicorn directly.
-cathedral-publisher-serve = "scaffold.publisher.server:_serve_cli"
-# Publisher evidence snapshot used by the live origin release.
-cathedral-candidate-snapshot = "scaffold.snapshot_candidates:main"
-# The former `cathedral-thin-validator` chain-writer entry point is retired.
-# Legacy, integration, independent, generic-preview, and recovery modules stay
-# importable for tests and historical recovery but do not install operator
-# commands. The live package intentionally exposes only the recurring relay,
-# publisher origin, candidate snapshot, current UID30 fleet workflow, and the
-# requested AMD friend preview.
+cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"
+# Legacy relay, publisher, candidate-snapshot, and one-shot writer modules stay
+# importable for tests and historical recovery. They install no operator command.
 # Development-only AMD SEV-SNP preview. It has no writer mode and loads the
 # exact Compute verifier/client dependency lazily.
 cathedral-amd-sev-snp-dev-preview = "cathedral_thin.independent_runtime.amd_snp_dev_preview:main"
 # Preview-only proof for two distinct physical machines behind the pinned miner
 # UID. This entry point has no submit, recover, confirm, or chain-writer mode.
 cathedral-uid30-fleet-preview = "cathedral_thin.uid30_fleet_preview:main"
-# One immutable transition from the finalized two-UID predecessor to UID124.
-# Submit has one signed-attempt budget. Recovery never signs or resubmits.
-cathedral-uid30-fleet-submit = "cathedral_thin.uid30_fleet_submit:main"
 
 [tool.setuptools.packages.find]
 include = ["scaffold*", "cathedral_thin*"]

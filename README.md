@@ -1,54 +1,64 @@
-<div align="center">
-  <h1>⚡ Cathedral Validator</h1>
-  <p><strong>Bittensor SN39</strong></p>
-  <p>Verify Cathedral's signed weight list and submit the accepted weights to Bittensor.</p>
-</div>
+# Cathedral Validator
 
-## 1. What it does
+Cathedral Validator is a direct Bittensor SN39 validator. It derives its own
+mechanism-0 weights from miner machines. It does not download a signed weight
+vector and does not depend on a publisher or relay.
 
-Cathedral Validator downloads Cathedral's signed SN39 weight list. It refuses
-the list if its signature, policy, or current hotkey-to-UID mapping is wrong.
-It submits an accepted list to Bittensor using your validator hotkey.
+## One recurring path
 
-It does not mine. It does not need a GPU or confidential-compute hardware.
+Each cycle:
 
-## 2. What you need
+1. Reads one reverse-checked finalized Finney metagraph.
+2. Discovers every serving non-validator miner axon.
+3. Authenticates the validator request and fetches each miner's signed
+   `/v1/fleet` response.
+4. Verifies every machine with the pinned Intel TDX verifier and the existing
+   SAT rule. The required verifier SHA-256 is
+   `4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148`.
+   This pinned artifact is a linux/amd64 static executable.
+5. Applies the existing global endpoint, TLS channel, and hardware dedupe.
+6. Counts distinct verified machines per UID and normalizes the positive counts
+   into one u16 vector with zero burn.
+7. Writes the vector directly with the validator hotkey.
 
-- An x86-64 Linux machine with systemd and `/usr/bin/python3.12`. Ubuntu 24.04
-  is the simplest choice.
-- A steady internet connection to GitHub, `api.cathedral.computer`, and the
-  Bittensor Finney network.
-- `sudo` access.
-- Your Bittensor validator hotkey file, usable without an interactive password.
-  The hotkey signs weight submissions. Never provide your coldkey, seed phrase,
-  or wallet password.
+The writer records the exact signed intent before broadcast. A restart searches
+finalized history for the same extrinsic hash. It never signs a replacement for
+an unresolved attempt. A cycle reports `CONFIRMED` only after the exact stored
+row and UID mappings match at inclusion and two later finalized heads.
 
-There is no benchmarked hardware minimum. Start with 2 CPU cores, 4 GB RAM,
-and 20 GB of free disk.
+## Run one proof
 
-## 3. Install, run, and know it is working
-
-```bash
-sudo apt-get update
-sudo apt-get install -y git python3.12-venv
-git clone https://github.com/cathedralai/cathedral-validator.git
-cd cathedral-validator
-sudo ./deploy/sn39/install-validator \
-  --hotkey "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY"
-```
-
-The installer locks the exact Git commit and dependencies, copies only the
-hotkey into the validator service account, verifies the installation, starts
-the validator, and checks that its process stays up through startup.
-
-Check it with:
+Install this checkout in a virtual environment. Use the reviewed verifier
+executable and an existing Bittensor validator wallet.
 
 ```bash
-sudo systemctl status cathedral-validator-sn39-relay.service --no-pager
-sudo journalctl -u cathedral-validator-sn39-relay.service -f
+python -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/cathedral-validator \
+  --wallet-name cathedral \
+  --wallet-hotkey default \
+  --qvl /absolute/path/to/cathedral-tdx-verifier \
+  --once \
+  --confirm-direct-write
 ```
 
-`active (running)` means the process is online. `WEIGHTS_SUBMITTED` means a
-cycle reached Bittensor and submitted weights. The first cycle begins when the
-service starts. Later checks run about every 25 minutes. If a cycle cannot
-submit, the journal states why and the service keeps running for the next one.
+The runtime is pinned to Finney and SN39. It scores every serving miner. It has
+no miner allowlist or alternate scoring mode.
+
+The sole journal path is deterministic for the current user and signer:
+
+```text
+~/.local/state/cathedral-validator/direct-writer/
+  finney-sn39-mechanism-0/<validator-hotkey>/state.json
+```
+
+The parent directory and journal must remain owner-only. There is no command
+line state-path override.
+
+## Current proof boundary
+
+The local tests cover discovery, signed fleet enforcement, unchanged SAT,
+deterministic multi-UID scoring, cooldown refusal before signing, exact-intent
+persistence, ambiguous-submit recovery, and three-head stored-row confirmation.
+They do not prove a production miner endpoint, production QVL availability,
+validator permit, wallet funding, chain cooldown, or a live set-weights result.
