@@ -12,7 +12,7 @@ Nothing here authorizes a chain write, infrastructure spend, or a public claim.
 > `config/validator-selfcompose-sn39.toml` was subsequently retired with the
 > recurring authority/fallback posture. As of 2026-08-28, the only shipped SN39
 > recurring profile is `config/validator-thin-sn39-relay.toml`. Use the current
-> public installer in `VALIDATOR.md`, not this closed cutover record.
+> public installer in `README.md`, not this closed cutover record.
 
 ## 1. Producer revision reconciliation
 
