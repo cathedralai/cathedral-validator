@@ -2055,6 +2055,38 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "$(command -v cathedral-validator-update)" not in docs
 
 
+def test_release_workflows_activate_locked_production_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    project_requirement = (
+        'project_requirement="cathedral-scaffold[snp-production] @ '
+        'file://${project_wheel}"'
+    )
+    compute_requirement = (
+        "compute_requirement='cathedral @ git+https://github.com/cathedralai/"
+        "cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb'"
+    )
+    for name in ("tests.yml", "release-candidate.yml"):
+        workflow = (root / ".github" / "workflows" / name).read_text()
+        assert project_requirement in workflow
+        assert compute_requirement in workflow
+        assert workflow.count('"$compute_requirement" \\') == 1
+        assert (
+            "cmp /tmp/cathedral-compute-requirements-one.pex "
+            "/tmp/cathedral-compute-requirements-two.pex"
+        ) in workflow
+        assert (
+            "compute_requirements_pex=/tmp/cathedral-compute-requirements-one.pex"
+            in workflow
+        )
+        assert '--requirements-pex "$compute_requirements_pex"' in workflow
+        assert '--project "$project_requirement"' in workflow
+        assert '--project "$project_wheel"' not in workflow
+        assert (
+            "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+            in workflow
+        )
+
+
 def test_extracted_release_is_traversable_but_not_writable_by_service(
     tmp_path: Path,
 ) -> None:

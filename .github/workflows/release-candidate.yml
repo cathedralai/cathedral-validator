@@ -59,10 +59,27 @@ jobs:
       - name: Build the validator PEX twice from the committed Linux lock
         run: |
           project_wheel="$(find /tmp/project-wheel-one -maxdepth 1 -name '*.whl' -print -quit)"
+          project_requirement="cathedral-scaffold[snp-production] @ file://${project_wheel}"
+          compute_requirement='cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb'
+          for compute_requirements_pex in /tmp/cathedral-compute-requirements-one.pex /tmp/cathedral-compute-requirements-two.pex; do
+            pex \
+              "$compute_requirement" \
+              --lock requirements/validator-release-cpython312-linux-x86_64.pex.lock \
+              --python "$(command -v python)" \
+              --interpreter-constraint 'CPython==3.12.*' \
+              --inherit-path=false \
+              --no-compile \
+              --strip-pex-env \
+              --python-shebang '/usr/bin/python3.12' \
+              --output-file "$compute_requirements_pex"
+          done
+          cmp /tmp/cathedral-compute-requirements-one.pex /tmp/cathedral-compute-requirements-two.pex
+          compute_requirements_pex=/tmp/cathedral-compute-requirements-one.pex
           for output in /tmp/cathedral-validator-one.pex /tmp/cathedral-validator-two.pex; do
             pex \
+              --requirements-pex "$compute_requirements_pex" \
               --lock requirements/validator-release-cpython312-linux-x86_64.pex.lock \
-              --project "$project_wheel" \
+              --project "$project_requirement" \
               --python "$(command -v python)" \
               --interpreter-constraint 'CPython==3.12.*' \
               --entry-point cathedral_thin.independent_runtime.direct_validator:main \
