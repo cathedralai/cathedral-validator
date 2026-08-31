@@ -152,22 +152,29 @@ def _validated(tmp_path: Path, *, track: str = "test"):
     return publication, paths, bootstrap_fingerprint
 
 
-def _release_record(publication, **changes):
+def _release_record(
+    publication, *, draft: bool = False, draft_token: str = "untagged-91", **changes
+):
     record = {
         "id": 91,
         "tag_name": publication.tag,
         "name": publication.tag,
         "target_commitish": publication.target_revision,
-        "draft": False,
+        "draft": draft,
         "prerelease": publication.track == "test",
-        "immutable": True,
+        "immutable": not draft,
         "assets": [
             {
                 "name": asset.name,
                 "state": "uploaded",
                 "size": len(asset.body),
                 "digest": f"sha256:{asset.sha256}",
-                "browser_download_url": publication.asset_url(asset),
+                "browser_download_url": (
+                    f"https://github.com/{publication.repository}/releases/download/"
+                    f"{draft_token}/{asset.name}"
+                    if draft
+                    else publication.asset_url(asset)
+                ),
             }
             for asset in publication.assets
         ],
@@ -202,7 +209,8 @@ class _FakeGitHub:
         self.draft_ready = bool(existing and existing.get("draft") is True)
         self.uploaded = bool(
             self.draft_ready
-            and existing.get("assets") == _release_record(publication)["assets"]
+            and existing.get("assets")
+            == _release_record(publication, draft=True)["assets"]
         )
         self.published = False
         self.events: list[str] = []
@@ -225,8 +233,7 @@ class _FakeGitHub:
         return _release_record(
             self.publication,
             draft=True,
-            immutable=False,
-            assets=_release_record(self.publication)["assets"],
+            assets=_release_record(self.publication, draft=True)["assets"],
         )
 
     def tag_ref(self, tag: str, *, allow_not_found: bool = False):
@@ -483,8 +490,11 @@ def test_publish_resumes_only_an_exact_same_plan_draft(
     existing = _release_record(
         publication,
         draft=True,
-        immutable=False,
-        assets=(_release_record(publication)["assets"] if already_uploaded else []),
+        assets=(
+            _release_record(publication, draft=True)["assets"]
+            if already_uploaded
+            else []
+        ),
     )
     github = _FakeGitHub(publication, existing=existing)
     monkeypatch.setattr(publisher, "_anonymous_fetch", _anonymous_from(publication))
@@ -499,13 +509,65 @@ def test_publish_resumes_only_an_exact_same_plan_draft(
     assert github.created is False
 
 
+def test_draft_assets_accept_github_untagged_identity(tmp_path: Path) -> None:
+    publication, _paths, _fingerprint = _validated(tmp_path)
+    draft = _release_record(
+        publication,
+        draft=True,
+        draft_token="untagged-1489237-55b9d805-07a8-4fd8-a18d-6f1ccbd78654",
+    )
+
+    publisher._verify_release_record(publication, draft, draft=True, assets=True)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "https://github.com/cathedralai/other/releases/download/untagged-91/",
+        "https://example.com/cathedralai/cathedral-validator/releases/download/untagged-91/",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91/not-the-asset",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91/{}?token=secret",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-token..token/",
+    ),
+)
+def test_draft_assets_refuse_noncanonical_untagged_urls(
+    tmp_path: Path, replacement: str
+) -> None:
+    publication, _paths, _fingerprint = _validated(tmp_path)
+    draft = _release_record(publication, draft=True)
+    asset = publication.assets[0]
+    suffix = asset.name if replacement.endswith("/") else ""
+    draft["assets"][0]["browser_download_url"] = replacement.format(asset.name) + suffix
+
+    with pytest.raises(
+        publisher.BootstrapPublicationRefused, match="draft asset URL differs"
+    ):
+        publisher._verify_release_record(publication, draft, draft=True, assets=True)
+
+
+def test_published_assets_still_require_final_tagged_url(tmp_path: Path) -> None:
+    publication, _paths, _fingerprint = _validated(tmp_path)
+    published = _release_record(publication)
+    published["assets"][0]["browser_download_url"] = (
+        f"https://github.com/{publication.repository}/releases/download/"
+        f"untagged-91/{publication.assets[0].name}"
+    )
+
+    with pytest.raises(
+        publisher.BootstrapPublicationRefused,
+        match="asset metadata differs",
+    ):
+        publisher._verify_release_record(
+            publication, published, draft=False, assets=True
+        )
+
+
 def test_publish_refuses_partial_draft_without_repair(tmp_path: Path) -> None:
     publication, _paths, _fingerprint = _validated(tmp_path)
     partial = _release_record(
         publication,
         draft=True,
-        immutable=False,
-        assets=_release_record(publication)["assets"][:1],
+        assets=_release_record(publication, draft=True)["assets"][:1],
     )
     github = _FakeGitHub(publication, existing=partial)
 

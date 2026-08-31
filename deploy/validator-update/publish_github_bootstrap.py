@@ -37,6 +37,7 @@ MAX_PUBLIC_KEY_BYTES = 16_384
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 _NOT_FOUND = re.compile(r"(?:HTTP 404|404 Not Found)", re.IGNORECASE)
+_DRAFT_ASSET_TOKEN = re.compile(r"untagged-[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
 _RELEASE_PAGE_SIZE = 100
 _RELEASE_MAX_PAGES = 10
 
@@ -567,11 +568,56 @@ def _verify_release_record(
             record.get("state") != "uploaded"
             or record.get("size") != len(asset.body)
             or record.get("digest") != f"sha256:{asset.sha256}"
-            or record.get("browser_download_url") != publication.asset_url(asset)
         ):
             raise BootstrapPublicationRefused(
                 f"GitHub bootstrap asset metadata differs for {asset.name}"
             )
+        url = record.get("browser_download_url")
+        if draft:
+            if not _safe_draft_asset_url(publication, asset, url):
+                raise BootstrapPublicationRefused(
+                    f"GitHub bootstrap draft asset URL differs for {asset.name}"
+                )
+        elif url != publication.asset_url(asset):
+            raise BootstrapPublicationRefused(
+                f"GitHub bootstrap asset metadata differs for {asset.name}"
+            )
+
+
+def _safe_draft_asset_url(
+    publication: BootstrapPublication, asset: Asset, value: object
+) -> bool:
+    """Accept GitHub's draft-only untagged asset identity, not a redirect."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or hostname != "github.com"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    prefix = f"/{publication.repository}/releases/download/"
+    if not parsed.path.startswith(prefix):
+        return False
+    remainder = parsed.path[len(prefix) :]
+    token, separator, name = remainder.partition("/")
+    return (
+        separator == "/"
+        and name == asset.name
+        and _DRAFT_ASSET_TOKEN.fullmatch(token) is not None
+        and ".." not in token
+    )
 
 
 def _verify_tag(publication: BootstrapPublication, tag_ref: Mapping[str, Any]) -> None:
