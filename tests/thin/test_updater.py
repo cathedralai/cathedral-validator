@@ -933,6 +933,82 @@ def test_crash_uncertain_target_is_rescued_by_higher_remote_release(
     assert state["channels"]["canary"]["sequence"] == 10
 
 
+def test_failed_rescue_preserves_the_restored_uncertain_release_record(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "fallback-one")
+    archive_two = _archive(marker_path=tmp_path / "fallback-two")
+    archive_three = _archive(marker_path=tmp_path / "fallback-three")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=8,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="fallback-tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=9,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="fallback-tree-two"),
+    )
+    metadata_three = _canary_metadata(
+        private,
+        sequence=10,
+        archive=archive_three,
+        tree=_tree_digest(tmp_path, archive_three, name="fallback-tree-three"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=[],
+    )
+    assert _update(updater, private, channel="canary", sequence=8) == "ACTIVATED"
+
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def interrupt_uncertain_release(_command: object) -> None:
+        raise KeyboardInterrupt("leave the second release crash-uncertain")
+
+    updater.service_restarter = interrupt_uncertain_release
+    with pytest.raises(KeyboardInterrupt, match="crash-uncertain"):
+        _update(updater, private, channel="canary", sequence=9)
+
+    restart_targets: list[str] = []
+
+    def fail_uncertain_and_rescue_then_start_fallback(_command: object) -> None:
+        restart_targets.append(os.readlink(tmp_path / "install" / "current"))
+        if len(restart_targets) <= 2:
+            raise OSError("release readiness remained unconfirmed")
+
+    recovered = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_three,
+        archive=archive_three,
+        service_restarter=fail_uncertain_and_rescue_then_start_fallback,
+    )
+    with pytest.raises(UpdateRefused, match="prior release was restored"):
+        _update(recovered, private, channel="canary", sequence=10)
+
+    target_two = f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    target_three = f"releases/{hashlib.sha256(archive_three).hexdigest()}"
+    assert restart_targets == [target_two, target_three, target_two]
+    assert os.readlink(tmp_path / "install" / "current") == target_two
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["pending"] is None
+    assert state["channels"]["canary"] == _record_for(
+        metadata_two, private, channel="canary"
+    )
+    assert recovered.reconcile_boot(cycle_wait_seconds=0.1) == "RECONCILED"
+
+
 def test_boot_reconcile_rolls_back_only_before_restart_is_authorized(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1936,8 +2012,8 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock" in (
         release_job
     )
-    assert 'runtime_lock=Path(' in release_job
-    assert 'runtime_distributions=Path(' in release_job
+    assert "runtime_lock=Path(" in release_job
+    assert "runtime_distributions=Path(" in release_job
     assert "CPython==3.12.*" in release_job
     assert "cmp /tmp/cathedral-validator-one.pex" in release_job
     assert 'builder["_validator_pex"](pex)' in release_job
@@ -2069,7 +2145,9 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     archive_dir_two.mkdir()
     archive_dir_one.chmod(0o700)
     archive_dir_two.chmod(0o700)
-    runtime_lock = root / "requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+    runtime_lock = (
+        root / "requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+    )
     with zipfile.ZipFile(io.BytesIO(pex.read_bytes()), mode="r") as bundle:
         pex_info = bundle.read("PEX-INFO")
     pex_document = json.loads(pex_info)
@@ -2094,7 +2172,9 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
         json.dumps(
             {
                 "schema": "cathedral_validator_pex_distributions_v1",
-                "runtime_lock_sha256": hashlib.sha256(runtime_lock.read_bytes()).hexdigest(),
+                "runtime_lock_sha256": hashlib.sha256(
+                    runtime_lock.read_bytes()
+                ).hexdigest(),
                 "pex_sha256": hashlib.sha256(pex.read_bytes()).hexdigest(),
                 "pex_info_sha256": hashlib.sha256(pex_info).hexdigest(),
                 "distributions": pex_document["distributions"],

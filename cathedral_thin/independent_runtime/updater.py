@@ -82,6 +82,10 @@ class _OperationDeadlineExpired(UpdateRefused):
     """The monotonic updater operation deadline was exhausted."""
 
 
+class _NestedAuthorizationLost(UpdateRefused):
+    """The updater that authorized a nested service start released its lock."""
+
+
 @dataclass(frozen=True)
 class Release:
     channel: str
@@ -1185,7 +1189,7 @@ class SignedReleaseUpdater:
             except BlockingIOError:
                 return
             fcntl.flock(descriptor, fcntl.LOCK_UN)
-            raise UpdateRefused(
+            raise _NestedAuthorizationLost(
                 "locked updater does not hold the direct validator cycle lock"
             )
         finally:
@@ -1249,7 +1253,9 @@ class SignedReleaseUpdater:
             except BlockingIOError:
                 return
             fcntl.flock(descriptor, fcntl.LOCK_UN)
-            raise UpdateRefused("locked updater released its start authorization")
+            raise _NestedAuthorizationLost(
+                "locked updater released its start authorization"
+            )
         finally:
             os.close(descriptor)
 
@@ -1311,7 +1317,9 @@ class SignedReleaseUpdater:
     def _updater_locked(self, *, wait_seconds: float = 0.0) -> Iterator[None]:
         with self._updater_lock_status(wait_seconds=wait_seconds) as acquired:
             if not acquired:
-                raise UpdateRefused("another local updater did not finish before timeout")
+                raise UpdateRefused(
+                    "another local updater did not finish before timeout"
+                )
             yield
 
     @staticmethod
@@ -1775,7 +1783,9 @@ class SignedReleaseUpdater:
                 pending["previous_current"],
                 pending["target_current"],
             }:
-                raise UpdateRefused("pending activation contradicts the current release")
+                raise UpdateRefused(
+                    "pending activation contradicts the current release"
+                )
             wait_seconds = min(
                 float(cycle_wait_seconds),
                 _remaining_seconds(deadline_monotonic, label="boot cycle lock wait"),
@@ -1835,16 +1845,27 @@ class SignedReleaseUpdater:
                     self._cycle_lock_is_held_elsewhere()
                     and self._has_restart_authorized_pending()
                 ):
-                    self._require_inflight_start_authorized(
-                        deadline_monotonic=deadline
-                    )
-                    return "START_AUTHORIZED"
+                    try:
+                        self._require_inflight_start_authorized(
+                            deadline_monotonic=deadline
+                        )
+                    except _NestedAuthorizationLost:
+                        # The authorizing updater can exit between the lock
+                        # observations above and the exact read-only checks.
+                        # Retry within the same deadline so this gate either
+                        # acquires updater.lock and reconciles normally or
+                        # observes a new exact nested authorization.
+                        pass
+                    else:
+                        return "START_AUTHORIZED"
             # An updater before its cycle lock is not yet a nested systemd
             # restart. Keep watching both locks: if it transitions into its
             # restart boundary, authorize only the exact durable target; if it
             # releases first, acquire the updater lock and reconcile normally.
             if time.monotonic() >= wait_deadline:
-                raise UpdateRefused("another local updater did not finish before timeout")
+                raise UpdateRefused(
+                    "another local updater did not finish before timeout"
+                )
             time.sleep(min(0.1, max(0.0, wait_deadline - time.monotonic())))
 
     def _update_release(
@@ -2020,6 +2041,14 @@ class SignedReleaseUpdater:
                         )
                     return "PAUSED"
                 require_idle_direct_writer_journal(self.journal)
+                if rescue_pending is not None:
+                    # The crash-uncertain target might already have run. Once a
+                    # higher release supersedes that pending activation, retain
+                    # its exact signed record as the only truthful rollback
+                    # authority. If the rescue fails and this target becomes
+                    # ready, clearing the rescue pending state must leave the
+                    # current symlink backed by a committed channel record.
+                    state = self._commit_pending(state)
                 previous = _current_target(self.install_root)
                 if previous is None and not allow_first_install:
                     raise UpdateRefused(

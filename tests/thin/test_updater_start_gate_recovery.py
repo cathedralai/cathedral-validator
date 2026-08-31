@@ -29,6 +29,7 @@ def _spawn_transition_gate(
     *,
     observed_cycle_check: Path,
     observe_held_cycle_lock: bool = False,
+    continue_after_observation: Path | None = None,
 ) -> subprocess.Popen[str]:
     """Run a process gate that reports one chosen cycle-lock observation."""
 
@@ -36,6 +37,7 @@ def _spawn_transition_gate(
     program = """\\
 import os
 import sys
+import time
 from pathlib import Path
 
 from cathedral_thin.independent_runtime.updater import SignedReleaseUpdater, UpdateRefused
@@ -45,6 +47,9 @@ class MarkingGate(SignedReleaseUpdater):
         held = super()._cycle_lock_is_held_elsewhere()
         if held == (sys.argv[6] == "held"):
             Path(sys.argv[5]).touch(exist_ok=True)
+            if sys.argv[7] != "-":
+                while not Path(sys.argv[7]).exists():
+                    time.sleep(0.005)
         return held
 
 updater = MarkingGate(
@@ -78,6 +83,11 @@ except UpdateRefused as exc:
             str(updater.journal.parent.parent),
             str(observed_cycle_check),
             "held" if observe_held_cycle_lock else "free",
+            (
+                str(continue_after_observation)
+                if continue_after_observation is not None
+                else "-"
+            ),
         ],
         cwd=root,
         env=environment,
@@ -108,7 +118,9 @@ def _active_updater(
         archive=archive,
         restarts=restarts,
     )
-    assert fixture._update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    assert (
+        fixture._update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    )
     return updater, private, journal, archive, metadata
 
 
@@ -177,7 +189,9 @@ def test_start_gate_waits_through_unrelated_writer_cycle_then_reconciles(
         deadline = time.monotonic() + 1.0
         while not observed.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert observed.exists(), "start gate did not observe the unrelated writer cycle"
+        assert observed.exists(), (
+            "start gate did not observe the unrelated writer cycle"
+        )
         fcntl.flock(cycle_lock, fcntl.LOCK_UN)
         os.close(cycle_lock)
         cycle_lock = -1
@@ -310,6 +324,113 @@ def test_start_gate_waits_for_prepared_record_to_become_restart_authorized(
     )
 
 
+def test_start_gate_reconciles_when_nested_authorization_releases_its_locks(
+    tmp_path: Path,
+) -> None:
+    updater, private, journal, _archive, _metadata = _active_updater(tmp_path)
+    archive_two = fixture._archive(marker_path=tmp_path / "released-two")
+    metadata_two = fixture._canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=fixture._tree_digest(tmp_path, archive_two, name="released-tree"),
+    )
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def interrupt_after_authorization(_command: object) -> None:
+        raise KeyboardInterrupt("leave a restart-authorized target")
+
+    updater.service_restarter = interrupt_after_authorization
+    with pytest.raises(KeyboardInterrupt, match="restart-authorized"):
+        fixture._update(updater, private, channel="canary", sequence=2)
+
+    observed = tmp_path / "observed-held-authorization-locks"
+    continue_gate = tmp_path / "continue-after-lock-release"
+    updater_lock = fixture._lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = fixture._lock_for_other_process(journal.with_name("cycle.lock"))
+    gate = _spawn_transition_gate(
+        updater,
+        observed_cycle_check=observed,
+        observe_held_cycle_lock=True,
+        continue_after_observation=continue_gate,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while not observed.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert observed.exists(), "start gate did not reach nested authorization"
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        cycle_lock = -1
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+        updater_lock = -1
+        continue_gate.touch()
+        stdout, stderr = gate.communicate(timeout=3.0)
+    finally:
+        if cycle_lock >= 0:
+            fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+            os.close(cycle_lock)
+        if updater_lock >= 0:
+            fcntl.flock(updater_lock, fcntl.LOCK_UN)
+            os.close(updater_lock)
+        if gate.poll() is None:
+            gate.kill()
+            gate.communicate(timeout=1.0)
+
+    target_two = f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert gate.returncode == 0, stderr
+    assert stdout.strip() == "RECONCILED"
+    assert os.readlink(tmp_path / "install" / "current") == target_two
+    assert state["pending"] is None
+    assert state["channels"]["canary"]["sequence"] == 2
+
+
+def test_lost_authorization_retry_does_not_accept_an_unrelated_target(
+    tmp_path: Path,
+) -> None:
+    updater, private, journal, _archive, _metadata = _active_updater(tmp_path)
+    archive_two = fixture._archive(marker_path=tmp_path / "unrelated-two")
+    metadata_two = fixture._canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=fixture._tree_digest(tmp_path, archive_two, name="unrelated-tree"),
+    )
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+    updater.service_restarter = lambda _command: (_ for _ in ()).throw(
+        KeyboardInterrupt("leave a restart-authorized target")
+    )
+    with pytest.raises(KeyboardInterrupt, match="restart-authorized"):
+        fixture._update(updater, private, channel="canary", sequence=2)
+
+    state_path = tmp_path / "state" / "state.json"
+    before_state = state_path.read_bytes()
+    unrelated_target = f"releases/{'0' * 64}"
+    current = tmp_path / "install" / "current"
+    current.unlink()
+    current.symlink_to(unrelated_target)
+    updater_lock = fixture._lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = fixture._lock_for_other_process(journal.with_name("cycle.lock"))
+    try:
+        result = fixture._run_reconcile_in_separate_process(updater)
+    finally:
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+
+    assert result.returncode == 23
+    assert "does not authorize the current release target" in result.stderr
+    assert state_path.read_bytes() == before_state
+    assert os.readlink(current) == unrelated_target
+
+
 @pytest.mark.parametrize("roll_back", (False, True), ids=("target", "rollback"))
 def test_nested_start_gate_authorizes_only_the_exact_locked_target(
     tmp_path: Path,
@@ -351,8 +472,10 @@ def test_nested_start_gate_authorizes_only_the_exact_locked_target(
         fcntl.flock(updater_lock, fcntl.LOCK_UN)
         os.close(updater_lock)
 
-    expected = original if roll_back else (
-        f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    expected = (
+        original
+        if roll_back
+        else (f"releases/{hashlib.sha256(archive_two).hexdigest()}")
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "START_AUTHORIZED"
@@ -372,6 +495,7 @@ def test_pause_cannot_hide_an_unresolved_recovery_outage(tmp_path: Path) -> None
     updater.fetcher = lambda url, _maximum: (
         metadata_two if url.endswith(".json") else archive_two
     )
+
     def interrupt_after_authorization(_command: object) -> None:
         raise KeyboardInterrupt("leave a crash-uncertain activation")
 
@@ -448,7 +572,9 @@ def test_first_install_timeout_preserves_recovery_record_and_target(
         return original_remaining(deadline, label=label)
 
     monkeypatch.setattr(updater_module, "_remaining_seconds", expire_before_stop)
-    with pytest.raises(UpdateRefused, match="could not be stopped; pending activation remains"):
+    with pytest.raises(
+        UpdateRefused, match="could not be stopped; pending activation remains"
+    ):
         updater.bootstrap(
             metadata_url="https://releases.example/canary.json",
             channel="canary",
@@ -463,7 +589,9 @@ def test_first_install_timeout_preserves_recovery_record_and_target(
 
     state = json.loads((tmp_path / "state" / "state.json").read_text())
     target = f"releases/{hashlib.sha256(archive).hexdigest()}"
-    assert calls == [(updater_module.SYSTEMCTL, "restart", updater_module.VALIDATOR_SERVICE)]
+    assert calls == [
+        (updater_module.SYSTEMCTL, "restart", updater_module.VALIDATOR_SERVICE)
+    ]
     assert state["schema"] == UPDATER_STATE_SCHEMA
     assert state["channels"] == {}
     assert state["pending"]["stage"] == "may_have_run"
