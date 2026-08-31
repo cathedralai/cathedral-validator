@@ -86,7 +86,8 @@ sequence for different metadata.
 ## Validate, then publish canary
 
 Validate the exact local archive, metadata, public key, GitHub repository, and
-channel branch without writing:
+channel branch without writing. Run the script from the reviewed checkout. It
+does not require an editable install or `PYTHONPATH`:
 
 ```bash
 python deploy/validator-update/publish_github_channel.py \
@@ -95,14 +96,25 @@ python deploy/validator-update/publish_github_channel.py \
   --public-key /secure/offline/runtime-release-public-key.pem
 ```
 
-Only after that succeeds, repeat with `--publish`. The publisher writes in this
-order:
+Before adding `--publish`, the repository must be public and an administrator
+must enable GitHub immutable releases. The publishing identity needs release
+write access and
+`Administration` repository read access for the immutable-release setting. The
+publisher refuses if the setting is unavailable or disabled.
 
-1. immutable GitHub release and content-addressed archive
-2. anonymous archive download and digest verification
-3. immutable signed channel history
-4. mutable signed canary pointer
-5. anonymous pointer verification
+Only after validation succeeds, repeat with `--publish`. The publisher writes
+in this order:
+
+1. create an empty release draft
+2. upload and verify the exact content-addressed archive
+3. publish and verify the immutable release and tag
+4. anonymously download and verify the archive
+5. write immutable signed channel history
+6. move the mutable signed canary pointer
+7. anonymously verify the pointer
+
+An interrupted retry resumes an exact empty or fully uploaded draft. It refuses
+partial or different draft assets and never overwrites them.
 
 ```bash
 python deploy/validator-update/publish_github_channel.py \
@@ -198,12 +210,52 @@ python deploy/validator-update/build_updater_bundle.py \
   --lifetime-seconds 2592000
 ```
 
-Publish the bundle, manifest, detached signature, and bootstrap signing public
-key as immutable assets. Independently verify anonymous downloads. Record both
-key fingerprints, sequence, issue time, and expiry from the signed manifest.
-Then replace the generated block in `README.md` with exact URLs, the bootstrap
-signing key fingerprint, authenticated minimum bootstrap and stable sequences,
-and commands run successfully on a clean live-test host.
+The target repository must be public and have GitHub immutable releases
+enabled. The publishing identity needs release write access and permission to
+read that setting through `Administration` repository read access. The
+publisher refuses a repository without this enforcement. It authenticates the
+signed bundle against the externally pinned bootstrap key, publishes one exact
+four-asset release, checks its immutable GitHub record and tag target, then
+downloads every asset anonymously and compares the bytes.
+
+Validate the test release without writing:
+
+```bash
+python deploy/validator-update/publish_github_bootstrap.py \
+  --bundle /secure/signed/updater-bootstrap.tar.gz \
+  --manifest /secure/signed/updater-bootstrap.manifest.json \
+  --signature /secure/signed/updater-bootstrap.manifest.sig \
+  --bootstrap-public-key \
+    /secure/offline/bootstrap-signing-public-key.pem \
+  --expected-bootstrap-key-fingerprint \
+    sha256:REPLACE_WITH_BOOTSTRAP_FINGERPRINT \
+  --minimum-bootstrap-sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE \
+  --repository OWNER/DISPOSABLE_TEST_REPOSITORY \
+  --track test \
+  --target-revision REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT
+```
+
+Repeat the identical command with `--publish` only after validation succeeds.
+The disposable test repository must be a public fork or mirror containing the
+exact target commit. It must also have immutable releases enabled.
+After the live test passes, publish the same four local files with `--track
+production` and `--repository cathedralai/cathedral-validator`, again validating
+before adding `--publish`.
+
+Bootstrap publication has no mutable branch or pointer. Test and production use
+separate content-addressed tags. An identical retry is idempotent. An existing
+tag, release, target, or asset set with different state is an equivocation and
+the publisher refuses it. It never fills a partial asset set or replaces an
+asset.
+
+An interrupted retry resumes only an exact empty or fully uploaded draft. A
+partial or different draft remains refused for manual investigation.
+
+Record both key fingerprints, sequence, issue time, expiry, exact tag, target
+revision, and manifest digest. Then replace the generated block in `README.md`
+with exact URLs, the bootstrap signing key fingerprint, authenticated minimum
+bootstrap and stable sequences, and commands run successfully on a clean
+live-test host.
 
 Validate the published bootstrap install inputs with:
 

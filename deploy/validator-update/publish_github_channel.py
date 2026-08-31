@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import io
 import json
@@ -17,7 +18,9 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -26,7 +29,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from cathedral_thin.independent_runtime.updater import (
+# The maintainer guide invokes this file directly from a clean checkout. Bind
+# imports to that exact checkout rather than an editable install or PYTHONPATH.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if not (_REPOSITORY_ROOT / "cathedral_thin" / "__init__.py").is_file():
+    raise RuntimeError("Cathedral repository root is unavailable")
+sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from cathedral_thin.independent_runtime.updater import (  # noqa: E402
     MAX_ARCHIVE_BYTES,
     UpdateRefused,
     load_pinned_public_key,
@@ -38,6 +48,9 @@ DEFAULT_CHANNEL_BRANCH = "validator-release-channel"
 RELEASE_MANIFEST = "RELEASE.json"
 RELEASE_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 _REVISION = re.compile(r"[0-9a-f]{40}")
+_NOT_FOUND = re.compile(r"(?:HTTP 404|404 Not Found)", re.IGNORECASE)
+_RELEASE_PAGE_SIZE = 100
+_RELEASE_MAX_PAGES = 10
 
 
 @dataclass(frozen=True)
@@ -70,21 +83,92 @@ class Publication:
 def _owner_file(path: Path, *, maximum: int, label: str) -> bytes:
     if not path.is_absolute() or path.is_symlink():
         raise UpdateRefused(f"{label} path must be an absolute regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        metadata = path.stat()
+        descriptor = os.open(path, flags)
     except OSError as exc:
         raise UpdateRefused(f"{label} is unavailable") from exc
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o022
-        or not 1 <= metadata.st_size <= maximum
-    ):
-        raise UpdateRefused(f"{label} is not a bounded owner-controlled file")
     try:
-        return path.read_bytes()
-    except OSError as exc:
-        raise UpdateRefused(f"{label} is unreadable") from exc
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or not 1 <= before.st_size <= maximum
+        ):
+            raise UpdateRefused(f"{label} is not a bounded owner-controlled file")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(body) != before.st_size
+            or len(body) > maximum
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise UpdateRefused(f"{label} changed while it was read")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def _safe_repository(repository: str) -> str:
+    component = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?")
+    parts = repository.split("/")
+    if (
+        len(parts) != 2
+        or any(component.fullmatch(part) is None for part in parts)
+        or any(part in {".", ".."} or part.endswith(".git") for part in parts)
+    ):
+        raise UpdateRefused("GitHub repository is invalid")
+    return repository
+
+
+def _safe_branch(branch: str) -> str:
+    parts = branch.split("/")
+    if (
+        not 1 <= len(branch) <= 200
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) is None
+        or ".." in branch
+        or "@{" in branch
+        or branch.endswith((".", "/", ".lock"))
+        or any(part in {"", ".", ".."} or part.startswith(".") for part in parts)
+    ):
+        raise UpdateRefused("release channel branch is invalid")
+    return branch
+
+
+def _safe_tag(tag: str) -> str:
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", tag) is None
+        or ".." in tag
+        or tag.endswith((".", ".lock"))
+    ):
+        raise UpdateRefused("GitHub release tag is invalid")
+    return tag
+
+
+def _write_staged(path: Path, body: bytes) -> None:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o400,
+    )
+    try:
+        os.fchmod(descriptor, 0o400)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
 
 
 def _release_manifest(archive: bytes) -> Mapping[str, Any]:
@@ -124,10 +208,8 @@ def validate_publication(
     channel_branch: str = DEFAULT_CHANNEL_BRANCH,
     now_unix: int | None = None,
 ) -> Publication:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise UpdateRefused("GitHub repository is invalid")
-    if not re.fullmatch(r"[A-Za-z0-9._/-]+", channel_branch):
-        raise UpdateRefused("release channel branch is invalid")
+    repository = _safe_repository(repository)
+    channel_branch = _safe_branch(channel_branch)
     try:
         metadata = _owner_file(
             metadata_path, maximum=1_048_576, label="release metadata"
@@ -189,7 +271,7 @@ def validate_publication(
 
 class GitHub:
     def __init__(self, repository: str) -> None:
-        self.repository = repository
+        self.repository = _safe_repository(repository)
 
     def _run(
         self,
@@ -205,8 +287,10 @@ class GitHub:
             stderr=subprocess.PIPE,
             check=False,
         )
-        if result.returncode != 0 and not allow_missing:
+        if result.returncode != 0:
             message = result.stderr.decode("utf-8", errors="replace").strip()
+            if allow_missing and _NOT_FOUND.search(message):
+                return result
             raise UpdateRefused(f"GitHub publication failed: {message[:500]}")
         return result
 
@@ -218,7 +302,10 @@ class GitHub:
         payload: Mapping[str, Any] | None = None,
         allow_missing: bool = False,
     ) -> Mapping[str, Any] | None:
-        arguments = ["api", f"repos/{self.repository}/{endpoint}"]
+        resource = f"repos/{self.repository}"
+        if endpoint:
+            resource = f"{resource}/{endpoint}"
+        arguments = ["api", resource]
         if method != "GET":
             arguments.extend(["--method", method])
         body = None
@@ -236,51 +323,164 @@ class GitHub:
             raise UpdateRefused("GitHub returned an unexpected response")
         return decoded
 
-    def ensure_release(self, publication: Publication, archive_path: Path) -> None:
-        existing = self.api(f"releases/tags/{publication.tag}", allow_missing=True)
-        if existing is None:
-            notes = (
-                "Cathedral validator release candidate.\n\n"
-                f"Source commit: `{publication.source_revision}`\n"
-                f"Archive SHA-256: `{publication.archive_sha256}`\n"
-                f"Channel sequence: `{publication.channel} {publication.sequence}`\n\n"
-                "This release is available to the signed updater channel. It does "
-                "not by itself prove a successful validator cycle or chain write.\n"
-            ).encode("utf-8")
-            self._run(
+    def require_immutable_releases(self) -> None:
+        repository = self.api("")
+        if repository is None or repository.get("private") is not False:
+            raise UpdateRefused("GitHub release repository is not public")
+        setting = self.api("immutable-releases", allow_missing=True)
+        if setting is None or setting.get("enabled") is not True:
+            raise UpdateRefused("GitHub repository does not enforce immutable releases")
+
+    def release_by_id(self, release_id: int) -> Mapping[str, Any]:
+        if (
+            isinstance(release_id, bool)
+            or not isinstance(release_id, int)
+            or not 1 <= release_id <= 2**63 - 1
+        ):
+            raise UpdateRefused("GitHub release identifier is invalid")
+        release = self.api(f"releases/{release_id}")
+        if release is None:
+            raise UpdateRefused("GitHub release is unavailable")
+        return release
+
+    def release(self, tag: str) -> Mapping[str, Any] | None:
+        tag = _safe_tag(tag)
+        matches: list[int] = []
+        exhausted = False
+        for page in range(1, _RELEASE_MAX_PAGES + 1):
+            result = self._run(
                 [
-                    "release",
-                    "create",
-                    publication.tag,
-                    str(archive_path),
-                    "--repo",
-                    publication.repository,
-                    "--target",
-                    publication.source_revision,
-                    "--title",
-                    publication.tag,
-                    "--notes-file",
-                    "-",
-                    "--prerelease",
-                ],
-                input_bytes=notes,
-            )
-            return
-        assets = existing.get("assets")
-        if not isinstance(assets, list):
-            raise UpdateRefused("existing GitHub release has invalid assets")
-        names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
-        if publication.asset_name not in names:
-            self._run(
-                [
-                    "release",
-                    "upload",
-                    publication.tag,
-                    str(archive_path),
-                    "--repo",
-                    publication.repository,
+                    "api",
+                    f"repos/{self.repository}/releases"
+                    f"?per_page={_RELEASE_PAGE_SIZE}&page={page}",
                 ]
             )
+            try:
+                records = json.loads(result.stdout.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise UpdateRefused("GitHub returned an invalid release list") from exc
+            if not isinstance(records, list):
+                raise UpdateRefused("GitHub returned an unexpected release list")
+            for record in records:
+                if not isinstance(record, dict):
+                    raise UpdateRefused(
+                        "GitHub release list contains an invalid record"
+                    )
+                if record.get("tag_name") != tag:
+                    continue
+                release_id = record.get("id")
+                if (
+                    isinstance(release_id, bool)
+                    or not isinstance(release_id, int)
+                    or not 1 <= release_id <= 2**63 - 1
+                ):
+                    raise UpdateRefused("GitHub release identifier is invalid")
+                matches.append(release_id)
+            if len(records) < _RELEASE_PAGE_SIZE:
+                exhausted = True
+                break
+        if not exhausted:
+            raise UpdateRefused("GitHub release search exceeded its safe bound")
+        if len(matches) > 1:
+            raise UpdateRefused("GitHub has duplicate releases for the exact tag")
+        if not matches:
+            return None
+        return self.release_by_id(matches[0])
+
+    def tag_ref(
+        self, tag: str, *, allow_missing: bool = False
+    ) -> Mapping[str, Any] | None:
+        tag = _safe_tag(tag)
+        encoded = urllib.parse.quote(tag, safe="")
+        return self.api(f"git/ref/tags/{encoded}", allow_missing=allow_missing)
+
+    def create_release_draft(self, publication: Publication) -> Mapping[str, Any]:
+        notes = (
+            "Cathedral validator release candidate.\n\n"
+            f"Source commit: `{publication.source_revision}`\n"
+            f"Archive SHA-256: `{publication.archive_sha256}`\n"
+            f"Channel sequence: `{publication.channel} {publication.sequence}`\n\n"
+            "This release is available to the signed updater channel. It does "
+            "not by itself prove a successful validator cycle or chain write.\n"
+        )
+        draft = self.api(
+            "releases",
+            method="POST",
+            payload={
+                "tag_name": publication.tag,
+                "target_commitish": publication.source_revision,
+                "name": publication.tag,
+                "body": notes,
+                "draft": True,
+                "prerelease": True,
+                "make_latest": "false",
+            },
+        )
+        if draft is None:
+            raise UpdateRefused("new GitHub release draft is unavailable")
+        return draft
+
+    def upload_release_asset(
+        self, publication: Publication, archive_path: Path
+    ) -> None:
+        self._run(
+            [
+                "release",
+                "upload",
+                publication.tag,
+                str(archive_path),
+                "--repo",
+                publication.repository,
+            ]
+        )
+
+    def publish_release(
+        self, publication: Publication, release_id: int
+    ) -> Mapping[str, Any]:
+        published = self.api(
+            f"releases/{release_id}",
+            method="PATCH",
+            payload={
+                "draft": False,
+                "prerelease": True,
+                "make_latest": "false",
+            },
+        )
+        if published is None:
+            raise UpdateRefused("published GitHub release is unavailable")
+        return published
+
+    def ensure_release(self, publication: Publication) -> None:
+        self.require_immutable_releases()
+        existing = self.release(publication.tag)
+        if existing is None:
+            if self.tag_ref(publication.tag, allow_missing=True) is not None:
+                raise UpdateRefused(
+                    "GitHub release tag exists without the exact immutable release"
+                )
+            existing = self.create_release_draft(publication)
+        if existing.get("draft") is True:
+            release_id = _release_id(existing)
+            records = existing.get("assets")
+            if records == []:
+                _verify_release_record(publication, existing, draft=True, asset=False)
+                with tempfile.TemporaryDirectory(
+                    prefix="cathedral-validator-release-"
+                ) as raw:
+                    root = Path(raw)
+                    os.chmod(root, 0o700)
+                    archive_path = root / publication.asset_name
+                    _write_staged(archive_path, publication.archive)
+                    self.upload_release_asset(publication, archive_path)
+                existing = self.release_by_id(release_id)
+            _verify_release_record(publication, existing, draft=True, asset=True)
+            self.publish_release(publication, release_id)
+            existing = self.release_by_id(release_id)
+        _verify_release_record(publication, existing, draft=False, asset=True)
+        ref = self.tag_ref(publication.tag)
+        if ref is None:
+            raise UpdateRefused("published GitHub release tag is unavailable")
+        _verify_release_tag(publication, ref)
 
     def ensure_branch(self, publication: Publication) -> None:
         encoded = urllib.parse.quote(publication.channel_branch, safe="")
@@ -314,8 +514,10 @@ class GitHub:
         ):
             raise UpdateRefused("GitHub channel object is invalid")
         try:
-            return sha, base64.b64decode(content, validate=False)
-        except ValueError as exc:
+            if "\r" in content:
+                raise ValueError("unsupported base64 line ending")
+            return sha, base64.b64decode(content.replace("\n", ""), validate=True)
+        except (ValueError, binascii.Error) as exc:
             raise UpdateRefused("GitHub channel object is not valid base64") from exc
 
     def write_content(
@@ -339,6 +541,66 @@ class GitHub:
             method="PUT",
             payload=payload,
         )
+
+
+def _verify_release_record(
+    publication: Publication,
+    release: Mapping[str, Any],
+    *,
+    draft: bool,
+    asset: bool,
+) -> None:
+    expected_immutable = not draft
+    if (
+        release.get("tag_name") != publication.tag
+        or release.get("name") != publication.tag
+        or release.get("target_commitish") != publication.source_revision
+        or release.get("draft") is not draft
+        or release.get("prerelease") is not True
+        or release.get("immutable") is not expected_immutable
+    ):
+        raise UpdateRefused(
+            "existing GitHub release differs from the exact publication plan"
+        )
+    records = release.get("assets")
+    if not asset:
+        if records != []:
+            raise UpdateRefused("new GitHub release draft is not empty")
+        return
+    if not isinstance(records, list) or len(records) != 1:
+        raise UpdateRefused("GitHub release does not contain the exact asset set")
+    record = records[0]
+    if not isinstance(record, dict):
+        raise UpdateRefused("GitHub release asset is invalid")
+    if (
+        record.get("name") != publication.asset_name
+        or record.get("state") != "uploaded"
+        or record.get("size") != len(publication.archive)
+        or record.get("digest") != f"sha256:{publication.archive_sha256}"
+        or record.get("browser_download_url") != publication.archive_url
+    ):
+        raise UpdateRefused("GitHub release asset differs from the signed archive")
+
+
+def _release_id(release: Mapping[str, Any]) -> int:
+    release_id = release.get("id")
+    if (
+        isinstance(release_id, bool)
+        or not isinstance(release_id, int)
+        or not 1 <= release_id <= 2**63 - 1
+    ):
+        raise UpdateRefused("GitHub release identifier is invalid")
+    return release_id
+
+
+def _verify_release_tag(publication: Publication, ref: Mapping[str, Any]) -> None:
+    tag_object = ref.get("object")
+    if (
+        not isinstance(tag_object, dict)
+        or tag_object.get("type") != "commit"
+        or tag_object.get("sha") != publication.source_revision
+    ):
+        raise UpdateRefused("GitHub release tag does not bind the source revision")
 
 
 def _parse_existing_sequence(
@@ -383,11 +645,10 @@ def _anonymous_fetch(url: str, *, maximum: int) -> bytes:
 def publish(
     publication: Publication,
     *,
-    archive_path: Path,
     public_key_path: Path,
     github: GitHub,
 ) -> None:
-    github.ensure_release(publication, archive_path)
+    github.ensure_release(publication)
     downloaded = _anonymous_fetch(publication.archive_url, maximum=MAX_ARCHIVE_BYTES)
     if hashlib.sha256(downloaded).hexdigest() != publication.archive_sha256:
         raise UpdateRefused("anonymous GitHub archive does not match the signed digest")
@@ -478,7 +739,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if options.publish:
             publish(
                 publication,
-                archive_path=options.archive,
                 public_key_path=options.public_key,
                 github=GitHub(publication.repository),
             )

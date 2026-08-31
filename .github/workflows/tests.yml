@@ -317,6 +317,7 @@ jobs:
             deploy/validator-update/build_updater_bundle.py \
             deploy/validator-update/compose_updater_requirements.py \
             deploy/validator-update/install_updater_bundle.py \
+            deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
             tests/release_smoke/run_real_validator.py
           ruff format --check \
@@ -325,6 +326,7 @@ jobs:
             deploy/validator-update/build_updater_bundle.py \
             deploy/validator-update/compose_updater_requirements.py \
             deploy/validator-update/install_updater_bundle.py \
+            deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
             tests/release_smoke/run_real_validator.py
 
