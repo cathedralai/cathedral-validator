@@ -81,6 +81,86 @@ _PRIVATE_KEY_MARKERS = (
 )
 
 
+class _PrivateKeyLineScanner:
+    """Refuse a PEM private-key boundary only when it is a complete line.
+
+    A release wheel legitimately contains source-code literals such as
+    ``b\"-----BEGIN OPENSSH PRIVATE KEY-----\"``.  Those strings are not key
+    material.  A PEM boundary is safe to recognise only when horizontal
+    whitespace is the sole surrounding content on its logical line.
+
+    The scanner keeps only a small state machine, rather than a whole line, so
+    a marker split across archive read chunks remains detectable without making
+    an unbounded wheel member consume memory.
+    """
+
+    _HORIZONTAL_WHITESPACE = b" \t"
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._line_state = "prefix"
+        self._candidates: tuple[bytes, ...] = _PRIVATE_KEY_MARKERS
+        self._marker_index = 0
+
+    def _reset_line(self) -> None:
+        self._line_state = "prefix"
+        self._candidates = _PRIVATE_KEY_MARKERS
+        self._marker_index = 0
+
+    def _finish_line(self) -> None:
+        if self._line_state in {"suffix", "suffix-cr"}:
+            raise BundleRefused(f"{self._label} contains private-key material")
+        self._reset_line()
+
+    def feed(self, body: bytes) -> None:
+        for byte in body:
+            if byte == ord("\n"):
+                self._finish_line()
+                continue
+
+            if self._line_state == "prefix":
+                if byte in self._HORIZONTAL_WHITESPACE:
+                    continue
+                self._candidates = tuple(
+                    marker for marker in _PRIVATE_KEY_MARKERS if marker[0] == byte
+                )
+                if not self._candidates:
+                    self._line_state = "other"
+                    continue
+                self._line_state = "marker"
+                self._marker_index = 1
+            elif self._line_state == "marker":
+                self._candidates = tuple(
+                    marker
+                    for marker in self._candidates
+                    if len(marker) > self._marker_index
+                    and marker[self._marker_index] == byte
+                )
+                self._marker_index += 1
+                if not self._candidates:
+                    self._line_state = "other"
+                    continue
+            elif self._line_state == "suffix":
+                if byte == ord("\r"):
+                    self._line_state = "suffix-cr"
+                elif byte not in self._HORIZONTAL_WHITESPACE:
+                    self._line_state = "other"
+                continue
+            elif self._line_state == "suffix-cr":
+                self._line_state = "other"
+                continue
+            else:
+                continue
+
+            if self._line_state == "marker" and any(
+                len(marker) == self._marker_index for marker in self._candidates
+            ):
+                self._line_state = "suffix"
+
+    def finish(self) -> None:
+        self._finish_line()
+
+
 class BundleRefused(ValueError):
     """The requested bootstrap artifact is not safe to build."""
 
@@ -164,8 +244,9 @@ def _read_controlled_file(
 
 
 def _refuse_private_key(body: bytes, label: str) -> None:
-    if any(marker in body for marker in _PRIVATE_KEY_MARKERS):
-        raise BundleRefused(f"{label} contains private-key material")
+    scanner = _PrivateKeyLineScanner(label)
+    scanner.feed(body)
+    scanner.finish()
 
 
 def _bootstrap_signing_private_key(path: Path) -> Ed25519PrivateKey:
@@ -254,15 +335,14 @@ def _scan_wheel(path: Path, body: bytes) -> None:
                     or total > MAX_WHEEL_EXPANDED_BYTES
                 ):
                     raise BundleRefused(f"wheel {path.name} exceeds expanded limits")
-                carry = b""
+                scanner = _PrivateKeyLineScanner(f"wheel {path.name}")
                 with wheel.open(member, "r") as handle:
                     while True:
                         chunk = handle.read(64 * 1024)
                         if not chunk:
                             break
-                        sample = carry + chunk
-                        _refuse_private_key(sample, f"wheel {path.name}")
-                        carry = sample[-64:]
+                        scanner.feed(chunk)
+                scanner.finish()
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise BundleRefused(f"wheel {path.name} is not a readable wheel") from exc
 
