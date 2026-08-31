@@ -53,6 +53,10 @@ MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
 BOOTSTRAP_STATE_SCHEMA = "cathedral_validator_bootstrap_state_v1"
 BOOTSTRAP_PENDING_SCHEMA = "cathedral_validator_bootstrap_pending_v1"
 VENV_INTERPRETER_NAME = "python3.12"
+UPDATER_RELEASES_DIRECTORY = "cathedral-updater-r"
+UPDATER_RELEASES_RELATIVE_PATH = f"usr/local/lib/{UPDATER_RELEASES_DIRECTORY}"
+DISTLIB_MAX_SHEBANG_BYTES = 127
+DISTLIB_MIN_SHEBANG_HEADROOM_BYTES = 8
 
 SYSTEMD_ASSETS = frozenset(
     {
@@ -593,6 +597,26 @@ def _relative(root: Path, relative: str) -> Path:
     return root.joinpath(*path.parts)
 
 
+def _updater_version_dir(root: Path, manifest_sha256: str) -> Path:
+    return _relative(root, UPDATER_RELEASES_RELATIVE_PATH) / manifest_sha256
+
+
+def _updater_entrypoint_shebang(version_dir: Path) -> bytes:
+    return f"#!{version_dir}/bin/{VENV_INTERPRETER_NAME}".encode("utf-8")
+
+
+def _check_distlib_shebang_budget(version_dir: Path) -> None:
+    # On Linux, pip's vendored distlib emits a /bin/sh trampoline once the
+    # interpreter path plus ``#!`` and newline exceed 127 bytes. Keep reserve
+    # so the signed console script remains a direct final-venv Python entry.
+    shebang_length = len(_updater_entrypoint_shebang(version_dir)) + 1
+    headroom = DISTLIB_MAX_SHEBANG_BYTES - shebang_length
+    if headroom < DISTLIB_MIN_SHEBANG_HEADROOM_BYTES:
+        raise InstallRefused(
+            "updater release path exceeds the distlib shebang safety budget"
+        )
+
+
 def _check_root(root: Path, expected_owner: int) -> None:
     if not root.is_absolute() or root.is_symlink():
         raise InstallRefused("installation root must be an absolute directory")
@@ -923,7 +947,7 @@ def _active_updater_digest(
     current_parts = PurePosixPath(current.as_posix()).parts
     if (
         len(current_parts) != 2
-        or current_parts[0] != "cathedral-validator-updater-releases"
+        or current_parts[0] != UPDATER_RELEASES_DIRECTORY
         or DIGEST.fullmatch(current_parts[1]) is None
     ):
         raise InstallRefused("existing updater activation target is unsafe")
@@ -1351,7 +1375,7 @@ def _validate_installed_venv(
         or not stat.S_IMODE(metadata.st_mode) & 0o111
     ):
         raise InstallRefused("installed updater entry point is unsafe")
-    expected_shebang = f"#!{version_dir}/bin/{VENV_INTERPRETER_NAME}".encode("utf-8")
+    expected_shebang = _updater_entrypoint_shebang(version_dir)
     with executable.open("rb") as handle:
         first_line = handle.readline(4096).rstrip(b"\r\n")
     if first_line != expected_shebang:
@@ -1408,14 +1432,13 @@ def _install_verified_bundle_locked(
     _check_bootstrap_transition(bundle, committed=committed, pending=pending)
     destinations = _destinations(root, bundle)
 
-    releases = _relative(root, "usr/local/lib/cathedral-validator-updater-releases")
+    releases = _relative(root, UPDATER_RELEASES_RELATIVE_PATH)
     version_dir = releases / bundle.manifest_sha256
     fixed_link = _relative(root, "usr/local/lib/cathedral-validator-updater")
     _existing_ancestors(root, releases, expected_owner)
     _existing_ancestors(root, fixed_link.parent, expected_owner)
-    relative_link = (
-        Path("cathedral-validator-updater-releases") / bundle.manifest_sha256
-    )
+    relative_link = Path(UPDATER_RELEASES_DIRECTORY) / bundle.manifest_sha256
+    _active_updater_digest(fixed_link, expected_owner=expected_owner)
 
     version_exists = version_dir.exists() or version_dir.is_symlink()
     if version_exists:
@@ -1604,6 +1627,9 @@ def install_verified_bundle(
     _check_root(root, expected_owner)
     _preflight_python(python_executable, runner)
     _preflight_destinations(root, bundle, expected_owner=expected_owner)
+    _check_distlib_shebang_budget(
+        _updater_version_dir(Path("/"), bundle.manifest_sha256)
+    )
     with _bootstrap_operation_lock(root, expected_owner=expected_owner) as state_root:
         return _install_verified_bundle_locked(
             bundle,
