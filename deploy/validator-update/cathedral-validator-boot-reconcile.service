@@ -7,8 +7,12 @@ Type=oneshot
 User=root
 Group=root
 ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --reconcile-boot --identity-file=/etc/cathedral-validator/identity.env
+# On an ordinary start this takes the updater lock and fully reconciles any
+# pending activation under the cycle lock. During an updater-controlled restart
+# it accepts only the exact durable may-have-run target, or the exact committed
+# rollback target, while proving the parent still owns both locks.
 # Match the updater's 20-minute monotonic deadline and retain a two-minute
-# manager margin. A failure blocks the direct validator through Requires=.
+# manager margin. Any other state blocks the direct validator through Requires=.
 TimeoutStartSec=1320s
 UMask=0077
 NoNewPrivileges=true

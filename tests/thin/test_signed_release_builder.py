@@ -437,11 +437,11 @@ def test_direct_service_executes_only_verifiers_from_current_release() -> None:
     ).read_text()
 
     assert (
-        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/"
+        "AssertFileIsExecutable=/opt/cathedral-validator/current/bin/"
         "cathedral-tdx-verifier"
     ) in service
     assert (
-        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest"
+        "AssertFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest"
     ) in service
     assert (
         "--qvl=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier" in service

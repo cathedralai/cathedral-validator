@@ -4,14 +4,14 @@ Requires=cathedral-validator-boot-reconcile.service
 Wants=network-online.target
 After=network-online.target cathedral-validator-boot-reconcile.service
 Conflicts=cathedral-validator-sn39.service cathedral-validator-sn39-relay.service cathedral-confidential-validator.service cathedral-confidential-validator-sn39.service
-ConditionPathExists=/etc/cathedral-validator/direct.env
-ConditionPathExists=/etc/cathedral-validator/identity.env
-ConditionPathExists=/etc/cathedral-validator/validator-hotkey
-ConditionPathExists=/etc/cathedral-validator/snp-policy.json
-ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier
-ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest
-ConditionFileIsExecutable=/usr/bin/python3.12
-ConditionPathExists=/opt/cathedral-validator/current/bin/cathedral-validator
+AssertPathExists=/etc/cathedral-validator/direct.env
+AssertPathExists=/etc/cathedral-validator/identity.env
+AssertPathExists=/etc/cathedral-validator/validator-hotkey
+AssertPathExists=/etc/cathedral-validator/snp-policy.json
+AssertFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier
+AssertFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest
+AssertFileIsExecutable=/usr/bin/python3.12
+AssertFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-validator
 
 [Service]
 Type=notify

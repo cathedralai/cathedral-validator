@@ -1155,8 +1155,53 @@ class SignedReleaseUpdater:
             finally:
                 os.close(descriptor)
 
+    def _require_cycle_lock_held_elsewhere(self) -> None:
+        """Prove the lock-owning updater still excludes every writer cycle."""
+
+        if not self.journal.is_absolute() or self.journal.name != "state.json":
+            raise UpdateRefused("direct writer journal path is invalid")
+        cycle_lock = self.journal.with_name("cycle.lock")
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(cycle_lock, flags)
+            lock_metadata = os.fstat(descriptor)
+            journal_metadata = self.journal.stat()
+        except OSError as exc:
+            raise UpdateRefused("direct validator cycle lock is unavailable") from exc
+        try:
+            if (
+                self.journal.is_symlink()
+                or not stat.S_ISREG(journal_metadata.st_mode)
+                or stat.S_IMODE(journal_metadata.st_mode) != 0o600
+                or not stat.S_ISREG(lock_metadata.st_mode)
+                or stat.S_IMODE(lock_metadata.st_mode) != 0o600
+                or lock_metadata.st_uid != journal_metadata.st_uid
+            ):
+                raise UpdateRefused("direct validator cycle lock is invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            raise UpdateRefused(
+                "locked updater does not hold the direct validator cycle lock"
+            )
+        finally:
+            os.close(descriptor)
+
     @contextmanager
-    def _updater_locked(self) -> Iterator[None]:
+    def _updater_lock_status(self) -> Iterator[bool]:
+        """Report whether this process acquired the root updater lock.
+
+        The validator's systemd start gate normally acquires this lock and
+        performs full recovery.  During an updater-controlled restart, the
+        parent updater deliberately retains the lock while systemd invokes a
+        separate gate process.  That gate must distinguish the expected
+        contention from an ordinary unlocked start without waiting on itself.
+        """
+
         lock_path = self.state_root / "updater.lock"
         flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
@@ -1165,6 +1210,7 @@ class SignedReleaseUpdater:
             descriptor = os.open(lock_path, flags, 0o600)
         except OSError as exc:
             raise UpdateRefused("local updater lock is unavailable") from exc
+        acquired = False
         try:
             os.fchmod(descriptor, 0o600)
             lock_metadata = os.fstat(descriptor)
@@ -1176,14 +1222,24 @@ class SignedReleaseUpdater:
                 raise UpdateRefused("local updater lock is not root-controlled")
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise UpdateRefused("another local updater is running") from exc
-            yield
+            except BlockingIOError:
+                yield False
+                return
+            acquired = True
+            yield True
         finally:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                if acquired:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+
+    @contextmanager
+    def _updater_locked(self) -> Iterator[None]:
+        with self._updater_lock_status() as acquired:
+            if not acquired:
+                raise UpdateRefused("another local updater is running")
+            yield
 
     @staticmethod
     def _record(release: Release) -> dict[str, Any]:
@@ -1512,19 +1568,17 @@ class SignedReleaseUpdater:
             bootstrap_owner=None,
         )
 
-    def _require_committed_current(
-        self, state: Mapping[str, Any], *, deadline_monotonic: float
-    ) -> None:
-        selected = state.get("selected_channel")
-        if selected not in {"canary", "stable"}:
-            raise UpdateRefused("validator host has no selected release channel")
-        record = state["channels"].get(selected)
-        if record is None:
-            raise UpdateRefused("validator host has no committed release")
-        record = _validate_channel_record(record, label="selected channel record")
+    def _require_exact_current_record(
+        self,
+        record: object,
+        *,
+        label: str,
+        deadline_monotonic: float,
+    ) -> str:
+        record = _validate_channel_record(record, label=label)
         target = _release_target(record["archive_sha256"])
         if _current_target(self.install_root) != target:
-            raise UpdateRefused("committed release contradicts the current release")
+            raise UpdateRefused(f"{label} contradicts the current release")
         release_dir = self.install_root / target
         try:
             _require_owned_release_tree(
@@ -1541,6 +1595,82 @@ class SignedReleaseUpdater:
             or not os.access(executable, os.X_OK)
         ):
             raise UpdateRefused("current release entrypoint is not executable")
+        return target
+
+    def _require_committed_current(
+        self, state: Mapping[str, Any], *, deadline_monotonic: float
+    ) -> None:
+        selected = state.get("selected_channel")
+        if selected not in {"canary", "stable"}:
+            raise UpdateRefused("validator host has no selected release channel")
+        record = state["channels"].get(selected)
+        if record is None:
+            raise UpdateRefused("validator host has no committed release")
+        self._require_exact_current_record(
+            record,
+            label="selected channel record",
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _require_inflight_start_authorized(self, *, deadline_monotonic: float) -> None:
+        """Authorize only the exact service start the locked updater requested.
+
+        This path is read-only.  The parent updater owns updater.lock and
+        cycle.lock until systemd reports readiness, so this separate start-gate
+        process must not try to take either lock.  The durable ``may_have_run``
+        state is the root authorization.  It permits the exact new target, or
+        the exact previously committed target after the updater has restored
+        the symlink during a synchronous rollback.  No other state or target is
+        accepted.
+        """
+
+        self._require_cycle_lock_held_elsewhere()
+        require_idle_direct_writer_journal(self.journal)
+        state = _read_update_state(self.state_root)
+        selected = state.get("selected_channel")
+        if selected not in {"canary", "stable"}:
+            raise UpdateRefused("in-flight start has no selected release channel")
+        pending = _validate_pending(state.get("pending"))
+        if pending is None or pending["stage"] != _PENDING_MAY_HAVE_RUN:
+            raise UpdateRefused(
+                "locked updater has no restart-authorized pending activation"
+            )
+        if pending["previous_current"] is None and state["channels"]:
+            raise UpdateRefused(
+                "first-install start authorization contradicts committed state"
+            )
+        current = _current_target(self.install_root)
+        if current == pending["target_current"]:
+            record = pending["record"]
+            label = "restart-authorized pending record"
+        elif current is not None and current == pending["previous_current"]:
+            record = state["channels"].get(selected)
+            if record is None or _release_target(record["archive_sha256"]) != current:
+                raise UpdateRefused(
+                    "in-flight rollback is not the exact committed release"
+                )
+            label = "restart-authorized rollback record"
+        else:
+            raise UpdateRefused(
+                "locked updater does not authorize the current release target"
+            )
+        authorized_target = self._require_exact_current_record(
+            record,
+            label=label,
+            deadline_monotonic=deadline_monotonic,
+        )
+        # Re-read the atomically replaced state and symlink after validating the
+        # tree.  Any transition outside the parent's synchronous systemctl call
+        # invalidates this start rather than authorizing a raced target.
+        if (
+            _read_update_state(self.state_root) != state
+            or _current_target(self.install_root) != authorized_target
+        ):
+            raise UpdateRefused(
+                "in-flight start authorization changed during validation"
+            )
+        self._require_cycle_lock_held_elsewhere()
+        require_idle_direct_writer_journal(self.journal)
 
     def reconcile_boot(
         self,
@@ -1548,7 +1678,7 @@ class SignedReleaseUpdater:
         cycle_wait_seconds: float = DEFAULT_CYCLE_WAIT_SECONDS,
         operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
     ) -> str:
-        """Resolve durable activation state before systemd may start the writer."""
+        """Gate a writer start, reconciling state unless its updater owns the locks."""
 
         deadline = _operation_deadline(operation_timeout_seconds)
         _require_root_owned_directory(
@@ -1557,7 +1687,10 @@ class SignedReleaseUpdater:
         _require_root_owned_directory(
             self.state_root, expected_uid=self.expected_uid, required_mode=0o700
         )
-        with self._updater_locked():
+        with self._updater_lock_status() as acquired:
+            if not acquired:
+                self._require_inflight_start_authorized(deadline_monotonic=deadline)
+                return "START_AUTHORIZED"
             state = _read_update_state(self.state_root)
             selected = state.get("selected_channel")
             if selected not in {"canary", "stable"}:
@@ -1579,7 +1712,6 @@ class SignedReleaseUpdater:
                     _remaining_seconds(deadline, label="boot cycle lock wait"),
                 )
                 with self._cycle_locked(wait_seconds=wait_seconds):
-                    require_idle_direct_writer_journal(self.journal)
                     if pending["stage"] == _PENDING_PREPARED:
                         if current == pending["target_current"]:
                             previous = pending["previous_current"]
@@ -1819,7 +1951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument(
         "--reconcile-boot",
         action="store_true",
-        help="resolve durable activation state without starting the validator",
+        help="gate validator startup and reconcile durable activation state",
     )
     parser.add_argument(
         "--cycle-wait-seconds",

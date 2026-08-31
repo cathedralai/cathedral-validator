@@ -308,6 +308,65 @@ def _updater(
     )
 
 
+def _run_reconcile_in_separate_process(
+    updater: SignedReleaseUpdater,
+) -> subprocess.CompletedProcess[str]:
+    """Run the systemd start-gate shape in a distinct lock-owning process."""
+
+    root = Path(__file__).resolve().parents[2]
+    program = """\
+import os
+import sys
+from pathlib import Path
+
+from cathedral_thin.independent_runtime.updater import SignedReleaseUpdater, UpdateRefused
+
+updater = SignedReleaseUpdater(
+    install_root=Path(sys.argv[1]),
+    state_root=Path(sys.argv[2]),
+    expected_hotkey=sys.argv[3],
+    journal_scope_root=Path(sys.argv[4]),
+    expected_uid=os.geteuid(),
+)
+try:
+    print(updater.reconcile_boot(cycle_wait_seconds=0.05, operation_timeout_seconds=2.0))
+except UpdateRefused as exc:
+    print(f"REFUSED: {exc}", file=sys.stderr)
+    raise SystemExit(23)
+"""
+    environment = dict(os.environ)
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        str(root)
+        if not existing_pythonpath
+        else f"{root}{os.pathsep}{existing_pythonpath}"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            program,
+            str(updater.install_root),
+            str(updater.state_root),
+            updater.journal.parent.name,
+            str(updater.journal.parent.parent),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=5.0,
+        check=False,
+    )
+
+
+def _lock_for_other_process(path: Path) -> int:
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return descriptor
+
+
 def test_updater_derives_the_only_journal_for_the_expected_hotkey(
     tmp_path: Path,
 ) -> None:
@@ -928,6 +987,9 @@ def test_boot_reconcile_rolls_back_only_before_restart_is_authorized(
     pending = json.loads((tmp_path / "state" / "state.json").read_text())
     assert pending["pending"]["stage"] == "prepared"
     assert os.readlink(tmp_path / "install" / "current") == target_two
+    direct_state = json.loads(journal.read_text())
+    direct_state["pending"] = {"recover_with": "previous-release"}
+    journal.write_bytes(canonical_document_bytes(direct_state))
 
     assert updater.reconcile_boot(cycle_wait_seconds=0.1) == "RECONCILED"
     assert os.readlink(tmp_path / "install" / "current") == target_one
@@ -935,6 +997,9 @@ def test_boot_reconcile_rolls_back_only_before_restart_is_authorized(
     assert reconciled["pending"] is None
     assert reconciled["channels"]["canary"]["sequence"] == 1
     assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    assert json.loads(journal.read_text())["pending"] == {
+        "recover_with": "previous-release"
+    }
 
 
 def test_boot_reconcile_treats_legacy_pending_as_may_have_run(
@@ -993,6 +1058,9 @@ def test_boot_reconcile_treats_legacy_pending_as_may_have_run(
             }
         )
     )
+    direct_state = json.loads(journal.read_text())
+    direct_state["pending"] = {"recover_with": "authorized-target"}
+    journal.write_bytes(canonical_document_bytes(direct_state))
 
     assert updater.reconcile_boot(cycle_wait_seconds=0.1) == "RECONCILED"
     reconciled = json.loads(state_path.read_text())
@@ -1001,6 +1069,248 @@ def test_boot_reconcile_treats_legacy_pending_as_may_have_run(
     assert reconciled["pending"] is None
     assert reconciled["channels"]["canary"]["sequence"] == 2
     assert restart_attempts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    assert json.loads(journal.read_text())["pending"] == {
+        "recover_with": "authorized-target"
+    }
+
+
+@pytest.mark.parametrize("roll_back", (False, True), ids=("new-target", "rollback"))
+def test_separate_start_gate_accepts_only_updater_authorized_target_while_locks_held(
+    tmp_path: Path,
+    roll_back: bool,
+) -> None:
+    """Catch the real systemd nested-lock failure with process-owned flocks."""
+
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "gate-one")
+    archive_two = _archive(marker_path=tmp_path / "gate-two")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="gate-tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="gate-tree-two"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    committed_target = os.readlink(tmp_path / "install" / "current")
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def crash_after_authorization(_command) -> None:
+        raise KeyboardInterrupt("hold the root-authorized restart boundary")
+
+    updater.service_restarter = crash_after_authorization
+    with pytest.raises(KeyboardInterrupt, match="root-authorized restart"):
+        _update(updater, private, channel="canary", sequence=2)
+
+    state_path = tmp_path / "state" / "state.json"
+    pending_state = json.loads(state_path.read_text())
+    assert pending_state["pending"]["stage"] == "may_have_run"
+    if roll_back:
+        current = tmp_path / "install" / "current"
+        current.unlink()
+        current.symlink_to(committed_target)
+
+    updater_lock = _lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = _lock_for_other_process(journal.with_name("cycle.lock"))
+    try:
+        result = _run_reconcile_in_separate_process(updater)
+        prepared_state = json.loads(state_path.read_text())
+        prepared_state["pending"]["stage"] = "prepared"
+        state_path.write_bytes(canonical_document_bytes(prepared_state))
+        prepared_guard = _run_reconcile_in_separate_process(updater)
+        state_path.write_bytes(canonical_document_bytes(pending_state))
+        journal_document = json.loads(journal.read_text())
+        journal_document["pending"] = {"signed_intent": "unresolved"}
+        journal.write_bytes(canonical_document_bytes(journal_document))
+        unresolved_journal_guard = _run_reconcile_in_separate_process(updater)
+        journal_document["pending"] = None
+        journal.write_bytes(canonical_document_bytes(journal_document))
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        cycle_lock = -1
+        missing_cycle_guard = _run_reconcile_in_separate_process(updater)
+    finally:
+        if cycle_lock >= 0:
+            fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+            os.close(cycle_lock)
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "START_AUTHORIZED"
+    assert prepared_guard.returncode == 23
+    assert "no restart-authorized pending activation" in prepared_guard.stderr
+    assert unresolved_journal_guard.returncode == 23
+    assert "unresolved or ambiguous submission" in unresolved_journal_guard.stderr
+    assert missing_cycle_guard.returncode == 23
+    assert "does not hold the direct validator cycle lock" in missing_cycle_guard.stderr
+    # The child gate is read-only. The lock-owning parent commits or clears this
+    # record only after systemd reports whether the service became ready.
+    assert json.loads(state_path.read_text()) == pending_state
+
+
+@pytest.mark.parametrize("roll_back", (False, True), ids=("activate", "roll-back"))
+def test_update_restart_callback_runs_start_gate_under_the_real_outer_locks(
+    tmp_path: Path,
+    roll_back: bool,
+) -> None:
+    """Exercise the same nested process/lock shape as systemctl restart."""
+
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "nested-one")
+    archive_two = _archive(marker_path=tmp_path / "nested-two")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="nested-tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="nested-tree-two"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    committed_target = os.readlink(tmp_path / "install" / "current")
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+    gated_targets: list[str] = []
+
+    def nested_systemd_start(command) -> None:
+        assert tuple(command) == (SYSTEMCTL, "restart", VALIDATOR_SERVICE)
+        gated_targets.append(os.readlink(tmp_path / "install" / "current"))
+        result = _run_reconcile_in_separate_process(updater)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "START_AUTHORIZED"
+        if roll_back and len(gated_targets) == 1:
+            raise OSError("new service failed readiness after its start gate")
+
+    updater.service_restarter = nested_systemd_start
+    if roll_back:
+        with pytest.raises(UpdateRefused, match="prior release was restored"):
+            _update(updater, private, channel="canary", sequence=2)
+    else:
+        assert _update(updater, private, channel="canary", sequence=2) == "ACTIVATED"
+
+    target_two = f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    assert gated_targets == (
+        [target_two, committed_target] if roll_back else [target_two]
+    )
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["pending"] is None
+    assert state["channels"]["canary"]["sequence"] == (1 if roll_back else 2)
+    assert os.readlink(tmp_path / "install" / "current") == (
+        committed_target if roll_back else target_two
+    )
+
+
+def test_separate_start_gate_rejects_unrelated_start_while_updater_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+
+    updater_lock = _lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = _lock_for_other_process(journal.with_name("cycle.lock"))
+    try:
+        result = _run_reconcile_in_separate_process(updater)
+    finally:
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+
+    assert result.returncode == 23
+    assert "no restart-authorized pending activation" in result.stderr
+
+
+def test_first_install_start_gate_accepts_exact_authorized_target_with_locks_held(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+
+    gate_results: list[str] = []
+
+    def nested_first_systemd_start(command) -> None:
+        assert tuple(command) == (SYSTEMCTL, "restart", VALIDATOR_SERVICE)
+        pending = json.loads((tmp_path / "state" / "state.json").read_text())
+        assert pending["channels"] == {}
+        assert pending["pending"]["previous_current"] is None
+        assert pending["pending"]["stage"] == "may_have_run"
+        result = _run_reconcile_in_separate_process(updater)
+        assert result.returncode == 0, result.stderr
+        gate_results.append(result.stdout.strip())
+
+    updater.service_restarter = nested_first_systemd_start
+    assert _bootstrap(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+
+    assert gate_results == ["START_AUTHORIZED"]
+    committed = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert committed["pending"] is None
+    assert committed["channels"]["canary"]["sequence"] == 1
 
 
 def test_readiness_failure_rolls_back_before_cycle_lock_is_released(
@@ -1475,7 +1785,10 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "RestartPreventExitStatus=2" in direct
     assert "TimeoutStartSec=120s" in direct
     assert "LoadCredential=validator-hotkey:" in direct
-    assert "ConditionPathExists=/etc/cathedral-validator/identity.env" in direct
+    assert "\nCondition" not in direct
+    assert "AssertPathExists=/etc/cathedral-validator/direct.env" in direct
+    assert "AssertPathExists=/etc/cathedral-validator/identity.env" in direct
+    assert "AssertPathExists=/etc/cathedral-validator/validator-hotkey" in direct
     assert "EnvironmentFile=/etc/cathedral-validator/identity.env" in direct
     assert direct.rindex("EnvironmentFile=/etc/cathedral-validator/identity.env") > (
         direct.rindex("EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env")
@@ -1488,16 +1801,19 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "/var/lib/cathedral-validator/.cache/pex" not in direct
     assert "--wallet-path=/run/cathedral-validator-wallet" in direct
     assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in direct
-    assert "ConditionPathExists=/etc/cathedral-validator/snp-policy.json" in direct
+    assert "AssertPathExists=/etc/cathedral-validator/snp-policy.json" in direct
     assert (
-        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/"
+        "AssertFileIsExecutable=/opt/cathedral-validator/current/bin/"
         "cathedral-tdx-verifier" in direct
     )
     assert (
-        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest"
-        in direct
+        "AssertFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest" in direct
     )
-    assert "ConditionFileIsExecutable=/usr/bin/python3.12" in direct
+    assert "AssertFileIsExecutable=/usr/bin/python3.12" in direct
+    assert (
+        "AssertFileIsExecutable=/opt/cathedral-validator/current/bin/"
+        "cathedral-validator" in direct
+    )
     assert "--snp-policy=${CATHEDRAL_SNP_POLICY}" in direct
     assert "--qvl=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier" in direct
     assert "--snpguest=/opt/cathedral-validator/current/bin/snpguest" in direct
