@@ -84,9 +84,9 @@ _PRIVATE_KEY_MARKERS = (
 class _PrivateKeyLineScanner:
     """Refuse a PEM private-key boundary only when it is a complete line.
 
-    A release wheel legitimately contains source-code literals such as
-    ``b\"-----BEGIN OPENSSH PRIVATE KEY-----\"``.  Those strings are not key
-    material.  A PEM boundary is safe to recognise only when horizontal
+    A release wheel legitimately contains source-code literals for OpenSSH
+    private-key boundaries. Those strings are not key material. A PEM boundary
+    is safe to recognise only when horizontal
     whitespace is the sole surrounding content on its logical line.
 
     The scanner keeps only a small state machine, rather than a whole line, so

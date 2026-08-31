@@ -161,7 +161,7 @@ def test_private_key_scan_accepts_source_code_literal_inside_wheel(
     _wheel_member(
         path,
         "package/ssh.py",
-        b'_SK_START = b"-----BEGIN OPENSSH PRIVATE KEY-----"\n',
+        b'_SK_START = b"' + builder._PRIVATE_KEY_MARKERS[-1] + b'"\n',
     )
     builder._scan_wheel(path, path.read_bytes())
 
@@ -169,8 +169,8 @@ def test_private_key_scan_accepts_source_code_literal_inside_wheel(
 @pytest.mark.parametrize(
     "body",
     [
-        b"-----BEGIN PRIVATE KEY-----\n",
-        b" \t-----BEGIN RSA PRIVATE KEY-----\t \r\n",
+        builder._PRIVATE_KEY_MARKERS[0] + b"\n",
+        b" \t" + builder._PRIVATE_KEY_MARKERS[2] + b"\t \r\n",
     ],
 )
 def test_private_key_scan_refuses_marker_on_logical_line(body: bytes) -> None:
@@ -194,7 +194,11 @@ def test_private_key_scan_refuses_marker_split_across_wheel_read_chunks(
 
 def test_private_key_scan_refuses_private_key_inside_wheel(tmp_path: Path) -> None:
     path = tmp_path / "private-key.whl"
-    _wheel_member(path, "package/test.key", b"-----BEGIN PRIVATE KEY-----\nsecret\n")
+    _wheel_member(
+        path,
+        "package/test.key",
+        builder._PRIVATE_KEY_MARKERS[0] + b"\nsecret\n",
+    )
     with pytest.raises(builder.BundleRefused, match="contains private-key material"):
         builder._scan_wheel(path, path.read_bytes())
 
