@@ -185,7 +185,12 @@ def _release_record(publication, *, draft: bool, asset: bool):
                     "state": "uploaded",
                     "size": len(publication.archive),
                     "digest": f"sha256:{publication.archive_sha256}",
-                    "browser_download_url": publication.archive_url,
+                    "browser_download_url": (
+                        f"https://github.com/{publication.repository}/releases/download/"
+                        f"untagged-30ab6836a380fb821857/{publication.asset_name}"
+                        if draft
+                        else publication.archive_url
+                    ),
                 }
             ]
             if asset
@@ -420,6 +425,54 @@ def test_ensure_release_refuses_a_mismatched_draft_without_repair(
     with pytest.raises(UpdateRefused, match="differs from the signed archive"):
         github.ensure_release(publication)
     assert events == []
+
+
+def test_draft_asset_accepts_github_untagged_identity(tmp_path: Path) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(tmp_path)
+    draft = _release_record(publication, draft=True, asset=True)
+
+    publisher["_verify_release_record"](publication, draft, draft=True, asset=True)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "https://github.com/cathedralai/other/releases/download/untagged-91/{}",
+        "https://example.com/cathedralai/cathedral-validator/releases/download/untagged-91/{}",
+        "https://github.com:443/cathedralai/cathedral-validator/releases/download/untagged-91/{}",
+        "https://user@github.com/cathedralai/cathedral-validator/releases/download/untagged-91/{}",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91/{}?token=secret",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91/{}#fragment",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-token..token/{}",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91/not-the-asset",
+        "https://github.com/cathedralai/cathedral-validator/releases/download/untagged-91%2Fextra/{}",
+    ),
+)
+def test_draft_asset_refuses_noncanonical_untagged_urls(
+    tmp_path: Path, replacement: str
+) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(tmp_path)
+    draft = _release_record(publication, draft=True, asset=True)
+    draft["assets"][0]["browser_download_url"] = replacement.format(
+        publication.asset_name
+    )
+
+    with pytest.raises(UpdateRefused, match="draft asset URL differs"):
+        publisher["_verify_release_record"](publication, draft, draft=True, asset=True)
+
+
+def test_published_asset_still_requires_final_tagged_url(tmp_path: Path) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(tmp_path)
+    published = _release_record(publication, draft=False, asset=True)
+    published["assets"][0]["browser_download_url"] = (
+        f"https://github.com/{publication.repository}/releases/download/"
+        f"untagged-91/{publication.asset_name}"
+    )
+
+    with pytest.raises(UpdateRefused, match="differs from the signed archive"):
+        publisher["_verify_release_record"](
+            publication, published, draft=False, asset=True
+        )
 
 
 def test_immutable_release_preflight_refuses_a_private_repository(monkeypatch) -> None:
