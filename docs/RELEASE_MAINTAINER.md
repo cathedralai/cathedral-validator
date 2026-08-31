@@ -33,13 +33,20 @@ Before production signing:
 Run the manual `validator release candidate` workflow on the reviewed source
 commit. The workflow:
 
+- installs release tools and the Setuptools build backend only from the
+  committed CPython 3.12, Ubuntu 24.04 x86_64 hash lock
 - builds the project wheel twice
 - resolves and builds the validator PEX twice
 - downloads and verifies the exact QVL and `snpguest` binaries
 - reproduces the strict runtime archive
-- builds the updater wheelhouse and complete hash lock
+- downloads the updater's three third-party wheels against a separate committed
+  hash lock, then adds only the reproduced local project-wheel hash
 - uploads retained inputs for 30 days
 - creates GitHub build-provenance attestations for every release input
+
+Project-wheel builds use the pinned backend with build isolation disabled and
+network access refused. A downloaded backend or a third-party wheel whose bytes
+do not match the committed review hash stops the candidate build.
 
 Download the artifact named
 `cathedral-validator-release-inputs-<SOURCE_REVISION>`. Verify every file against
@@ -166,6 +173,12 @@ Bootstrap releases are rare. Build one only when the updater, service units,
 host requirements, or runtime release key must change. Use the candidate's exact
 wheelhouse and hash lock plus the reviewed deploy assets from the same source
 revision.
+
+The privileged updater environment intentionally contains only the Cathedral
+project wheel, `cryptography`, `cffi`, and `pycparser`. It does not contain
+Bittensor or NumPy. Those validator dependencies stay in the signed runtime PEX.
+The candidate workflow proves the isolated updater import and command before the
+wheelhouse becomes a retained signing input.
 
 ```bash
 python deploy/validator-update/build_updater_bundle.py \

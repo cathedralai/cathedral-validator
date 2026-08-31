@@ -38,6 +38,10 @@ builder = _module(
 installer = _module(
     "cathedral_test_updater_bundle_installer", DEPLOY / "install_updater_bundle.py"
 )
+composer = _module(
+    "cathedral_test_updater_requirements_composer",
+    DEPLOY / "compose_updater_requirements.py",
+)
 
 
 def _keypair(
@@ -97,6 +101,37 @@ def _wheel(root: Path, *, private_marker: bool = False) -> tuple[Path, str]:
     path.write_bytes(output.getvalue())
     path.chmod(0o644)
     return wheelhouse, hashlib.sha256(output.getvalue()).hexdigest()
+
+
+def _updater_dependency_wheelhouse(
+    root: Path,
+) -> tuple[Path, Path, dict[str, tuple[Path, str]]]:
+    wheelhouse = root / "updater-wheelhouse"
+    wheelhouse.mkdir(parents=True)
+    files = {
+        "cathedral-scaffold": "cathedral_scaffold-4.0.0-py3-none-any.whl",
+        "cffi": (
+            "cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+        ),
+        "cryptography": ("cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl"),
+        "pycparser": "pycparser-3.0-py3-none-any.whl",
+    }
+    records: dict[str, tuple[Path, str]] = {}
+    for name, filename in files.items():
+        wheel = wheelhouse / filename
+        wheel.write_bytes(f"reviewed fixture for {name}\n".encode())
+        records[name] = (wheel, hashlib.sha256(wheel.read_bytes()).hexdigest())
+    lock = root / "updater-third-party.lock"
+    lock.write_text(
+        "# retained reviewed third-party lines\n"
+        + "".join(
+            f"{name}=={composer.EXPECTED_THIRD_PARTY[name]} "
+            f"--hash=sha256:{records[name][1]}\n"
+            for name in sorted(composer.EXPECTED_THIRD_PARTY)
+        ),
+        encoding="ascii",
+    )
+    return wheelhouse, lock, records
 
 
 def _assets(root: Path) -> Path:
@@ -360,6 +395,73 @@ def test_builder_refuses_incomplete_hash_lock_and_private_key_in_wheel(tmp_path)
     )
     with pytest.raises(builder.BundleRefused, match="private-key material"):
         _build(values)
+
+
+def test_updater_lock_composer_preserves_reviewed_lines_and_binds_local_wheel(
+    tmp_path,
+):
+    wheelhouse, third_party_lock, records = _updater_dependency_wheelhouse(tmp_path)
+    output = tmp_path / "updater-requirements.lock"
+
+    body = composer.compose_lock(
+        wheelhouse=wheelhouse,
+        third_party_lock=third_party_lock,
+        output=output,
+    )
+
+    assert body == output.read_bytes()
+    assert body.startswith(third_party_lock.read_bytes())
+    assert body.endswith(
+        (
+            "cathedral-scaffold==4.0.0 "
+            f"--hash=sha256:{records['cathedral-scaffold'][1]}\n"
+        ).encode("ascii")
+    )
+    assert body.count(b"--hash=sha256:") == 4
+
+
+def test_updater_lock_composer_refuses_substitution_and_extra_wheel(tmp_path):
+    substituted = tmp_path / "substituted"
+    wheelhouse, third_party_lock, records = _updater_dependency_wheelhouse(substituted)
+    records["cffi"][0].write_bytes(b"substituted wheel bytes\n")
+    with pytest.raises(composer.LockCompositionRefused, match="committed lock"):
+        composer.compose_lock(
+            wheelhouse=wheelhouse,
+            third_party_lock=third_party_lock,
+            output=substituted / "output.lock",
+        )
+
+    expanded = tmp_path / "expanded"
+    wheelhouse, third_party_lock, _records = _updater_dependency_wheelhouse(expanded)
+    (wheelhouse / "bittensor-10.5.0-py3-none-any.whl").write_bytes(b"not allowed\n")
+    with pytest.raises(composer.LockCompositionRefused, match="four files"):
+        composer.compose_lock(
+            wheelhouse=wheelhouse,
+            third_party_lock=third_party_lock,
+            output=expanded / "output.lock",
+        )
+
+
+def test_updater_lock_composer_refuses_changed_reviewed_hash(tmp_path):
+    wheelhouse, third_party_lock, _records = _updater_dependency_wheelhouse(tmp_path)
+    text = third_party_lock.read_text(encoding="ascii")
+    third_party_lock.write_text(
+        text.replace(
+            next(
+                line.split("sha256:", 1)[1]
+                for line in text.splitlines()
+                if line.startswith("cryptography==")
+            ),
+            "0" * 64,
+        ),
+        encoding="ascii",
+    )
+    with pytest.raises(composer.LockCompositionRefused, match="committed lock"):
+        composer.compose_lock(
+            wheelhouse=wheelhouse,
+            third_party_lock=third_party_lock,
+            output=tmp_path / "output.lock",
+        )
 
 
 def test_builder_refuses_symlinked_asset_and_permissive_private_key(tmp_path):

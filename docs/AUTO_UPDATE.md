@@ -259,5 +259,9 @@ The updater has no access to the hotkey. The root updater verifies and switches
 files. The unprivileged validator service alone receives the hotkey through a
 systemd credential and signs its own weights.
 
+The root-owned updater environment contains only the updater and its exact
+cryptographic dependency closure. It does not install Bittensor, NumPy, or the
+validator runtime dependency set. Those stay inside the signed validator PEX.
+
 Release signing, bootstrap publication, and key custody are in
 [Release maintainer guide](RELEASE_MAINTAINER.md).

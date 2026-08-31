@@ -30,18 +30,21 @@ jobs:
       - name: Install pinned release tooling
         run: |
           python -m pip install \
-            'cryptography==48.0.0' \
-            'packaging==26.3' \
-            'pex==2.101.1'
-          python -m pip install --no-deps -e .
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement \
+            "$GITHUB_WORKSPACE/requirements/release-build-cpython312-ubuntu2404-x86_64.lock"
 
       - name: Build the project wheel twice
         env:
+          PIP_NO_INDEX: "1"
           SOURCE_DATE_EPOCH: "0"
         run: |
-          python -m pip wheel --no-cache-dir --no-deps "$GITHUB_WORKSPACE" \
+          python -m pip wheel --no-cache-dir --no-build-isolation --no-deps \
+            "$GITHUB_WORKSPACE" \
             --wheel-dir /tmp/project-wheel-one
-          python -m pip wheel --no-cache-dir --no-deps "$GITHUB_WORKSPACE" \
+          python -m pip wheel --no-cache-dir --no-build-isolation --no-deps \
+            "$GITHUB_WORKSPACE" \
             --wheel-dir /tmp/project-wheel-two
           python - <<'PY'
           from pathlib import Path
@@ -193,35 +196,15 @@ jobs:
           python -m pip download \
             --only-binary=:all: \
             --no-deps \
+            --require-hashes \
             --dest /tmp/updater-wheelhouse \
-            'cffi==2.0.0' \
-            'cryptography==48.0.0' \
-            'pycparser==2.23'
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          from packaging.utils import canonicalize_name, parse_wheel_filename
-
-          wheelhouse = Path("/tmp/updater-wheelhouse")
-          records = []
-          for wheel in wheelhouse.glob("*.whl"):
-              name, version, _build, _tags = parse_wheel_filename(wheel.name)
-              records.append(
-                  (
-                      canonicalize_name(name),
-                      str(version),
-                      hashlib.sha256(wheel.read_bytes()).hexdigest(),
-                  )
-              )
-          if len(records) != 4 or len({name for name, _, _ in records}) != 4:
-              raise SystemExit("updater wheelhouse does not contain four unique wheels")
-          lock = "".join(
-              f"{name}=={version} --hash=sha256:{digest}\n"
-              for name, version, digest in sorted(records)
-          )
-          Path("/tmp/updater-requirements.lock").write_text(lock, encoding="ascii")
-          PY
+            --requirement \
+            "$GITHUB_WORKSPACE/requirements/updater-bootstrap-cpython312-ubuntu2404-x86_64.lock"
+          python deploy/validator-update/compose_updater_requirements.py \
+            --wheelhouse /tmp/updater-wheelhouse \
+            --third-party-lock \
+            "$GITHUB_WORKSPACE/requirements/updater-bootstrap-cpython312-ubuntu2404-x86_64.lock" \
+            --output /tmp/updater-requirements.lock
           python -m venv /tmp/updater-install-check
           /tmp/updater-install-check/bin/python -m pip install \
             --no-index \
@@ -229,6 +212,17 @@ jobs:
             --require-hashes \
             --find-links /tmp/updater-wheelhouse \
             --requirement /tmp/updater-requirements.lock
+          /tmp/updater-install-check/bin/python -I - <<'PY'
+          import importlib.util
+
+          from cathedral_thin.independent_runtime import updater
+          import cryptography
+
+          assert callable(updater.main)
+          assert cryptography.__name__ == "cryptography"
+          assert importlib.util.find_spec("bittensor") is None
+          assert importlib.util.find_spec("numpy") is None
+          PY
           /tmp/updater-install-check/bin/cathedral-validator-update --help >/dev/null
 
       - name: Assemble and hash the exact offline inputs

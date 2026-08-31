@@ -2008,7 +2008,8 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     release_job = workflow.split("  validator-release:\n", 1)[1]
 
     assert "continue-on-error" not in release_job
-    assert "pex==2.101.1" in release_job
+    assert "runs-on: ubuntu-24.04" in release_job
+    assert "requirements/release-build-cpython312-ubuntu2404-x86_64.lock" in release_job
     assert "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock" in (
         release_job
     )
@@ -2087,6 +2088,85 @@ def test_release_workflows_activate_locked_production_contract() -> None:
             in workflow
         )
         assert 'Path(os.environ["GITHUB_WORKSPACE"])' in workflow
+
+
+def test_release_workflows_use_reviewed_hash_locks_and_offline_backend() -> None:
+    root = Path(__file__).resolve().parents[2]
+    tests_workflow = (root / ".github" / "workflows" / "tests.yml").read_text()
+    release_job = tests_workflow.split("  validator-release:\n", 1)[1]
+    candidate = (root / ".github" / "workflows" / "release-candidate.yml").read_text()
+    build_lock_path = "requirements/release-build-cpython312-ubuntu2404-x86_64.lock"
+
+    for workflow in (release_job, candidate):
+        assert build_lock_path in workflow
+        assert "--only-binary=:all:" in workflow
+        assert "--require-hashes" in workflow
+        assert workflow.count("--no-build-isolation") == 2
+        assert 'PIP_NO_INDEX: "1"' in workflow
+        assert "python -m pip install --no-deps -e ." not in workflow
+        assert "'cryptography>=42'" not in workflow
+        assert "'pex==2.101.1'" not in workflow
+
+    updater_lock_path = (
+        "requirements/updater-bootstrap-cpython312-ubuntu2404-x86_64.lock"
+    )
+    assert candidate.count(updater_lock_path) == 2
+    assert "deploy/validator-update/compose_updater_requirements.py" in candidate
+    assert "'cffi==2.1.1'" not in candidate
+    assert "'cryptography==50.0.1'" not in candidate
+    assert "'pycparser==3.0'" not in candidate
+    assert 'find_spec("bittensor") is None' in candidate
+    assert 'find_spec("numpy") is None' in candidate
+
+
+def test_release_tool_and_updater_locks_pin_the_reviewed_wheel_hashes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    build_lock = (
+        root / "requirements" / "release-build-cpython312-ubuntu2404-x86_64.lock"
+    ).read_text(encoding="ascii")
+    updater_lock = (
+        root / "requirements" / "updater-bootstrap-cpython312-ubuntu2404-x86_64.lock"
+    ).read_text(encoding="ascii")
+    expected = {
+        "cffi==2.1.1": (
+            "c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf"
+        ),
+        "cryptography==50.0.1": (
+            "51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a"
+        ),
+        "packaging==26.3": (
+            "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+        ),
+        "pex==2.101.1": (
+            "51e91aa1bcc8ac311ba6e42822f5d6337d4affc553e0e2475c35976518ff3059"
+        ),
+        "pycparser==3.0": (
+            "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+        ),
+        "ruff==0.15.13": (
+            "cc411dfebe5eebe55ce041c6ae080eb7668955e866daa2fbb16692a784f1c4ca"
+        ),
+        "setuptools==83.0.0": (
+            "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"
+        ),
+    }
+    build_lines = {
+        line.split(" --hash=sha256:", 1)[0]: line.split("sha256:", 1)[1]
+        for line in build_lock.splitlines()
+        if line and not line.startswith("#")
+    }
+    updater_lines = {
+        line.split(" --hash=sha256:", 1)[0]: line.split("sha256:", 1)[1]
+        for line in updater_lock.splitlines()
+        if line and not line.startswith("#")
+    }
+    assert build_lines == expected
+    assert updater_lines == {
+        name: expected[name]
+        for name in ("cffi==2.1.1", "cryptography==50.0.1", "pycparser==3.0")
+    }
+    assert "official PyPI release JSON" in build_lock
+    assert "official PyPI" in updater_lock
 
 
 def test_extracted_release_is_traversable_but_not_writable_by_service(

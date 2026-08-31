@@ -1,0 +1,18 @@
+# Reviewed release tooling for CPython 3.12 on Ubuntu 24.04 x86_64.
+# On 2026-08-31 each digest below matched both the official PyPI release JSON
+# and an independent SHA-256 of the downloaded wheel bytes. The selected
+# release JSON records reported no vulnerabilities on that date.
+# cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+# cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl
+cryptography==50.0.1 --hash=sha256:51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a
+# packaging-26.3-py3-none-any.whl
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+# pex-2.101.1-py3.py312-none-any.whl
+pex==2.101.1 --hash=sha256:51e91aa1bcc8ac311ba6e42822f5d6337d4affc553e0e2475c35976518ff3059
+# pycparser-3.0-py3-none-any.whl
+pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+# ruff-0.15.13-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+ruff==0.15.13 --hash=sha256:cc411dfebe5eebe55ce041c6ae080eb7668955e866daa2fbb16692a784f1c4ca
+# setuptools-83.0.0-py3-none-any.whl
+setuptools==83.0.0 --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3
