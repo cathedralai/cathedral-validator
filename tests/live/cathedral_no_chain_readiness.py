@@ -43,13 +43,18 @@ def digest(path: Path) -> str:
 
 def require_pex_origin(module: object) -> None:
     module_file = getattr(module, "__file__", None)
-    raw_root = os.environ.get("PEX_ROOT")
+    # PEX strips PEX_* variables before interpreter-mode user code runs. The
+    # live controller preserves the reviewed root under this test-only name.
+    raw_root = os.environ.get("CATHEDRAL_LIVE_TEST_PEX_ROOT")
     if not isinstance(module_file, str) or not raw_root:
         refuse(f"{getattr(module, '__name__', module)!r} has no PEX origin")
     module_path = Path(module_file).resolve()
     pex_root = Path(raw_root).resolve()
     if not module_path.is_relative_to(pex_root):
-        refuse(f"{getattr(module, '__name__', module)!r} did not load from PEX_ROOT")
+        refuse(
+            f"{getattr(module, '__name__', module)!r} did not load from the "
+            "preserved live-test PEX root"
+        )
 
 
 def require_ip_denied() -> None:
