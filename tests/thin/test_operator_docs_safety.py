@@ -22,74 +22,48 @@ def test_false_launch_design_page_is_not_active() -> None:
 def test_readme_is_the_small_public_guide() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     words = " ".join(guide.split())
-    run_block = guide.split("## Run the validator", 1)[1].split("```bash", 1)[1]
-    run_block = run_block.split("```", 1)[0]
     assert guide.count("## ") == 5
     assert guide.startswith("# Cathedral Validator\n")
-    assert "## One recurring path" in guide
-    assert "## Run the validator" in guide
-    assert "## Install the pinned QVL" in guide
-    assert "## Install the pinned AMD verifier and policy" in guide
-    assert "## Current proof boundary" in guide
-    assert "Linux/amd64 host with CPython 3.12" in guide
+    for heading in (
+        "## What it does",
+        "## What you need",
+        "## Install and start",
+        "## What to expect",
+        "## Updates",
+    ):
+        assert heading in guide
     assert (
-        "git clone https://github.com/cathedralai/cathedral-validator.git" in run_block
+        "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
+        in guide
     )
-    assert "cd cathedral-validator" in run_block
-    assert "python3.12 -m venv .venv" in run_block
-    assert "[the QVL setup](#install-the-pinned-qvl)" in guide
-    assert "[the AMD setup](#install-the-pinned-amd-verifier-and-policy)" in guide
-    assert "Do not copy the coldkey" in guide
-    assert "The validator opens `wallet.hotkey` only" in guide
-    assert "It never reads or signs with a coldkey" in words
-    assert "--wallet-path /absolute/hotkey-only/wallets" in guide
-    assert "There is no non-writing launch mode" in guide
-    assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in guide
-    assert "`NOT_PROVEN` means success was not established" in guide
-    assert "`EXPIRED_WITHOUT_INCLUSION` means recovery proved" in guide
-    assert "For `--once`, only the two confirmed statuses exit zero" in guide
+    assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
+    assert "service receives only the hotkey file" in words
+    assert "There is no alternate scoring mode and no non-writing mode" in words
+    assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in words
+    assert "`NOT_PROVEN` means success is unresolved" in guide
+    assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
-    assert "Auto-update remains unavailable until" in words
-    assert "You can still run the validator from this checkout" in words
-    assert "Do not enable updater units from the checkout" in words
+    assert "Do not install or enable updater services from a source checkout" in words
+    assert "BEGIN GENERATED VALIDATOR INSTALL" in guide
+    assert "END GENERATED VALIDATOR INSTALL" in guide
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
-    assert "does not download a signed weight vector" in words
+    assert "does not download a weight vector" in words
     assert "scored every serving miner" not in guide
-    assert "scores every serving miner" in guide
-    assert "YOUR_WALLET" in guide
-    assert "YOUR_HOTKEY" in guide
-    assert "--once" not in run_block
-    assert "Add `--once` only for a bounded" in guide
-    assert "cathedral-tdx-verifier-v1.0.0" in guide
-    assert "restart supervisor" in guide
+    assert "finds serving miners" in guide
+    assert "zero burn" in guide
     assert "`CONTRADICTION_STOPPED`" in guide
-    assert "terminal exit with status 2" in guide
-    assert "`Restart=on-failure`" in guide
     assert "`RestartPreventExitStatus=2`" in guide
-    assert "must never clear the journal" in guide
-    assert "before any manual journal clearance" in guide
-    assert (
-        "https://github.com/cathedralai/cathedral-sandbox/releases/download/"
-        "cathedral-tdx-verifier-v1.0.0/"
-        "cathedral-tdx-verifier-linux-amd64" in guide
-    )
-    assert "sha256sum --check -" in guide
-    assert "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148" in guide
-    assert "70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0" in guide
-    assert "[snpguest 0.10.0 release]" in guide
-    assert "No shared SNP admission policy is published" in guide
-    assert (
-        "cathedral-sandbox/blob/8dde6eaca27116eed53386a1fa33ec70b74a01fb/"
-        "docs/AMD_SEV_SNP_FRIEND_TEST.md" in guide
-    )
-    assert "[AMD verification rehearsal](docs/AMD_SEV_SNP_DEV_PREVIEW.md)" in guide
-    assert "require `PROVEN_DEVELOPMENT_NO_WRITE`" in guide
-    assert "Never pass the placeholder file to the validator" in words
-    assert "release assets are public and match the exact" in words
-    assert "--snp-policy" in run_block
-    assert "--snpguest" in run_block
-    assert ".[snp-production]" in run_block
+    assert "Never delete or replace the journal" in guide
+    assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
+    assert "cathedral-validator-boot-reconcile.service" in guide
+    assert "pinned TDX verifier, and pinned SNP verifier together" in words
+    assert "bootstrap updater, systemd units, host Python" in words
+    assert "Each host chooses `stable` or `canary` once" in guide
+    assert "git clone" not in guide
+    assert "python3.12 -m venv" not in guide
+    assert "cathedral-tdx-verifier-v1.0.0" not in guide
+    assert "snpguest 0.10.0" not in guide
     assert "issue #185" not in guide
     assert "not self-service" not in guide
     assert "authorized Cathedral operator" not in guide
@@ -106,24 +80,26 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
     updater = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
 
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
-    assert updater.startswith(
-        "# Validator auto-update\n\n"
-        "Status: implementation candidate. Installation is not self-service or\n"
-        "launch-ready."
-    )
-    assert "Do not enable these units from a repository\ncheckout" in updater
-    assert "It never receives a coldkey" in updater
+    assert updater.startswith("# Validator auto-update\n\nStatus:")
+    assert "public bootstrap artifacts are not published yet" in updater
+    assert "Do not install\nor enable updater units from a source checkout" in updater
+    assert "BEGIN GENERATED UPDATER BOOTSTRAP" in updater
+    assert "END GENERATED UPDATER BOOTSTRAP" in updater
+    assert "releases.cathedral.com" not in updater
+    assert "signed installation path" in guide
+    assert "The updater has no access to the hotkey" in updater
+    assert "repository home page is the only operator install guide" in updater
 
 
 def test_readme_snp_policy_template_is_strict_json_with_the_runtime_shape() -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
-    section = guide.split("## Install the pinned AMD verifier and policy", 1)[1]
+    guide = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
+    section = guide.split("## Before installation", 1)[1]
     policy = json.loads(section.split("```json", 1)[1].split("```", 1)[0])
 
     assert set(policy) == {"schema", "generations"}
     assert policy["schema"] == "cathedral_amd_sev_snp_policy_v1"
-    assert set(policy["generations"]) == {"REPLACE_WITH_milan_genoa_OR_turin"}
-    generation = policy["generations"]["REPLACE_WITH_milan_genoa_OR_turin"]
+    assert set(policy["generations"]) == {"genoa"}
+    generation = policy["generations"]["genoa"]
     assert set(generation) == {"allowed_measurements", "minimum_tcb"}
     assert generation["allowed_measurements"] == ["REPLACE_WITH_96_LOWERCASE_HEX"]
     assert generation["minimum_tcb"] == "0xREPLACE_WITH_16_LOWERCASE_HEX"
@@ -171,6 +147,39 @@ def test_active_operator_surfaces_exclude_removed_commands() -> None:
         text = path.read_text(encoding="utf-8")
         for command in retired:
             assert command not in text, f"{command} remains in {path.relative_to(ROOT)}"
+
+
+def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
+    guide = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
+    maintainer = (ROOT / "docs" / "RELEASE_MAINTAINER.md").read_text(encoding="utf-8")
+
+    assert "RECONCILED" in guide
+    assert "START_AUTHORIZED" in guide
+    assert "It does not hide unresolved recovery" in guide
+    assert "exact updater-controlled nested" in guide
+    assert "[Release maintainer guide](RELEASE_MAINTAINER.md)" in guide
+    assert "--archive-out-dir" not in guide
+    assert "--runtime-lock" not in guide
+    assert "two offline encrypted backups" in maintainer
+    assert (
+        "--runtime-lock /secure/candidate/runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock"
+        in maintainer
+    )
+    assert (
+        "--runtime-distributions /secure/candidate/runtime/cathedral-validator.pex-distributions.json"
+        in maintainer
+    )
+    assert "--archive-out-dir /secure/signed" in maintainer
+    assert "--lifetime-seconds 604800" in maintainer
+    assert (
+        "--minimum-bootstrap-sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE"
+        in maintainer
+    )
+    assert "cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz" in maintainer
+    assert (
+        "Routine validator and verifier releases are unattended after bootstrap"
+        in maintainer
+    )
 
 
 def test_retired_guides_are_only_historical_pointers() -> None:

@@ -1,0 +1,26 @@
+[Unit]
+Description=Reconcile Cathedral validator activation before writer startup
+Before=cathedral-validator-direct.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --reconcile-boot --identity-file=/etc/cathedral-validator/identity.env
+# On an ordinary start this takes the updater lock and fully reconciles any
+# pending activation under the cycle lock. During an updater-controlled restart
+# it accepts only the exact durable may-have-run target, or the exact committed
+# rollback target, while proving the parent still owns both locks.
+# Match the updater's 20-minute monotonic deadline and retain a two-minute
+# manager margin. Any other state blocks the direct validator through Requires=.
+TimeoutStartSec=1320s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/cathedral-validator/validator-hotkey -/var/lib/cathedral-validator/.bittensor -/run/cathedral-validator-wallet -/run/cathedral-validator-pex
+ReadWritePaths=/opt/cathedral-validator /var/lib/cathedral-validator-update /var/lib/cathedral-validator
+ReadOnlyPaths=/etc/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
