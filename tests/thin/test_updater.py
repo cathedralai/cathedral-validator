@@ -1160,7 +1160,7 @@ def test_separate_start_gate_accepts_only_updater_authorized_target_while_locks_
     assert unresolved_journal_guard.returncode == 23
     assert "unresolved or ambiguous submission" in unresolved_journal_guard.stderr
     assert missing_cycle_guard.returncode == 23
-    assert "does not hold the direct validator cycle lock" in missing_cycle_guard.stderr
+    assert "did not finish before timeout" in missing_cycle_guard.stderr
     # The child gate is read-only. The lock-owning parent commits or clears this
     # record only after systemd reports whether the service became ready.
     assert json.loads(state_path.read_text()) == pending_state

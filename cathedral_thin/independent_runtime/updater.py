@@ -1191,8 +1191,70 @@ class SignedReleaseUpdater:
         finally:
             os.close(descriptor)
 
+    def _cycle_lock_is_held_elsewhere(self) -> bool:
+        """Read the validated cycle lock without changing its ownership."""
+
+        if not self.journal.is_absolute() or self.journal.name != "state.json":
+            raise UpdateRefused("direct writer journal path is invalid")
+        cycle_lock = self.journal.with_name("cycle.lock")
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(cycle_lock, flags)
+            lock_metadata = os.fstat(descriptor)
+            journal_metadata = self.journal.stat()
+        except OSError as exc:
+            raise UpdateRefused("direct validator cycle lock is unavailable") from exc
+        try:
+            if (
+                self.journal.is_symlink()
+                or not stat.S_ISREG(journal_metadata.st_mode)
+                or stat.S_IMODE(journal_metadata.st_mode) != 0o600
+                or not stat.S_ISREG(lock_metadata.st_mode)
+                or stat.S_IMODE(lock_metadata.st_mode) != 0o600
+                or lock_metadata.st_uid != journal_metadata.st_uid
+            ):
+                raise UpdateRefused("direct validator cycle lock is invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    def _require_updater_lock_held_elsewhere(self) -> None:
+        """Reject a start if its authorizing updater lock was released."""
+
+        lock_path = self.state_root / "updater.lock"
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lock_path, flags)
+            metadata = os.fstat(descriptor)
+        except OSError as exc:
+            raise UpdateRefused("local updater lock is unavailable") from exc
+        try:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self.expected_uid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise UpdateRefused("local updater lock is not root-controlled")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            raise UpdateRefused("locked updater released its start authorization")
+        finally:
+            os.close(descriptor)
+
     @contextmanager
-    def _updater_lock_status(self) -> Iterator[bool]:
+    def _updater_lock_status(self, *, wait_seconds: float = 0.0) -> Iterator[bool]:
         """Report whether this process acquired the root updater lock.
 
         The validator's systemd start gate normally acquires this lock and
@@ -1202,6 +1264,12 @@ class SignedReleaseUpdater:
         contention from an ordinary unlocked start without waiting on itself.
         """
 
+        if (
+            isinstance(wait_seconds, bool)
+            or not isinstance(wait_seconds, (int, float))
+            or not 0 <= float(wait_seconds) <= 3600
+        ):
+            raise UpdateRefused("updater lock wait is invalid")
         lock_path = self.state_root / "updater.lock"
         flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
@@ -1220,11 +1288,16 @@ class SignedReleaseUpdater:
                 or stat.S_IMODE(lock_metadata.st_mode) != 0o600
             ):
                 raise UpdateRefused("local updater lock is not root-controlled")
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                yield False
-                return
+            deadline = time.monotonic() + float(wait_seconds)
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        yield False
+                        return
+                    time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
             acquired = True
             yield True
         finally:
@@ -1235,10 +1308,10 @@ class SignedReleaseUpdater:
                 os.close(descriptor)
 
     @contextmanager
-    def _updater_locked(self) -> Iterator[None]:
-        with self._updater_lock_status() as acquired:
+    def _updater_locked(self, *, wait_seconds: float = 0.0) -> Iterator[None]:
+        with self._updater_lock_status(wait_seconds=wait_seconds) as acquired:
             if not acquired:
-                raise UpdateRefused("another local updater is running")
+                raise UpdateRefused("another local updater did not finish before timeout")
             yield
 
     @staticmethod
@@ -1307,15 +1380,15 @@ class SignedReleaseUpdater:
                     self._stop_service(deadline_monotonic=deadline_monotonic)
                 except UpdateRefused as exc:
                     stop_error = exc
+                if stop_error is not None:
+                    raise UpdateRefused(
+                        "first release failed readiness and could not be stopped; "
+                        "pending activation remains"
+                    ) from stop_error
                 _remove_current_symlink(
                     self.install_root, expected_target=pending["target_current"]
                 )
                 self._clear_pending(state)
-                if stop_error is not None:
-                    raise UpdateRefused(
-                        "first release failed readiness and the failed service "
-                        "could not be stopped"
-                    ) from stop_error
                 raise UpdateRefused(
                     "first release failed readiness and was deactivated"
                 ) from startup_error
@@ -1624,6 +1697,7 @@ class SignedReleaseUpdater:
         accepted.
         """
 
+        self._require_updater_lock_held_elsewhere()
         self._require_cycle_lock_held_elsewhere()
         require_idle_direct_writer_journal(self.journal)
         state = _read_update_state(self.state_root)
@@ -1669,8 +1743,56 @@ class SignedReleaseUpdater:
             raise UpdateRefused(
                 "in-flight start authorization changed during validation"
             )
+        self._require_updater_lock_held_elsewhere()
         self._require_cycle_lock_held_elsewhere()
         require_idle_direct_writer_journal(self.journal)
+
+    def _reconcile_boot_under_updater_lock(
+        self,
+        *,
+        cycle_wait_seconds: float,
+        deadline_monotonic: float,
+    ) -> None:
+        """Reconcile one ordinary service start while exclusively locked."""
+
+        state = _read_update_state(self.state_root)
+        selected = state.get("selected_channel")
+        if selected not in {"canary", "stable"}:
+            raise UpdateRefused("validator host has no selected release channel")
+        # Persist a safely inferred v2 channel and conservative pending stage.
+        _write_update_state(self.state_root, state)
+        pending = _validate_pending(state.get("pending"))
+        if pending is not None:
+            current = _current_target(self.install_root)
+            if current not in {
+                pending["previous_current"],
+                pending["target_current"],
+            }:
+                raise UpdateRefused("pending activation contradicts the current release")
+            wait_seconds = min(
+                float(cycle_wait_seconds),
+                _remaining_seconds(deadline_monotonic, label="boot cycle lock wait"),
+            )
+            with self._cycle_locked(wait_seconds=wait_seconds):
+                if pending["stage"] == _PENDING_PREPARED:
+                    if current == pending["target_current"]:
+                        previous = pending["previous_current"]
+                        if previous is None:
+                            _remove_current_symlink(
+                                self.install_root,
+                                expected_target=pending["target_current"],
+                            )
+                        else:
+                            _atomic_current_symlink(self.install_root, previous)
+                    state = self._clear_pending(state)
+                elif current == pending["target_current"]:
+                    # Once restart was durably authorized, the target might have
+                    # run. Never roll it back during boot; authorize that exact
+                    # signed record so a later higher sequence can rescue it.
+                    state = self._commit_pending(state)
+                else:
+                    state = self._clear_pending(state)
+        self._require_committed_current(state, deadline_monotonic=deadline_monotonic)
 
     def reconcile_boot(
         self,
@@ -1689,48 +1811,29 @@ class SignedReleaseUpdater:
         )
         with self._updater_lock_status() as acquired:
             if not acquired:
-                self._require_inflight_start_authorized(deadline_monotonic=deadline)
-                return "START_AUTHORIZED"
-            state = _read_update_state(self.state_root)
-            selected = state.get("selected_channel")
-            if selected not in {"canary", "stable"}:
-                raise UpdateRefused("validator host has no selected release channel")
-            # Persist a safely inferred v2 channel and conservative pending stage.
-            _write_update_state(self.state_root, state)
-            pending = _validate_pending(state.get("pending"))
-            if pending is not None:
-                current = _current_target(self.install_root)
-                if current not in {
-                    pending["previous_current"],
-                    pending["target_current"],
-                }:
-                    raise UpdateRefused(
-                        "pending activation contradicts the current release"
+                if self._cycle_lock_is_held_elsewhere():
+                    self._require_inflight_start_authorized(
+                        deadline_monotonic=deadline
                     )
-                wait_seconds = min(
-                    float(cycle_wait_seconds),
-                    _remaining_seconds(deadline, label="boot cycle lock wait"),
+                    return "START_AUTHORIZED"
+            else:
+                self._reconcile_boot_under_updater_lock(
+                    cycle_wait_seconds=cycle_wait_seconds,
+                    deadline_monotonic=deadline,
                 )
-                with self._cycle_locked(wait_seconds=wait_seconds):
-                    if pending["stage"] == _PENDING_PREPARED:
-                        if current == pending["target_current"]:
-                            previous = pending["previous_current"]
-                            if previous is None:
-                                _remove_current_symlink(
-                                    self.install_root,
-                                    expected_target=pending["target_current"],
-                                )
-                            else:
-                                _atomic_current_symlink(self.install_root, previous)
-                        state = self._clear_pending(state)
-                    elif current == pending["target_current"]:
-                        # Once restart was durably authorized, the target might have
-                        # run. Never roll it back during boot; authorize that exact
-                        # signed record so a later higher sequence can rescue it.
-                        state = self._commit_pending(state)
-                    else:
-                        state = self._clear_pending(state)
-            self._require_committed_current(state, deadline_monotonic=deadline)
+                return "RECONCILED"
+        # An updater before its cycle lock is not a nested systemd restart. Wait
+        # for it to finish, then reconcile under our own lock rather than
+        # authorizing an unrelated start against transient state.
+        wait_seconds = min(
+            float(cycle_wait_seconds),
+            _remaining_seconds(deadline, label="boot updater lock wait"),
+        )
+        with self._updater_locked(wait_seconds=wait_seconds):
+            self._reconcile_boot_under_updater_lock(
+                cycle_wait_seconds=cycle_wait_seconds,
+                deadline_monotonic=deadline,
+            )
         return "RECONCILED"
 
     def _update_release(
@@ -1792,6 +1895,10 @@ class SignedReleaseUpdater:
                 deadline_monotonic=deadline,
             )
             if pause_file.exists():
+                if rescue_pending is not None:
+                    raise UpdateRefused(
+                        "pending activation remains unresolved while updates are paused"
+                    )
                 return "PAUSED"
             if not allow_first_install and _current_target(self.install_root) is None:
                 raise UpdateRefused(
@@ -1896,6 +2003,10 @@ class SignedReleaseUpdater:
                     )
                 enforce_monotonic_release(state, release)
                 if pause_file.exists():
+                    if rescue_pending is not None:
+                        raise UpdateRefused(
+                            "pending activation remains unresolved while updates are paused"
+                        )
                     return "PAUSED"
                 require_idle_direct_writer_journal(self.journal)
                 previous = _current_target(self.install_root)
