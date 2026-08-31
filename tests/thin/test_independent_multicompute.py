@@ -559,6 +559,14 @@ def test_discovery_and_sat_share_the_same_reviewed_worker_pool(monkeypatch):
     lock = threading.Lock()
     active = 0
     maximum = 0
+    first_wave_active = 0
+    second_wave_active = 0
+    first_wave_started = threading.Event()
+    second_wave_started = threading.Event()
+    release_first_wave = threading.Event()
+    release_second_wave = threading.Event()
+    sat_started = threading.Event()
+    completed: dict[str, object] = {}
 
     def enter() -> None:
         nonlocal active, maximum
@@ -572,10 +580,23 @@ def test_discovery_and_sat_share_the_same_reviewed_worker_pool(monkeypatch):
             active -= 1
 
     def collect(*, axon, **kwargs):
+        nonlocal first_wave_active, second_wave_active
         enter()
         try:
-            if axon.uid >= fleet_score.MAX_CONCURRENT_MINERS:
-                time.sleep(0.12)
+            if axon.uid < fleet_score.MAX_CONCURRENT_MINERS:
+                with lock:
+                    first_wave_active += 1
+                    if first_wave_active == fleet_score.MAX_CONCURRENT_MINERS:
+                        first_wave_started.set()
+                if not release_first_wave.wait(timeout=2.0):
+                    raise AssertionError("first discovery wave was never released")
+            else:
+                with lock:
+                    second_wave_active += 1
+                    if second_wave_active == fleet_score.MAX_CONCURRENT_MINERS:
+                        second_wave_started.set()
+                if not release_second_wave.wait(timeout=2.0):
+                    raise AssertionError("second discovery wave was never released")
             return _bounded_miner_result(
                 axon, scoring_window=str(kwargs["anchor_hash"])
             )
@@ -585,22 +606,46 @@ def test_discovery_and_sat_share_the_same_reviewed_worker_pool(monkeypatch):
     def units(**_kwargs):
         enter()
         try:
-            time.sleep(0.005)
+            sat_started.set()
             return 20
         finally:
             leave()
 
+    def score() -> None:
+        try:
+            completed["result"] = fleet_score.score_multicompute_round(
+                axons=miners,
+                keypair=_runtime_keypair(),
+                anchor_hash="0x" + "0" * 64,
+                verifier_adapter=_runtime_adapter(),
+                cycle_deadline_monotonic=time.monotonic() + 2.2,
+            )
+        except BaseException as exc:
+            completed["error"] = exc
+
     monkeypatch.setattr(fleet_score, "_collect_miner_evidence", collect)
     monkeypatch.setattr(fleet_score, "_units_after_quote", units)
-    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.03)
-    monkeypatch.setattr(fleet_score, "MINER_RESPONSE_DEADLINE_SECONDS", 0.3)
-    result = fleet_score.score_multicompute_round(
-        axons=miners,
-        keypair=_runtime_keypair(),
-        anchor_hash="0x" + "0" * 64,
-        verifier_adapter=_runtime_adapter(),
-        cycle_deadline_monotonic=time.monotonic() + 0.35,
-    )
+    monkeypatch.setattr(fleet_score, "DISCOVERY_RESPONSE_DEADLINE_SECONDS", 0.75)
+    monkeypatch.setattr(fleet_score, "MINER_RESPONSE_DEADLINE_SECONDS", 2.0)
+    worker = threading.Thread(target=score, daemon=True)
+    worker.start()
+    try:
+        assert first_wave_started.wait(timeout=1.0)
+        assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
+        release_first_wave.set()
+        assert second_wave_started.wait(timeout=1.0)
+        assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
+        assert not sat_started.wait(timeout=1.0)
+        assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
+    finally:
+        release_first_wave.set()
+        release_second_wave.set()
+        worker.join(timeout=3.0)
+
+    assert not worker.is_alive()
+    if "error" in completed:
+        raise completed["error"]
+    result = completed["result"]
 
     assert maximum == fleet_score.MAX_CONCURRENT_MINERS == 32
     assert len(result.verified_units) == 32
