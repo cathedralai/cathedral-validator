@@ -385,9 +385,10 @@ def _fake_runner(
         if command[1:4] == ["-m", "venv", command[-1]]:
             version = Path(command[-1])
             (version / "bin").mkdir(parents=True, exist_ok=True)
-            python = version / "bin" / "python"
+            python = version / "bin" / installer.VENV_INTERPRETER_NAME
             python.write_text("#!/bin/sh\nexit 0\n")
             python.chmod(0o755)
+            (version / "bin" / "python").symlink_to(installer.VENV_INTERPRETER_NAME)
             updater = version / "bin" / "cathedral-validator-update"
             updater.write_text(f"#!{python}\nexit 0\n")
             updater.chmod(0o755)
@@ -1063,6 +1064,14 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
         root / "usr/local/share/cathedral-validator-updater/bootstrap/"
         "install_updater_bundle.py"
     ).read_bytes() == verified.files[installer.INSTALLER_ARCHIVE_PATH].body
+    version = (
+        root
+        / "usr/local/lib/cathedral-validator-updater-releases"
+        / verified.manifest_sha256
+    )
+    assert (version / "bin" / "cathedral-validator-update").read_text(
+        encoding="utf-8"
+    ).splitlines()[0] == f"#!{version}/bin/{installer.VENV_INTERPRETER_NAME}"
 
     before = {
         path.relative_to(root): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1113,6 +1122,47 @@ def test_missing_python_venv_support_refuses_before_mutation(tmp_path):
         )
     assert len(calls) == 1
     assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("interpreter_kind", ["non_versioned", "staging"])
+def test_installed_updater_entry_point_requires_final_versioned_interpreter(
+    tmp_path, interpreter_kind
+):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+    version = (
+        root
+        / "usr/local/lib/cathedral-validator-updater-releases"
+        / verified.manifest_sha256
+    )
+    executable = version / "bin" / "cathedral-validator-update"
+    if interpreter_kind == "non_versioned":
+        interpreter = version / "bin" / "python"
+    else:
+        interpreter = (
+            root
+            / "usr/local/lib/cathedral-validator-updater-staging"
+            / "abandoned"
+            / "bin"
+            / installer.VENV_INTERPRETER_NAME
+        )
+    executable.write_text(f"#!{interpreter}\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    with pytest.raises(installer.InstallRefused, match="wrong interpreter"):
+        installer._validate_installed_venv(
+            version,
+            verified,
+            expected_owner=os.geteuid(),
+        )
 
 
 def test_install_sets_traversable_service_paths_under_owner_only_umask(tmp_path):
@@ -1522,7 +1572,8 @@ def test_release_tree_fsyncs_files_and_directories_without_following_symlinks(
     real_python = bin_dir / "python-real"
     real_python.write_bytes(b"#!/bin/sh\nexit 0\n")
     real_python.chmod(0o755)
-    (bin_dir / "python").symlink_to("python-real")
+    (bin_dir / installer.VENV_INTERPRETER_NAME).symlink_to("python-real")
+    (bin_dir / "python").symlink_to(installer.VENV_INTERPRETER_NAME)
     module = package_dir / "module.py"
     module.write_bytes(b"VALUE = 1\n")
     module.chmod(0o644)

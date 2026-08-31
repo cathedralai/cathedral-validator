@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cathedral-scaffold"
-version = "4.0.0-rc.9"
+version = "4.0.0-rc.10"
 description = "Cathedral SN39 direct confidential-compute validator"
 requires-python = ">=3.11"
 # Validator-runtime deps only. The supported validator discovers miner fleets,
