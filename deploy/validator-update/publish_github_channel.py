@@ -437,9 +437,10 @@ def publish(
             ),
             existing_sha=pointer_sha,
         )
+    encoded_branch = urllib.parse.quote(publication.channel_branch, safe="")
     raw_url = (
         f"https://raw.githubusercontent.com/{publication.repository}/"
-        f"{publication.channel_branch}/{publication.pointer_path}"
+        f"{encoded_branch}/{publication.pointer_path}"
     )
     if _anonymous_fetch(raw_url, maximum=1_048_576) != publication.metadata:
         raise UpdateRefused(

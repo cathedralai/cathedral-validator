@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  private-key-custody:
+    name: Reject tracked private PEM keys
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Refuse private-key PEM markers in tracked files
+        run: |
+          matches="$(git grep -nE -- '-----BEGIN (ENCRYPTED )?PRIVATE KEY-----' || true)"
+          if [ -n "$matches" ]; then
+            printf '%s\n' "$matches"
+            echo 'Tracked private PEM material is forbidden. Public PEM is allowed.'
+            exit 1
+          fi
+
   tests:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -325,31 +340,15 @@ jobs:
               or first[0].read_bytes() != second[0].read_bytes()
           ):
               raise SystemExit("project wheel build is not reproducible")
-          requirement = (
-              "cathedral-scaffold[snp-production] @ "
-              + first[0].resolve().as_uri()
-          )
-          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
-              output.write(f"VALIDATOR_REQUIREMENT={requirement}\n")
           PY
 
-      - name: Resolve the strict production release lock
+      - name: Build the real relocatable validator twice from the committed lock
         run: |
-          pex3 lock create \
-            --style strict \
-            "$VALIDATOR_REQUIREMENT" \
-            'cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb' \
-            --python "$(command -v python)" \
-            --interpreter-constraint 'CPython==3.12.*' \
-            --no-build \
-            --indent 2 \
-            --output /tmp/cathedral-validator.pex.lock
-
-      - name: Build the real relocatable validator twice
-        run: |
+          project_wheel="$(find /tmp/cathedral-validator-project-one -maxdepth 1 -name '*.whl' -print -quit)"
           for output in /tmp/cathedral-validator-one.pex /tmp/cathedral-validator-two.pex; do
             pex \
-              --lock /tmp/cathedral-validator.pex.lock \
+              --lock requirements/validator-release-cpython312-linux-x86_64.pex.lock \
+              --project "$project_wheel" \
               --python "$(command -v python)" \
               --interpreter-constraint 'CPython==3.12.*' \
               --entry-point cathedral_thin.independent_runtime.direct_validator:main \
@@ -362,6 +361,33 @@ jobs:
             chmod 0555 "$output"
           done
           cmp /tmp/cathedral-validator-one.pex /tmp/cathedral-validator-two.pex
+
+      - name: Bind the real PEX to the committed runtime lock
+        run: |
+          python - <<'PY'
+          import hashlib
+          import io
+          import json
+          import zipfile
+          from pathlib import Path
+
+          lock = Path("requirements/validator-release-cpython312-linux-x86_64.pex.lock")
+          pex = Path("/tmp/cathedral-validator-one.pex")
+          with zipfile.ZipFile(io.BytesIO(pex.read_bytes()), mode="r") as bundle:
+              info = bundle.read("PEX-INFO")
+              distributions = json.loads(info)["distributions"]
+          document = {
+              "schema": "cathedral_validator_pex_distributions_v1",
+              "runtime_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+              "pex_sha256": hashlib.sha256(pex.read_bytes()).hexdigest(),
+              "pex_info_sha256": hashlib.sha256(info).hexdigest(),
+              "distributions": distributions,
+          }
+          Path("/tmp/cathedral-validator.pex-distributions.json").write_text(
+              json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="ascii",
+          )
+          PY
 
       - name: Validate, extract, and start the exact signed-release payload
         run: |
@@ -394,6 +420,12 @@ jobs:
               release,
               qvl=Path("/tmp/cathedral-tdx-verifier"),
               snpguest=Path("/tmp/snpguest"),
+              runtime_lock=Path(
+                  "requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+              ),
+              runtime_distributions=Path(
+                  "/tmp/cathedral-validator.pex-distributions.json"
+              ),
               source_revision=os.environ["GITHUB_SHA"],
           )
           PY

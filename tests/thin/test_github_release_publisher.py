@@ -96,7 +96,12 @@ def _metadata(
     )
 
 
-def _validated(tmp_path: Path, *, sequence: int = 1):
+def _validated(
+    tmp_path: Path,
+    *,
+    sequence: int = 1,
+    channel_branch: str = "validator-release-channel",
+):
     publisher = _publisher()
     private, public_path = _key(tmp_path)
     archive = _archive()
@@ -109,6 +114,7 @@ def _validated(tmp_path: Path, *, sequence: int = 1):
         metadata_path=metadata_path,
         archive_path=archive_path,
         public_key_path=public_path,
+        channel_branch=channel_branch,
         now_unix=NOW,
     )
     return publisher, private, public_path, archive_path, publication
@@ -122,6 +128,70 @@ def test_validate_publication_binds_archive_url_name_and_source(tmp_path: Path) 
     assert publication.tag == f"validator-{publication.archive_sha256}"
     assert publication.source_revision == SOURCE_REVISION
     assert publication.history_path.endswith(f"1-{publication.metadata_sha256}.json")
+
+
+def test_github_release_create_uses_one_exact_title_argument(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, _public, archive_path, publication = _validated(tmp_path)
+    github = publisher["GitHub"](publication.repository)
+    calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(github, "api", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        github,
+        "_run",
+        lambda arguments, **_kwargs: calls.append(tuple(arguments)),
+    )
+
+    github.ensure_release(publication, archive_path)
+    assert calls == [
+        (
+            "release",
+            "create",
+            publication.tag,
+            str(archive_path),
+            "--repo",
+            publication.repository,
+            "--target",
+            publication.source_revision,
+            "--title",
+            publication.tag,
+            "--notes-file",
+            "-",
+            "--prerelease",
+        )
+    ]
+
+
+def test_isolated_channel_branch_is_url_encoded_for_github_refs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(
+        tmp_path, channel_branch="validator-release-channel/fault"
+    )
+    github = publisher["GitHub"](publication.repository)
+    calls: list[tuple[str, object]] = []
+
+    def api(endpoint: str, **kwargs):
+        calls.append((endpoint, kwargs.get("payload")))
+        return None
+
+    monkeypatch.setattr(github, "api", api)
+    github.ensure_branch(publication)
+    assert calls == [
+        (
+            "git/ref/heads/validator-release-channel%2Ffault",
+            None,
+        ),
+        (
+            "git/refs",
+            {
+                "ref": "refs/heads/validator-release-channel/fault",
+                "sha": SOURCE_REVISION,
+            },
+        ),
+    ]
 
 
 def test_validate_publication_rejects_tamper_and_noncanonical_name(

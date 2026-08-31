@@ -7,6 +7,7 @@ import runpy
 import stat
 import time
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 from cathedral_thin.independent_runtime.updater import (
-    UpdateRefused,
     extract_release_archive,
     parse_release_metadata,
     release_tree_sha256,
@@ -87,14 +87,47 @@ def _executable(path: Path, body: bytes) -> None:
     path.chmod(0o755)
 
 
-def _inputs(tmp_path: Path, *, marker: bytes = b"one") -> tuple[Path, Path, Path]:
+def _inputs(
+    tmp_path: Path, *, marker: bytes = b"one"
+) -> tuple[Path, Path, Path, Path, Path]:
     pex = tmp_path / f"validator-{marker.decode()}.pex"
     qvl = tmp_path / f"qvl-{marker.decode()}"
     snpguest = tmp_path / f"snpguest-{marker.decode()}"
     _validator_pex(pex)
     _executable(qvl, b"#!/bin/sh\n# qvl " + marker + b"\n")
     _executable(snpguest, b"#!/bin/sh\n# snpguest " + marker + b"\n")
-    return pex, qvl, snpguest
+    runtime_lock = tmp_path / f"runtime-{marker.decode()}.pex.lock"
+    runtime_lock.write_bytes(
+        canonical_document_bytes(
+            {
+                "style": "strict",
+                "pex_version": "2.101.1",
+                "locked_resolves": [
+                    {"platform_tag": ["cp312", "cp312", "manylinux_2_17_x86_64"]}
+                ],
+            }
+        )
+    )
+    runtime_lock.chmod(0o644)
+    raw = pex.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as bundle:
+        info = bundle.read("PEX-INFO")
+    runtime_distributions = tmp_path / f"runtime-{marker.decode()}.json"
+    runtime_distributions.write_bytes(
+        canonical_document_bytes(
+            {
+                "schema": "cathedral_validator_pex_distributions_v1",
+                "runtime_lock_sha256": hashlib.sha256(
+                    runtime_lock.read_bytes()
+                ).hexdigest(),
+                "pex_sha256": hashlib.sha256(raw).hexdigest(),
+                "pex_info_sha256": hashlib.sha256(info).hexdigest(),
+                "distributions": json.loads(info)["distributions"],
+            }
+        )
+    )
+    runtime_distributions.chmod(0o644)
+    return pex, qvl, snpguest, runtime_lock, runtime_distributions
 
 
 def _build(
@@ -107,15 +140,18 @@ def _build(
     source_revision: str = SOURCE_REVISION,
     issued_unix: int = NOW,
 ) -> tuple[Path, Path]:
-    pex, qvl, snpguest = _inputs(tmp_path, marker=name.encode())
-    archive = tmp_path / f"{name}.tar.gz"
+    pex, qvl, snpguest, runtime_lock, runtime_distributions = _inputs(
+        tmp_path, marker=name.encode()
+    )
     metadata = tmp_path / f"{name}.json"
-    builder["build_canary"](
+    archive = builder["build_canary"](
         pex=pex,
         qvl=qvl,
         snpguest=snpguest,
+        runtime_lock=runtime_lock,
+        runtime_distributions=runtime_distributions,
         source_revision=source_revision,
-        archive_out=archive,
+        archive_out_dir=tmp_path / f"{name}-archives",
         metadata_out=metadata,
         archive_url_template=ARCHIVE_URL_TEMPLATE,
         sequence=sequence,
@@ -136,23 +172,64 @@ def _release(metadata: Path, private: Ed25519PrivateKey, channel: str = "canary"
     )
 
 
+def test_self_contained_signer_parser_matches_installed_updater(
+    tmp_path: Path,
+) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    _archive, metadata = _build(
+        builder, tmp_path, private, name="parser-parity", sequence=1
+    )
+    raw = metadata.read_bytes()
+    now = json.loads(raw)["signed"]["issued_unix"]
+
+    signer_release = builder["parse_release_metadata"](
+        raw,
+        channel="canary",
+        public_key=private.public_key(),
+        now_unix=now,
+    )
+    updater_release = parse_release_metadata(
+        raw,
+        channel="canary",
+        public_key=private.public_key(),
+        now_unix=now,
+    )
+    assert asdict(signer_release) == asdict(updater_release)
+
+    for malformed, expected in (
+        (b"{}", "release metadata fields are invalid"),
+        (raw[:-2], "release metadata is not strict JSON"),
+    ):
+        for parser in (builder["parse_release_metadata"], parse_release_metadata):
+            with pytest.raises(RuntimeError) as refused:
+                parser(
+                    malformed,
+                    channel="canary",
+                    public_key=private.public_key(),
+                    now_unix=now,
+                )
+            assert str(refused.value) == expected
+
+
 def test_strict_canary_binds_all_runtime_files_and_is_deterministic(
     tmp_path: Path,
 ) -> None:
     builder = _builder()
     private = Ed25519PrivateKey.generate()
-    pex, qvl, snpguest = _inputs(tmp_path)
+    pex, qvl, snpguest, runtime_lock, runtime_distributions = _inputs(tmp_path)
 
     outputs: list[tuple[Path, Path]] = []
     for suffix in ("first", "second"):
-        archive = tmp_path / f"{suffix}.tar.gz"
         metadata = tmp_path / f"{suffix}.json"
-        builder["build_canary"](
+        archive = builder["build_canary"](
             pex=pex,
             qvl=qvl,
             snpguest=snpguest,
+            runtime_lock=runtime_lock,
+            runtime_distributions=runtime_distributions,
             source_revision=SOURCE_REVISION,
-            archive_out=archive,
+            archive_out_dir=tmp_path / f"{suffix}-archives",
             metadata_out=metadata,
             archive_url_template=ARCHIVE_URL_TEMPLATE,
             sequence=4,
@@ -180,6 +257,9 @@ def test_strict_canary_binds_all_runtime_files_and_is_deterministic(
     assert manifest == {
         "entry_point": "cathedral_thin.independent_runtime.direct_validator:main",
         "interpreter_constraints": ["CPython==3.12.*"],
+        "pex_distributions": json.loads((runtime_distributions).read_text())[
+            "distributions"
+        ],
         "pex_info_sha256": manifest["pex_info_sha256"],
         "pex_sha256": hashlib.sha256(pex.read_bytes()).hexdigest(),
         "project_distribution": "cathedral_scaffold-1.2.3-py3-none-any.whl",
@@ -189,6 +269,7 @@ def test_strict_canary_binds_all_runtime_files_and_is_deterministic(
         "snpguest_path": "bin/snpguest",
         "snpguest_sha256": hashlib.sha256(snpguest.read_bytes()).hexdigest(),
         "source_revision": SOURCE_REVISION,
+        "runtime_lock_sha256": hashlib.sha256(runtime_lock.read_bytes()).hexdigest(),
         "telemetry_module": ("cathedral_thin.independent_runtime.telemetry_exporter"),
     }
     assert (extracted / manifest["qvl_path"]).read_bytes() == qvl.read_bytes()
@@ -208,8 +289,9 @@ def test_strict_canary_binds_all_runtime_files_and_is_deterministic(
 def test_source_revision_requires_exact_lowercase_commit(
     revision: object,
 ) -> None:
-    with pytest.raises(UpdateRefused, match="source revision"):
-        _builder()["_source_revision"](revision)
+    builder = _builder()
+    with pytest.raises(builder["UpdateRefused"], match="source revision"):
+        builder["_source_revision"](revision)
 
 
 def test_strict_canary_rejects_uncontrolled_verifiers(tmp_path: Path) -> None:
@@ -219,18 +301,18 @@ def test_strict_canary_rejects_uncontrolled_verifiers(tmp_path: Path) -> None:
 
     link = tmp_path / "link"
     link.symlink_to(target)
-    with pytest.raises(UpdateRefused, match="unavailable"):
+    with pytest.raises(builder["UpdateRefused"], match="unavailable"):
         builder["_validated_executable"](link, label="QVL")
 
     target.chmod(0o775)
-    with pytest.raises(UpdateRefused, match="owner-controlled executable"):
+    with pytest.raises(builder["UpdateRefused"], match="owner-controlled executable"):
         builder["_validated_executable"](target, label="QVL")
 
     target.chmod(0o600)
-    with pytest.raises(UpdateRefused, match="owner-controlled executable"):
+    with pytest.raises(builder["UpdateRefused"], match="owner-controlled executable"):
         builder["_validated_executable"](target, label="QVL")
 
-    with pytest.raises(UpdateRefused, match="path must be absolute"):
+    with pytest.raises(builder["UpdateRefused"], match="path must be absolute"):
         builder["_validated_executable"](Path("relative-qvl"), label="QVL")
 
 
@@ -239,16 +321,18 @@ def test_canary_refuses_a_bundle_larger_than_the_updater_accepts(
 ) -> None:
     builder = _builder()
     private = Ed25519PrivateKey.generate()
-    pex, qvl, snpguest = _inputs(tmp_path)
+    pex, qvl, snpguest, runtime_lock, runtime_distributions = _inputs(tmp_path)
     builder["build_canary"].__globals__["MAX_TREE_BYTES"] = 1
 
-    with pytest.raises(UpdateRefused, match="updater tree limit"):
+    with pytest.raises(builder["UpdateRefused"], match="updater tree limit"):
         builder["build_canary"](
             pex=pex,
             qvl=qvl,
             snpguest=snpguest,
+            runtime_lock=runtime_lock,
+            runtime_distributions=runtime_distributions,
             source_revision=SOURCE_REVISION,
-            archive_out=tmp_path / "oversized.tar.gz",
+            archive_out_dir=tmp_path / "oversized-archives",
             metadata_out=tmp_path / "oversized.json",
             archive_url_template=ARCHIVE_URL_TEMPLATE,
             sequence=1,
@@ -278,8 +362,9 @@ def test_canary_refuses_a_bundle_larger_than_the_updater_accepts(
     ),
 )
 def test_archive_url_template_is_exactly_content_addressed(template: str) -> None:
-    with pytest.raises(UpdateRefused, match="archive URL"):
-        _builder()["_archive_url_from_template"](template, "a" * 64)
+    builder = _builder()
+    with pytest.raises(builder["UpdateRefused"], match="archive URL"):
+        builder["_archive_url_from_template"](template, "a" * 64)
 
 
 def test_canary_rollback_resigns_retained_bytes_then_promotes_exactly(
@@ -349,6 +434,29 @@ def test_canary_rollback_resigns_retained_bytes_then_promotes_exactly(
     assert stable.promoted_canary_metadata_sha256 == rollback_release.metadata_sha256
 
 
+def test_promote_stable_refuses_a_symlinked_canary_metadata(tmp_path: Path) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    _archive, canary_metadata = _build(
+        builder, tmp_path, private, name="canary", sequence=1
+    )
+    linked_metadata = tmp_path / "linked-canary.json"
+    linked_metadata.symlink_to(canary_metadata)
+
+    with pytest.raises(
+        builder["UpdateRefused"], match="canary metadata is unavailable"
+    ):
+        builder["promote_stable"](
+            canary_metadata=linked_metadata,
+            metadata_out=tmp_path / "stable.json",
+            sequence=1,
+            private_key=private,
+            issued_unix=NOW,
+            lifetime_seconds=3600,
+            enforce_content_addressed=True,
+        )
+
+
 def test_canary_rollback_refuses_replay_and_wrong_retained_bytes(
     tmp_path: Path,
 ) -> None:
@@ -372,20 +480,22 @@ def test_canary_rollback_refuses_replay_and_wrong_retained_bytes(
     }
 
     for sequence in (4, 5):
-        with pytest.raises(UpdateRefused, match="must exceed"):
+        with pytest.raises(builder["UpdateRefused"], match="must exceed"):
             builder["resign_canary"](sequence=sequence, **arguments)
 
     _future_archive, future_metadata = _build(
         builder, tmp_path, private, name="future", sequence=7
     )
-    with pytest.raises(UpdateRefused, match="retained canary sequence"):
+    with pytest.raises(builder["UpdateRefused"], match="retained canary sequence"):
         builder["resign_canary"](
             sequence=6,
             **(arguments | {"retained_metadata": future_metadata}),
         )
 
     retained_archive.write_bytes(retained_archive.read_bytes() + b"tampered")
-    with pytest.raises(UpdateRefused, match="does not match signed metadata"):
+    with pytest.raises(
+        builder["UpdateRefused"], match="does not match signed metadata"
+    ):
         builder["resign_canary"](sequence=6, **arguments)
 
 
@@ -417,7 +527,9 @@ def test_canary_rollback_revalidates_inner_runtime_manifest(tmp_path: Path) -> N
     tampered_metadata = tmp_path / "tampered.json"
     tampered_metadata.write_bytes(builder["_signed_envelope"](signed, private))
 
-    with pytest.raises(UpdateRefused, match="QVL does not match RELEASE.json"):
+    with pytest.raises(
+        builder["UpdateRefused"], match="QVL does not match RELEASE.json"
+    ):
         builder["resign_canary"](
             current_canary_metadata=current_metadata,
             retained_metadata=tampered_metadata,

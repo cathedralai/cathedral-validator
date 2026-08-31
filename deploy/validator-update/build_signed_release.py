@@ -26,24 +26,337 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
-from cathedral_thin.independent_runtime.updater import (
-    MAX_ARCHIVE_BYTES,
-    MAX_METADATA_LIFETIME_SECONDS,
-    MAX_METADATA_BYTES,
-    MAX_TREE_BYTES,
-    METADATA_SCHEMA,
-    UpdateRefused,
-    extract_release_archive,
-    parse_release_metadata,
-    release_tree_sha256,
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
 )
+
+# Keep this signer self-contained. It is invoked with a decrypted release key,
+# so importing Python from the checkout would let an untrusted working tree
+# alter parsing or capture the key. The parser and archive rules intentionally
+# mirror the installed updater contract. test_signed_release_builder asserts
+# parser parity against that contract.
+METADATA_SCHEMA = "cathedral_validator_release_v1"
+MAX_METADATA_LIFETIME_SECONDS = 14 * 24 * 60 * 60
+MAX_METADATA_BYTES = 131_072
+MAX_ARCHIVE_BYTES = 536_870_912
+MAX_TREE_FILES = 20_000
+MAX_TREE_BYTES = 1_073_741_824
+_HEX = frozenset("0123456789abcdef")
+
+
+class UpdateRefused(RuntimeError):
+    """The offline signer refused an unsafe release input."""
+
+
+@dataclass(frozen=True)
+class Release:
+    channel: str
+    sequence: int
+    issued_unix: int
+    expires_unix: int
+    version: str
+    archive_url: str
+    archive_sha256: str
+    tree_sha256: str
+    entrypoint: str
+    signed_sha256: str
+    metadata_sha256: str
+    promoted_canary_sequence: int | None = None
+    promoted_canary_signed_sha256: str | None = None
+    promoted_canary_metadata_sha256: str | None = None
+
+
+def canonical_document_bytes(document: Mapping[str, Any]) -> bytes:
+    try:
+        text = json.dumps(
+            document,
+            sort_keys=True,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise UpdateRefused("release metadata is not canonical JSON data") from exc
+    return (text + "\n").encode("ascii")
+
+
+def _strict_json(raw: bytes, *, label: str) -> dict[str, Any]:
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in output:
+                raise UpdateRefused(f"{label} repeats key {key!r}")
+            output[key] = value
+        return output
+
+    try:
+        decoded = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateRefused(f"{label} is not strict JSON") from exc
+    if not isinstance(decoded, dict):
+        raise UpdateRefused(f"{label} is not an object")
+    return decoded
+
+
+def _sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _hex_digest(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(item not in _HEX for item in value)
+    ):
+        raise UpdateRefused(f"{label} is not a lower-case SHA-256 digest")
+    return value
+
+
+def _https_url(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or len(value) > 4096:
+        raise UpdateRefused(f"{label} is invalid")
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+    ):
+        raise UpdateRefused(f"{label} must be an HTTPS URL without credentials")
+    return value
+
+
+def _entrypoint(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise UpdateRefused("release entrypoint is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
+        raise UpdateRefused("release entrypoint escapes its release")
+    return str(path)
+
+
+def parse_release_metadata(
+    raw: bytes,
+    *,
+    channel: str,
+    public_key: Ed25519PublicKey,
+    now_unix: int | None = None,
+) -> Release:
+    """Verify the signer/updater metadata contract without importing the repo."""
+
+    if len(raw) > MAX_METADATA_BYTES:
+        raise UpdateRefused("release metadata exceeds its size limit")
+    envelope = _strict_json(raw, label="release metadata")
+    if set(envelope) != {"signed", "signature"}:
+        raise UpdateRefused("release metadata fields are invalid")
+    signed = envelope["signed"]
+    signature = envelope["signature"]
+    if not isinstance(signed, dict) or not isinstance(signature, str):
+        raise UpdateRefused("release metadata shape is invalid")
+    try:
+        signature_bytes = base64.b64decode(signature.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise UpdateRefused("release metadata signature is not base64") from exc
+    payload = canonical_document_bytes(signed)
+    try:
+        public_key.verify(signature_bytes, payload)
+    except InvalidSignature as exc:
+        raise UpdateRefused("release metadata signature is invalid") from exc
+    if set(signed) != {
+        "schema",
+        "channel",
+        "sequence",
+        "issued_unix",
+        "expires_unix",
+        "release",
+    }:
+        raise UpdateRefused("signed release metadata fields are invalid")
+    if signed["schema"] != METADATA_SCHEMA or signed["channel"] != channel:
+        raise UpdateRefused("release metadata is for a different channel")
+    sequence = signed["sequence"]
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 1 <= sequence <= 2**63 - 1
+    ):
+        raise UpdateRefused("release sequence is invalid")
+    issued_unix = signed["issued_unix"]
+    expires_unix = signed["expires_unix"]
+    if (
+        isinstance(issued_unix, bool)
+        or not isinstance(issued_unix, int)
+        or issued_unix < 1
+        or isinstance(expires_unix, bool)
+        or not isinstance(expires_unix, int)
+        or expires_unix <= issued_unix
+        or expires_unix - issued_unix > MAX_METADATA_LIFETIME_SECONDS
+    ):
+        raise UpdateRefused("release metadata validity window is invalid")
+    observed_now = int(time.time()) if now_unix is None else now_unix
+    if observed_now < issued_unix - 300:
+        raise UpdateRefused("release metadata is not valid yet")
+    if observed_now >= expires_unix:
+        raise UpdateRefused("release metadata has expired")
+    release = signed["release"]
+    if not isinstance(release, dict):
+        raise UpdateRefused("release metadata has no release object")
+    expected = {
+        "version",
+        "archive_url",
+        "archive_sha256",
+        "tree_sha256",
+        "entrypoint",
+    }
+    if channel == "stable":
+        expected.add("promoted_canary")
+    if set(release) != expected:
+        raise UpdateRefused("release fields are invalid")
+    version = release["version"]
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        or not version.isascii()
+    ):
+        raise UpdateRefused("release version is invalid")
+    archive_sha256 = _hex_digest(release["archive_sha256"], label="archive digest")
+    promoted_sequence: int | None = None
+    promoted_signed: str | None = None
+    promoted_metadata: str | None = None
+    if channel == "stable":
+        promoted = release["promoted_canary"]
+        if not isinstance(promoted, dict) or set(promoted) != {
+            "sequence",
+            "signed_sha256",
+            "metadata_sha256",
+            "archive_sha256",
+        }:
+            raise UpdateRefused("stable release has no exact signed canary record")
+        promoted_sequence = promoted["sequence"]
+        if (
+            isinstance(promoted_sequence, bool)
+            or not isinstance(promoted_sequence, int)
+            or not 1 <= promoted_sequence <= 2**63 - 1
+        ):
+            raise UpdateRefused("promoted canary sequence is invalid")
+        promoted_signed = _hex_digest(
+            promoted["signed_sha256"], label="promoted canary signed digest"
+        )
+        promoted_metadata = _hex_digest(
+            promoted["metadata_sha256"], label="promoted canary metadata digest"
+        )
+        if promoted.get("archive_sha256") != archive_sha256:
+            raise UpdateRefused(
+                "stable release is not the exact promoted canary archive"
+            )
+    return Release(
+        channel=channel,
+        sequence=sequence,
+        issued_unix=issued_unix,
+        expires_unix=expires_unix,
+        version=version,
+        archive_url=_https_url(release["archive_url"], label="archive URL"),
+        archive_sha256=archive_sha256,
+        tree_sha256=_hex_digest(release["tree_sha256"], label="tree digest"),
+        entrypoint=_entrypoint(release["entrypoint"]),
+        signed_sha256=_sha256(payload),
+        metadata_sha256=_sha256(raw),
+        promoted_canary_sequence=promoted_sequence,
+        promoted_canary_signed_sha256=promoted_signed,
+        promoted_canary_metadata_sha256=promoted_metadata,
+    )
+
+
+def _safe_member_path(name: str) -> PurePosixPath:
+    path = PurePosixPath(name)
+    if (
+        not name
+        or path.is_absolute()
+        or ".." in path.parts
+        or path == PurePosixPath(".")
+    ):
+        raise UpdateRefused("release archive has an unsafe member path")
+    return path
+
+
+def extract_release_archive(archive: bytes, destination: Path) -> None:
+    """Extract the updater's bounded regular-file-only archive format."""
+
+    if destination.exists() or destination.is_symlink():
+        raise UpdateRefused("release extraction destination already exists")
+    destination.mkdir(mode=0o755, parents=True)
+    total = 0
+    count = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as bundle:
+            for member in bundle:
+                path = _safe_member_path(member.name)
+                if member.isdir():
+                    (destination / path).mkdir(mode=0o755, parents=True, exist_ok=True)
+                    continue
+                if not member.isfile() or member.size < 0:
+                    raise UpdateRefused("release archive contains a non-regular member")
+                count += 1
+                total += member.size
+                if count > MAX_TREE_FILES or total > MAX_TREE_BYTES:
+                    raise UpdateRefused("release archive exceeds extraction limits")
+                target = destination / path
+                target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                source = bundle.extractfile(member)
+                if source is None:
+                    raise UpdateRefused("release archive member is unreadable")
+                with target.open("xb") as output:
+                    while chunk := source.read(65_536):
+                        output.write(chunk)
+                    output.flush()
+                    os.fchmod(output.fileno(), 0o555 if member.mode & 0o111 else 0o444)
+                    os.fsync(output.fileno())
+        for root, _directories, _files in os.walk(destination, topdown=False):
+            os.chmod(root, 0o755)
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            descriptor = os.open(root, flags)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    except (tarfile.TarError, OSError) as exc:
+        raise UpdateRefused("release archive extraction failed") from exc
+
+
+def release_tree_sha256(root: Path) -> str:
+    """Hash release paths and bytes, with no metadata, links, or special files."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise UpdateRefused("release tree is invalid")
+    entries: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise UpdateRefused("release tree contains a symlink")
+        if path.is_file():
+            entries.append(path)
+        elif not path.is_dir():
+            raise UpdateRefused("release tree contains an unsupported file")
+    digest = hashlib.sha256()
+    for path in sorted(entries, key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(path.stat().st_size.to_bytes(8, "big"))
+        with path.open("rb") as handle:
+            while chunk := handle.read(65_536):
+                digest.update(chunk)
+    return digest.hexdigest()
+
 
 VALIDATOR_PEX_ENTRY_POINT = "cathedral_thin.independent_runtime.direct_validator:main"
 TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
+RUNTIME_DISTRIBUTIONS_SCHEMA = "cathedral_validator_pex_distributions_v1"
 VALIDATOR_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 QVL_RELEASE_PATH = "bin/cathedral-tdx-verifier"
 SNPGUEST_RELEASE_PATH = "bin/snpguest"
@@ -78,6 +391,7 @@ class ValidatedPex:
     project_distribution: str
     version: str
     interpreter_constraints: tuple[str, ...]
+    distributions: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -137,6 +451,39 @@ def _atomic_write(path: Path, body: bytes, *, mode: int) -> None:
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def _write_content_addressed_archive(directory: Path, archive: bytes) -> Path:
+    """Atomically retain one archive under the only filename the publisher accepts."""
+
+    if not directory.is_absolute() or directory.is_symlink():
+        raise UpdateRefused(
+            "archive output directory must be absolute and not a symlink"
+        )
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = directory.stat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise UpdateRefused("archive output directory is not owner-controlled")
+    digest = hashlib.sha256(archive).hexdigest()
+    target = directory / f"cathedral-validator-{digest}.tar.gz"
+    if target.exists() or target.is_symlink():
+        retained = _owner_controlled_file(
+            target,
+            label="existing content-addressed archive",
+            maximum_bytes=MAX_ARCHIVE_BYTES,
+            executable=False,
+        )
+        if retained != archive:
+            raise UpdateRefused(
+                "content-addressed archive path already has other bytes"
+            )
+        return target
+    _atomic_write(target, archive, mode=0o644)
+    return target
 
 
 def _source_revision(value: object) -> str:
@@ -274,6 +621,89 @@ def _archive_url_from_template(template: object, archive_sha256: str) -> str:
     )
 
 
+def _runtime_lock_sha256(path: Path) -> str:
+    """Accept only the reviewed Linux CPython 3.12 strict PEX lock."""
+
+    raw = _owner_controlled_file(
+        path,
+        label="runtime lock",
+        maximum_bytes=8 * 1024 * 1024,
+        executable=False,
+    )
+    lock = _strict_json_object(raw, label="runtime lock")
+    resolves = lock.get("locked_resolves")
+    if (
+        lock.get("style") != "strict"
+        or lock.get("pex_version") != "2.101.1"
+        or not isinstance(resolves, list)
+        or len(resolves) != 1
+    ):
+        raise UpdateRefused("runtime lock is not the reviewed strict PEX lock")
+    platform_tag = (
+        resolves[0].get("platform_tag") if isinstance(resolves[0], dict) else None
+    )
+    if (
+        not isinstance(platform_tag, list)
+        or len(platform_tag) != 3
+        or platform_tag[0] != "cp312"
+        or platform_tag[1] != "cp312"
+        or not isinstance(platform_tag[2], str)
+        or "linux" not in platform_tag[2]
+        and "manylinux" not in platform_tag[2]
+        or "x86_64" not in platform_tag[2]
+    ):
+        raise UpdateRefused("runtime lock is not CPython 3.12 Linux x86_64")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _expected_runtime_distributions(
+    path: Path, *, runtime_lock_sha256: str
+) -> tuple[str, str, dict[str, str]]:
+    raw = _owner_controlled_file(
+        path,
+        label="runtime distribution manifest",
+        maximum_bytes=4 * 1024 * 1024,
+        executable=False,
+    )
+    document = _strict_json_object(raw, label="runtime distribution manifest")
+    if (
+        set(document)
+        != {
+            "schema",
+            "runtime_lock_sha256",
+            "pex_sha256",
+            "pex_info_sha256",
+            "distributions",
+        }
+        or document.get("schema") != RUNTIME_DISTRIBUTIONS_SCHEMA
+    ):
+        raise UpdateRefused("runtime distribution manifest has the wrong schema")
+    if document.get("runtime_lock_sha256") != runtime_lock_sha256:
+        raise UpdateRefused(
+            "runtime distribution manifest does not bind the runtime lock"
+        )
+    pex_sha256 = _lower_sha256(document.get("pex_sha256"), label="PEX digest")
+    info_sha256 = _lower_sha256(
+        document.get("pex_info_sha256"), label="PEX-INFO digest"
+    )
+    distributions = document.get("distributions")
+    if not isinstance(distributions, dict) or not distributions:
+        raise UpdateRefused("runtime distribution manifest has no distributions")
+    normalized: dict[str, str] = {}
+    for name, digest in distributions.items():
+        if (
+            not isinstance(name, str)
+            or not name.endswith(".whl")
+            or not isinstance(digest, str)
+            or _LOWER_SHA256.fullmatch(digest) is None
+        ):
+            raise UpdateRefused("runtime distribution manifest is invalid")
+        if name in normalized:
+            raise UpdateRefused("runtime distribution manifest repeats a distribution")
+        normalized[name] = digest
+    return pex_sha256, info_sha256, normalized
+
+
 def _validator_pex(path: Path) -> ValidatedPex:
     """Validate the exact relocatable validator bundle before signing it."""
 
@@ -402,6 +832,7 @@ def _validator_pex(path: Path) -> ValidatedPex:
         project_distribution=project,
         version=project_version,
         interpreter_constraints=tuple(constraints),
+        distributions=dict(distributions),
     )
 
 
@@ -411,6 +842,8 @@ def validator_release_tree(
     *,
     qvl: Path,
     snpguest: Path,
+    runtime_lock: Path,
+    runtime_distributions: Path,
     source_revision: str,
 ) -> ValidatedPex:
     """Create the only supported release-tree shape from one validated PEX."""
@@ -421,6 +854,20 @@ def validator_release_tree(
     reviewed_qvl = _validated_executable(qvl, label="QVL")
     reviewed_snpguest = _validated_executable(snpguest, label="snpguest")
     reviewed_revision = _source_revision(source_revision)
+    lock_sha256 = _runtime_lock_sha256(runtime_lock)
+    expected_pex_sha256, expected_info_sha256, expected_distributions = (
+        _expected_runtime_distributions(
+            runtime_distributions, runtime_lock_sha256=lock_sha256
+        )
+    )
+    if (
+        hashlib.sha256(validated.raw).hexdigest() != expected_pex_sha256
+        or validated.info_sha256 != expected_info_sha256
+        or validated.distributions != expected_distributions
+    ):
+        raise UpdateRefused(
+            "validator PEX distributions do not exactly match the reviewed runtime manifest"
+        )
 
     executable = destination / "bin" / "cathedral-validator"
     executable.parent.mkdir(mode=0o755, parents=True)
@@ -434,6 +881,8 @@ def validator_release_tree(
         "pex_info_sha256": validated.info_sha256,
         "project_distribution": validated.project_distribution,
         "interpreter_constraints": list(validated.interpreter_constraints),
+        "pex_distributions": validated.distributions,
+        "runtime_lock_sha256": lock_sha256,
     }
     qvl_executable = destination / QVL_RELEASE_PATH
     qvl_executable.write_bytes(reviewed_qvl.raw)
@@ -528,6 +977,8 @@ def _validate_signed_bundle_tree(
         "pex_info_sha256",
         "project_distribution",
         "interpreter_constraints",
+        "pex_distributions",
+        "runtime_lock_sha256",
         "source_revision",
         "qvl_path",
         "qvl_sha256",
@@ -555,6 +1006,21 @@ def _validate_signed_bundle_tree(
     ):
         raise UpdateRefused("retained release has invalid PEX identity")
 
+    expected_distributions = manifest.get("pex_distributions")
+    if (
+        not isinstance(expected_distributions, dict)
+        or not expected_distributions
+        or any(
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or _LOWER_SHA256.fullmatch(digest) is None
+            for name, digest in expected_distributions.items()
+        )
+        or _LOWER_SHA256.fullmatch(manifest.get("runtime_lock_sha256")) is None
+    ):
+        raise UpdateRefused(
+            "retained release has invalid runtime distribution identity"
+        )
     validator = _validator_pex(root / VALIDATOR_RELEASE_ENTRYPOINT)
     if (
         validator.version != expected_version
@@ -563,6 +1029,7 @@ def _validate_signed_bundle_tree(
         or manifest.get("project_distribution") != validator.project_distribution
         or manifest.get("interpreter_constraints")
         != list(validator.interpreter_constraints)
+        or expected_distributions != validator.distributions
     ):
         raise UpdateRefused("retained validator identity does not match RELEASE.json")
     for relative, digest_field, label in (
@@ -691,15 +1158,17 @@ def build_canary(
     pex: Path,
     qvl: Path,
     snpguest: Path,
+    runtime_lock: Path,
+    runtime_distributions: Path,
     source_revision: str,
-    archive_out: Path,
+    archive_out_dir: Path,
     metadata_out: Path,
     archive_url_template: str,
     sequence: int,
     private_key: Ed25519PrivateKey,
     issued_unix: int | None,
     lifetime_seconds: int,
-) -> bytes:
+) -> Path:
     _release_sequence(sequence)
     with tempfile.TemporaryDirectory(prefix="cathedral-validator-release-") as work:
         source = Path(work) / "release"
@@ -708,6 +1177,8 @@ def build_canary(
             source,
             qvl=qvl,
             snpguest=snpguest,
+            runtime_lock=runtime_lock,
+            runtime_distributions=runtime_distributions,
             source_revision=source_revision,
         )
         archive = deterministic_archive(source)
@@ -744,9 +1215,9 @@ def build_canary(
         public_key=private_key.public_key(),
         now_unix=issued,
     )
-    _atomic_write(archive_out, archive, mode=0o644)
+    archive_path = _write_content_addressed_archive(archive_out_dir, archive)
     _atomic_write(metadata_out, metadata, mode=0o644)
-    return metadata
+    return archive_path
 
 
 def resign_canary(
@@ -827,7 +1298,12 @@ def promote_stable(
     lifetime_seconds: int,
     enforce_content_addressed: bool = False,
 ) -> bytes:
-    raw = canary_metadata.read_bytes()
+    raw = _owner_controlled_file(
+        canary_metadata,
+        label="canary metadata",
+        maximum_bytes=MAX_METADATA_BYTES,
+        executable=False,
+    )
     issued, expires = _validity(
         issued_unix=issued_unix, lifetime_seconds=lifetime_seconds
     )
@@ -876,8 +1352,10 @@ def _parser() -> argparse.ArgumentParser:
     canary.add_argument("--pex", required=True, type=Path)
     canary.add_argument("--qvl", required=True, type=Path)
     canary.add_argument("--snpguest", required=True, type=Path)
+    canary.add_argument("--runtime-lock", required=True, type=Path)
+    canary.add_argument("--runtime-distributions", required=True, type=Path)
     canary.add_argument("--source-revision", required=True)
-    canary.add_argument("--archive-out", required=True, type=Path)
+    canary.add_argument("--archive-out-dir", required=True, type=Path)
     canary.add_argument("--metadata-out", required=True, type=Path)
     canary.add_argument("--archive-url-template", required=True)
     canary.add_argument("--sequence", required=True, type=int)
@@ -905,12 +1383,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         key = _private_key(options.private_key)
         if options.command == "canary":
-            build_canary(
+            archive_path = build_canary(
                 pex=options.pex,
                 qvl=options.qvl,
                 snpguest=options.snpguest,
+                runtime_lock=options.runtime_lock,
+                runtime_distributions=options.runtime_distributions,
                 source_revision=options.source_revision,
-                archive_out=options.archive_out,
+                archive_out_dir=options.archive_out_dir,
                 metadata_out=options.metadata_out,
                 archive_url_template=options.archive_url_template,
                 sequence=options.sequence,
@@ -918,6 +1398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 issued_unix=options.issued_unix,
                 lifetime_seconds=options.lifetime_seconds,
             )
+            print(archive_path)
         elif options.command == "resign-canary":
             resign_canary(
                 current_canary_metadata=options.current_canary_metadata,
