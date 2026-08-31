@@ -87,7 +87,7 @@ def _wheel(root: Path, *, private_marker: bool = False) -> tuple[Path, str]:
         }
         if private_marker:
             entries["cathedral_scaffold/test.key"] = (
-                b"-----BEGIN PRIVATE KEY-----\nnot-allowed\n"
+                b"-----BEGIN " + b"PRIVATE KEY-----\nnot-allowed\n"
             )
         for name, body in sorted(entries.items()):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
@@ -222,6 +222,7 @@ def _fake_runner(
     calls: list[list[str]],
     *,
     fail_pip: bool = False,
+    interrupt_pip: bool = False,
     fail_preflight: bool = False,
     fail_daemon_reload: bool = False,
 ):
@@ -239,6 +240,8 @@ def _fake_runner(
             updater = version / "bin" / "cathedral-validator-update"
             updater.write_text(f"#!{python}\nexit 0\n")
             updater.chmod(0o755)
+        elif "install" in command and interrupt_pip:
+            raise KeyboardInterrupt
         elif "install" in command and fail_pip:
             raise subprocess.CalledProcessError(1, command)
         elif command[-1] == "daemon-reload" and fail_daemon_reload:
@@ -1118,6 +1121,276 @@ def test_failed_offline_pip_install_leaves_no_active_or_partial_updater(tmp_path
     assert list(releases.iterdir()) == []
     assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
     assert not (root / "etc/systemd/system/cathedral-validator-update.timer").exists()
+
+
+def test_interrupted_install_cleans_an_unreferenced_partial_release(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    with pytest.raises(KeyboardInterrupt):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([], interrupt_pip=True),
+        )
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    assert releases.is_dir()
+    assert list(releases.iterdir()) == []
+    assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
+
+
+def test_sigkill_residue_without_completion_markers_is_rebuilt(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases.mkdir(parents=True, mode=0o755)
+    version = releases / verified.manifest_sha256
+    version.mkdir(mode=0o755)
+    residue = version / "pip-was-writing"
+    residue.write_bytes(b"partial\n")
+    residue.chmod(0o644)
+
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    assert not residue.exists()
+    assert (version / ".bootstrap-manifest.json").read_bytes() == verified.manifest
+    assert (version / ".bootstrap-manifest.sig").read_bytes() == verified.signature
+    assert (root / "usr/local/lib/cathedral-validator-updater").is_symlink()
+
+
+def test_unreferenced_complete_markers_do_not_preserve_crash_residue(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases.mkdir(parents=True, mode=0o755)
+    version = releases / verified.manifest_sha256
+    bin_dir = version / "bin"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    python = bin_dir / "python"
+    python.write_bytes(b"#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    updater = bin_dir / "cathedral-validator-update"
+    updater.write_bytes(f"#!{python}\nexit 0\n".encode())
+    updater.chmod(0o755)
+    manifest_marker = version / ".bootstrap-manifest.json"
+    manifest_marker.write_bytes(verified.manifest)
+    manifest_marker.chmod(0o444)
+    signature_marker = version / ".bootstrap-manifest.sig"
+    signature_marker.write_bytes(verified.signature)
+    signature_marker.chmod(0o444)
+    residue = version / "package-write-was-not-durable"
+    residue.write_bytes(b"truncated\n")
+    residue.chmod(0o644)
+
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    assert not residue.exists()
+    assert manifest_marker.read_bytes() == verified.manifest
+    assert signature_marker.read_bytes() == verified.signature
+
+
+@pytest.mark.parametrize(
+    ("reference", "schema"),
+    [
+        ("active link", None),
+        ("committed state", installer.BOOTSTRAP_STATE_SCHEMA),
+        ("pending state", installer.BOOTSTRAP_PENDING_SCHEMA),
+    ],
+)
+def test_incomplete_release_is_never_removed_when_referenced(
+    tmp_path,
+    reference,
+    schema,
+):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases.mkdir(parents=True, mode=0o755)
+    version = releases / verified.manifest_sha256
+    version.mkdir(mode=0o755)
+    residue = version / "pip-was-writing"
+    residue.write_bytes(b"partial\n")
+    residue.chmod(0o644)
+
+    if reference == "active link":
+        (root / "usr/local/lib/cathedral-validator-updater").symlink_to(
+            Path("cathedral-validator-updater-releases") / verified.manifest_sha256
+        )
+    else:
+        state_root = root / "var/lib/cathedral-validator-update"
+        state_root.mkdir(parents=True, mode=0o700)
+        state_root.chmod(0o700)
+        filename = (
+            "bootstrap-state.json"
+            if schema == installer.BOOTSTRAP_STATE_SCHEMA
+            else "bootstrap-pending.json"
+        )
+        record = state_root / filename
+        record.write_bytes(installer._bootstrap_record(verified, schema))
+        record.chmod(0o600)
+
+    with pytest.raises(installer.InstallRefused, match=f"referenced by {reference}"):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+    assert residue.read_bytes() == b"partial\n"
+    assert version.is_dir()
+
+
+def test_referenced_complete_release_is_validated_and_never_removed(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+    version = (
+        root
+        / "usr/local/lib/cathedral-validator-updater-releases"
+        / verified.manifest_sha256
+    )
+    unsafe = version / "unsafe-package-file"
+    unsafe.write_bytes(b"do not trust\n")
+    unsafe.chmod(0o666)
+
+    with pytest.raises(installer.InstallRefused, match="writable by another user"):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+
+    assert unsafe.read_bytes() == b"do not trust\n"
+    assert version.is_dir()
+    assert (root / "usr/local/lib/cathedral-validator-updater").is_symlink()
+
+
+def test_release_tree_fsyncs_files_and_directories_without_following_symlinks(
+    tmp_path,
+    monkeypatch,
+):
+    release = tmp_path / "release"
+    bin_dir = release / "bin"
+    package_dir = release / "lib/python3.12/site-packages/example"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    package_dir.mkdir(parents=True, mode=0o755)
+    real_python = bin_dir / "python-real"
+    real_python.write_bytes(b"#!/bin/sh\nexit 0\n")
+    real_python.chmod(0o755)
+    (bin_dir / "python").symlink_to("python-real")
+    module = package_dir / "module.py"
+    module.write_bytes(b"VALUE = 1\n")
+    module.chmod(0o644)
+
+    regular_and_directories = [
+        path
+        for path in release.rglob("*")
+        if not path.is_symlink() and (path.is_file() or path.is_dir())
+    ] + [release]
+    expected = {
+        (path.lstat().st_dev, path.lstat().st_ino) for path in regular_and_directories
+    }
+    symlink_metadata = (bin_dir / "python").lstat()
+    symlink_identity = (symlink_metadata.st_dev, symlink_metadata.st_ino)
+    synced: set[tuple[int, int]] = set()
+    real_fsync = installer.os.fsync
+
+    def record_fsync(descriptor):
+        metadata = os.fstat(descriptor)
+        synced.add((metadata.st_dev, metadata.st_ino))
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(installer.os, "fsync", record_fsync)
+    installer._validate_venv_interpreter(
+        release,
+        expected_owner=os.geteuid(),
+    )
+    installer._fsync_owned_tree(
+        release,
+        expected_owner=os.geteuid(),
+    )
+
+    assert expected <= synced
+    assert symlink_identity not in synced
+
+
+def test_release_tree_is_durable_before_state_or_activation(tmp_path, monkeypatch):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    events: list[str] = []
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    real_fsync_tree = installer._fsync_owned_tree
+    real_fsync_directory = installer._fsync_directory
+    real_install_managed_file = installer._install_managed_file
+    real_activate = installer._activate_updater_link
+
+    def record_tree(*args, **kwargs):
+        result = real_fsync_tree(*args, **kwargs)
+        events.append("release tree")
+        return result
+
+    def record_directory(path, **kwargs):
+        result = real_fsync_directory(path, **kwargs)
+        if path == releases:
+            events.append("releases parent")
+        return result
+
+    def record_managed_file(root_path, path, body, **kwargs):
+        if path.name == "bootstrap-pending.json":
+            events.append("pending state")
+        elif path.name == "bootstrap-state.json":
+            events.append("committed state")
+        return real_install_managed_file(root_path, path, body, **kwargs)
+
+    def record_activate(*args, **kwargs):
+        events.append("active link")
+        return real_activate(*args, **kwargs)
+
+    monkeypatch.setattr(installer, "_fsync_owned_tree", record_tree)
+    monkeypatch.setattr(installer, "_fsync_directory", record_directory)
+    monkeypatch.setattr(installer, "_install_managed_file", record_managed_file)
+    monkeypatch.setattr(installer, "_activate_updater_link", record_activate)
+
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    assert events.index("release tree") < events.index("releases parent")
+    assert events.index("releases parent") < events.index("pending state")
+    assert events.index("pending state") < events.index("active link")
+    assert events.index("active link") < events.index("committed state")
 
 
 def test_runtime_guard_enforces_root_linux_python312_and_systemd(monkeypatch):

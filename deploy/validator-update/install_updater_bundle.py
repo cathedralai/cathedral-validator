@@ -907,38 +907,339 @@ def _remove_durable(path: Path) -> None:
         os.close(directory)
 
 
+def _active_updater_digest(
+    fixed_link: Path,
+    *,
+    expected_owner: int,
+) -> str | None:
+    try:
+        metadata = fixed_link.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != expected_owner:
+        raise InstallRefused("existing updater activation path is not a safe symlink")
+    current = fixed_link.readlink()
+    current_parts = PurePosixPath(current.as_posix()).parts
+    if (
+        len(current_parts) != 2
+        or current_parts[0] != "cathedral-validator-updater-releases"
+        or DIGEST.fullmatch(current_parts[1]) is None
+    ):
+        raise InstallRefused("existing updater activation target is unsafe")
+    current_target = fixed_link.parent.joinpath(*current_parts)
+    try:
+        target_metadata = current_target.lstat()
+    except OSError as exc:
+        raise InstallRefused(
+            "existing updater activation target is unavailable"
+        ) from exc
+    if (
+        stat.S_ISLNK(target_metadata.st_mode)
+        or not stat.S_ISDIR(target_metadata.st_mode)
+        or target_metadata.st_uid != expected_owner
+        or stat.S_IMODE(target_metadata.st_mode) & 0o022
+    ):
+        raise InstallRefused("existing updater activation target is unsafe")
+    return current_parts[1]
+
+
+def _bootstrap_markers_complete(
+    version_dir: Path,
+    bundle: VerifiedBundle,
+    *,
+    expected_owner: int,
+) -> bool:
+    manifest_matches = _managed_file_matches(
+        version_dir / ".bootstrap-manifest.json",
+        bundle.manifest,
+        expected_owner=expected_owner,
+        mode=0o444,
+    )
+    signature_matches = _managed_file_matches(
+        version_dir / ".bootstrap-manifest.sig",
+        bundle.signature,
+        expected_owner=expected_owner,
+        mode=0o444,
+    )
+    return manifest_matches and signature_matches
+
+
+def _validate_owned_tree(
+    path: Path,
+    *,
+    expected_owner: int,
+    expected_device: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise InstallRefused(f"updater release tree is unavailable: {path}") from exc
+    if metadata.st_uid != expected_owner:
+        raise InstallRefused(f"updater release tree has an unsafe owner: {path}")
+    if expected_device is None:
+        expected_device = metadata.st_dev
+    if metadata.st_dev != expected_device:
+        raise InstallRefused(f"updater release tree crosses a filesystem: {path}")
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            target = os.readlink(path)
+        except OSError as exc:
+            raise InstallRefused(
+                f"updater release tree has an unreadable symlink: {path}"
+            ) from exc
+        if not target or len(os.fsencode(target)) > 4096:
+            raise InstallRefused(f"updater release tree has an unsafe symlink: {path}")
+        return
+    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+        raise InstallRefused(f"updater release tree has an unsafe node: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise InstallRefused(
+            f"updater release tree is writable by another user: {path}"
+        )
+    if stat.S_ISREG(metadata.st_mode):
+        return
+    try:
+        children = sorted(path.iterdir(), key=lambda child: os.fsencode(child.name))
+    except OSError as exc:
+        raise InstallRefused(f"updater release tree is unreadable: {path}") from exc
+    for child in children:
+        _validate_owned_tree(
+            child,
+            expected_owner=expected_owner,
+            expected_device=expected_device,
+        )
+
+
+def _fsync_directory(path: Path, *, expected_owner: int) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise InstallRefused(f"updater directory is unavailable: {path}") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != expected_owner
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise InstallRefused(f"updater directory is unsafe: {path}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise InstallRefused(f"updater directory cannot be opened: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+            or opened.st_uid != expected_owner
+            or stat.S_IMODE(opened.st_mode) & 0o022
+        ):
+            raise InstallRefused(f"updater directory changed while opening: {path}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_owned_tree(
+    path: Path,
+    *,
+    expected_owner: int,
+    expected_device: int | None = None,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise InstallRefused(f"updater release tree is unavailable: {path}") from exc
+    if metadata.st_uid != expected_owner:
+        raise InstallRefused(f"updater release tree has an unsafe owner: {path}")
+    if expected_device is None:
+        expected_device = metadata.st_dev
+    if metadata.st_dev != expected_device:
+        raise InstallRefused(f"updater release tree crosses a filesystem: {path}")
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            target = os.readlink(path)
+        except OSError as exc:
+            raise InstallRefused(
+                f"updater release tree has an unreadable symlink: {path}"
+            ) from exc
+        if not target or len(os.fsencode(target)) > 4096:
+            raise InstallRefused(f"updater release tree has an unsafe symlink: {path}")
+        return
+    is_directory = stat.S_ISDIR(metadata.st_mode)
+    if not (is_directory or stat.S_ISREG(metadata.st_mode)):
+        raise InstallRefused(f"updater release tree has an unsafe node: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise InstallRefused(
+            f"updater release tree is writable by another user: {path}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    if is_directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise InstallRefused(f"updater release tree cannot be opened: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+            or opened.st_uid != expected_owner
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or stat.S_ISDIR(opened.st_mode) != is_directory
+            or not (stat.S_ISDIR(opened.st_mode) or stat.S_ISREG(opened.st_mode))
+        ):
+            raise InstallRefused(f"updater release tree changed while opening: {path}")
+        if is_directory:
+            try:
+                children = sorted(
+                    path.iterdir(), key=lambda child: os.fsencode(child.name)
+                )
+            except OSError as exc:
+                raise InstallRefused(
+                    f"updater release tree is unreadable: {path}"
+                ) from exc
+            for child in children:
+                _fsync_owned_tree(
+                    child,
+                    expected_owner=expected_owner,
+                    expected_device=expected_device,
+                )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_venv_interpreter(
+    version_dir: Path,
+    *,
+    expected_owner: int,
+) -> None:
+    interpreter = version_dir / "bin" / "python"
+    try:
+        metadata = interpreter.lstat()
+    except OSError as exc:
+        raise InstallRefused("installed updater interpreter is missing") from exc
+    if metadata.st_uid != expected_owner or not (
+        stat.S_ISLNK(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+    ):
+        raise InstallRefused("installed updater interpreter is unsafe")
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            target = os.readlink(interpreter)
+            resolved = interpreter.resolve(strict=True)
+            resolved_metadata = resolved.lstat()
+        except (OSError, RuntimeError) as exc:
+            raise InstallRefused(
+                "installed updater interpreter link is unsafe"
+            ) from exc
+        if not target or len(os.fsencode(target)) > 4096:
+            raise InstallRefused("installed updater interpreter link is unsafe")
+    else:
+        resolved_metadata = metadata
+    if (
+        not stat.S_ISREG(resolved_metadata.st_mode)
+        or resolved_metadata.st_uid != expected_owner
+        or stat.S_IMODE(resolved_metadata.st_mode) & 0o022
+        or not stat.S_IMODE(resolved_metadata.st_mode) & 0o111
+    ):
+        raise InstallRefused("installed updater interpreter target is unsafe")
+
+
+def _release_references(
+    *,
+    fixed_link: Path,
+    committed_path: Path,
+    pending_path: Path,
+    expected_owner: int,
+) -> dict[str, str]:
+    references: dict[str, str] = {}
+    active = _active_updater_digest(fixed_link, expected_owner=expected_owner)
+    if active is not None:
+        references["active link"] = active
+    committed = _read_bootstrap_record(
+        committed_path,
+        schema=BOOTSTRAP_STATE_SCHEMA,
+        expected_owner=expected_owner,
+    )
+    if committed is not None:
+        references["committed state"] = committed.manifest_sha256
+    pending = _read_bootstrap_record(
+        pending_path,
+        schema=BOOTSTRAP_PENDING_SCHEMA,
+        expected_owner=expected_owner,
+    )
+    if pending is not None:
+        references["pending state"] = pending.manifest_sha256
+    return references
+
+
+def _remove_unreferenced_release(
+    version_dir: Path,
+    bundle: VerifiedBundle,
+    *,
+    fixed_link: Path,
+    committed_path: Path,
+    pending_path: Path,
+    expected_owner: int,
+) -> bool:
+    references = _release_references(
+        fixed_link=fixed_link,
+        committed_path=committed_path,
+        pending_path=pending_path,
+        expected_owner=expected_owner,
+    )
+    labels = sorted(
+        label for label, digest in references.items() if digest == version_dir.name
+    )
+    if labels:
+        if not _bootstrap_markers_complete(
+            version_dir,
+            bundle,
+            expected_owner=expected_owner,
+        ):
+            raise InstallRefused(
+                "incomplete updater release is referenced by " + ", ".join(labels)
+            )
+        return False
+    parent_metadata = version_dir.parent.lstat()
+    if (
+        stat.S_ISLNK(parent_metadata.st_mode)
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != expected_owner
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+    ):
+        raise InstallRefused("updater releases directory is unsafe")
+    _validate_owned_tree(
+        version_dir,
+        expected_owner=expected_owner,
+        expected_device=parent_metadata.st_dev,
+    )
+    shutil.rmtree(version_dir)
+    _fsync_directory(version_dir.parent, expected_owner=expected_owner)
+    return True
+
+
 def _activate_updater_link(
     fixed_link: Path,
     relative_link: Path,
     *,
     expected_owner: int,
 ) -> None:
-    try:
-        metadata = fixed_link.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        current = fixed_link.readlink() if stat.S_ISLNK(metadata.st_mode) else None
-        if current is None:
-            raise InstallRefused("existing updater activation path is not a symlink")
-        current_parts = PurePosixPath(current.as_posix()).parts
-        if (
-            len(current_parts) != 2
-            or current_parts[0] != "cathedral-validator-updater-releases"
-            or DIGEST.fullmatch(current_parts[1]) is None
-        ):
-            raise InstallRefused("existing updater activation target is unsafe")
-        current_target = fixed_link.parent.joinpath(*current_parts)
-        target_metadata = current_target.lstat()
-        if (
-            stat.S_ISLNK(target_metadata.st_mode)
-            or not stat.S_ISDIR(target_metadata.st_mode)
-            or target_metadata.st_uid != expected_owner
-            or stat.S_IMODE(target_metadata.st_mode) & 0o022
-        ):
-            raise InstallRefused("existing updater activation target is unsafe")
-        if current == relative_link:
-            return
+    current_digest = _active_updater_digest(
+        fixed_link,
+        expected_owner=expected_owner,
+    )
+    if current_digest == relative_link.name:
+        return
     staging = Path(
         tempfile.mkdtemp(prefix=".cathedral-updater-link-", dir=fixed_link.parent)
     )
@@ -1125,8 +1426,18 @@ def _install_verified_bundle_locked(
             or stat.S_IMODE(metadata.st_mode) & 0o022
         ):
             raise InstallRefused("existing updater release directory is unsafe")
-        _validate_installed_venv(version_dir, bundle, expected_owner=expected_owner)
-    else:
+        removed = _remove_unreferenced_release(
+            version_dir,
+            bundle,
+            fixed_link=fixed_link,
+            committed_path=committed_path,
+            pending_path=pending_path,
+            expected_owner=expected_owner,
+        )
+        version_exists = not removed
+        if version_exists:
+            _validate_installed_venv(version_dir, bundle, expected_owner=expected_owner)
+    if not version_exists:
         _ensure_directory(root, releases, expected_owner, 0o755)
         work_root = _relative(root, "usr/local/lib/cathedral-validator-updater-staging")
         _ensure_directory(root, work_root, expected_owner, 0o700)
@@ -1137,8 +1448,8 @@ def _install_verified_bundle_locked(
         try:
             _extract_payload(work, bundle, expected_owner)
             version_dir.mkdir(mode=0o755)
-            os.chmod(version_dir, 0o755, follow_symlinks=False)
             created_version = True
+            os.chmod(version_dir, 0o755, follow_symlinks=False)
             environment = {
                 "HOME": "/root",
                 "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
@@ -1208,12 +1519,28 @@ def _install_verified_bundle_locked(
                 0o444,
             )
             _validate_installed_venv(version_dir, bundle, expected_owner=expected_owner)
-        except Exception:
+        except BaseException:
             if created_version:
-                shutil.rmtree(version_dir)
+                _remove_unreferenced_release(
+                    version_dir,
+                    bundle,
+                    fixed_link=fixed_link,
+                    committed_path=committed_path,
+                    pending_path=pending_path,
+                    expected_owner=expected_owner,
+                )
             raise
         finally:
             shutil.rmtree(work)
+
+    _validate_venv_interpreter(version_dir, expected_owner=expected_owner)
+    releases_metadata = releases.lstat()
+    _fsync_owned_tree(
+        version_dir,
+        expected_owner=expected_owner,
+        expected_device=releases_metadata.st_dev,
+    )
+    _fsync_directory(releases, expected_owner=expected_owner)
 
     _install_managed_file(
         root,

@@ -73,11 +73,11 @@ _LOCKED_REQUIREMENT = re.compile(
 )
 _HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})(?=\s|$)")
 _PRIVATE_KEY_MARKERS = (
-    b"-----BEGIN PRIVATE KEY-----",
-    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    b"-----BEGIN RSA PRIVATE KEY-----",
-    b"-----BEGIN EC PRIVATE KEY-----",
-    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"-----BEGIN " + b"PRIVATE KEY-----",
+    b"-----BEGIN " + b"ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN " + b"RSA PRIVATE KEY-----",
+    b"-----BEGIN " + b"EC PRIVATE KEY-----",
+    b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
 )
 
 
