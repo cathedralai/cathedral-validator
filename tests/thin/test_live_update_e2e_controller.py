@@ -17,13 +17,15 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "systemctl start '$other_timer'" in configure_host
     for timer in ("$timer", "$other_timer"):
         assert f"systemctl show '{timer}' -p UnitFileState --value" in configure_host
-        assert f"systemctl show '{timer}' -p ActiveState --value" in configure_host
+    assert "systemctl show '$timer' -p ActiveState --value" in configure_host
     assert configure_host.count("= disabled") == 2
-    assert configure_host.count("= inactive") == 2
-    assert "systemctl show '$other_timer' -p SubState --value" in configure_host
-    assert "systemctl show '$other_timer' -p ConditionResult --value" in configure_host
-    assert "= dead" in configure_host
-    assert "= no" in configure_host
+    assert "systemctl cat '$other_timer'" in configure_host
+    assert "other_timer_state=" in configure_host
+    assert "-p ActiveState -p SubState -p ConditionResult" in configure_host
+    assert "ActiveState=inactive" in configure_host
+    assert "SubState=dead" in configure_host
+    assert "! sudo systemctl is-active --quiet '$other_timer'" in configure_host
+    assert "ConditionResult=no" not in configure_host
 
 
 def test_live_controller_records_both_timer_states_in_host_evidence():
@@ -40,14 +42,24 @@ def test_live_controller_records_both_timer_states_in_host_evidence():
     ) in capture_host
 
 
-def test_live_controller_requires_selected_timers_to_be_waiting():
+def test_live_controller_accepts_healthy_selected_timer_dispatch_states():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    start_timer = script.split("start_update_timer() {", 1)[1].split(
+        "run_update() {", 1
+    )[0]
 
-    for timer in (
-        "cathedral-validator-canary-update.timer",
-        "cathedral-validator-update.timer",
-    ):
-        assert f"systemctl show {timer} -p ActiveState --value" in script
-        assert f"systemctl show {timer} -p SubState --value" in script
-        assert f"systemctl show {timer} -p ConditionResult --value" in script
+    assert "-p ActiveState -p SubState -p ConditionResult" in start_timer
+    assert "ActiveState=active" in start_timer
+    assert "ConditionResult=yes" in start_timer
+    assert "^SubState=(waiting|running)$" in start_timer
+    assert (
+        script.count(
+            'start_update_timer "$CANARY_VM" cathedral-validator-canary-update.timer'
+        )
+        == 2
+    )
+    assert (
+        script.count('start_update_timer "$STABLE_VM" cathedral-validator-update.timer')
+        == 1
+    )
