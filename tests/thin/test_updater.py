@@ -1953,12 +1953,15 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT" in smoke
 
     docs = (root / "docs" / "AUTO_UPDATE.md").read_text()
-    assert "Installation is not self-service or\nlaunch-ready" in docs
-    assert "No reviewed updater wheelhouse, hash lock" in docs
-    assert "/usr/local/lib/cathedral-validator-updater/bin/python" in docs
-    assert "#!/usr/local/lib/cathedral-validator-updater/bin/python'" in docs
-    assert "#!/usr/local/lib/cathedral-validator-updater/bin/python3.12" not in docs
-    assert "--no-index --require-hashes" in docs
+    assert "public bootstrap artifacts are not published yet" in docs
+    assert "Do not install\nor enable updater units from a source checkout" in docs
+    assert "signed manifest" in docs
+    assert (
+        "/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update"
+        in docs
+    )
+    assert "The updater has no access to the hotkey" in docs
+    assert "releases.cathedral.com" not in docs
     assert "$(command -v cathedral-validator-update)" not in docs
 
 
