@@ -1,3 +1,5 @@
+import importlib.abc
+import importlib.util
 import runpy
 import sys
 from pathlib import Path
@@ -6,7 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 
-def _live_readiness_guard(monkeypatch):
+def _live_readiness_namespace(monkeypatch):
     package = ModuleType("cathedral_thin")
     runtime = ModuleType("cathedral_thin.independent_runtime")
     for name in ("direct_validator", "qvl", "snp_production"):
@@ -15,8 +17,11 @@ def _live_readiness_guard(monkeypatch):
     monkeypatch.setitem(sys.modules, package.__name__, package)
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
     root = Path(__file__).resolve().parents[2]
-    namespace = runpy.run_path(str(root / "tests/live/cathedral_no_chain_readiness.py"))
-    return namespace["require_pex_origin"]
+    return runpy.run_path(str(root / "tests/live/cathedral_no_chain_readiness.py"))
+
+
+def _live_readiness_guard(monkeypatch):
+    return _live_readiness_namespace(monkeypatch)["require_pex_origin"]
 
 
 def test_live_controller_isolates_the_unselected_timer_without_masking_units():
@@ -154,6 +159,112 @@ def test_live_readiness_preserves_the_expected_pex_root(tmp_path, monkeypatch):
     monkeypatch.setenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", str(pex_root))
     monkeypatch.setenv("PEX_ROOT", str(tmp_path / "stripped-pex-variable"))
     require_pex_origin(module)
+
+
+def test_live_readiness_verifies_compute_before_importing_it(tmp_path, monkeypatch):
+    namespace = _live_readiness_namespace(monkeypatch)
+    main = namespace["main"]
+    globals_map = main.__globals__
+    events: list[str] = []
+
+    for name in tuple(sys.modules):
+        if name == "cathedral" or name.startswith("cathedral."):
+            monkeypatch.delitem(sys.modules, name)
+
+    compute_source = (
+        tmp_path / "pex-root/installed_wheels/compute/cathedral/__init__.py"
+    )
+    compute_source.parent.mkdir(parents=True)
+    compute_source.touch()
+
+    class ComputeLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, _path=None, _target=None):
+            if fullname != "cathedral":
+                return None
+            events.append("compute_import")
+            return importlib.util.spec_from_loader(
+                fullname, self, origin=str(compute_source)
+            )
+
+        def create_module(self, _spec):
+            return None
+
+        def exec_module(self, module):
+            module.__file__ = str(compute_source)
+
+    monkeypatch.setattr(sys, "meta_path", [ComputeLoader(), *sys.meta_path])
+
+    release = tmp_path / "releases" / ("a" * 64)
+    (release / "bin").mkdir(parents=True)
+    manifest = {
+        "pex_sha256": "pex",
+        "qvl_path": "bin/cathedral-tdx-verifier",
+        "qvl_sha256": "qvl",
+        "snpguest_path": "bin/snpguest",
+        "snpguest_sha256": "snpguest",
+    }
+    globals_map["require_ip_denied"] = lambda: None
+    globals_map["require_pex_origin"] = lambda module: events.append(
+        f"origin:{module.__name__}"
+    )
+    globals_map["active_release"] = lambda: (release, manifest)
+    globals_map["digest"] = lambda path: {
+        "cathedral-validator": "pex",
+        "cathedral-tdx-verifier": "qvl",
+        "snpguest": "snpguest",
+    }[path.name]
+    globals_map["apply_target_control"] = lambda _target: None
+
+    direct_validator = globals_map["direct_validator"]
+    direct_validator._notify_ready = lambda: events.append("ready")
+    qvl = globals_map["qvl"]
+    qvl.DIRECT_VALIDATOR_QVL_DIGEST = "qvl-digest"
+    qvl.load_direct_validator_verifier = lambda _path: SimpleNamespace(
+        digest="qvl-digest"
+    )
+    snp_production = globals_map["snp_production"]
+    snp_production.load_snp_policy = lambda _path: object()
+
+    class FakeSnpVerifier:
+        digest = "sha256:verified"
+
+        def __init__(self, **_kwargs):
+            assert not any(
+                name == "cathedral" or name.startswith("cathedral.")
+                for name in sys.modules
+            )
+            events.append("snp_verifier_initialized")
+
+    snp_production.SnpProductionVerifier = FakeSnpVerifier
+    handlers = {}
+    monkeypatch.setattr(
+        globals_map["signal"],
+        "signal",
+        lambda signum, handler: handlers.__setitem__(signum, handler),
+    )
+    monkeypatch.setattr(
+        globals_map["signal"],
+        "pause",
+        lambda: handlers[globals_map["signal"].SIGTERM](None, None),
+    )
+
+    try:
+        result = main()
+    finally:
+        # The import hook inserts its synthetic package directly. Remove it
+        # without adding another monkeypatch undo entry, so the fixture can
+        # restore only modules that existed before this test.
+        for name in tuple(sys.modules):
+            if name == "cathedral" or name.startswith("cathedral."):
+                sys.modules.pop(name, None)
+
+    assert result == 0
+    assert not any(
+        name == "cathedral" or name.startswith("cathedral.") for name in sys.modules
+    )
+    assert events.index("snp_verifier_initialized") < events.index("compute_import")
+    assert events.index("compute_import") < events.index("origin:cathedral")
+    assert events.index("origin:cathedral") < events.index("ready")
 
 
 def test_live_readiness_refuses_missing_or_outside_preserved_pex_root(
