@@ -83,6 +83,14 @@ The output archive is deterministic and content-addressed. Publish the printed
 digest-named tarball from `/secure/signed`. Never rename it and never reuse a
 sequence for different metadata.
 
+By default the signer accepts archive URLs only from
+`cathedralai/cathedral-validator`. A disposable live-test mirror must be named
+explicitly with `--expected-archive-repository OWNER/TEST_MIRROR` on canary,
+recovery, and stable signing. Use the same exact lower-case repository value in
+all three commands. URLs, `.git` suffixes, case aliases, and redirect targets
+are refused. The live acceptance controller performs this compatibility check
+during preflight before it creates a VM.
+
 ## Validate, then publish canary
 
 Validate the exact local archive, metadata, public key, GitHub repository, and

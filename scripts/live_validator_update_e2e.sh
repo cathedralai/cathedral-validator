@@ -366,6 +366,15 @@ for branch in "$CANARY_BRANCH" "$STABLE_BRANCH" "$FAULT_BRANCH"; do
   fi
 done
 
+# Prove that the offline signer accepts this exact isolated mirror before any
+# live resources are created.  The production default remains the canonical
+# repository, so an unbound mirror here would otherwise fail later, after the
+# paid test has started.
+python3 "$SIGNER" validate-archive-target \
+  --archive-url-template "$ARCHIVE_URL_TEMPLATE" \
+  --expected-archive-repository "$TEST_GITHUB_REPOSITORY" \
+  >/dev/null
+
 if [[ "$MODE" == "--preflight" ]]; then
   printf 'PREFLIGHT_PASS project=%s zone=%s hosts=%s vm_disk_estimate_usd=%s network_allowance_usd=%s planning_total_usd=%s\n' \
     "$GCP_PROJECT" "$ZONE" "$VM_COUNT" "$ESTIMATED_COST_USD" \
@@ -589,6 +598,7 @@ sign_canary() {
     --archive-out-dir "$SIGNED_DIR" \
     --metadata-out "$metadata" \
     --archive-url-template "$ARCHIVE_URL_TEMPLATE" \
+    --expected-archive-repository "$TEST_GITHUB_REPOSITORY" \
     --sequence "$sequence" \
     --lifetime-seconds 43200 >/dev/null
 }
@@ -600,6 +610,7 @@ promote_stable() {
   python3 "$SIGNER" --private-key "$runtime_private" stable \
     --canary-metadata "$canary_metadata" \
     --metadata-out "$stable_metadata" \
+    --expected-archive-repository "$TEST_GITHUB_REPOSITORY" \
     --sequence "$sequence" \
     --lifetime-seconds 43200
 }

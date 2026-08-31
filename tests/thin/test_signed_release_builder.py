@@ -24,6 +24,7 @@ from cathedral_thin.independent_runtime.updater import (
 
 NOW = int(time.time())
 SOURCE_REVISION = "a" * 40
+MIRROR_REPOSITORY = "cathedralai/cathedral-validator-release-e2e"
 ARCHIVE_URL_TEMPLATE = (
     "https://github.com/cathedralai/cathedral-validator/releases/download/"
     "validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
@@ -173,6 +174,8 @@ def _build(
     sequence: int,
     source_revision: str = SOURCE_REVISION,
     issued_unix: int = NOW,
+    archive_url_template: str = ARCHIVE_URL_TEMPLATE,
+    expected_archive_repository: str = "cathedralai/cathedral-validator",
 ) -> tuple[Path, Path]:
     pex, qvl, snpguest, runtime_lock, runtime_distributions = _inputs(
         tmp_path, marker=name.encode()
@@ -187,7 +190,8 @@ def _build(
         source_revision=source_revision,
         archive_out_dir=tmp_path / f"{name}-archives",
         metadata_out=metadata,
-        archive_url_template=ARCHIVE_URL_TEMPLATE,
+        archive_url_template=archive_url_template,
+        expected_archive_repository=expected_archive_repository,
         sequence=sequence,
         private_key=private,
         issued_unix=issued_unix,
@@ -442,6 +446,126 @@ def test_archive_url_template_is_exactly_content_addressed(template: str) -> Non
     builder = _builder()
     with pytest.raises(builder["UpdateRefused"], match="archive URL"):
         builder["_archive_url_from_template"](template, "a" * 64)
+
+
+def test_archive_repository_binding_requires_an_explicit_safe_mirror(
+    tmp_path: Path,
+) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    mirror_template = (
+        f"https://github.com/{MIRROR_REPOSITORY}/releases/download/"
+        "validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
+    )
+
+    # The production default remains the only implicit publication authority.
+    assert builder["_archive_url_from_template"](
+        ARCHIVE_URL_TEMPLATE, "a" * 64
+    ).startswith("https://github.com/cathedralai/cathedral-validator/")
+    with pytest.raises(builder["UpdateRefused"], match="content-addressed"):
+        builder["_archive_url_from_template"](mirror_template, "a" * 64)
+
+    archive, metadata = _build(
+        builder,
+        tmp_path,
+        private,
+        name="mirror",
+        sequence=1,
+        archive_url_template=mirror_template,
+        expected_archive_repository=MIRROR_REPOSITORY,
+    )
+    release = _release(metadata, private)
+    assert f"github.com/{MIRROR_REPOSITORY}/" in release.archive_url
+
+    # Retained-canary recovery and stable promotion use the same binding.
+    with pytest.raises(builder["UpdateRefused"], match="content-addressed"):
+        builder["resign_canary"](
+            current_canary_metadata=metadata,
+            retained_metadata=metadata,
+            retained_archive=archive,
+            metadata_out=tmp_path / "resigned.json",
+            sequence=2,
+            private_key=private,
+            issued_unix=NOW,
+            lifetime_seconds=3600,
+        )
+    resigned = tmp_path / "resigned.json"
+    builder["resign_canary"](
+        current_canary_metadata=metadata,
+        retained_metadata=metadata,
+        retained_archive=archive,
+        metadata_out=resigned,
+        sequence=2,
+        private_key=private,
+        issued_unix=NOW,
+        lifetime_seconds=3600,
+        expected_archive_repository=MIRROR_REPOSITORY,
+    )
+    with pytest.raises(builder["UpdateRefused"], match="content-addressed"):
+        builder["promote_stable"](
+            canary_metadata=resigned,
+            metadata_out=tmp_path / "stable.json",
+            sequence=3,
+            private_key=private,
+            issued_unix=NOW,
+            lifetime_seconds=3600,
+            enforce_content_addressed=True,
+        )
+    builder["promote_stable"](
+        canary_metadata=resigned,
+        metadata_out=tmp_path / "stable.json",
+        sequence=3,
+        private_key=private,
+        issued_unix=NOW,
+        lifetime_seconds=3600,
+        enforce_content_addressed=True,
+        expected_archive_repository=MIRROR_REPOSITORY,
+    )
+
+
+@pytest.mark.parametrize(
+    "repository",
+    (
+        "CathedralAI/cathedral-validator-release-e2e",
+        "https://github.com/cathedralai/cathedral-validator-release-e2e",
+        "cathedralai/cathedral-validator-release-e2e.git",
+        "cathedralai//cathedral-validator-release-e2e",
+        "cathedralai/../cathedral-validator-release-e2e",
+    ),
+)
+def test_archive_repository_binding_refuses_noncanonical_identities(
+    repository: str,
+) -> None:
+    builder = _builder()
+    with pytest.raises(builder["UpdateRefused"], match="expected archive repository"):
+        builder["_archive_url_from_template"](
+            ARCHIVE_URL_TEMPLATE,
+            "a" * 64,
+            expected_repository=repository,
+        )
+
+
+def test_archive_target_cli_preflight_requires_explicit_compatible_binding(
+    capsys,
+) -> None:
+    builder = _builder()
+    mirror_template = (
+        f"https://github.com/{MIRROR_REPOSITORY}/releases/download/"
+        "validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
+    )
+    assert (
+        builder["main"](
+            [
+                "validate-archive-target",
+                "--archive-url-template",
+                mirror_template,
+                "--expected-archive-repository",
+                MIRROR_REPOSITORY,
+            ]
+        )
+        == 0
+    )
+    assert MIRROR_REPOSITORY in capsys.readouterr().out
 
 
 def test_canary_rollback_resigns_retained_bytes_then_promotes_exactly(

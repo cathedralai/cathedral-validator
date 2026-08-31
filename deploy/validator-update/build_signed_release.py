@@ -575,10 +575,40 @@ def _strict_json_object(raw: bytes, *, label: str) -> dict[str, Any]:
     return document
 
 
-def _canonical_archive_url(url: object, archive_sha256: str) -> str:
-    """Require Cathedral's digest-tagged, digest-named GitHub release asset."""
+CANONICAL_ARCHIVE_REPOSITORY = "cathedralai/cathedral-validator"
+_GITHUB_REPOSITORY = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9](?:[a-z0-9._-]{0,99})"
+)
+
+
+def _expected_archive_repository(repository: object) -> str:
+    """Return one unambiguous GitHub owner/repository identity.
+
+    Release metadata is an update authority.  Permit a non-production mirror
+    only when the signer was explicitly invoked with its exact lower-case
+    owner/repository name.  URLs, paths, case aliases, and GitHub redirects
+    are deliberately not repository identities here.
+    """
+
+    if (
+        not isinstance(repository, str)
+        or not _GITHUB_REPOSITORY.fullmatch(repository)
+        or repository.endswith(".git")
+    ):
+        raise UpdateRefused("expected archive repository is invalid")
+    return repository
+
+
+def _canonical_archive_url(
+    url: object,
+    archive_sha256: str,
+    *,
+    expected_repository: object = CANONICAL_ARCHIVE_REPOSITORY,
+) -> str:
+    """Require a digest-tagged release asset from the explicit repository."""
 
     digest = _lower_sha256(archive_sha256, label="archive digest")
+    repository = _expected_archive_repository(expected_repository)
     if not isinstance(url, str) or len(url) > 4096:
         raise UpdateRefused("archive URL is invalid")
     parsed = urllib.parse.urlparse(url)
@@ -593,14 +623,8 @@ def _canonical_archive_url(url: object, archive_sha256: str) -> str:
     ):
         raise UpdateRefused("archive URL is not the canonical GitHub HTTPS URL")
     segments = parsed.path.split("/")
-    expected_prefix = [
-        "",
-        "cathedralai",
-        "cathedral-validator",
-        "releases",
-        "download",
-        f"validator-{digest}",
-    ]
+    owner, name = repository.split("/", 1)
+    expected_prefix = ["", owner, name, "releases", "download", f"validator-{digest}"]
     if len(segments) != 7 or segments[:6] != expected_prefix:
         raise UpdateRefused("archive URL tag is not content-addressed")
     asset = segments[6]
@@ -613,7 +637,12 @@ def _canonical_archive_url(url: object, archive_sha256: str) -> str:
     return url
 
 
-def _archive_url_from_template(template: object, archive_sha256: str) -> str:
+def _archive_url_from_template(
+    template: object,
+    archive_sha256: str,
+    *,
+    expected_repository: object = CANONICAL_ARCHIVE_REPOSITORY,
+) -> str:
     if not isinstance(template, str) or template.count("{archive_sha256}") != 2:
         raise UpdateRefused(
             "archive URL template must put {archive_sha256} in its tag and asset"
@@ -623,7 +652,9 @@ def _archive_url_from_template(template: object, archive_sha256: str) -> str:
     ):
         raise UpdateRefused("archive URL template contains an unknown placeholder")
     return _canonical_archive_url(
-        template.replace("{archive_sha256}", archive_sha256), archive_sha256
+        template.replace("{archive_sha256}", archive_sha256),
+        archive_sha256,
+        expected_repository=expected_repository,
     )
 
 
@@ -1173,6 +1204,7 @@ def build_canary(
     archive_out_dir: Path,
     metadata_out: Path,
     archive_url_template: str,
+    expected_archive_repository: str = CANONICAL_ARCHIVE_REPOSITORY,
     sequence: int,
     private_key: Ed25519PrivateKey,
     issued_unix: int | None,
@@ -1200,7 +1232,9 @@ def build_canary(
     )
     archive_sha256 = hashlib.sha256(archive).hexdigest()
     resolved_archive_url = _archive_url_from_template(
-        archive_url_template, archive_sha256
+        archive_url_template,
+        archive_sha256,
+        expected_repository=expected_archive_repository,
     )
     release = {
         "version": validated.version,
@@ -1239,6 +1273,7 @@ def resign_canary(
     private_key: Ed25519PrivateKey,
     issued_unix: int | None,
     lifetime_seconds: int,
+    expected_archive_repository: str = CANONICAL_ARCHIVE_REPOSITORY,
 ) -> bytes:
     """Issue a higher canary sequence for one exact retained signed release."""
 
@@ -1260,7 +1295,11 @@ def resign_canary(
         raise UpdateRefused(
             "re-signed canary sequence must exceed the retained canary sequence"
         )
-    _canonical_archive_url(retained.archive_url, retained.archive_sha256)
+    _canonical_archive_url(
+        retained.archive_url,
+        retained.archive_sha256,
+        expected_repository=expected_archive_repository,
+    )
     _validated_retained_archive(
         retained_archive,
         archive_sha256=retained.archive_sha256,
@@ -1306,6 +1345,7 @@ def promote_stable(
     issued_unix: int | None,
     lifetime_seconds: int,
     enforce_content_addressed: bool = False,
+    expected_archive_repository: str = CANONICAL_ARCHIVE_REPOSITORY,
 ) -> bytes:
     raw = _owner_controlled_file(
         canary_metadata,
@@ -1323,7 +1363,11 @@ def promote_stable(
         now_unix=issued,
     )
     if enforce_content_addressed:
-        _canonical_archive_url(canary.archive_url, canary.archive_sha256)
+        _canonical_archive_url(
+            canary.archive_url,
+            canary.archive_sha256,
+            expected_repository=expected_archive_repository,
+        )
     envelope = json.loads(raw.decode("ascii"))
     release = dict(envelope["signed"]["release"])
     release["promoted_canary"] = {
@@ -1355,7 +1399,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build and sign immutable Cathedral validator releases offline"
     )
-    parser.add_argument("--private-key", required=True, type=Path)
+    parser.add_argument("--private-key", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
     canary = subparsers.add_parser("canary")
     canary.add_argument("--pex", required=True, type=Path)
@@ -1367,6 +1411,11 @@ def _parser() -> argparse.ArgumentParser:
     canary.add_argument("--archive-out-dir", required=True, type=Path)
     canary.add_argument("--metadata-out", required=True, type=Path)
     canary.add_argument("--archive-url-template", required=True)
+    canary.add_argument(
+        "--expected-archive-repository",
+        default=CANONICAL_ARCHIVE_REPOSITORY,
+        help="exact lower-case owner/repository allowed in signed archive URLs",
+    )
     canary.add_argument("--sequence", required=True, type=int)
     canary.add_argument("--issued-unix", type=int)
     canary.add_argument("--lifetime-seconds", type=int, default=7 * 24 * 60 * 60)
@@ -1375,21 +1424,45 @@ def _parser() -> argparse.ArgumentParser:
     resign.add_argument("--retained-metadata", required=True, type=Path)
     resign.add_argument("--retained-archive", required=True, type=Path)
     resign.add_argument("--metadata-out", required=True, type=Path)
+    resign.add_argument(
+        "--expected-archive-repository",
+        default=CANONICAL_ARCHIVE_REPOSITORY,
+        help="exact lower-case owner/repository allowed in retained archive URLs",
+    )
     resign.add_argument("--sequence", required=True, type=int)
     resign.add_argument("--issued-unix", type=int)
     resign.add_argument("--lifetime-seconds", type=int, default=7 * 24 * 60 * 60)
     stable = subparsers.add_parser("stable")
     stable.add_argument("--canary-metadata", required=True, type=Path)
     stable.add_argument("--metadata-out", required=True, type=Path)
+    stable.add_argument(
+        "--expected-archive-repository",
+        default=CANONICAL_ARCHIVE_REPOSITORY,
+        help="exact lower-case owner/repository allowed in canary archive URLs",
+    )
     stable.add_argument("--sequence", required=True, type=int)
     stable.add_argument("--issued-unix", type=int)
     stable.add_argument("--lifetime-seconds", type=int, default=7 * 24 * 60 * 60)
+    validate = subparsers.add_parser("validate-archive-target")
+    validate.add_argument("--archive-url-template", required=True)
+    validate.add_argument("--expected-archive-repository", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
+        if options.command == "validate-archive-target":
+            print(
+                _archive_url_from_template(
+                    options.archive_url_template,
+                    "a" * 64,
+                    expected_repository=options.expected_archive_repository,
+                )
+            )
+            return 0
+        if options.private_key is None:
+            raise UpdateRefused("--private-key is required for signing commands")
         key = _private_key(options.private_key)
         if options.command == "canary":
             archive_path = build_canary(
@@ -1402,6 +1475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 archive_out_dir=options.archive_out_dir,
                 metadata_out=options.metadata_out,
                 archive_url_template=options.archive_url_template,
+                expected_archive_repository=options.expected_archive_repository,
                 sequence=options.sequence,
                 private_key=key,
                 issued_unix=options.issued_unix,
@@ -1418,6 +1492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 private_key=key,
                 issued_unix=options.issued_unix,
                 lifetime_seconds=options.lifetime_seconds,
+                expected_archive_repository=options.expected_archive_repository,
             )
         else:
             promote_stable(
@@ -1428,6 +1503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 issued_unix=options.issued_unix,
                 lifetime_seconds=options.lifetime_seconds,
                 enforce_content_addressed=True,
+                expected_archive_repository=options.expected_archive_repository,
             )
     except (OSError, UpdateRefused, ValueError) as exc:
         raise SystemExit(f"release build refused: {exc}") from exc
