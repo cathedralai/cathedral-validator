@@ -442,8 +442,10 @@ jobs:
               release,
               qvl=Path("/tmp/cathedral-tdx-verifier"),
               snpguest=Path("/tmp/snpguest"),
-              runtime_lock=Path(
-                  "requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+              runtime_lock=(
+                  Path(os.environ["GITHUB_WORKSPACE"])
+                  / "requirements"
+                  / "validator-release-cpython312-linux-x86_64.pex.lock"
               ),
               runtime_distributions=Path(
                   "/tmp/cathedral-validator.pex-distributions.json"

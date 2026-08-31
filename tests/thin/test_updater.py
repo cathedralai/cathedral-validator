@@ -2012,7 +2012,8 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock" in (
         release_job
     )
-    assert "runtime_lock=Path(" in release_job
+    assert "runtime_lock=(" in release_job
+    assert 'Path(os.environ["GITHUB_WORKSPACE"])' in release_job
     assert "runtime_distributions=Path(" in release_job
     assert "CPython==3.12.*" in release_job
     assert "cmp /tmp/cathedral-validator-one.pex" in release_job
@@ -2085,6 +2086,7 @@ def test_release_workflows_activate_locked_production_contract() -> None:
             "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock"
             in workflow
         )
+        assert 'Path(os.environ["GITHUB_WORKSPACE"])' in workflow
 
 
 def test_extracted_release_is_traversable_but_not_writable_by_service(
