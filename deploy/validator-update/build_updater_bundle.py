@@ -2,10 +2,10 @@
 """Build the signed, offline bootstrap bundle for the validator updater.
 
 This program runs on an owner-controlled release workstation.  It accepts only
-an already-built Linux wheelhouse, a complete hash lock, the pinned release
-public key, and the fixed reviewed systemd/config-template asset set.  The
-private signing key is read only to create the detached manifest signature and
-is never copied into an output.
+an already-built Linux wheelhouse, a complete hash lock, the runtime release
+public key, and the fixed reviewed systemd/config-template asset set.  A
+distinct offline bootstrap key signs the detached manifest.  Neither private
+key is ever copied into an output.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import os
 import re
 import stat
 import tarfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -32,8 +33,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v1"
-PUBLIC_KEY_ARCHIVE_PATH = "payload/update-public-key.pem"
+BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v2"
+RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH = "payload/runtime-release-public-key.pem"
 REQUIREMENTS_ARCHIVE_PATH = "payload/requirements.txt"
 INSTALLER_ARCHIVE_PATH = "payload/installer/install_updater_bundle.py"
 MAX_CONTROL_FILE_BYTES = 2 * 1024 * 1024
@@ -41,6 +42,7 @@ MAX_WHEELS = 1_000
 MAX_WHEEL_BYTES = 512 * 1024 * 1024
 MAX_WHEEL_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
 
 SYSTEMD_ASSETS = frozenset(
     {
@@ -166,10 +168,10 @@ def _refuse_private_key(body: bytes, label: str) -> None:
         raise BundleRefused(f"{label} contains private-key material")
 
 
-def _private_key(path: Path) -> Ed25519PrivateKey:
+def _bootstrap_signing_private_key(path: Path) -> Ed25519PrivateKey:
     raw = _read_controlled_file(
         path,
-        "private signing key",
+        "bootstrap signing private key",
         maximum=16_384,
         owner_only=True,
     )
@@ -179,24 +181,27 @@ def _private_key(path: Path) -> Ed25519PrivateKey:
         password = getpass.getpass("Bootstrap signing key password: ").encode("utf-8")
         key = serialization.load_pem_private_key(raw, password=password)
     except ValueError as exc:
-        raise BundleRefused("private signing key is not valid PEM") from exc
+        raise BundleRefused("bootstrap signing private key is not valid PEM") from exc
     if not isinstance(key, Ed25519PrivateKey):
-        raise BundleRefused("private signing key is not Ed25519")
+        raise BundleRefused("bootstrap signing private key is not Ed25519")
     return key
 
 
-def _public_key(path: Path) -> tuple[Ed25519PublicKey, bytes, str]:
+def _public_key(
+    path: Path,
+    label: str,
+) -> tuple[Ed25519PublicKey, bytes, str]:
     raw = _read_controlled_file(
         path,
-        "pinned public key",
+        label,
         maximum=16_384,
     )
     try:
         key = serialization.load_pem_public_key(raw)
     except ValueError as exc:
-        raise BundleRefused("pinned public key is not valid PEM") from exc
+        raise BundleRefused(f"{label} is not valid PEM") from exc
     if not isinstance(key, Ed25519PublicKey):
-        raise BundleRefused("pinned public key is not Ed25519")
+        raise BundleRefused(f"{label} is not Ed25519")
     canonical = key.public_bytes(
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -385,32 +390,87 @@ def deterministic_archive(files: Iterable[PayloadFile]) -> bytes:
     return output.getvalue()
 
 
+def _bootstrap_validity(
+    *,
+    sequence: int,
+    issued_unix: int | None,
+    lifetime_seconds: int,
+) -> tuple[int, int, int]:
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 1 <= sequence <= 2**63 - 1
+    ):
+        raise BundleRefused("bootstrap sequence is invalid")
+    issued = int(time.time()) if issued_unix is None else issued_unix
+    if isinstance(issued, bool) or not isinstance(issued, int) or issued < 1:
+        raise BundleRefused("bootstrap issue time is invalid")
+    if (
+        isinstance(lifetime_seconds, bool)
+        or not isinstance(lifetime_seconds, int)
+        or not 60 <= lifetime_seconds <= MAX_BOOTSTRAP_LIFETIME_SECONDS
+    ):
+        raise BundleRefused("bootstrap lifetime is outside 60 seconds to 90 days")
+    return sequence, issued, issued + lifetime_seconds
+
+
 def build_bundle(
     *,
     wheelhouse: Path,
     requirements: Path,
-    public_key_path: Path,
-    private_key_path: Path,
+    bootstrap_signing_private_key_path: Path,
+    bootstrap_signing_public_key_path: Path,
+    runtime_release_public_key_path: Path,
     assets_dir: Path,
-) -> tuple[bytes, bytes, bytes, str]:
-    private_key = _private_key(private_key_path)
-    public_key, public_pem, fingerprint = _public_key(public_key_path)
-    private_public = private_key.public_key().public_bytes(
+    sequence: int,
+    issued_unix: int | None,
+    lifetime_seconds: int,
+) -> tuple[bytes, bytes, bytes, str, str]:
+    sequence, issued_unix, expires_unix = _bootstrap_validity(
+        sequence=sequence,
+        issued_unix=issued_unix,
+        lifetime_seconds=lifetime_seconds,
+    )
+    bootstrap_private_key = _bootstrap_signing_private_key(
+        bootstrap_signing_private_key_path
+    )
+    bootstrap_public_key, _, bootstrap_fingerprint = _public_key(
+        bootstrap_signing_public_key_path,
+        "bootstrap signing public key",
+    )
+    runtime_public_key, runtime_public_pem, runtime_fingerprint = _public_key(
+        runtime_release_public_key_path,
+        "runtime release public key",
+    )
+    private_public = bootstrap_private_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    pinned_public = public_key.public_bytes(
+    pinned_bootstrap_public = bootstrap_public_key.public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    if private_public != pinned_public:
-        raise BundleRefused("private signing key does not match pinned public key")
+    runtime_public = runtime_public_key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    if private_public != pinned_bootstrap_public:
+        raise BundleRefused(
+            "bootstrap signing private key does not match bootstrap signing public key"
+        )
+    if pinned_bootstrap_public == runtime_public:
+        raise BundleRefused(
+            "bootstrap signing key and runtime release key must be distinct"
+        )
 
     wheels, wheel_digests = _wheelhouse(wheelhouse)
     requirements_body = _requirements(requirements, wheel_digests)
     files = [
         _installer_payload(),
-        PayloadFile(PUBLIC_KEY_ARCHIVE_PATH, public_pem),
+        PayloadFile(
+            RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
+            runtime_public_pem,
+        ),
         PayloadFile(REQUIREMENTS_ARCHIVE_PATH, requirements_body),
         *_assets(assets_dir),
         *wheels,
@@ -433,16 +493,32 @@ def build_bundle(
                 "requirements": REQUIREMENTS_ARCHIVE_PATH,
                 "wheelhouse": "payload/wheelhouse",
             },
-            "public_key": {
+            "bootstrap_signing_key": {
                 "algorithm": "Ed25519",
-                "fingerprint": fingerprint,
-                "path": PUBLIC_KEY_ARCHIVE_PATH,
+                "fingerprint": bootstrap_fingerprint,
+                "source": "operator-pinned-external",
+            },
+            "bootstrap_metadata": {
+                "expires_unix": expires_unix,
+                "issued_unix": issued_unix,
+                "sequence": sequence,
+            },
+            "runtime_release_key": {
+                "algorithm": "Ed25519",
+                "fingerprint": runtime_fingerprint,
+                "path": RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
             },
             "schema": BUNDLE_SCHEMA,
         }
     )
-    signature = private_key.sign(manifest)
-    return archive, manifest, signature, fingerprint
+    signature = bootstrap_private_key.sign(manifest)
+    return (
+        archive,
+        manifest,
+        signature,
+        bootstrap_fingerprint,
+        runtime_fingerprint,
+    )
 
 
 def _validate_output(path: Path, label: str) -> None:
@@ -508,24 +584,54 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--wheelhouse", required=True, type=Path)
     parser.add_argument("--requirements", required=True, type=Path)
-    parser.add_argument("--public-key", required=True, type=Path)
-    parser.add_argument("--private-key", required=True, type=Path)
+    parser.add_argument(
+        "--bootstrap-signing-private-key",
+        required=True,
+        type=Path,
+    )
+    parser.add_argument(
+        "--bootstrap-signing-public-key",
+        required=True,
+        type=Path,
+    )
+    parser.add_argument(
+        "--runtime-release-public-key",
+        required=True,
+        type=Path,
+    )
     parser.add_argument("--assets-dir", required=True, type=Path)
     parser.add_argument("--bundle-out", required=True, type=Path)
     parser.add_argument("--manifest-out", required=True, type=Path)
     parser.add_argument("--signature-out", required=True, type=Path)
+    parser.add_argument("--sequence", required=True, type=int)
+    parser.add_argument("--issued-unix", type=int)
+    parser.add_argument(
+        "--lifetime-seconds",
+        type=int,
+        default=30 * 24 * 60 * 60,
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
-        archive, manifest, signature, fingerprint = build_bundle(
+        (
+            archive,
+            manifest,
+            signature,
+            bootstrap_fingerprint,
+            runtime_fingerprint,
+        ) = build_bundle(
             wheelhouse=options.wheelhouse,
             requirements=options.requirements,
-            public_key_path=options.public_key,
-            private_key_path=options.private_key,
+            bootstrap_signing_private_key_path=(options.bootstrap_signing_private_key),
+            bootstrap_signing_public_key_path=(options.bootstrap_signing_public_key),
+            runtime_release_public_key_path=(options.runtime_release_public_key),
             assets_dir=options.assets_dir,
+            sequence=options.sequence,
+            issued_unix=options.issued_unix,
+            lifetime_seconds=options.lifetime_seconds,
         )
         write_outputs(
             bundle_out=options.bundle_out,
@@ -542,7 +648,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "bundle_sha256": hashlib.sha256(archive).hexdigest(),
                 "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
-                "public_key_fingerprint": fingerprint,
+                "bootstrap_sequence": options.sequence,
+                "bootstrap_signing_key_fingerprint": bootstrap_fingerprint,
+                "runtime_release_key_fingerprint": runtime_fingerprint,
                 "signature_base64": base64.b64encode(signature).decode("ascii"),
             }
         ).decode("ascii"),

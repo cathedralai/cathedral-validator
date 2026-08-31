@@ -23,7 +23,7 @@ pinned TDX and SNP verifier programs.
 
 ## What you need
 
-- A Linux/amd64 systemd host with CPython 3.12 and OpenSSL 3.
+- A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
 - Your Bittensor validator hotkey file and its public SS58 address.
 - A reviewed AMD SEV-SNP policy containing only measurements and TCB floors you
   trust.
@@ -39,16 +39,17 @@ enable updater services from a source checkout.
 
 <!-- BEGIN GENERATED VALIDATOR INSTALL -->
 Publication pending. This block will contain the authenticated bundle URLs,
-release-key fingerprint, stable sequence, and exact install commands after the
-artifacts pass live testing.
+offline bootstrap-signing-key fingerprint, bootstrap and stable sequence
+checkpoints, and exact install commands after the artifacts pass live testing.
 <!-- END GENERATED VALIDATOR INSTALL -->
 
 After publication, the signed installation path will:
 
-1. Verify and install the fixed updater, service files, and release public key.
-2. Let you add the hotkey file, public hotkey address, and SNP policy.
-3. Install the first signed stable release and start the validator.
-4. Enable one stable-channel timer for later releases.
+1. Verify the bootstrap with the separately pinned bootstrap key.
+2. Install the fixed updater, service files, and bundled runtime release key.
+3. Let you add the hotkey file, public hotkey address, and SNP policy.
+4. Install the first signed stable release and start the validator.
+5. Enable one stable-channel timer for later releases.
 
 The detailed operator path and trust boundary are in
 [Validator auto-update](docs/AUTO_UPDATE.md).
@@ -85,9 +86,9 @@ to become safe before it switches releases. Failed verification or startup
 keeps the last healthy release.
 
 Routine releases do not replace the bootstrap updater, systemd units, host
-Python, release public key, hotkey, SNP policy, or operator configuration. Those
-are host trust settings and need an explicit bootstrap migration when they
-change.
+Python, bootstrap signing key, runtime release public key, hotkey, SNP policy,
+or operator configuration. Those are host trust settings and need an explicit
+bootstrap migration when they change.
 
 Each host chooses `stable` or `canary` once. The updater refuses a later channel
 switch. Normal operators use `stable`. Canary is for an explicit release-test

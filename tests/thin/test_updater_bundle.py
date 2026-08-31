@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -39,11 +40,14 @@ installer = _module(
 )
 
 
-def _keypair(root: Path) -> tuple[Ed25519PrivateKey, Path, Path, str]:
+def _keypair(
+    root: Path,
+    label: str,
+) -> tuple[Ed25519PrivateKey, Path, Path, str]:
     root.mkdir(parents=True, exist_ok=True)
     private = Ed25519PrivateKey.generate()
-    private_path = root / "release-private.pem"
-    public_path = root / "release-public.pem"
+    private_path = root / f"{label}-private.pem"
+    public_path = root / f"{label}-public.pem"
     private_path.write_bytes(
         private.private_bytes(
             serialization.Encoding.PEM,
@@ -58,7 +62,7 @@ def _keypair(root: Path) -> tuple[Ed25519PrivateKey, Path, Path, str]:
     )
     public_path.write_bytes(public)
     public_path.chmod(0o644)
-    fingerprint = installer.public_key_fingerprint(public)
+    fingerprint = installer.ed25519_public_key_fingerprint(public, label)
     return private, private_path, public_path, fingerprint
 
 
@@ -106,7 +110,18 @@ def _assets(root: Path) -> Path:
 
 def _inputs(tmp_path: Path) -> dict[str, object]:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    private, private_path, public_path, fingerprint = _keypair(tmp_path)
+    (
+        bootstrap_private,
+        bootstrap_private_path,
+        bootstrap_public_path,
+        bootstrap_fingerprint,
+    ) = _keypair(tmp_path / "bootstrap-key", "bootstrap")
+    (
+        _,
+        _,
+        runtime_public_path,
+        runtime_fingerprint,
+    ) = _keypair(tmp_path / "runtime-key", "runtime")
     wheelhouse, digest = _wheel(tmp_path)
     requirements = tmp_path / "requirements.txt"
     requirements.write_text(
@@ -115,23 +130,34 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
     )
     requirements.chmod(0o644)
     return {
-        "private": private,
-        "private_path": private_path,
-        "public_path": public_path,
-        "fingerprint": fingerprint,
+        "bootstrap_private": bootstrap_private,
+        "bootstrap_private_path": bootstrap_private_path,
+        "bootstrap_public_path": bootstrap_public_path,
+        "bootstrap_fingerprint": bootstrap_fingerprint,
+        "runtime_public_path": runtime_public_path,
+        "runtime_fingerprint": runtime_fingerprint,
+        "sequence": 1,
+        "issued_unix": int(time.time()) - 60,
+        "lifetime_seconds": 24 * 60 * 60,
         "wheelhouse": wheelhouse,
         "requirements": requirements,
         "assets": _assets(tmp_path),
     }
 
 
-def _build(values: dict[str, object]) -> tuple[bytes, bytes, bytes, str]:
+def _build(
+    values: dict[str, object],
+) -> tuple[bytes, bytes, bytes, str, str]:
     return builder.build_bundle(
         wheelhouse=values["wheelhouse"],
         requirements=values["requirements"],
-        public_key_path=values["public_path"],
-        private_key_path=values["private_path"],
+        bootstrap_signing_private_key_path=values["bootstrap_private_path"],
+        bootstrap_signing_public_key_path=values["bootstrap_public_path"],
+        runtime_release_public_key_path=values["runtime_public_path"],
         assets_dir=values["assets"],
+        sequence=values["sequence"],
+        issued_unix=values["issued_unix"],
+        lifetime_seconds=values["lifetime_seconds"],
     )
 
 
@@ -146,7 +172,7 @@ def _artifacts(
     bundle_path = root / "updater-bootstrap.tar.gz"
     manifest_path = root / "updater-bootstrap.manifest.json"
     signature_path = root / "updater-bootstrap.manifest.sig"
-    trusted_path = root / "trusted-public.pem"
+    trusted_path = root / "bootstrap-public-key.pem"
     bundle_path.write_bytes(archive)
     manifest_path.write_bytes(manifest)
     signature_path.write_bytes(signature)
@@ -163,30 +189,47 @@ def _verifier(manifest: bytes, signature: bytes, public: bytes) -> None:
 
 def _verified(tmp_path: Path) -> tuple[object, dict[str, object], tuple[Path, ...]]:
     values = _inputs(tmp_path)
-    archive, manifest, signature, _ = _build(values)
+    verified, artifacts = _verify_values(tmp_path / "artifacts", values)
+    return verified, values, artifacts
+
+
+def _verify_values(
+    artifact_root: Path,
+    values: dict[str, object],
+) -> tuple[object, tuple[Path, ...]]:
+    archive, manifest, signature, _, _ = _build(values)
     artifacts = _artifacts(
-        tmp_path / "artifacts",
+        artifact_root,
         archive,
         manifest,
         signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
     verified = installer.verify_bundle(
         bundle_path=artifacts[0],
         manifest_path=artifacts[1],
         signature_path=artifacts[2],
-        trusted_public_key_path=artifacts[3],
-        expected_fingerprint=values["fingerprint"],
+        bootstrap_public_key_path=artifacts[3],
+        expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+        minimum_bootstrap_sequence=1,
         expected_owner=os.geteuid(),
         signature_verifier=_verifier,
     )
-    return verified, values, artifacts
+    return verified, artifacts
 
 
-def _fake_runner(calls: list[list[str]], *, fail_pip: bool = False):
+def _fake_runner(
+    calls: list[list[str]],
+    *,
+    fail_pip: bool = False,
+    fail_preflight: bool = False,
+    fail_daemon_reload: bool = False,
+):
     def run(command, **kwargs):
         command = [str(value) for value in command]
         calls.append(command)
+        if "import ensurepip, venv" in command[-1] and fail_preflight:
+            raise subprocess.CalledProcessError(1, command)
         if command[1:4] == ["-m", "venv", command[-1]]:
             version = Path(command[-1])
             (version / "bin").mkdir(parents=True, exist_ok=True)
@@ -197,6 +240,8 @@ def _fake_runner(calls: list[list[str]], *, fail_pip: bool = False):
             updater.write_text(f"#!{python}\nexit 0\n")
             updater.chmod(0o755)
         elif "install" in command and fail_pip:
+            raise subprocess.CalledProcessError(1, command)
+        elif command[-1] == "daemon-reload" and fail_daemon_reload:
             raise subprocess.CalledProcessError(1, command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -214,7 +259,7 @@ def _resign_archive(
         "size": len(archive),
     }
     new_manifest = builder.canonical_json(document)
-    return new_manifest, values["private"].sign(new_manifest)
+    return new_manifest, values["bootstrap_private"].sign(new_manifest)
 
 
 def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
@@ -222,18 +267,75 @@ def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
     first = _build(values)
     second = _build(values)
     assert first == second
-    archive, manifest, signature, fingerprint = first
+    (
+        archive,
+        manifest,
+        signature,
+        bootstrap_fingerprint,
+        runtime_fingerprint,
+    ) = first
     assert len(signature) == 64
-    assert fingerprint == values["fingerprint"]
+    assert bootstrap_fingerprint == values["bootstrap_fingerprint"]
+    assert runtime_fingerprint == values["runtime_fingerprint"]
+    assert bootstrap_fingerprint != runtime_fingerprint
     assert b"PRIVATE KEY" not in archive
     assert b"PRIVATE KEY" not in manifest
+    document = json.loads(manifest)
+    assert document["schema"] == "cathedral_validator_updater_bootstrap_v2"
+    assert document["bootstrap_signing_key"] == {
+        "algorithm": "Ed25519",
+        "fingerprint": values["bootstrap_fingerprint"],
+        "source": "operator-pinned-external",
+    }
+    assert document["bootstrap_metadata"] == {
+        "expires_unix": values["issued_unix"] + values["lifetime_seconds"],
+        "issued_unix": values["issued_unix"],
+        "sequence": values["sequence"],
+    }
+    assert document["runtime_release_key"] == {
+        "algorithm": "Ed25519",
+        "fingerprint": values["runtime_fingerprint"],
+        "path": "payload/runtime-release-public-key.pem",
+    }
+    assert "public_key" not in document
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
         names = bundle.getnames()
         assert names == sorted(names)
         assert names.count("payload/installer/install_updater_bundle.py") == 1
-        assert names.count("payload/update-public-key.pem") == 1
+        assert names.count("payload/runtime-release-public-key.pem") == 1
         assert all(member.uid == 0 and member.gid == 0 for member in bundle)
         assert all(member.mtime == 0 for member in bundle)
+        runtime_member = bundle.extractfile("payload/runtime-release-public-key.pem")
+        assert runtime_member is not None
+        assert runtime_member.read() == values["runtime_public_path"].read_bytes()
+
+
+def test_builder_requires_matching_bootstrap_pair_and_distinct_runtime_key(tmp_path):
+    values = _inputs(tmp_path / "mismatch")
+    values["bootstrap_public_path"] = values["runtime_public_path"]
+    with pytest.raises(builder.BundleRefused, match="does not match"):
+        _build(values)
+
+    values = _inputs(tmp_path / "same-key")
+    values["runtime_public_path"] = values["bootstrap_public_path"]
+    with pytest.raises(builder.BundleRefused, match="must be distinct"):
+        _build(values)
+
+
+def test_builder_cli_names_bootstrap_and_runtime_key_roles() -> None:
+    options = {
+        option
+        for action in builder._parser()._actions
+        for option in action.option_strings
+    }
+    assert "--bootstrap-signing-private-key" in options
+    assert "--bootstrap-signing-public-key" in options
+    assert "--runtime-release-public-key" in options
+    assert "--sequence" in options
+    assert "--issued-unix" in options
+    assert "--lifetime-seconds" in options
+    assert "--private-key" not in options
+    assert "--public-key" not in options
 
 
 def test_builder_refuses_incomplete_hash_lock_and_private_key_in_wheel(tmp_path):
@@ -270,14 +372,14 @@ def test_builder_refuses_symlinked_asset_and_permissive_private_key(tmp_path):
     second = tmp_path / "key-mode"
     second.mkdir()
     values = _inputs(second)
-    values["private_path"].chmod(0o644)
+    values["bootstrap_private_path"].chmod(0o644)
     with pytest.raises(builder.BundleRefused, match="owner-controlled"):
         _build(values)
 
 
 def test_output_writer_never_overwrites_an_existing_artifact(tmp_path):
     values = _inputs(tmp_path)
-    archive, manifest, signature, _ = _build(values)
+    archive, manifest, signature, _, _ = _build(values)
     output = tmp_path / "output"
     output.mkdir()
     bundle_path = output / "bundle.tar.gz"
@@ -300,15 +402,17 @@ def test_output_writer_never_overwrites_an_existing_artifact(tmp_path):
 
 def test_verifier_rejects_wrong_pin_bad_signature_and_tampered_archive(tmp_path):
     verified, values, artifacts = _verified(tmp_path)
-    assert verified.public_key_fingerprint == values["fingerprint"]
+    assert verified.bootstrap_signing_key_fingerprint == values["bootstrap_fingerprint"]
+    assert verified.runtime_release_key_fingerprint == values["runtime_fingerprint"]
 
-    with pytest.raises(installer.InstallRefused, match="differs from the pin"):
+    with pytest.raises(installer.InstallRefused, match="operator pin"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint="sha256:" + "0" * 64,
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint="sha256:" + "0" * 64,
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -321,13 +425,14 @@ def test_verifier_rejects_wrong_pin_bad_signature_and_tampered_archive(tmp_path)
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
 
-    archive, manifest, signature, _ = _build(values)
+    archive, manifest, signature, _, _ = _build(values)
     artifacts[0].write_bytes(archive[:-1] + bytes([archive[-1] ^ 1]))
     artifacts[1].write_bytes(manifest)
     artifacts[2].write_bytes(signature)
@@ -336,11 +441,121 @@ def test_verifier_rejects_wrong_pin_bad_signature_and_tampered_archive(tmp_path)
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
+
+
+def test_verifier_binds_runtime_key_and_rejects_old_one_key_schema(tmp_path):
+    values = _inputs(tmp_path)
+    archive, manifest, _, _, _ = _build(values)
+    document = json.loads(manifest)
+    document["runtime_release_key"]["fingerprint"] = "sha256:" + "0" * 64
+    mismatched_manifest = builder.canonical_json(document)
+    mismatched_signature = values["bootstrap_private"].sign(mismatched_manifest)
+    artifacts = _artifacts(
+        tmp_path / "runtime-mismatch",
+        archive,
+        mismatched_manifest,
+        mismatched_signature,
+        values["bootstrap_public_path"],
+    )
+    with pytest.raises(
+        installer.InstallRefused,
+        match="runtime release key fingerprint differs",
+    ):
+        installer.verify_bundle(
+            bundle_path=artifacts[0],
+            manifest_path=artifacts[1],
+            signature_path=artifacts[2],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
+            expected_owner=os.geteuid(),
+            signature_verifier=_verifier,
+        )
+
+    old_document = json.loads(manifest)
+    old_document["schema"] = "cathedral_validator_updater_bootstrap_v1"
+    old_manifest = builder.canonical_json(old_document)
+    old_signature = values["bootstrap_private"].sign(old_manifest)
+    artifacts[1].write_bytes(old_manifest)
+    artifacts[2].write_bytes(old_signature)
+    with pytest.raises(installer.InstallRefused, match="schema is unsupported"):
+        installer.verify_bundle(
+            bundle_path=artifacts[0],
+            manifest_path=artifacts[1],
+            signature_path=artifacts[2],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
+            expected_owner=os.geteuid(),
+            signature_verifier=_verifier,
+        )
+
+
+def test_bootstrap_sequence_checkpoint_and_validity_window_are_enforced(tmp_path):
+    values = _inputs(tmp_path)
+    archive, manifest, signature, _, _ = _build(values)
+    artifacts = _artifacts(
+        tmp_path / "artifacts",
+        archive,
+        manifest,
+        signature,
+        values["bootstrap_public_path"],
+    )
+
+    common = {
+        "bundle_path": artifacts[0],
+        "manifest_path": artifacts[1],
+        "signature_path": artifacts[2],
+        "bootstrap_public_key_path": artifacts[3],
+        "expected_bootstrap_fingerprint": values["bootstrap_fingerprint"],
+        "expected_owner": os.geteuid(),
+        "signature_verifier": _verifier,
+    }
+    with pytest.raises(installer.InstallRefused, match="operator checkpoint"):
+        installer.verify_bundle(
+            **common,
+            minimum_bootstrap_sequence=2,
+        )
+    with pytest.raises(installer.InstallRefused, match="not valid yet"):
+        installer.verify_bundle(
+            **common,
+            minimum_bootstrap_sequence=1,
+            now_unix=values["issued_unix"] - 301,
+        )
+    with pytest.raises(installer.InstallRefused, match="has expired"):
+        installer.verify_bundle(
+            **common,
+            minimum_bootstrap_sequence=1,
+            now_unix=values["issued_unix"] + values["lifetime_seconds"],
+        )
+
+    values["sequence"] = 0
+    with pytest.raises(builder.BundleRefused, match="sequence is invalid"):
+        _build(values)
+    values["sequence"] = 1
+    values["lifetime_seconds"] = 91 * 24 * 60 * 60
+    with pytest.raises(builder.BundleRefused, match="outside"):
+        _build(values)
+
+
+def test_installer_cli_accepts_only_external_bootstrap_trust_anchor() -> None:
+    options = {
+        option
+        for action in installer._parser()._actions
+        for option in action.option_strings
+    }
+    assert "--bootstrap-public-key" in options
+    assert "--expected-bootstrap-key-fingerprint" in options
+    assert "--minimum-bootstrap-sequence" in options
+    assert "--runtime-release-public-key" not in options
+    assert "--trusted-public-key" not in options
+    assert "--expected-public-key-fingerprint" not in options
 
 
 def test_openssl3_verifies_ed25519_from_memory_without_temp_files():
@@ -368,37 +583,42 @@ def test_openssl3_verifies_ed25519_from_memory_without_temp_files():
 
 def test_verifier_rejects_self_signed_attacker_key_and_permissive_inputs(tmp_path):
     values = _inputs(tmp_path)
-    archive, manifest, signature, _ = _build(values)
+    archive, manifest, signature, _, _ = _build(values)
     artifact_root = tmp_path / "artifacts"
     artifacts = _artifacts(
         artifact_root,
         archive,
         manifest,
         signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
-    _, _, legitimate, legitimate_fingerprint = _keypair(tmp_path / "legitimate")
+    _, _, legitimate, legitimate_fingerprint = _keypair(
+        tmp_path / "legitimate",
+        "legitimate-bootstrap",
+    )
     artifacts[3].write_bytes(legitimate.read_bytes())
     with pytest.raises(installer.InstallRefused, match="fingerprint differs"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=legitimate_fingerprint,
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=legitimate_fingerprint,
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
 
-    artifacts[3].write_bytes(values["public_path"].read_bytes())
+    artifacts[3].write_bytes(values["bootstrap_public_path"].read_bytes())
     artifacts[0].chmod(0o666)
     with pytest.raises(installer.InstallRefused, match="owner-controlled"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -406,26 +626,27 @@ def test_verifier_rejects_self_signed_attacker_key_and_permissive_inputs(tmp_pat
 
 def test_verifier_rejects_traversal_and_symlink_members(tmp_path):
     values = _inputs(tmp_path)
-    archive, manifest, _, _ = _build(values)
+    archive, manifest, _, _, _ = _build(values)
     document = json.loads(manifest)
     document["files"][0]["path"] = "../escape"
     document["files"] = sorted(document["files"], key=lambda item: item["path"])
     malicious_manifest = builder.canonical_json(document)
-    malicious_signature = values["private"].sign(malicious_manifest)
+    malicious_signature = values["bootstrap_private"].sign(malicious_manifest)
     artifacts = _artifacts(
         tmp_path / "traversal",
         archive,
         malicious_manifest,
         malicious_signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
     with pytest.raises(installer.InstallRefused, match="unsafe archive path"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -456,15 +677,16 @@ def test_verifier_rejects_traversal_and_symlink_members(tmp_path):
         link_archive,
         link_manifest,
         link_signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
     with pytest.raises(installer.InstallRefused, match="metadata differs"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -472,7 +694,7 @@ def test_verifier_rejects_traversal_and_symlink_members(tmp_path):
 
 def test_verifier_rejects_tampered_or_missing_signed_installer(tmp_path):
     values = _inputs(tmp_path)
-    archive, manifest, _, _ = _build(values)
+    archive, manifest, _, _, _ = _build(values)
     source = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as target:
@@ -493,15 +715,16 @@ def test_verifier_rejects_tampered_or_missing_signed_installer(tmp_path):
         tampered_archive,
         tampered_manifest,
         tampered_signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
     with pytest.raises(installer.InstallRefused, match="content differs"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -513,21 +736,22 @@ def test_verifier_rejects_tampered_or_missing_signed_installer(tmp_path):
         if record["path"] != installer.INSTALLER_ARCHIVE_PATH
     ]
     missing_manifest = builder.canonical_json(document)
-    missing_signature = values["private"].sign(missing_manifest)
+    missing_signature = values["bootstrap_private"].sign(missing_manifest)
     artifacts = _artifacts(
         tmp_path / "missing-installer",
         archive,
         missing_manifest,
         missing_signature,
-        values["public_path"],
+        values["bootstrap_public_path"],
     )
     with pytest.raises(installer.InstallRefused, match="fixed bootstrap asset set"):
         installer.verify_bundle(
             bundle_path=artifacts[0],
             manifest_path=artifacts[1],
             signature_path=artifacts[2],
-            trusted_public_key_path=artifacts[3],
-            expected_fingerprint=values["fingerprint"],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
@@ -578,19 +802,21 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
         runner=runner,
     )
     assert digest == verified.manifest_sha256
-    assert [command[1:4] for command in calls[:2]] == [
-        ["-m", "venv", calls[0][-1]],
+    assert calls[0][1:3] == ["-I", "-c"]
+    assert "import ensurepip, venv" in calls[0][3]
+    assert [command[1:4] for command in calls[1:3]] == [
+        ["-m", "venv", calls[1][-1]],
         ["-m", "pip", "install"],
     ]
-    pip_command = calls[1]
+    pip_command = calls[2]
     assert "--no-index" in pip_command
     assert "--no-deps" in pip_command
     assert "--require-hashes" in pip_command
     assert "--only-binary=:all:" in pip_command
-    assert calls[2][1:3] == ["-I", "-c"]
-    assert "import updater" in calls[2][3]
-    assert "import cryptography" in calls[2][3]
-    assert calls[3][-1] == "--help"
+    assert calls[3][1:3] == ["-I", "-c"]
+    assert "import updater" in calls[3][3]
+    assert "import cryptography" in calls[3][3]
+    assert calls[4][-1] == "--help"
     assert not any(command[1:4] == ["-m", "pip", "check"] for command in calls)
     assert not any(
         action in command
@@ -638,6 +864,12 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
     assert after == before
     assert calls[first_call_count:] == [
         [
+            "/usr/bin/python3.12",
+            "-I",
+            "-c",
+            "import ensurepip, venv; assert callable(venv.create)",
+        ],
+        [
             "/usr/bin/systemd-sysusers",
             str(root / "etc/sysusers.d/cathedral-validator.conf"),
         ],
@@ -645,7 +877,186 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
     ]
 
 
-def test_install_refuses_destination_symlink_before_running_commands(tmp_path):
+def test_missing_python_venv_support_refuses_before_mutation(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    calls: list[list[str]] = []
+    with pytest.raises(installer.InstallRefused, match="python3.12-venv"):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner(calls, fail_preflight=True),
+        )
+    assert len(calls) == 1
+    assert list(root.iterdir()) == []
+
+
+def test_install_sets_traversable_service_paths_under_owner_only_umask(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    previous = os.umask(0o077)
+    try:
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((root / "etc/cathedral-validator").stat().st_mode) == 0o755
+    assert (
+        stat.S_IMODE(
+            (root / "etc/cathedral-validator/runtime-release-public-key.pem")
+            .stat()
+            .st_mode
+        )
+        == 0o644
+    )
+
+
+def test_bootstrap_upgrade_is_monotonic_atomic_and_retains_prior_version(tmp_path):
+    values = _inputs(tmp_path / "inputs")
+    first, _ = _verify_values(tmp_path / "first-artifacts", values)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    installer.install_verified_bundle(
+        first,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    values["sequence"] = 2
+    unit_asset = values["assets"] / "cathedral-validator-update.service"
+    unit_asset.write_text(unit_asset.read_text() + "# signed bootstrap v2\n")
+    second, _ = _verify_values(tmp_path / "second-artifacts", values)
+    installer.install_verified_bundle(
+        second,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    fixed = root / "usr/local/lib/cathedral-validator-updater"
+    assert fixed.readlink() == (
+        Path("cathedral-validator-updater-releases") / second.manifest_sha256
+    )
+    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    assert (releases / first.manifest_sha256).is_dir()
+    assert (releases / second.manifest_sha256).is_dir()
+    state_path = root / "var/lib/cathedral-validator-update/bootstrap-state.json"
+    state = json.loads(state_path.read_bytes())
+    assert state["sequence"] == 2
+    assert state["manifest_sha256"] == second.manifest_sha256
+    assert not (
+        root / "var/lib/cathedral-validator-update/bootstrap-pending.json"
+    ).exists()
+    assert (
+        root / "etc/systemd/system/cathedral-validator-update.service"
+    ).read_bytes() == second.files[
+        "payload/systemd/cathedral-validator-update.service"
+    ].body
+
+    with pytest.raises(installer.InstallRefused, match="bootstrap replay"):
+        installer.install_verified_bundle(
+            first,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+    assert json.loads(state_path.read_bytes())["manifest_sha256"] == (
+        second.manifest_sha256
+    )
+
+
+def test_bootstrap_upgrade_recovers_same_signed_target_after_interruption(tmp_path):
+    values = _inputs(tmp_path / "inputs")
+    first, _ = _verify_values(tmp_path / "first-artifacts", values)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    installer.install_verified_bundle(
+        first,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    values["sequence"] = 2
+    values["assets"].joinpath("cathedral-validator-update.timer").write_text(
+        values["assets"].joinpath("cathedral-validator-update.timer").read_text()
+        + "# interrupted signed upgrade\n"
+    )
+    second, _ = _verify_values(tmp_path / "second-artifacts", values)
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.install_verified_bundle(
+            second,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([], fail_daemon_reload=True),
+        )
+    state_root = root / "var/lib/cathedral-validator-update"
+    assert (
+        json.loads((state_root / "bootstrap-state.json").read_bytes())["sequence"] == 1
+    )
+    assert (
+        json.loads((state_root / "bootstrap-pending.json").read_bytes())[
+            "manifest_sha256"
+        ]
+        == second.manifest_sha256
+    )
+
+    installer.install_verified_bundle(
+        second,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+    assert (
+        json.loads((state_root / "bootstrap-state.json").read_bytes())["sequence"] == 2
+    )
+    assert not (state_root / "bootstrap-pending.json").exists()
+
+
+def test_same_bootstrap_sequence_with_different_manifest_is_refused(tmp_path):
+    values = _inputs(tmp_path / "inputs")
+    first, _ = _verify_values(tmp_path / "first-artifacts", values)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    installer.install_verified_bundle(
+        first,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+    values["assets"].joinpath("update.env.example").write_text(
+        "signed but equivocal contents\n"
+    )
+    equivocal, _ = _verify_values(tmp_path / "equivocal-artifacts", values)
+    with pytest.raises(installer.InstallRefused, match="equivocal"):
+        installer.install_verified_bundle(
+            equivocal,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+
+
+def test_install_refuses_destination_symlink_before_persistent_mutation(tmp_path):
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
     root.mkdir(mode=0o700)
@@ -661,11 +1072,13 @@ def test_install_refuses_destination_symlink_before_running_commands(tmp_path):
             python_executable=Path("/usr/bin/python3.12"),
             runner=_fake_runner(calls),
         )
-    assert calls == []
+    assert len(calls) == 1
+    assert "import ensurepip, venv" in calls[0][-1]
     assert list(outside.iterdir()) == []
+    assert not (root / "var").exists()
 
 
-def test_install_refuses_existing_different_unit_without_mutation(tmp_path):
+def test_signed_bootstrap_replaces_a_safe_managed_unit(tmp_path):
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
     unit = root / "etc/systemd/system/cathedral-validator-update.service"
@@ -673,17 +1086,18 @@ def test_install_refuses_existing_different_unit_without_mutation(tmp_path):
     unit.write_text("operator unit\n")
     unit.chmod(0o644)
     calls: list[list[str]] = []
-    with pytest.raises(installer.InstallRefused, match="differs from signed bundle"):
-        installer.install_verified_bundle(
-            verified,
-            root=root,
-            expected_owner=os.geteuid(),
-            python_executable=Path("/usr/bin/python3.12"),
-            runner=_fake_runner(calls),
-        )
-    assert unit.read_text() == "operator unit\n"
-    assert calls == []
-    assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner(calls),
+    )
+    assert (
+        unit.read_bytes()
+        == verified.files["payload/systemd/cathedral-validator-update.service"].body
+    )
+    assert (root / "usr/local/lib/cathedral-validator-updater").is_symlink()
 
 
 def test_failed_offline_pip_install_leaves_no_active_or_partial_updater(tmp_path):
@@ -747,10 +1161,17 @@ def test_installed_files_are_root_style_modes_and_manifest_is_immutable(tmp_path
     assert stat.S_IMODE((release / ".bootstrap-manifest.json").stat().st_mode) == 0o444
     assert (
         stat.S_IMODE(
-            (root / "etc/cathedral-validator/update-public-key.pem").stat().st_mode
+            (root / "etc/cathedral-validator/runtime-release-public-key.pem")
+            .stat()
+            .st_mode
         )
         == 0o644
     )
+    assert (
+        root / "etc/cathedral-validator/runtime-release-public-key.pem"
+    ).read_bytes() == verified.files[
+        installer.RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH
+    ].body
     for unit in installer.SYSTEMD_ASSETS:
         assert (
             stat.S_IMODE((root / "etc/systemd/system" / unit).stat().st_mode) == 0o644

@@ -1850,9 +1850,20 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     ):
         unit = (deploy / name).read_text()
         assert "ProtectHome=true" in unit
-        assert "ConditionPathExists=/etc/cathedral-validator/identity.env" in unit
+        assert "\nCondition" not in unit
+        assert "AssertPathExists=/etc/cathedral-validator/update.env" in unit
+        assert "AssertPathExists=/etc/cathedral-validator/identity.env" in unit
+        assert (
+            "AssertPathExists=/etc/cathedral-validator/"
+            "runtime-release-public-key.pem" in unit
+        )
         assert "EnvironmentFile=/etc/cathedral-validator/identity.env" not in unit
         assert "--identity-file=/etc/cathedral-validator/identity.env" in unit
+        assert (
+            "--public-key=/etc/cathedral-validator/"
+            "runtime-release-public-key.pem" in unit
+        )
+        assert "update-public-key.pem" not in unit
         assert "--expected-hotkey" not in unit
         assert "--journal" not in unit
         assert (
@@ -1860,7 +1871,7 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
             "cathedral-validator-update "
         ) in unit
         assert (
-            "ConditionFileIsExecutable=/usr/local/lib/"
+            "AssertFileIsExecutable=/usr/local/lib/"
             "cathedral-validator-updater/bin/cathedral-validator-update"
         ) in unit
         assert "/home/" not in unit
@@ -1956,6 +1967,9 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "public bootstrap artifacts are not published yet" in docs
     assert "Do not install\nor enable updater units from a source checkout" in docs
     assert "signed manifest" in docs
+    assert "two distinct Ed25519 keys" in docs
+    assert "/etc/cathedral-validator/runtime-release-public-key.pem" in docs
+    assert "/etc/cathedral-validator/update-public-key.pem" not in docs
     assert (
         "/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update"
         in docs

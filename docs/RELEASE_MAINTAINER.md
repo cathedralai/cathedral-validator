@@ -5,14 +5,17 @@ validator releases. It is not an operator installation guide.
 
 ## Trust boundary
 
-The Ed25519 release private key stays on an offline, owner-controlled release
-workstation. It never enters GitHub Actions, a validator host, a cloud VM, or
-the repository. Validators receive only the public key.
+Two distinct Ed25519 private keys stay off GitHub Actions, validator hosts,
+cloud VMs, and the repository.
 
-The same private key signs runtime metadata and the updater bootstrap manifest.
-Keep an encrypted offline backup and a separately recorded public-key
-fingerprint. A key rotation is a bootstrap migration. It is not a routine
-runtime release.
+- The runtime release key signs routine canary and stable metadata.
+- The rarer offline bootstrap key signs the updater bootstrap manifest.
+
+Operators authenticate the bootstrap public key and fingerprint outside the
+bundle. That signed bootstrap binds and installs the exact runtime release
+public key. The installer has no caller option to replace it. Keep separate
+encrypted backups and separately recorded fingerprints. Rotation of either key
+is a bootstrap migration, not a routine runtime release.
 
 ## Build the retained candidate
 
@@ -42,7 +45,7 @@ before signing.
 
 ```bash
 python deploy/validator-update/build_signed_release.py \
-  --private-key /secure/offline/release-key.pem \
+  --private-key /secure/offline/runtime-release-private-key.pem \
   canary \
   --pex /secure/candidate/runtime/cathedral-validator.pex \
   --qvl /secure/candidate/runtime/cathedral-tdx-verifier \
@@ -67,7 +70,7 @@ channel branch without writing:
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/canary.json \
   --archive /secure/signed/cathedral-validator.tar.gz \
-  --public-key /secure/offline/release-public-key.pem
+  --public-key /secure/offline/runtime-release-public-key.pem
 ```
 
 Only after that succeeds, repeat with `--publish`. The publisher writes in this
@@ -83,7 +86,7 @@ order:
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/canary.json \
   --archive /secure/signed/cathedral-validator.tar.gz \
-  --public-key /secure/offline/release-public-key.pem \
+  --public-key /secure/offline/runtime-release-public-key.pem \
   --publish
 ```
 
@@ -101,7 +104,7 @@ rebuild the archive.
 
 ```bash
 python deploy/validator-update/build_signed_release.py \
-  --private-key /secure/offline/release-key.pem \
+  --private-key /secure/offline/runtime-release-private-key.pem \
   stable \
   --canary-metadata /secure/signed/canary.json \
   --metadata-out /secure/signed/stable.json \
@@ -109,11 +112,11 @@ python deploy/validator-update/build_signed_release.py \
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/stable.json \
   --archive /secure/signed/cathedral-validator.tar.gz \
-  --public-key /secure/offline/release-public-key.pem
+  --public-key /secure/offline/runtime-release-public-key.pem
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/stable.json \
   --archive /secure/signed/cathedral-validator.tar.gz \
-  --public-key /secure/offline/release-public-key.pem \
+  --public-key /secure/offline/runtime-release-public-key.pem \
   --publish
 ```
 
@@ -129,7 +132,7 @@ URL before it signs.
 
 ```bash
 python deploy/validator-update/build_signed_release.py \
-  --private-key /secure/offline/release-key.pem \
+  --private-key /secure/offline/runtime-release-private-key.pem \
   resign-canary \
   --current-canary-metadata /secure/signed/current-canary.json \
   --retained-metadata /secure/retained/known-good.json \
@@ -144,7 +147,7 @@ edit channel JSON by hand and do not overwrite immutable history.
 ## Build the signed updater bootstrap
 
 Bootstrap releases are rare. Build one only when the updater, service units,
-host requirements, or release key must change. Use the candidate's exact
+host requirements, or runtime release key must change. Use the candidate's exact
 wheelhouse and hash lock plus the reviewed deploy assets from the same source
 revision.
 
@@ -152,19 +155,28 @@ revision.
 python deploy/validator-update/build_updater_bundle.py \
   --wheelhouse /secure/candidate/updater-wheelhouse \
   --requirements /secure/candidate/updater-requirements.lock \
-  --public-key /secure/offline/release-public-key.pem \
-  --private-key /secure/offline/release-key.pem \
+  --bootstrap-signing-private-key \
+    /secure/offline/bootstrap-signing-private-key.pem \
+  --bootstrap-signing-public-key \
+    /secure/offline/bootstrap-signing-public-key.pem \
+  --runtime-release-public-key \
+    /secure/offline/runtime-release-public-key.pem \
   --assets-dir /absolute/reviewed/deploy/validator-update \
   --bundle-out /secure/signed/updater-bootstrap.tar.gz \
   --manifest-out /secure/signed/updater-bootstrap.manifest.json \
-  --signature-out /secure/signed/updater-bootstrap.manifest.sig
+  --signature-out /secure/signed/updater-bootstrap.manifest.sig \
+  --sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE \
+  --issued-unix REPLACE_WITH_CURRENT_UNIX_TIME \
+  --lifetime-seconds 2592000
 ```
 
-Publish the bundle, manifest, detached signature, and public key as immutable
-assets. Independently verify anonymous downloads. Then replace the generated
-blocks in `README.md` and `docs/AUTO_UPDATE.md` with exact URLs, the public-key
-fingerprint, the authenticated minimum stable sequence, and commands that were
-run successfully on a clean live-test host.
+Publish the bundle, manifest, detached signature, and bootstrap signing public
+key as immutable assets. Independently verify anonymous downloads. Record both
+key fingerprints, sequence, issue time, and expiry from the signed manifest.
+Then replace the generated blocks in `README.md` and `docs/AUTO_UPDATE.md` with
+exact URLs, the bootstrap signing key fingerprint, authenticated minimum
+bootstrap and stable sequences, and commands run successfully on a clean
+live-test host. Never add a caller-supplied runtime key to the install command.
 
 Do not publish a bootstrap guide before that host test passes. Do not claim a
 runtime release updates the bootstrap layer.

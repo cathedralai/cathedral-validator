@@ -2,17 +2,17 @@
 Description=Install a verified Cathedral validator UID30 canary release
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=/etc/cathedral-validator/update.env
-ConditionPathExists=/etc/cathedral-validator/identity.env
-ConditionPathExists=/etc/cathedral-validator/update-public-key.pem
-ConditionFileIsExecutable=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update
+AssertPathExists=/etc/cathedral-validator/update.env
+AssertPathExists=/etc/cathedral-validator/identity.env
+AssertPathExists=/etc/cathedral-validator/runtime-release-public-key.pem
+AssertFileIsExecutable=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update
 
 [Service]
 Type=oneshot
 User=root
 Group=root
 EnvironmentFile=/etc/cathedral-validator/update.env
-ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=canary --metadata-url=${CATHEDRAL_VALIDATOR_CANARY_METADATA_URL} --public-key=/etc/cathedral-validator/update-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=${CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE}
+ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=canary --metadata-url=${CATHEDRAL_VALIDATOR_CANARY_METADATA_URL} --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=${CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE}
 # The updater enforces a 20-minute monotonic deadline. Keep a two-minute
 # manager margin so systemd never kills it between durable activation phases.
 TimeoutStartSec=1320s

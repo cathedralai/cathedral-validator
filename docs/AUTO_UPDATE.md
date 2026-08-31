@@ -30,7 +30,8 @@ These host trust settings do not change in a routine release:
 
 - bootstrap updater and systemd units
 - CPython and other host packages
-- release public key
+- offline bootstrap signing key
+- runtime release public key
 - validator hotkey
 - AMD SEV-SNP policy
 - operator environment files
@@ -49,6 +50,13 @@ updater refuses metadata from the other channel. Do not delete updater state to
 force a switch. Use a new host for a different channel.
 
 ## Before installation
+
+On Ubuntu 24.04, install the required host packages first:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv openssl
+```
 
 Prepare these operator-owned inputs:
 
@@ -81,19 +89,28 @@ measurement, add a wildcard, or lower the observed TCB floor to admit a machine.
 
 ## Install the signed bootstrap
 
-The bootstrap is an offline bundle with a signed manifest. Before execution,
-the operator verifies it with an independently obtained Ed25519 public key and
-published key fingerprint. The signed installer checks the same signature,
-fingerprint, manifest, file set, and wheel hashes again. It installs no release
-and enables no service by itself.
+The bootstrap uses two distinct Ed25519 keys. You independently obtain and pin
+the rare offline bootstrap signing public key and its fingerprint. That key
+authenticates the bootstrap manifest. The signed manifest binds the exact
+runtime release public key inside the bundle. The installer accepts no caller
+replacement for the runtime key. It checks the signature, both fingerprints,
+manifest, file set, and wheel hashes before installing anything. It installs no
+release and enables no service by itself.
 
 <!-- BEGIN GENERATED UPDATER BOOTSTRAP -->
 Publication pending. Replace this block only after live testing with:
 
-- immutable bundle, manifest, signature, and public-key URLs
-- the independently authenticated public-key fingerprint
+- immutable bundle, manifest, signature, and bootstrap-public-key URLs
+- the independently authenticated bootstrap signing key fingerprint
+- the bootstrap sequence checkpoint and signed issue and expiry times
+- the runtime release key fingerprint bound inside the signed manifest
 - the current stable metadata URL and authenticated minimum sequence
 - exact download, verification, extraction, and install commands
+
+The install command must pass the published bootstrap key only through
+`--bootstrap-public-key`, its pin through
+`--expected-bootstrap-key-fingerprint`, and the authenticated replay checkpoint
+through `--minimum-bootstrap-sequence`. There is no runtime-key argument.
 
 Until those values are present, public installation is closed.
 <!-- END GENERATED UPDATER BOOTSTRAP -->
@@ -150,7 +167,7 @@ sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
   --bootstrap-first-install \
   --channel=stable \
   --metadata-url=REPLACE_WITH_PUBLISHED_STABLE_URL \
-  --public-key=/etc/cathedral-validator/update-public-key.pem \
+  --public-key=/etc/cathedral-validator/runtime-release-public-key.pem \
   --identity-file=/etc/cathedral-validator/identity.env \
   --minimum-sequence=REPLACE_WITH_AUTHENTICATED_STABLE_SEQUENCE
 ```
