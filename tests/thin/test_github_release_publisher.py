@@ -9,6 +9,8 @@ import runpy
 import subprocess
 import sys
 import tarfile
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -494,10 +496,20 @@ def test_isolated_channel_branch_is_url_encoded_for_github_refs(
 
     def api(endpoint: str, **kwargs):
         calls.append((endpoint, kwargs.get("payload")))
+        if endpoint == "git/refs":
+            return {
+                "object": {
+                    "type": "commit",
+                    "sha": publication.source_revision,
+                }
+            }
         return None
 
     monkeypatch.setattr(github, "api", api)
-    github.ensure_branch(publication)
+    assert github.ensure_branch(publication) == publisher["ChannelBranch"](
+        created=True,
+        revision=publication.source_revision,
+    )
     assert calls == [
         (
             "git/ref/heads/validator-release-channel%2Ffault",
@@ -511,6 +523,173 @@ def test_isolated_channel_branch_is_url_encoded_for_github_refs(
             },
         ),
     ]
+
+    calls.clear()
+    monkeypatch.setattr(
+        github,
+        "api",
+        lambda endpoint, **kwargs: (
+            calls.append((endpoint, kwargs.get("payload"))),
+            {
+                "object": {
+                    "type": "commit",
+                    "sha": publication.source_revision,
+                }
+            },
+        )[1],
+    )
+    assert github.ensure_branch(publication) == publisher["ChannelBranch"](
+        created=False,
+        revision=publication.source_revision,
+    )
+    assert calls == [("git/ref/heads/validator-release-channel%2Ffault", None)]
+
+
+def test_channel_history_listing_uses_bounded_strict_file_records(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(tmp_path)
+    github = publisher["GitHub"](publication.repository)
+    history_path = f"{publication.history_root}/1-{'b' * 64}.json"
+    record = {
+        "type": "file",
+        "path": history_path,
+        "name": history_path.rsplit("/", 1)[-1],
+        "sha": "c" * 40,
+        "size": 123,
+    }
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            json.dumps([record]).encode("utf-8"),
+            b"",
+        )
+
+    monkeypatch.setattr(github, "_run", run)
+    assert github.list_channel_objects(
+        publication.history_root, publication.channel_branch
+    ) == (
+        publisher["ChannelObject"](
+            path=history_path,
+            sha="c" * 40,
+            size=123,
+        ),
+    )
+    assert calls == [
+        (
+            [
+                "api",
+                f"repos/{publication.repository}/contents/"
+                f"{publication.history_root}?ref={publication.channel_branch}",
+            ],
+            {"allow_missing": True},
+        )
+    ]
+
+    invalid = dict(record, type="dir")
+    monkeypatch.setattr(github, "api_records", lambda *_args, **_kwargs: (invalid,))
+    with pytest.raises(UpdateRefused, match="history record is invalid"):
+        github.list_channel_objects(
+            publication.history_root, publication.channel_branch
+        )
+
+    monkeypatch.setattr(
+        github,
+        "api_records",
+        lambda *_args, **_kwargs: tuple(record for _index in range(1_000)),
+    )
+    with pytest.raises(UpdateRefused, match="safe bound"):
+        github.list_channel_objects(
+            publication.history_root, publication.channel_branch
+        )
+
+
+def test_channel_commit_atomically_binds_history_pointer_and_branch_cas(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(tmp_path)
+    github = publisher["GitHub"](publication.repository)
+    base = "d" * 40
+    calls: list[tuple[str, str, object]] = []
+    results = {
+        f"git/commits/{base}": {"sha": base, "tree": {"sha": "1" * 40}},
+        "git/blobs": {"sha": "2" * 40},
+        "git/trees": {"sha": "3" * 40},
+        "git/commits": {"sha": "4" * 40},
+        f"git/refs/heads/{publication.channel_branch}": {
+            "object": {"type": "commit", "sha": "4" * 40}
+        },
+    }
+
+    def api(endpoint: str, *, method="GET", payload=None, **_kwargs):
+        calls.append((endpoint, method, payload))
+        return results[endpoint]
+
+    monkeypatch.setattr(github, "api", api)
+    assert github.commit_channel(publication, base_revision=base) == "4" * 40
+    blob_payload = calls[1][2]
+    assert blob_payload == {
+        "content": base64.b64encode(publication.metadata).decode("ascii"),
+        "encoding": "base64",
+    }
+    tree_payload = calls[2][2]
+    assert tree_payload == {
+        "base_tree": "1" * 40,
+        "tree": [
+            {
+                "path": publication.history_path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": "2" * 40,
+            },
+            {
+                "path": publication.pointer_path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": "2" * 40,
+            },
+        ],
+    }
+    assert calls[3][2]["parents"] == [base]
+    assert calls[4] == (
+        f"git/refs/heads/{publication.channel_branch}",
+        "PATCH",
+        {"sha": "4" * 40, "force": False},
+    )
+
+
+def test_lower_sequence_loses_when_higher_sequence_wins_branch_cas(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, _public, _archive_path, publication = _validated(
+        tmp_path, sequence=4
+    )
+    github = publisher["GitHub"](publication.repository)
+    base = "d" * 40
+    endpoints = {
+        f"git/commits/{base}": {"sha": base, "tree": {"sha": "1" * 40}},
+        "git/blobs": {"sha": "2" * 40},
+        "git/trees": {"sha": "3" * 40},
+        "git/commits": {"sha": "4" * 40},
+    }
+    ref_payloads = []
+
+    def api(endpoint: str, *, method="GET", payload=None, **_kwargs):
+        if endpoint.startswith("git/refs/heads/"):
+            ref_payloads.append(payload)
+            raise UpdateRefused(
+                "non-fast-forward: signed sequence 5 advanced the reviewed head"
+            )
+        return endpoints[endpoint]
+
+    monkeypatch.setattr(github, "api", api)
+    with pytest.raises(UpdateRefused, match="sequence 5 advanced"):
+        github.commit_channel(publication, base_revision=base)
+    assert ref_payloads == [{"sha": "4" * 40, "force": False}]
 
 
 @pytest.mark.parametrize(
@@ -601,6 +780,86 @@ def test_github_channel_content_accepts_github_line_wrapping(monkeypatch) -> Non
     ) == ("a" * 40, expected)
 
 
+def test_anonymous_pointer_verification_retries_stale_cache_busted_bytes(
+    monkeypatch,
+) -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    digest = hashlib.sha256(expected).hexdigest()
+    responses = iter((b"stale pointer\n", b"stale pointer\n", expected))
+    urls: list[str] = []
+    now = [100.0]
+
+    def fetch(url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        urls.append(url)
+        assert maximum == 131_072
+        assert 0 < timeout_seconds <= 2.0
+        now[0] += 0.25
+        return next(responses)
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setitem(
+        publisher["_verify_anonymous_pointer"].__globals__,
+        "_anonymous_fetch",
+        fetch,
+    )
+    publisher["_verify_anonymous_pointer"](
+        "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+        expected,
+        metadata_sha256=digest,
+        attempts=4,
+        deadline_seconds=10.0,
+        retry_seconds=0.5,
+        request_seconds=2.0,
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+    assert len(urls) == 3
+    for attempt, url in enumerate(urls, start=1):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        assert query == {"cathedral_verify": [f"{digest}-{attempt}"]}
+
+
+def test_anonymous_pointer_verification_stops_at_its_deadline(monkeypatch) -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    now = [0.0]
+    calls = 0
+
+    def fetch(_url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert maximum == 131_072
+        assert timeout_seconds <= 1.5
+        now[0] += 0.75
+        return b"stale pointer\n"
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setitem(
+        publisher["_verify_anonymous_pointer"].__globals__,
+        "_anonymous_fetch",
+        fetch,
+    )
+    with pytest.raises(UpdateRefused, match="bounded retry window"):
+        publisher["_verify_anonymous_pointer"](
+            "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+            expected,
+            metadata_sha256=hashlib.sha256(expected).hexdigest(),
+            attempts=99,
+            deadline_seconds=2.0,
+            retry_seconds=0.5,
+            request_seconds=1.5,
+            clock=lambda: now[0],
+            sleeper=sleep,
+        )
+    assert calls == 2
+    assert now[0] == 2.0
+
+
 def test_validate_publication_rejects_tamper_and_noncanonical_name(
     tmp_path: Path,
 ) -> None:
@@ -627,68 +886,344 @@ def test_validate_publication_rejects_tamper_and_noncanonical_name(
         )
 
 
+@dataclass(frozen=True)
+class _ChannelObject:
+    path: str
+    sha: str
+    size: int
+
+
+@dataclass(frozen=True)
+class _ChannelBranch:
+    created: bool
+    revision: str
+
+
 class _FakeGitHub:
-    def __init__(self, *, pointer: bytes | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        pointer: bytes | None = None,
+        branch_created: bool | None = None,
+        branch_revision: str | None = None,
+        objects: dict[str, bytes] | None = None,
+    ) -> None:
         self.pointer = pointer
-        self.objects: dict[str, bytes] = {}
+        self.branch_created = (
+            pointer is None if branch_created is None else branch_created
+        )
+        self.branch_revision = (
+            SOURCE_REVISION
+            if self.branch_created
+            else ("d" * 40 if branch_revision is None else branch_revision)
+        )
+        self.objects = dict(objects or {})
         self.events: list[str] = []
 
     def ensure_release(self, publication) -> None:
         assert publication.archive
         self.events.append("release")
 
-    def ensure_branch(self, publication) -> None:
+    def ensure_branch(self, publication) -> _ChannelBranch:
         self.events.append("branch")
+        return _ChannelBranch(
+            created=self.branch_created,
+            revision=self.branch_revision,
+        )
 
-    def read_content(self, path: str, branch: str):
-        assert branch == "validator-release-channel"
+    def list_channel_objects(self, path: str, revision: str):
+        assert revision == self.branch_revision
+        self.events.append("history-list")
+        return (
+            tuple(
+                _ChannelObject(
+                    path=object_path,
+                    sha="object-sha",
+                    size=len(body),
+                )
+                for object_path, body in sorted(self.objects.items())
+                if object_path.startswith(path + "/")
+            )
+            or None
+        )
+
+    def read_content(self, path: str, revision: str):
+        assert revision == self.branch_revision
         if path.endswith("canary.json") and self.pointer is not None:
             return "pointer-sha", self.pointer
         body = self.objects.get(path)
         return None if body is None else ("object-sha", body)
 
-    def write_content(
-        self,
-        *,
-        path: str,
-        branch: str,
-        body: bytes,
-        message: str,
-        existing_sha: str | None = None,
-    ) -> None:
-        assert branch == "validator-release-channel"
-        assert message.startswith("release(canary):")
-        if path.endswith("canary.json"):
-            assert existing_sha in {None, "pointer-sha"}
-            self.pointer = body
-            self.events.append("pointer")
-        else:
-            assert existing_sha is None
-            self.events.append("history")
-        self.objects[path] = body
+    def commit_channel(self, publication, *, base_revision: str) -> str:
+        assert base_revision == self.branch_revision
+        self.pointer = publication.metadata
+        self.objects[publication.history_path] = publication.metadata
+        self.branch_revision = "e" * 40
+        self.events.append("channel-commit")
+        return self.branch_revision
 
 
-def test_publish_orders_archive_history_then_pointer(
+def _history_object(publication, body: bytes, *, sequence: int) -> dict[str, bytes]:
+    digest = hashlib.sha256(body).hexdigest()
+    return {
+        f"{publication.history_root}/{sequence}-{digest}.json": body,
+    }
+
+
+def _anonymous_publication_fetch(publication, github: _FakeGitHub):
+    def fetch(url: str, *, maximum: int, timeout_seconds: float = 60.0) -> bytes:
+        assert maximum > 0
+        assert timeout_seconds > 0
+        if "github.com/" in url:
+            return publication.archive
+        assert "validator/canary.json?" in url
+        return github.pointer or b""
+
+    return fetch
+
+
+def test_publish_orders_archive_then_atomic_channel_commit(
     tmp_path: Path, monkeypatch
 ) -> None:
     publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
     github = _FakeGitHub()
 
-    def anonymous(url: str, *, maximum: int) -> bytes:
-        assert maximum > 0
-        if "github.com/" in url:
-            return publication.archive
-        assert url.endswith("validator/canary.json")
-        return github.pointer or b""
-
-    monkeypatch.setitem(publisher["publish"].__globals__, "_anonymous_fetch", anonymous)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
     publisher["publish"](
         publication,
         public_key_path=public_path,
         github=github,
     )
-    assert github.events == ["release", "branch", "history", "pointer"]
+    assert github.events == [
+        "release",
+        "branch",
+        "history-list",
+        "channel-commit",
+    ]
     assert github.pointer == publication.metadata
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected"),
+    ((2, "does not advance retained"), (3, "differs from the retained")),
+)
+def test_missing_pointer_refuses_different_or_lower_retained_sequence(
+    tmp_path: Path, monkeypatch, sequence: int, expected: str
+) -> None:
+    publisher, private, public_path, _archive_path, publication = _validated(
+        tmp_path, sequence=sequence
+    )
+    retained_archive = publication.archive if sequence == 2 else b"different archive"
+    retained = _metadata(private, retained_archive, sequence=3)
+    objects = _history_object(publication, retained, sequence=3)
+    github = _FakeGitHub(branch_created=False, objects=objects)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    with pytest.raises(UpdateRefused, match=expected):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+        )
+    assert github.events == ["release", "branch", "history-list", "history-list"]
+    assert github.objects == objects
+    assert github.pointer is None
+
+
+def test_missing_pointer_resumes_exact_staged_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(
+        tmp_path, sequence=3
+    )
+    github = _FakeGitHub(
+        branch_created=False,
+        objects=_history_object(publication, publication.metadata, sequence=3),
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+    assert github.events == [
+        "release",
+        "branch",
+        "history-list",
+        "history-list",
+        "channel-commit",
+    ]
+    assert github.pointer == publication.metadata
+
+
+def test_missing_pointer_advances_stable_retained_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, private, public_path, _archive_path, publication = _validated(
+        tmp_path, sequence=4
+    )
+    retained = _metadata(private, publication.archive, sequence=3)
+    github = _FakeGitHub(
+        branch_created=False,
+        objects=_history_object(publication, retained, sequence=3),
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+    assert github.events == [
+        "release",
+        "branch",
+        "history-list",
+        "history-list",
+        "channel-commit",
+    ]
+    assert github.pointer == publication.metadata
+
+
+def test_missing_pointer_refuses_existing_branch_without_retained_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub(branch_created=False)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    with pytest.raises(UpdateRefused, match="without retained signed history"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+        )
+    assert github.events == ["release", "branch", "history-list"]
+    assert github.objects == {}
+
+
+def test_first_publication_resumes_an_empty_branch_at_the_exact_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub(
+        branch_created=False,
+        branch_revision=publication.source_revision,
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+    assert github.events == [
+        "release",
+        "branch",
+        "history-list",
+        "channel-commit",
+    ]
+    assert github.pointer == publication.metadata
+
+
+def test_first_publication_requires_an_empty_new_channel_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, private, public_path, _archive_path, publication = _validated(
+        tmp_path, sequence=2
+    )
+    retained = _metadata(private, publication.archive, sequence=1)
+    github = _FakeGitHub(
+        branch_created=True,
+        objects=_history_object(publication, retained, sequence=1),
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    with pytest.raises(UpdateRefused, match="new channel branch already contains"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+        )
+    assert github.events == ["release", "branch", "history-list", "history-list"]
+    assert github.pointer is None
+
+
+def test_missing_pointer_refuses_ambiguous_or_deleted_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, private, public_path, _archive_path, publication = _validated(
+        tmp_path, sequence=4
+    )
+    first = _metadata(private, publication.archive, sequence=3)
+    second = _metadata(private, b"other retained archive", sequence=3)
+    ambiguous_objects = {
+        **_history_object(publication, first, sequence=3),
+        **_history_object(publication, second, sequence=3),
+    }
+    ambiguous = _FakeGitHub(branch_created=False, objects=ambiguous_objects)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, ambiguous),
+    )
+    with pytest.raises(UpdateRefused, match="repeats a signed sequence"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=ambiguous,
+        )
+
+    class DeletingHistory(_FakeGitHub):
+        def read_content(self, path: str, branch: str):
+            if path.startswith(publication.history_root + "/"):
+                self.objects.pop(path, None)
+                return None
+            return super().read_content(path, branch)
+
+    deleted = DeletingHistory(
+        branch_created=False,
+        objects=_history_object(publication, first, sequence=3),
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, deleted),
+    )
+    with pytest.raises(UpdateRefused, match="deleted during review"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=deleted,
+        )
 
 
 def test_publish_rejects_pointer_rollback_before_channel_write(

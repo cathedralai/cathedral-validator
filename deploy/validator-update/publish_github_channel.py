@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Publish one already-signed validator release to the public GitHub channel.
 
-The offline signer remains the authority.  This helper only enforces publication
-ordering: immutable archive first, anonymous verification second, immutable
-history third, and the mutable signed channel pointer last.
+The offline signer remains the authority. This helper enforces publication
+ordering: immutable archive first, anonymous archive verification second,
+atomic signed history and pointer commit third, and anonymous pointer
+verification last.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 # The maintainer guide invokes this file directly from a clean checkout. Bind
 # imports to that exact checkout rather than an editable install or PYTHONPATH.
@@ -38,6 +39,7 @@ sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from cathedral_thin.independent_runtime.updater import (  # noqa: E402
     MAX_ARCHIVE_BYTES,
+    MAX_METADATA_BYTES,
     UpdateRefused,
     load_pinned_public_key,
     parse_release_metadata,
@@ -51,6 +53,12 @@ _REVISION = re.compile(r"[0-9a-f]{40}")
 _NOT_FOUND = re.compile(r"(?:HTTP 404|404 Not Found)", re.IGNORECASE)
 _RELEASE_PAGE_SIZE = 100
 _RELEASE_MAX_PAGES = 10
+_HISTORY_NAME = re.compile(r"([1-9][0-9]{0,18})-([0-9a-f]{64})\.json")
+_MAX_HISTORY_RECORDS = 1_000
+_POINTER_VERIFY_ATTEMPTS = 6
+_POINTER_VERIFY_DEADLINE_SECONDS = 30.0
+_POINTER_VERIFY_RETRY_SECONDS = 1.0
+_POINTER_VERIFY_REQUEST_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -76,8 +84,31 @@ class Publication:
         )
 
     @property
+    def history_root(self) -> str:
+        return f"validator/history/{self.channel}"
+
+    @property
     def pointer_path(self) -> str:
         return f"validator/{self.channel}.json"
+
+
+@dataclass(frozen=True)
+class ChannelObject:
+    path: str
+    sha: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ChannelBranch:
+    created: bool
+    revision: str
+
+
+@dataclass(frozen=True)
+class RetainedHistory:
+    sequence: int
+    metadata_sha256: str
 
 
 def _owner_file(path: Path, *, maximum: int, label: str) -> bytes:
@@ -323,6 +354,25 @@ class GitHub:
             raise UpdateRefused("GitHub returned an unexpected response")
         return decoded
 
+    def api_records(
+        self, endpoint: str, *, allow_missing: bool = False
+    ) -> tuple[Mapping[str, Any], ...] | None:
+        result = self._run(
+            ["api", f"repos/{self.repository}/{endpoint}"],
+            allow_missing=allow_missing,
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            decoded = json.loads(result.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpdateRefused("GitHub returned invalid JSON") from exc
+        if not isinstance(decoded, list) or any(
+            not isinstance(record, dict) for record in decoded
+        ):
+            raise UpdateRefused("GitHub returned an unexpected record list")
+        return tuple(decoded)
+
     def require_immutable_releases(self) -> None:
         repository = self.api("")
         if repository is None or repository.get("private") is not False:
@@ -482,12 +532,12 @@ class GitHub:
             raise UpdateRefused("published GitHub release tag is unavailable")
         _verify_release_tag(publication, ref)
 
-    def ensure_branch(self, publication: Publication) -> None:
+    def ensure_branch(self, publication: Publication) -> ChannelBranch:
         encoded = urllib.parse.quote(publication.channel_branch, safe="")
         existing = self.api(f"git/ref/heads/{encoded}", allow_missing=True)
         if existing is not None:
-            return
-        self.api(
+            return ChannelBranch(created=False, revision=_branch_revision(existing))
+        created = self.api(
             "git/refs",
             method="POST",
             payload={
@@ -495,6 +545,50 @@ class GitHub:
                 "sha": publication.source_revision,
             },
         )
+        if created is None:
+            raise UpdateRefused("created GitHub channel branch is unavailable")
+        revision = _branch_revision(created)
+        if revision != publication.source_revision:
+            raise UpdateRefused("created GitHub channel branch has the wrong revision")
+        return ChannelBranch(created=True, revision=revision)
+
+    def list_channel_objects(
+        self, path: str, branch: str
+    ) -> tuple[ChannelObject, ...] | None:
+        encoded_path = urllib.parse.quote(path, safe="/")
+        encoded_branch = urllib.parse.quote(_safe_branch(branch), safe="")
+        records = self.api_records(
+            f"contents/{encoded_path}?ref={encoded_branch}", allow_missing=True
+        )
+        if records is None:
+            return None
+        if len(records) >= _MAX_HISTORY_RECORDS:
+            raise UpdateRefused("GitHub channel history exceeds its safe bound")
+        objects: list[ChannelObject] = []
+        observed: set[str] = set()
+        for record in records:
+            record_path = record.get("path")
+            name = record.get("name")
+            sha = record.get("sha")
+            size = record.get("size")
+            if (
+                record.get("type") != "file"
+                or not isinstance(record_path, str)
+                or not isinstance(name, str)
+                or not name
+                or "/" in name
+                or record_path != f"{path}/{name}"
+                or record_path in observed
+                or not isinstance(sha, str)
+                or _REVISION.fullmatch(sha) is None
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or not 1 <= size <= MAX_METADATA_BYTES
+            ):
+                raise UpdateRefused("GitHub channel history record is invalid")
+            observed.add(record_path)
+            objects.append(ChannelObject(path=record_path, sha=sha, size=size))
+        return tuple(sorted(objects, key=lambda item: item.path))
 
     def read_content(self, path: str, branch: str) -> tuple[str, bytes] | None:
         encoded_path = urllib.parse.quote(path, safe="/")
@@ -520,27 +614,93 @@ class GitHub:
         except (ValueError, binascii.Error) as exc:
             raise UpdateRefused("GitHub channel object is not valid base64") from exc
 
-    def write_content(
-        self,
-        *,
-        path: str,
-        branch: str,
-        body: bytes,
-        message: str,
-        existing_sha: str | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "message": message,
-            "content": base64.b64encode(body).decode("ascii"),
-            "branch": branch,
-        }
-        if existing_sha is not None:
-            payload["sha"] = existing_sha
-        self.api(
-            f"contents/{urllib.parse.quote(path, safe='/')}",
-            method="PUT",
-            payload=payload,
+    def commit_channel(self, publication: Publication, *, base_revision: str) -> str:
+        base = self.api(f"git/commits/{base_revision}")
+        if base is None or _record_sha(base, label="base commit") != base_revision:
+            raise UpdateRefused("GitHub channel base commit is unavailable")
+        base_tree = base.get("tree")
+        if not isinstance(base_tree, dict):
+            raise UpdateRefused("GitHub channel base tree is unavailable")
+        base_tree_sha = _record_sha(base_tree, label="base tree")
+
+        blob = self.api(
+            "git/blobs",
+            method="POST",
+            payload={
+                "content": base64.b64encode(publication.metadata).decode("ascii"),
+                "encoding": "base64",
+            },
         )
+        if blob is None:
+            raise UpdateRefused("GitHub channel metadata blob is unavailable")
+        blob_sha = _record_sha(blob, label="metadata blob")
+        tree = self.api(
+            "git/trees",
+            method="POST",
+            payload={
+                "base_tree": base_tree_sha,
+                "tree": [
+                    {
+                        "path": publication.history_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob_sha,
+                    },
+                    {
+                        "path": publication.pointer_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob_sha,
+                    },
+                ],
+            },
+        )
+        if tree is None:
+            raise UpdateRefused("GitHub channel release tree is unavailable")
+        tree_sha = _record_sha(tree, label="release tree")
+        commit = self.api(
+            "git/commits",
+            method="POST",
+            payload={
+                "message": (
+                    f"release({publication.channel}): retain and point to "
+                    f"sequence {publication.sequence}"
+                ),
+                "tree": tree_sha,
+                "parents": [base_revision],
+            },
+        )
+        if commit is None:
+            raise UpdateRefused("GitHub channel release commit is unavailable")
+        commit_sha = _record_sha(commit, label="release commit")
+        encoded = urllib.parse.quote(publication.channel_branch, safe="")
+        updated = self.api(
+            f"git/refs/heads/{encoded}",
+            method="PATCH",
+            payload={"sha": commit_sha, "force": False},
+        )
+        if updated is None or _branch_revision(updated) != commit_sha:
+            raise UpdateRefused("GitHub channel branch update is unconfirmed")
+        return commit_sha
+
+
+def _branch_revision(ref: Mapping[str, Any]) -> str:
+    target = ref.get("object")
+    if (
+        not isinstance(target, dict)
+        or target.get("type") != "commit"
+        or not isinstance(target.get("sha"), str)
+        or _REVISION.fullmatch(target["sha"]) is None
+    ):
+        raise UpdateRefused("GitHub channel branch target is invalid")
+    return target["sha"]
+
+
+def _record_sha(record: Mapping[str, Any], *, label: str) -> str:
+    sha = record.get("sha")
+    if not isinstance(sha, str) or _REVISION.fullmatch(sha) is None:
+        raise UpdateRefused(f"GitHub channel {label} is invalid")
+    return sha
 
 
 def _verify_release_record(
@@ -604,15 +764,15 @@ def _verify_release_tag(publication: Publication, ref: Mapping[str, Any]) -> Non
 
 
 def _parse_existing_sequence(
-    raw: bytes, *, channel: str, public_key_path: Path
+    raw: bytes, *, channel: str, public_key_path: Path, label: str = "pointer"
 ) -> tuple[int, str]:
     try:
         envelope = json.loads(raw.decode("ascii"))
         issued = envelope["signed"]["issued_unix"]
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise UpdateRefused("existing channel pointer is invalid") from exc
+        raise UpdateRefused(f"existing channel {label} is invalid") from exc
     if isinstance(issued, bool) or not isinstance(issued, int):
-        raise UpdateRefused("existing channel issue time is invalid")
+        raise UpdateRefused(f"existing channel {label} issue time is invalid")
     release = parse_release_metadata(
         raw,
         channel=channel,
@@ -622,14 +782,55 @@ def _parse_existing_sequence(
     return release.sequence, hashlib.sha256(raw).hexdigest()
 
 
-def _anonymous_fetch(url: str, *, maximum: int) -> bytes:
+def _retained_history_floor(
+    publication: Publication,
+    *,
+    public_key_path: Path,
+    github: GitHub,
+    revision: str,
+) -> RetainedHistory | None:
+    records = github.list_channel_objects(publication.history_root, revision)
+    if not records:
+        return None
+    sequences: dict[int, str] = {}
+    for record in records:
+        name = record.path.rsplit("/", 1)[-1]
+        match = _HISTORY_NAME.fullmatch(name)
+        if match is None:
+            raise UpdateRefused("retained channel history filename is invalid")
+        filename_sequence = int(match.group(1))
+        filename_digest = match.group(2)
+        current = github.read_content(record.path, revision)
+        if current is None:
+            raise UpdateRefused("retained channel history was deleted during review")
+        object_sha, body = current
+        if object_sha != record.sha or len(body) != record.size:
+            raise UpdateRefused("retained channel history changed during review")
+        sequence, digest = _parse_existing_sequence(
+            body,
+            channel=publication.channel,
+            public_key_path=public_key_path,
+            label="history",
+        )
+        if sequence != filename_sequence or digest != filename_digest:
+            raise UpdateRefused("retained channel history name does not bind its bytes")
+        if sequence in sequences:
+            raise UpdateRefused("retained channel history repeats a signed sequence")
+        sequences[sequence] = digest
+    if github.list_channel_objects(publication.history_root, revision) != records:
+        raise UpdateRefused("retained channel history changed during review")
+    floor = max(sequences)
+    return RetainedHistory(sequence=floor, metadata_sha256=sequences[floor])
+
+
+def _anonymous_fetch(url: str, *, maximum: int, timeout_seconds: float = 60.0) -> bytes:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "cathedral-validator-release-publisher/1"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             if response.status != 200:
                 raise UpdateRefused(
                     "anonymous release download did not return HTTP 200"
@@ -642,6 +843,59 @@ def _anonymous_fetch(url: str, *, maximum: int) -> bytes:
     return body
 
 
+def _cache_busted_url(url: str, *, metadata_sha256: str, attempt: int) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query.append(("cathedral_verify", f"{metadata_sha256}-{attempt}"))
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), "")
+    )
+
+
+def _verify_anonymous_pointer(
+    url: str,
+    expected: bytes,
+    *,
+    metadata_sha256: str,
+    attempts: int = _POINTER_VERIFY_ATTEMPTS,
+    deadline_seconds: float = _POINTER_VERIFY_DEADLINE_SECONDS,
+    retry_seconds: float = _POINTER_VERIFY_RETRY_SECONDS,
+    request_seconds: float = _POINTER_VERIFY_REQUEST_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    deadline = clock() + deadline_seconds
+    last_error: UpdateRefused | None = None
+    for attempt in range(1, attempts + 1):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        try:
+            observed = _anonymous_fetch(
+                _cache_busted_url(
+                    url, metadata_sha256=metadata_sha256, attempt=attempt
+                ),
+                maximum=MAX_METADATA_BYTES,
+                timeout_seconds=min(request_seconds, remaining),
+            )
+        except UpdateRefused as exc:
+            last_error = exc
+        else:
+            if observed == expected:
+                return
+            last_error = None
+        if attempt == attempts:
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        sleeper(min(retry_seconds, remaining))
+    raise UpdateRefused(
+        "anonymous channel pointer did not converge to the exact published "
+        "metadata within its bounded retry window"
+    ) from last_error
+
+
 def publish(
     publication: Publication,
     *,
@@ -652,13 +906,40 @@ def publish(
     downloaded = _anonymous_fetch(publication.archive_url, maximum=MAX_ARCHIVE_BYTES)
     if hashlib.sha256(downloaded).hexdigest() != publication.archive_sha256:
         raise UpdateRefused("anonymous GitHub archive does not match the signed digest")
-    github.ensure_branch(publication)
+    branch = github.ensure_branch(publication)
 
-    pointer = github.read_content(publication.pointer_path, publication.channel_branch)
-    pointer_sha = None
+    pointer = github.read_content(publication.pointer_path, branch.revision)
     pointer_identical = False
-    if pointer is not None:
-        pointer_sha, pointer_body = pointer
+    if pointer is None:
+        history_floor = _retained_history_floor(
+            publication,
+            public_key_path=public_key_path,
+            github=github,
+            revision=branch.revision,
+        )
+        if history_floor is None:
+            if branch.revision != publication.source_revision:
+                raise UpdateRefused(
+                    "channel pointer is missing without retained signed history "
+                    "on the exact initial branch revision"
+                )
+        elif branch.created:
+            raise UpdateRefused("new channel branch already contains retained history")
+        elif publication.sequence < history_floor.sequence:
+            raise UpdateRefused(
+                "channel pointer is missing and the release does not advance "
+                f"retained signed history sequence {history_floor.sequence}"
+            )
+        elif (
+            publication.sequence == history_floor.sequence
+            and publication.metadata_sha256 != history_floor.metadata_sha256
+        ):
+            raise UpdateRefused(
+                "channel pointer is missing and the release differs from the "
+                "retained signed history at the same sequence"
+            )
+    else:
+        _pointer_sha, pointer_body = pointer
         if pointer_body == publication.metadata:
             pointer_identical = True
         else:
@@ -673,40 +954,26 @@ def publish(
                     f"(current {old_sequence} {old_digest})"
                 )
 
-    history = github.read_content(publication.history_path, publication.channel_branch)
-    if history is None:
-        github.write_content(
-            path=publication.history_path,
-            branch=publication.channel_branch,
-            body=publication.metadata,
-            message=(
-                f"release({publication.channel}): retain sequence "
-                f"{publication.sequence}"
-            ),
-        )
-    elif history[1] != publication.metadata:
+    history = github.read_content(publication.history_path, branch.revision)
+    history_identical = history is not None
+    if history is not None and history[1] != publication.metadata:
         raise UpdateRefused("immutable release history path already has other bytes")
 
-    if not pointer_identical:
-        github.write_content(
-            path=publication.pointer_path,
-            branch=publication.channel_branch,
-            body=publication.metadata,
-            message=(
-                f"release({publication.channel}): point to sequence "
-                f"{publication.sequence}"
-            ),
-            existing_sha=pointer_sha,
+    if not pointer_identical or not history_identical:
+        github.commit_channel(
+            publication,
+            base_revision=branch.revision,
         )
     encoded_branch = urllib.parse.quote(publication.channel_branch, safe="")
     raw_url = (
         f"https://raw.githubusercontent.com/{publication.repository}/"
         f"{encoded_branch}/{publication.pointer_path}"
     )
-    if _anonymous_fetch(raw_url, maximum=1_048_576) != publication.metadata:
-        raise UpdateRefused(
-            "anonymous channel pointer does not match published metadata"
-        )
+    _verify_anonymous_pointer(
+        raw_url,
+        publication.metadata,
+        metadata_sha256=publication.metadata_sha256,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

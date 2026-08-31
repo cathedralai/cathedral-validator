@@ -179,7 +179,12 @@ def _bootstrap_signing_private_key(path: Path) -> Ed25519PrivateKey:
         key = serialization.load_pem_private_key(raw, password=None)
     except TypeError:
         password = getpass.getpass("Bootstrap signing key password: ").encode("utf-8")
-        key = serialization.load_pem_private_key(raw, password=password)
+        try:
+            key = serialization.load_pem_private_key(raw, password=password)
+        except (TypeError, ValueError) as exc:
+            raise BundleRefused(
+                "bootstrap signing private key decryption failed"
+            ) from exc
     except ValueError as exc:
         raise BundleRefused("bootstrap signing private key is not valid PEM") from exc
     if not isinstance(key, Ed25519PrivateKey):

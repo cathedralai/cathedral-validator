@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
@@ -34,6 +35,47 @@ def _builder() -> dict[str, Any]:
     return runpy.run_path(
         str(root / "deploy" / "validator-update" / "build_signed_release.py")
     )
+
+
+def test_private_key_loader_supports_encrypted_ed25519_and_hides_passphrases(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    correct = "correct release custody passphrase"
+    wrong = "wrong release custody passphrase"
+    path = tmp_path / "encrypted-release-signing-key.pem"
+    path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(correct.encode("utf-8")),
+        )
+    )
+    path.chmod(0o600)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        builder["getpass"],
+        "getpass",
+        lambda prompt: (prompts.append(prompt), correct)[1],
+    )
+
+    loaded = builder["_private_key"](path)
+    assert (
+        loaded.public_key().public_bytes_raw()
+        == private.public_key().public_bytes_raw()
+    )
+    assert prompts == ["Release signing key password: "]
+    output = capsys.readouterr()
+    assert correct not in output.out + output.err
+
+    monkeypatch.setattr(builder["getpass"], "getpass", lambda _prompt: wrong)
+    with pytest.raises(builder["UpdateRefused"], match="decryption failed") as refused:
+        builder["_private_key"](path)
+    output = capsys.readouterr()
+    combined = output.out + output.err + str(refused.value)
+    assert correct not in combined
+    assert wrong not in combined
 
 
 def _validator_pex(path: Path) -> None:

@@ -419,7 +419,10 @@ def _private_key(path: Path) -> Ed25519PrivateKey:
         key = serialization.load_pem_private_key(raw, password=None)
     except TypeError:
         password = getpass.getpass("Release signing key password: ").encode("utf-8")
-        key = serialization.load_pem_private_key(raw, password=password)
+        try:
+            key = serialization.load_pem_private_key(raw, password=password)
+        except (TypeError, ValueError) as exc:
+            raise UpdateRefused("private signing key decryption failed") from exc
     except ValueError as exc:
         raise UpdateRefused("private signing key is not valid PEM") from exc
     if not isinstance(key, Ed25519PrivateKey):

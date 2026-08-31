@@ -98,8 +98,8 @@ python deploy/validator-update/publish_github_channel.py \
 
 Before adding `--publish`, the repository must be public and an administrator
 must enable GitHub immutable releases. The publishing identity needs release
-write access and
-`Administration` repository read access for the immutable-release setting. The
+write access and `Administration` repository read access for the
+immutable-release setting. The
 publisher refuses if the setting is unavailable or disabled.
 
 Only after validation succeeds, repeat with `--publish`. The publisher writes
@@ -109,12 +109,18 @@ in this order:
 2. upload and verify the exact content-addressed archive
 3. publish and verify the immutable release and tag
 4. anonymously download and verify the archive
-5. write immutable signed channel history
-6. move the mutable signed canary pointer
-7. anonymously verify the pointer
+5. atomically commit immutable signed history and the mutable canary pointer
+6. anonymously verify the pointer
 
 An interrupted retry resumes an exact empty or fully uploaded draft. It refuses
 partial or different draft assets and never overwrites them.
+Raw pointer verification uses cache-busted bounded retries but still requires
+the exact signed bytes. If a pointer is missing on an existing branch, the next
+release must exceed a stable set of retained signed history. An exact retained
+record resumes an interrupted pointer write. An empty initial branch resumes
+only at its exact source commit. Missing, invalid, duplicated, deleted, or
+changing history stops publication. History and pointer move in one commit with
+a non-force branch compare-and-swap, so a concurrent lower sequence loses.
 
 ```bash
 python deploy/validator-update/publish_github_channel.py \
@@ -257,7 +263,7 @@ with exact URLs, the bootstrap signing key fingerprint, authenticated minimum
 bootstrap and stable sequences, and commands run successfully on a clean
 live-test host.
 
-Validate the published bootstrap install inputs with:
+Install the published bootstrap on the live-test host as root with:
 
 ```bash
 python deploy/validator-update/install_updater_bundle.py \
