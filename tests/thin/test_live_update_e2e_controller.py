@@ -169,9 +169,13 @@ def test_live_readiness_refuses_missing_or_outside_preserved_pex_root(
 
     monkeypatch.delenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", raising=False)
     monkeypatch.setenv("PEX_ROOT", str(pex_root))
-    with pytest.raises(SystemExit, match="has no PEX origin"):
+    with pytest.raises(SystemExit, match="preserved live-test PEX root is unavailable"):
         require_pex_origin(module)
 
     monkeypatch.setenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", str(pex_root))
+    without_file = SimpleNamespace(__name__="packaged.without_file", __file__=None)
+    with pytest.raises(SystemExit, match="has no module file"):
+        require_pex_origin(without_file)
+
     with pytest.raises(SystemExit, match="did not load from the preserved live-test"):
         require_pex_origin(module)
