@@ -32,7 +32,10 @@ def test_readme_is_the_small_public_guide() -> None:
         "## Updates",
     ):
         assert heading in guide
-    assert "Linux/amd64 systemd host with CPython 3.12 and OpenSSL 3" in guide
+    assert (
+        "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
+        in guide
+    )
     assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
     assert "service receives only the hotkey file" in words
     assert "There is no alternate scoring mode and no non-writing mode" in words
@@ -52,6 +55,8 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "`CONTRADICTION_STOPPED`" in guide
     assert "`RestartPreventExitStatus=2`" in guide
     assert "Never delete or replace the journal" in guide
+    assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
+    assert "cathedral-validator-boot-reconcile.service" in guide
     assert "pinned TDX verifier, and pinned SNP verifier together" in words
     assert "bootstrap updater, systemd units, host Python" in words
     assert "Each host chooses `stable` or `canary` once" in guide
@@ -83,6 +88,7 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
     assert "releases.cathedral.com" not in updater
     assert "signed installation path" in guide
     assert "The updater has no access to the hotkey" in updater
+    assert "repository home page is the only operator install guide" in updater
 
 
 def test_readme_snp_policy_template_is_strict_json_with_the_runtime_shape() -> None:
@@ -141,6 +147,31 @@ def test_active_operator_surfaces_exclude_removed_commands() -> None:
         text = path.read_text(encoding="utf-8")
         for command in retired:
             assert command not in text, f"{command} remains in {path.relative_to(ROOT)}"
+
+
+def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
+    guide = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
+
+    assert "RECONCILED" in guide
+    assert "START_AUTHORIZED" in guide
+    assert "It does not hide unresolved recovery" in guide
+    assert (
+        "--runtime-lock /secure/candidate/runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock"
+        in guide
+    )
+    assert (
+        "--runtime-distributions /secure/candidate/runtime/cathedral-validator.pex-distributions.json"
+        in guide
+    )
+    assert "--archive-out-dir /secure/signed" in guide
+    assert "--sequence 7" in guide
+    assert "--lifetime-seconds 604800" in guide
+    assert "--minimum-bootstrap-sequence 7" in guide
+    assert "two offline encrypted backups" in guide
+    assert (
+        "Routine validator and verifier releases are unattended after bootstrap"
+        in guide
+    )
 
 
 def test_retired_guides_are_only_historical_pointers() -> None:

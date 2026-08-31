@@ -71,12 +71,14 @@ later finalized heads.
 The journal is stored at:
 
 ```text
-~/.local/state/cathedral-validator/direct-writer/
-  finney-sn39-mechanism-0/<validator-hotkey>/state.json
+/var/lib/cathedral-validator/.local/state/cathedral-validator/
+  direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json
 ```
 
 Never delete or replace the journal to clear an error. The service uses
 `RestartPreventExitStatus=2`, so a contradiction remains stopped for review.
+If the host reboots during an update, inspect
+`cathedral-validator-boot-reconcile.service` before taking action.
 
 ## Updates
 
@@ -91,5 +93,6 @@ or operator configuration. Those are host trust settings and need an explicit
 bootstrap migration when they change.
 
 Each host chooses `stable` or `canary` once. The updater refuses a later channel
-switch. Normal operators use `stable`. Canary is for an explicit release-test
-host.
+switch. Normal operators use `stable`. Canary is for one explicit release-test
+host. The public signed bootstrap stays unpublished until this path passes live
+stable and canary testing end to end.
