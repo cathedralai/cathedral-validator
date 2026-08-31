@@ -1809,32 +1809,33 @@ class SignedReleaseUpdater:
         _require_root_owned_directory(
             self.state_root, expected_uid=self.expected_uid, required_mode=0o700
         )
-        with self._updater_lock_status() as acquired:
-            if not acquired:
+        if (
+            isinstance(cycle_wait_seconds, bool)
+            or not isinstance(cycle_wait_seconds, (int, float))
+            or not 0 <= float(cycle_wait_seconds) <= 3600
+        ):
+            raise UpdateRefused("cycle lock wait is invalid")
+        wait_deadline = deadline
+        while True:
+            with self._updater_lock_status() as acquired:
+                if acquired:
+                    self._reconcile_boot_under_updater_lock(
+                        cycle_wait_seconds=cycle_wait_seconds,
+                        deadline_monotonic=deadline,
+                    )
+                    return "RECONCILED"
                 if self._cycle_lock_is_held_elsewhere():
                     self._require_inflight_start_authorized(
                         deadline_monotonic=deadline
                     )
                     return "START_AUTHORIZED"
-            else:
-                self._reconcile_boot_under_updater_lock(
-                    cycle_wait_seconds=cycle_wait_seconds,
-                    deadline_monotonic=deadline,
-                )
-                return "RECONCILED"
-        # An updater before its cycle lock is not a nested systemd restart. Wait
-        # for it to finish, then reconcile under our own lock rather than
-        # authorizing an unrelated start against transient state.
-        wait_seconds = min(
-            float(cycle_wait_seconds),
-            _remaining_seconds(deadline, label="boot updater lock wait"),
-        )
-        with self._updater_locked(wait_seconds=wait_seconds):
-            self._reconcile_boot_under_updater_lock(
-                cycle_wait_seconds=cycle_wait_seconds,
-                deadline_monotonic=deadline,
-            )
-        return "RECONCILED"
+            # An updater before its cycle lock is not yet a nested systemd
+            # restart. Keep watching both locks: if it transitions into its
+            # restart boundary, authorize only the exact durable target; if it
+            # releases first, acquire the updater lock and reconcile normally.
+            if time.monotonic() >= wait_deadline:
+                raise UpdateRefused("another local updater did not finish before timeout")
+            time.sleep(min(0.1, max(0.0, wait_deadline - time.monotonic())))
 
     def _update_release(
         self,

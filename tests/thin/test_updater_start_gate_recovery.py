@@ -6,7 +6,10 @@ import fcntl
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,67 @@ from cathedral_thin.independent_runtime.updater import (
     UpdateRefused,
 )
 from tests.thin import test_updater as fixture
+
+
+def _spawn_transition_gate(
+    updater: SignedReleaseUpdater,
+    *,
+    observed_cycle_check: Path,
+) -> subprocess.Popen[str]:
+    """Run a process gate that reports its first observed free cycle lock."""
+
+    root = Path(__file__).resolve().parents[2]
+    program = """\\
+import os
+import sys
+from pathlib import Path
+
+from cathedral_thin.independent_runtime.updater import SignedReleaseUpdater, UpdateRefused
+
+class MarkingGate(SignedReleaseUpdater):
+    def _cycle_lock_is_held_elsewhere(self):
+        held = super()._cycle_lock_is_held_elsewhere()
+        if not held:
+            Path(sys.argv[5]).touch(exist_ok=True)
+        return held
+
+updater = MarkingGate(
+    install_root=Path(sys.argv[1]),
+    state_root=Path(sys.argv[2]),
+    expected_hotkey=sys.argv[3],
+    journal_scope_root=Path(sys.argv[4]),
+    expected_uid=os.geteuid(),
+)
+try:
+    print(updater.reconcile_boot(cycle_wait_seconds=0.05, operation_timeout_seconds=2.0))
+except UpdateRefused as exc:
+    print(f\"REFUSED: {exc}\", file=sys.stderr)
+    raise SystemExit(23)
+"""
+    environment = dict(os.environ)
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        str(root)
+        if not existing_pythonpath
+        else f"{root}{os.pathsep}{existing_pythonpath}"
+    )
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            program,
+            str(updater.install_root),
+            str(updater.state_root),
+            updater.journal.parent.name,
+            str(updater.journal.parent.parent),
+            str(observed_cycle_check),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
 
 def _active_updater(
@@ -90,6 +154,53 @@ def test_start_gate_refuses_when_precycle_updater_lock_does_not_clear(
     assert "did not finish before timeout" in result.stderr
     assert state_path.read_bytes() == before_state
     assert os.readlink(tmp_path / "install" / "current") == before_target
+
+
+def test_start_gate_switches_to_nested_authorization_when_cycle_lock_appears(
+    tmp_path: Path,
+) -> None:
+    updater, private, journal, _archive, _metadata = _active_updater(tmp_path)
+    archive_two = fixture._archive(marker_path=tmp_path / "transition-two")
+    metadata_two = fixture._canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=fixture._tree_digest(tmp_path, archive_two, name="transition-tree"),
+    )
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def interrupt_after_authorization(_command: object) -> None:
+        raise KeyboardInterrupt("leave an authorized target for the gate")
+
+    updater.service_restarter = interrupt_after_authorization
+    with pytest.raises(KeyboardInterrupt, match="authorized target"):
+        fixture._update(updater, private, channel="canary", sequence=2)
+
+    observed = tmp_path / "observed-free-cycle-lock"
+    updater_lock = fixture._lock_for_other_process(tmp_path / "state" / "updater.lock")
+    gate = _spawn_transition_gate(updater, observed_cycle_check=observed)
+    cycle_lock = -1
+    try:
+        deadline = time.monotonic() + 1.0
+        while not observed.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert observed.exists(), "start gate did not observe the pre-cycle window"
+        cycle_lock = fixture._lock_for_other_process(journal.with_name("cycle.lock"))
+        stdout, stderr = gate.communicate(timeout=3.0)
+    finally:
+        if cycle_lock >= 0:
+            fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+            os.close(cycle_lock)
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+        if gate.poll() is None:
+            gate.kill()
+            gate.communicate(timeout=1.0)
+
+    assert gate.returncode == 0, stderr
+    assert stdout.strip() == "START_AUTHORIZED"
 
 
 @pytest.mark.parametrize("roll_back", (False, True), ids=("target", "rollback"))
