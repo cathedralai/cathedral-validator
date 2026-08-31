@@ -101,6 +101,48 @@ jobs:
             /tmp/snpguest | sha256sum --check -
           chmod 0555 /tmp/cathedral-tdx-verifier /tmp/snpguest
 
+      - name: Validate and reproduce the strict release tree
+        run: |
+          python - <<'PY'
+          import os
+          import runpy
+          from pathlib import Path
+
+          builder = runpy.run_path(
+              "deploy/validator-update/build_signed_release.py"
+          )
+          pex = Path("/tmp/cathedral-validator-one.pex")
+          archives = []
+          for name in ("one", "two"):
+              release = Path(f"/tmp/cathedral-validator-release-{name}")
+              builder["validator_release_tree"](
+                  pex,
+                  release,
+                  qvl=Path("/tmp/cathedral-tdx-verifier"),
+                  snpguest=Path("/tmp/snpguest"),
+                  source_revision=os.environ["GITHUB_SHA"],
+              )
+              archives.append(builder["deterministic_archive"](release))
+          if archives[0] != archives[1]:
+              raise SystemExit("strict validator release archive is not reproducible")
+          Path("/tmp/cathedral-validator-unsigned.tar.gz").write_bytes(archives[0])
+          PY
+          sudo chown -R root:root /tmp/cathedral-validator-release-one
+          sudo install -d -o nobody -m 0700 /tmp/cathedral-validator-pex-root
+          sudo install -d -o nobody -m 0700 /tmp/cathedral-validator-nobody-home
+          sudo install -o nobody -m 0444 \
+            "$GITHUB_WORKSPACE/tests/release_smoke/run_real_validator.py" \
+            /tmp/cathedral-validator-release-smoke.py
+          cd /tmp
+          sudo -u nobody env \
+            HOME=/tmp/cathedral-validator-nobody-home \
+            CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=/tmp/cathedral-validator-pex-root \
+            CATHEDRAL_RELEASE_SMOKE_CHECKOUT="$GITHUB_WORKSPACE" \
+            PEX_ROOT=/tmp/cathedral-validator-pex-root \
+            PEX_INTERPRETER=1 \
+            /tmp/cathedral-validator-release-one/bin/cathedral-validator \
+            /tmp/cathedral-validator-release-smoke.py
+
       - name: Build the offline updater wheelhouse and hash lock
         run: |
           install -d -m 0755 /tmp/updater-wheelhouse
@@ -159,6 +201,8 @@ jobs:
             /tmp/candidate/runtime/snpguest
           install -m 0444 /tmp/cathedral-validator.pex.lock \
             /tmp/candidate/runtime/cathedral-validator.pex.lock
+          install -m 0444 /tmp/cathedral-validator-unsigned.tar.gz \
+            /tmp/candidate/runtime/cathedral-validator-unsigned.tar.gz
           install -m 0444 /tmp/updater-requirements.lock \
             /tmp/candidate/updater-requirements.lock
           install -m 0444 /tmp/updater-wheelhouse/*.whl \

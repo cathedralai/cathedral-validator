@@ -292,10 +292,16 @@ jobs:
           ruff check \
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
+            deploy/validator-update/build_updater_bundle.py \
+            deploy/validator-update/install_updater_bundle.py \
+            deploy/validator-update/publish_github_channel.py \
             tests/release_smoke/run_real_validator.py
           ruff format --check \
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
+            deploy/validator-update/build_updater_bundle.py \
+            deploy/validator-update/install_updater_bundle.py \
+            deploy/validator-update/publish_github_channel.py \
             tests/release_smoke/run_real_validator.py
 
       - name: Build the reviewed project wheel twice
@@ -359,7 +365,21 @@ jobs:
 
       - name: Validate, extract, and start the exact signed-release payload
         run: |
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output /tmp/cathedral-tdx-verifier \
+            https://github.com/cathedralai/cathedral-sandbox/releases/download/cathedral-tdx-verifier-v1.0.0/cathedral-tdx-verifier-linux-amd64
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --output /tmp/snpguest \
+            https://github.com/virtee/snpguest/releases/download/v0.10.0/snpguest
+          printf '%s  %s\n' \
+            4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148 \
+            /tmp/cathedral-tdx-verifier | sha256sum --check -
+          printf '%s  %s\n' \
+            70e700465e3523e67dd5104583dc36cd11eef630c6f04c5b9ccafd6ba2e76ca0 \
+            /tmp/snpguest | sha256sum --check -
+          chmod 0555 /tmp/cathedral-tdx-verifier /tmp/snpguest
           python - <<'PY'
+          import os
           import runpy
           from pathlib import Path
 
@@ -369,7 +389,13 @@ jobs:
           pex = Path("/tmp/cathedral-validator-one.pex")
           release = Path("/tmp/cathedral-validator-release")
           builder["_validator_pex"](pex)
-          builder["validator_release_tree"](pex, release)
+          builder["validator_release_tree"](
+              pex,
+              release,
+              qvl=Path("/tmp/cathedral-tdx-verifier"),
+              snpguest=Path("/tmp/snpguest"),
+              source_revision=os.environ["GITHUB_SHA"],
+          )
           PY
           sudo chown -R root:root /tmp/cathedral-validator-release
           sudo install -d -o nobody -m 0700 /tmp/cathedral-validator-pex-root
