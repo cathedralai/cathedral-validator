@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import tarfile
 import time
@@ -66,6 +67,26 @@ class Publication:
         return f"validator/{self.channel}.json"
 
 
+def _owner_file(path: Path, *, maximum: int, label: str) -> bytes:
+    if not path.is_absolute() or path.is_symlink():
+        raise UpdateRefused(f"{label} path must be an absolute regular file")
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        raise UpdateRefused(f"{label} is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not 1 <= metadata.st_size <= maximum
+    ):
+        raise UpdateRefused(f"{label} is not a bounded owner-controlled file")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise UpdateRefused(f"{label} is unreadable") from exc
+
+
 def _release_manifest(archive: bytes) -> Mapping[str, Any]:
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
@@ -108,12 +129,15 @@ def validate_publication(
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", channel_branch):
         raise UpdateRefused("release channel branch is invalid")
     try:
-        metadata = metadata_path.read_bytes()
-        archive = archive_path.read_bytes()
+        metadata = _owner_file(
+            metadata_path, maximum=1_048_576, label="release metadata"
+        )
+        archive = _owner_file(
+            archive_path, maximum=MAX_ARCHIVE_BYTES, label="release archive"
+        )
         envelope = json.loads(metadata.decode("ascii"))
         channel = envelope["signed"]["channel"]
     except (
-        OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
         KeyError,
