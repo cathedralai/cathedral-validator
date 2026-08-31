@@ -1678,6 +1678,11 @@ def test_runtime_guard_enforces_root_linux_python312_and_systemd(monkeypatch):
         installer._runtime_guard()
 
     monkeypatch.setattr(installer.sys, "version_info", (3, 12, 9))
+    monkeypatch.setattr(installer.sys, "executable", "/usr/bin/python3")
+    with pytest.raises(installer.InstallRefused, match="/usr/bin/python3.12"):
+        installer._runtime_guard()
+
+    monkeypatch.setattr(installer.sys, "executable", "/usr/bin/python3.12")
     monkeypatch.setattr(installer.Path, "is_dir", lambda self: False)
     with pytest.raises(installer.InstallRefused, match="systemd"):
         installer._runtime_guard()

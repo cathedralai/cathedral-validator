@@ -1622,6 +1622,10 @@ def _runtime_guard() -> None:
         raise InstallRefused("installer runs only on Linux")
     if sys.version_info[:2] != (3, 12):
         raise InstallRefused("installer requires CPython 3.12")
+    if Path(sys.executable) != Path("/usr/bin/python3.12"):
+        raise InstallRefused(
+            "installer must be launched with /usr/bin/python3.12, not an alias"
+        )
     if not Path("/run/systemd/system").is_dir():
         raise InstallRefused("installer requires a running systemd host")
     if not hasattr(os, "memfd_create"):
