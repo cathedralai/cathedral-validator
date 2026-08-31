@@ -169,13 +169,22 @@ def test_private_key_scan_accepts_source_code_literal_inside_wheel(
 @pytest.mark.parametrize(
     "body",
     [
+        builder._PRIVATE_KEY_MARKERS[0],
         builder._PRIVATE_KEY_MARKERS[0] + b"\n",
         b" \t" + builder._PRIVATE_KEY_MARKERS[2] + b"\t \r\n",
     ],
 )
 def test_private_key_scan_refuses_marker_on_logical_line(body: bytes) -> None:
+    scanner = builder._PrivateKeyLineScanner("private-key fixture")
     with pytest.raises(builder.BundleRefused, match="contains private-key material"):
-        builder._refuse_private_key(body, "private-key fixture")
+        scanner.feed(body)
+        scanner.finish()
+
+
+def test_control_file_scan_refuses_inline_private_key_marker() -> None:
+    body = b"IDENTITY_KEY=" + builder._PRIVATE_KEY_MARKERS[0] + b"\n"
+    with pytest.raises(builder.BundleRefused, match="contains private-key material"):
+        builder._refuse_private_key(body, "reviewed environment")
 
 
 def test_private_key_scan_refuses_marker_split_across_wheel_read_chunks(

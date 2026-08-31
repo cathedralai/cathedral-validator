@@ -244,9 +244,8 @@ def _read_controlled_file(
 
 
 def _refuse_private_key(body: bytes, label: str) -> None:
-    scanner = _PrivateKeyLineScanner(label)
-    scanner.feed(body)
-    scanner.finish()
+    if any(marker in body for marker in _PRIVATE_KEY_MARKERS):
+        raise BundleRefused(f"{label} contains private-key material")
 
 
 def _bootstrap_signing_private_key(path: Path) -> Ed25519PrivateKey:
