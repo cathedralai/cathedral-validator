@@ -17,6 +17,17 @@ public key. The installer has no caller option to replace it. Keep separate
 encrypted backups and separately recorded fingerprints. Rotation of either key
 is a bootstrap migration, not a routine runtime release.
 
+Routine validator and verifier releases are unattended after bootstrap.
+
+Before production signing:
+
+1. Generate each private key encrypted at rest.
+2. Keep at least two offline encrypted backups of each key.
+3. Store the passphrase record separately from the encrypted key files.
+4. Restore one backup on a clean machine.
+5. Confirm it derives the expected public fingerprint.
+6. Sign and verify a fixed test message before using the key on a release.
+
 ## Build the retained candidate
 
 Run the manual `validator release candidate` workflow on the reviewed source
@@ -50,15 +61,19 @@ python deploy/validator-update/build_signed_release.py \
   --pex /secure/candidate/runtime/cathedral-validator.pex \
   --qvl /secure/candidate/runtime/cathedral-tdx-verifier \
   --snpguest /secure/candidate/runtime/snpguest \
+  --runtime-lock /secure/candidate/runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock \
+  --runtime-distributions /secure/candidate/runtime/cathedral-validator.pex-distributions.json \
   --source-revision REPLACE_WITH_40_CHARACTER_COMMIT \
-  --archive-out /secure/signed/cathedral-validator.tar.gz \
+  --archive-out-dir /secure/signed \
   --metadata-out /secure/signed/canary.json \
   --archive-url-template \
     'https://github.com/cathedralai/cathedral-validator/releases/download/validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz' \
-  --sequence REPLACE_WITH_NEXT_CANARY_SEQUENCE
+  --sequence REPLACE_WITH_NEXT_CANARY_SEQUENCE \
+  --lifetime-seconds 604800
 ```
 
-The output archive is deterministic and content-addressed. Never reuse a
+The output archive is deterministic and content-addressed. Publish the printed
+digest-named tarball from `/secure/signed`. Never rename it and never reuse a
 sequence for different metadata.
 
 ## Validate, then publish canary
@@ -69,7 +84,7 @@ channel branch without writing:
 ```bash
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/canary.json \
-  --archive /secure/signed/cathedral-validator.tar.gz \
+  --archive /secure/signed/cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz \
   --public-key /secure/offline/runtime-release-public-key.pem
 ```
 
@@ -85,7 +100,7 @@ order:
 ```bash
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/canary.json \
-  --archive /secure/signed/cathedral-validator.tar.gz \
+  --archive /secure/signed/cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz \
   --public-key /secure/offline/runtime-release-public-key.pem \
   --publish
 ```
@@ -111,11 +126,11 @@ python deploy/validator-update/build_signed_release.py \
   --sequence REPLACE_WITH_NEXT_STABLE_SEQUENCE
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/stable.json \
-  --archive /secure/signed/cathedral-validator.tar.gz \
+  --archive /secure/signed/cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz \
   --public-key /secure/offline/runtime-release-public-key.pem
 python deploy/validator-update/publish_github_channel.py \
   --metadata /secure/signed/stable.json \
-  --archive /secure/signed/cathedral-validator.tar.gz \
+  --archive /secure/signed/cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz \
   --public-key /secure/offline/runtime-release-public-key.pem \
   --publish
 ```
@@ -136,9 +151,10 @@ python deploy/validator-update/build_signed_release.py \
   resign-canary \
   --current-canary-metadata /secure/signed/current-canary.json \
   --retained-metadata /secure/retained/known-good.json \
-  --retained-archive /secure/retained/known-good.tar.gz \
+  --retained-archive /secure/retained/cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz \
   --metadata-out /secure/signed/recovery-canary.json \
-  --sequence REPLACE_WITH_HIGHER_CANARY_SEQUENCE
+  --sequence REPLACE_WITH_HIGHER_CANARY_SEQUENCE \
+  --lifetime-seconds 604800
 ```
 
 Validate and publish the recovery metadata with the same publisher. Do not
@@ -166,17 +182,29 @@ python deploy/validator-update/build_updater_bundle.py \
   --manifest-out /secure/signed/updater-bootstrap.manifest.json \
   --signature-out /secure/signed/updater-bootstrap.manifest.sig \
   --sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE \
-  --issued-unix REPLACE_WITH_CURRENT_UNIX_TIME \
   --lifetime-seconds 2592000
 ```
 
 Publish the bundle, manifest, detached signature, and bootstrap signing public
 key as immutable assets. Independently verify anonymous downloads. Record both
 key fingerprints, sequence, issue time, and expiry from the signed manifest.
-Then replace the generated blocks in `README.md` and `docs/AUTO_UPDATE.md` with
-exact URLs, the bootstrap signing key fingerprint, authenticated minimum
-bootstrap and stable sequences, and commands run successfully on a clean
-live-test host. Never add a caller-supplied runtime key to the install command.
+Then replace the generated block in `README.md` with exact URLs, the bootstrap
+signing key fingerprint, authenticated minimum bootstrap and stable sequences,
+and commands run successfully on a clean live-test host.
+
+Validate the published bootstrap install inputs with:
+
+```bash
+python deploy/validator-update/install_updater_bundle.py \
+  --bundle /secure/signed/updater-bootstrap.tar.gz \
+  --manifest /secure/signed/updater-bootstrap.manifest.json \
+  --signature /secure/signed/updater-bootstrap.manifest.sig \
+  --bootstrap-public-key /secure/offline/bootstrap-signing-public-key.pem \
+  --expected-bootstrap-key-fingerprint sha256:REPLACE_WITH_BOOTSTRAP_FINGERPRINT \
+  --minimum-bootstrap-sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE
+```
+
+Never add a caller-supplied runtime key to the install command.
 
 Do not publish a bootstrap guide before that host test passes. Do not claim a
 runtime release updates the bootstrap layer.

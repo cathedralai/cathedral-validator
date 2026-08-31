@@ -151,26 +151,34 @@ def test_active_operator_surfaces_exclude_removed_commands() -> None:
 
 def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     guide = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
+    maintainer = (ROOT / "docs" / "RELEASE_MAINTAINER.md").read_text(encoding="utf-8")
 
     assert "RECONCILED" in guide
     assert "START_AUTHORIZED" in guide
     assert "It does not hide unresolved recovery" in guide
+    assert "exact updater-controlled nested" in guide
+    assert "[Release maintainer guide](RELEASE_MAINTAINER.md)" in guide
+    assert "--archive-out-dir" not in guide
+    assert "--runtime-lock" not in guide
+    assert "two offline encrypted backups" in maintainer
     assert (
         "--runtime-lock /secure/candidate/runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock"
-        in guide
+        in maintainer
     )
     assert (
         "--runtime-distributions /secure/candidate/runtime/cathedral-validator.pex-distributions.json"
-        in guide
+        in maintainer
     )
-    assert "--archive-out-dir /secure/signed" in guide
-    assert "--sequence 7" in guide
-    assert "--lifetime-seconds 604800" in guide
-    assert "--minimum-bootstrap-sequence 7" in guide
-    assert "two offline encrypted backups" in guide
+    assert "--archive-out-dir /secure/signed" in maintainer
+    assert "--lifetime-seconds 604800" in maintainer
+    assert (
+        "--minimum-bootstrap-sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE"
+        in maintainer
+    )
+    assert "cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz" in maintainer
     assert (
         "Routine validator and verifier releases are unattended after bootstrap"
-        in guide
+        in maintainer
     )
 
 

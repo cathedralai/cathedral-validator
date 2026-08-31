@@ -220,8 +220,9 @@ The boot and start gates report these control results:
 
 - `RECONCILED`: the host restarted while an update outcome was uncertain, and
   the boot reconcile service finished the durable recovery checks.
-- `START_AUTHORIZED`: the validator start gate verified there is no unresolved
-  updater state blocking a normal validator start.
+- `START_AUTHORIZED`: systemd launched the exact updater-controlled nested
+  restart, and the start gate proved both updater locks and the durable
+  `may_have_run` authorization still matched that one target.
 - `PAUSED`: the updater saw `/etc/cathedral-validator/update.pause` and skipped
   fetching a new release. It does not hide unresolved recovery.
 
@@ -258,62 +259,5 @@ The updater has no access to the hotkey. The root updater verifies and switches
 files. The unprivileged validator service alone receives the hotkey through a
 systemd credential and signs its own weights.
 
-## Maintainer notes
-
-Use one offline bootstrap signing key for the rare bootstrap bundle and a
-separate runtime release signing key for routine validator releases. Keep each
-private key encrypted at rest. Keep at least two offline encrypted backups. Keep
-the passphrase record separate from the encrypted key files. Before production
-signing, restore one backup on a clean machine, confirm it derives the expected
-public fingerprint, and sign and verify a fixed test message.
-
-Routine validator and verifier releases are unattended after bootstrap. Changes
-to the bootstrap updater, systemd units, host Python, bootstrap key, or bundled
-runtime release public key are explicit bootstrap migrations.
-
-Common release commands:
-
-```bash
-python3 deploy/validator-update/build_updater_bundle.py \
-  --wheelhouse /secure/bootstrap/wheelhouse \
-  --requirements /secure/bootstrap/requirements.txt \
-  --bootstrap-signing-private-key /secure/bootstrap/bootstrap-signing-private.pem \
-  --bootstrap-signing-public-key /secure/bootstrap/bootstrap-signing-public.pem \
-  --runtime-release-public-key /secure/runtime/runtime-release-public.pem \
-  --assets-dir /secure/bootstrap/assets \
-  --bundle-out /secure/bootstrap/updater-bootstrap.tar.gz \
-  --manifest-out /secure/bootstrap/updater-bootstrap.manifest.json \
-  --signature-out /secure/bootstrap/updater-bootstrap.manifest.sig \
-  --sequence 7 \
-  --lifetime-seconds 604800
-```
-
-```bash
-python3 deploy/validator-update/install_updater_bundle.py \
-  --bundle /secure/bootstrap/updater-bootstrap.tar.gz \
-  --manifest /secure/bootstrap/updater-bootstrap.manifest.json \
-  --signature /secure/bootstrap/updater-bootstrap.manifest.sig \
-  --bootstrap-public-key /secure/bootstrap/bootstrap-signing-public.pem \
-  --expected-bootstrap-key-fingerprint sha256:REPLACE_WITH_BOOTSTRAP_FINGERPRINT \
-  --minimum-bootstrap-sequence 7
-```
-
-```bash
-python3 deploy/validator-update/build_signed_release.py \
-  --private-key /secure/runtime/runtime-release-private.pem \
-  canary \
-  --pex /secure/candidate/cathedral-validator.pex \
-  --qvl /secure/candidate/cathedral-tdx-verifier \
-  --snpguest /secure/candidate/snpguest \
-  --runtime-lock /secure/candidate/runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock \
-  --runtime-distributions /secure/candidate/runtime/cathedral-validator.pex-distributions.json \
-  --source-revision REPLACE_WITH_GIT_SHA \
-  --archive-out-dir /secure/signed \
-  --metadata-out /secure/signed/canary.json \
-  --archive-url-template https://github.com/cathedralai/cathedral-validator/releases/download/validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz \
-  --sequence 41 \
-  --lifetime-seconds 604800
-```
-
-The signed archive written by `--archive-out-dir` is content addressed. Publish
-the printed digest-named tarball, not a renamed copy.
+Release signing, bootstrap publication, and key custody are in
+[Release maintainer guide](RELEASE_MAINTAINER.md).
