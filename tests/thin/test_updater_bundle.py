@@ -1050,7 +1050,7 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
     fixed = root / "usr/local/lib/cathedral-validator-updater"
     assert fixed.is_symlink()
     assert fixed.readlink() == (
-        Path("cathedral-validator-updater-releases") / verified.manifest_sha256
+        Path(installer.UPDATER_RELEASES_DIRECTORY) / verified.manifest_sha256
     )
     assert (root / "etc/systemd/system/cathedral-validator-update.timer").is_file()
     assert (
@@ -1066,7 +1066,8 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
     ).read_bytes() == verified.files[installer.INSTALLER_ARCHIVE_PATH].body
     version = (
         root
-        / "usr/local/lib/cathedral-validator-updater-releases"
+        / "usr/local/lib"
+        / installer.UPDATER_RELEASES_DIRECTORY
         / verified.manifest_sha256
     )
     assert (version / "bin" / "cathedral-validator-update").read_text(
@@ -1107,6 +1108,107 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
     ]
 
 
+def test_production_updater_release_path_has_distlib_shebang_headroom():
+    digest = "0" * 64
+    version = installer._updater_version_dir(Path("/"), digest)
+    shebang = installer._updater_entrypoint_shebang(version)
+
+    assert version == Path("/usr/local/lib/cathedral-updater-r") / digest
+    assert len(shebang) + 1 == 117
+    assert (
+        installer.DISTLIB_MAX_SHEBANG_BYTES - (len(shebang) + 1)
+        >= installer.DISTLIB_MIN_SHEBANG_HEADROOM_BYTES
+    )
+    installer._check_distlib_shebang_budget(version)
+
+
+def test_distlib_shebang_budget_refuses_before_bootstrap_state_mutation(
+    tmp_path, monkeypatch
+):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    calls: list[list[str]] = []
+    overlong = Path("/") / ("x" * installer.DISTLIB_MAX_SHEBANG_BYTES)
+    monkeypatch.setattr(installer, "_updater_version_dir", lambda *_args: overlong)
+
+    with pytest.raises(installer.InstallRefused, match="shebang safety budget"):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner(calls),
+        )
+
+    assert len(calls) == 1
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or sys.version_info[:2] != (3, 12),
+    reason="requires the production Ubuntu Python 3.12 pip/distlib policy",
+)
+def test_pip_vendored_distlib_uses_direct_shebang_within_production_budget(tmp_path):
+    from pip._vendor.distlib.scripts import ScriptMaker
+
+    digest = "0" * 64
+    direct = installer._updater_version_dir(Path("/"), digest)
+    legacy = Path("/usr/local/lib/cathedral-validator-updater-releases") / digest
+
+    def make_entrypoint(label: str, interpreter: Path) -> Path:
+        maker = ScriptMaker(None, str(tmp_path / label))
+        maker.executable = str(interpreter)
+        maker.variants = {""}
+        maker.clobber = True
+        files = maker.make("cathedral-validator-update = tiny_updater:main")
+        assert len(files) == 1
+        return Path(files[0])
+
+    direct_entrypoint = make_entrypoint(
+        "direct", direct / "bin" / installer.VENV_INTERPRETER_NAME
+    )
+    legacy_entrypoint = make_entrypoint(
+        "legacy", legacy / "bin" / installer.VENV_INTERPRETER_NAME
+    )
+
+    assert direct_entrypoint.read_bytes().splitlines()[
+        0
+    ] == installer._updater_entrypoint_shebang(direct)
+    assert legacy_entrypoint.read_bytes().splitlines()[0] == b"#!/bin/sh"
+
+
+def test_legacy_updater_active_link_is_refused(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    digest = "0" * 64
+    legacy_parent = root / "usr/local/lib/cathedral-validator-updater-releases"
+    legacy_release = legacy_parent / digest
+    legacy_release.mkdir(parents=True, mode=0o755)
+    fixed_link = root / "usr/local/lib/cathedral-validator-updater"
+    fixed_link.symlink_to(Path("cathedral-validator-updater-releases") / digest)
+
+    with pytest.raises(installer.InstallRefused, match="activation target is unsafe"):
+        installer.install_verified_bundle(
+            verified,
+            root=root,
+            expected_owner=os.geteuid(),
+            python_executable=Path("/usr/bin/python3.12"),
+            runner=_fake_runner([]),
+        )
+
+    assert (
+        fixed_link.readlink() == Path("cathedral-validator-updater-releases") / digest
+    )
+    assert not (
+        root
+        / "usr/local/lib"
+        / installer.UPDATER_RELEASES_DIRECTORY
+        / verified.manifest_sha256
+    ).exists()
+
+
 def test_missing_python_venv_support_refuses_before_mutation(tmp_path):
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
@@ -1140,7 +1242,8 @@ def test_installed_updater_entry_point_requires_final_versioned_interpreter(
     )
     version = (
         root
-        / "usr/local/lib/cathedral-validator-updater-releases"
+        / "usr/local/lib"
+        / installer.UPDATER_RELEASES_DIRECTORY
         / verified.manifest_sha256
     )
     executable = version / "bin" / "cathedral-validator-update"
@@ -1218,9 +1321,9 @@ def test_bootstrap_upgrade_is_monotonic_atomic_and_retains_prior_version(tmp_pat
 
     fixed = root / "usr/local/lib/cathedral-validator-updater"
     assert fixed.readlink() == (
-        Path("cathedral-validator-updater-releases") / second.manifest_sha256
+        Path(installer.UPDATER_RELEASES_DIRECTORY) / second.manifest_sha256
     )
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     assert (releases / first.manifest_sha256).is_dir()
     assert (releases / second.manifest_sha256).is_dir()
     state_path = root / "var/lib/cathedral-validator-update/bootstrap-state.json"
@@ -1384,7 +1487,7 @@ def test_failed_offline_pip_install_leaves_no_active_or_partial_updater(tmp_path
             python_executable=Path("/usr/bin/python3.12"),
             runner=_fake_runner(calls, fail_pip=True),
         )
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     assert releases.is_dir()
     assert list(releases.iterdir()) == []
     assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
@@ -1403,7 +1506,7 @@ def test_interrupted_install_cleans_an_unreferenced_partial_release(tmp_path):
             python_executable=Path("/usr/bin/python3.12"),
             runner=_fake_runner([], interrupt_pip=True),
         )
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     assert releases.is_dir()
     assert list(releases.iterdir()) == []
     assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
@@ -1413,7 +1516,7 @@ def test_sigkill_residue_without_completion_markers_is_rebuilt(tmp_path):
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
     root.mkdir(mode=0o700)
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     releases.mkdir(parents=True, mode=0o755)
     version = releases / verified.manifest_sha256
     version.mkdir(mode=0o755)
@@ -1439,7 +1542,7 @@ def test_unreferenced_complete_markers_do_not_preserve_crash_residue(tmp_path):
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
     root.mkdir(mode=0o700)
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     releases.mkdir(parents=True, mode=0o755)
     version = releases / verified.manifest_sha256
     bin_dir = version / "bin"
@@ -1489,7 +1592,7 @@ def test_incomplete_release_is_never_removed_when_referenced(
     verified, _, _ = _verified(tmp_path / "source")
     root = tmp_path / "host"
     root.mkdir(mode=0o700)
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     releases.mkdir(parents=True, mode=0o755)
     version = releases / verified.manifest_sha256
     version.mkdir(mode=0o755)
@@ -1499,7 +1602,7 @@ def test_incomplete_release_is_never_removed_when_referenced(
 
     if reference == "active link":
         (root / "usr/local/lib/cathedral-validator-updater").symlink_to(
-            Path("cathedral-validator-updater-releases") / verified.manifest_sha256
+            Path(installer.UPDATER_RELEASES_DIRECTORY) / verified.manifest_sha256
         )
     else:
         state_root = root / "var/lib/cathedral-validator-update"
@@ -1539,7 +1642,8 @@ def test_referenced_complete_release_is_validated_and_never_removed(tmp_path):
     )
     version = (
         root
-        / "usr/local/lib/cathedral-validator-updater-releases"
+        / "usr/local/lib"
+        / installer.UPDATER_RELEASES_DIRECTORY
         / verified.manifest_sha256
     )
     unsafe = version / "unsafe-package-file"
@@ -1615,7 +1719,7 @@ def test_release_tree_is_durable_before_state_or_activation(tmp_path, monkeypatc
     root = tmp_path / "host"
     root.mkdir(mode=0o700)
     events: list[str] = []
-    releases = root / "usr/local/lib/cathedral-validator-updater-releases"
+    releases = root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY
     real_fsync_tree = installer._fsync_owned_tree
     real_fsync_directory = installer._fsync_directory
     real_install_managed_file = installer._install_managed_file
@@ -1702,7 +1806,8 @@ def test_installed_files_are_root_style_modes_and_manifest_is_immutable(tmp_path
     )
     release = (
         root
-        / "usr/local/lib/cathedral-validator-updater-releases"
+        / "usr/local/lib"
+        / installer.UPDATER_RELEASES_DIRECTORY
         / verified.manifest_sha256
     )
     assert stat.S_IMODE((release / ".bootstrap-manifest.json").stat().st_mode) == 0o444
