@@ -136,6 +136,38 @@ same-sequence equivocation, unreachable metadata, busy-cycle lock, pending
 writer journal, and failed readiness. Record the signed sequence, archive
 digest, old and new process state, and final healthy release for each case.
 
+### Run the bounded live acceptance controller
+
+The committed controller performs this matrix with disposable signing keys and
+two automatically deleted Ubuntu hosts. It never loads a wallet or runs a
+validator cycle. It reads commits and attestations from this repository, but it
+refuses to publish test releases or hostile fault pointers here. All GitHub
+writes go to a separate public test mirror with immutable releases enabled.
+
+Mirror both reviewed commits first and make the mirror's `main` point to release
+B. Download and unpack both attested candidate artifacts, then run the read-only
+preflight from a clean checkout at release B:
+
+```bash
+env \
+  RUN_ID=REPLACE_WITH_UNIQUE_RUN_ID \
+  CONTROLLER_CIDR=REPLACE_WITH_ONE_PUBLIC_IPV4/32 \
+  CANDIDATE_A_DIR=/secure/candidate-a \
+  CANDIDATE_B_DIR=/secure/candidate-b \
+  SOURCE_REVISION_A=REPLACE_WITH_MERGED_RELEASE_A_SHA \
+  SOURCE_REVISION_B=REPLACE_WITH_MERGED_RELEASE_B_SHA \
+  EVIDENCE_DIR=/secure/empty-live-test-evidence \
+  TEST_GITHUB_REPOSITORY=cathedralai/cathedral-validator-release-e2e \
+  BUDGET_USD=2.00 \
+  ./scripts/live_validator_update_e2e.sh --preflight
+```
+
+Run the identical environment with `--execute` only after preflight prints
+`PREFLIGHT_PASS`. Success is `LIVE_UPDATE_E2E_PASS`, followed by
+`TEARDOWN_COMPLETE`. The controller returns failure unless both hosts, boot
+disks, firewall, subnet, and network are proven absent. The test mirror's
+branches and immutable prerelease remain public as the audit record.
+
 ## Promote the exact canary
 
 Promote only the exact canary metadata that passed the live test. Promotion

@@ -2,17 +2,18 @@
 # Live, no-chain resilience test for the signed Cathedral validator updater.
 #
 # This controller is intentionally inert unless invoked with --execute.  It
-# publishes disposable-key runtime metadata to unique test branches plus one
-# content-addressed immutable test bootstrap prerelease, creates two bounded
-# GCP hosts, exercises the real updater/bootstrap/systemd path, records
-# evidence, and deletes only the exact GCP resources it created. The public
-# GitHub test artifacts are intentionally retained as the test record.
+# reads source commits and attestations only from cathedralai/cathedral-validator.
+# Every write goes to the separate public TEST_GITHUB_REPOSITORY mirror: unique
+# hostile/runtime branches plus one content-addressed immutable test bootstrap
+# prerelease. It creates two bounded GCP hosts, exercises the real
+# updater/bootstrap/systemd path, records evidence, and deletes only the exact
+# GCP resources it created. Public mirror artifacts remain as the test record.
 
 set -Eeuo pipefail
 umask 077
 
 readonly EXPECTED_PROJECT="polaris-tdx-attest"
-readonly EXPECTED_REPOSITORY="cathedralai/cathedral-validator"
+readonly SOURCE_GITHUB_REPOSITORY="cathedralai/cathedral-validator"
 readonly MACHINE_TYPE="e2-standard-2"
 readonly VM_COUNT=2
 readonly MAX_RUN_SECONDS=14400
@@ -45,6 +46,7 @@ fi
 MODE="${1:-}"
 if [[ "$MODE" != "--preflight" && "$MODE" != "--execute" ]]; then
   printf 'usage: %s --preflight|--execute\n' "$0" >&2
+  printf 'required: TEST_GITHUB_REPOSITORY=public-owner/test-mirror plus run, candidate, revision, CIDR, and evidence variables\n' >&2
   exit 2
 fi
 
@@ -58,12 +60,11 @@ required_env() {
 
 for variable in \
   RUN_ID CONTROLLER_CIDR CANDIDATE_A_DIR CANDIDATE_B_DIR \
-  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR; do
+  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY; do
   required_env "$variable"
 done
 
 readonly GCP_PROJECT="${GCP_PROJECT:-$EXPECTED_PROJECT}"
-readonly GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-$EXPECTED_REPOSITORY}"
 readonly ZONE="${ZONE:-us-central1-a}"
 readonly REGION="${REGION:-${ZONE%-*}}"
 readonly BUDGET_USD="${BUDGET_USD:-$HARD_COST_CAP_USD}"
@@ -72,10 +73,29 @@ if [[ "$GCP_PROJECT" != "$EXPECTED_PROJECT" ]]; then
   printf 'REFUSED: GCP project must be exactly %s\n' "$EXPECTED_PROJECT" >&2
   exit 2
 fi
-if [[ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]]; then
-  printf 'REFUSED: GitHub repository must be exactly %s\n' "$EXPECTED_REPOSITORY" >&2
+if [[ -n "${GITHUB_REPOSITORY+x}" ]]; then
+  printf 'REFUSED: GITHUB_REPOSITORY is obsolete; set only TEST_GITHUB_REPOSITORY\n' >&2
   exit 2
 fi
+python3 - "$TEST_GITHUB_REPOSITORY" "$SOURCE_GITHUB_REPOSITORY" <<'PY'
+import re
+import sys
+
+test_repository, source_repository = sys.argv[1:]
+component = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?")
+parts = test_repository.split("/")
+if (
+    len(parts) != 2
+    or any(component.fullmatch(part) is None for part in parts)
+    or any(part in {".", ".."} or part.endswith(".git") for part in parts)
+):
+    raise SystemExit("REFUSED: TEST_GITHUB_REPOSITORY must be one safe owner/repo")
+if test_repository.casefold() == source_repository.casefold():
+    raise SystemExit(
+        "REFUSED: TEST_GITHUB_REPOSITORY must not be cathedralai/cathedral-validator"
+    )
+PY
+readonly TEST_GITHUB_REPOSITORY
 if [[ ! "$RUN_ID" =~ ^[a-z0-9][a-z0-9-]{5,20}$ ]]; then
   printf 'REFUSED: RUN_ID must match [a-z0-9][a-z0-9-]{5,20}\n' >&2
   exit 2
@@ -106,9 +126,9 @@ readonly SSH_USER="cathedrallive"
 TEST_HOTKEY="LiveTestHotkey$(printf '%s' "$RUN_ID" | shasum -a 256 | cut -c1-20)"
 readonly TEST_HOTKEY
 readonly JOURNAL="/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0/${TEST_HOTKEY}/state.json"
-readonly CANARY_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${CANARY_BRANCH}/validator/canary.json"
-readonly STABLE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${STABLE_BRANCH}/validator/stable.json"
-readonly ARCHIVE_URL_TEMPLATE="https://github.com/${GITHUB_REPOSITORY}/releases/download/validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
+readonly CANARY_URL="https://raw.githubusercontent.com/${TEST_GITHUB_REPOSITORY}/${CANARY_BRANCH}/validator/canary.json"
+readonly STABLE_URL="https://raw.githubusercontent.com/${TEST_GITHUB_REPOSITORY}/${STABLE_BRANCH}/validator/stable.json"
+readonly ARCHIVE_URL_TEMPLATE="https://github.com/${TEST_GITHUB_REPOSITORY}/releases/download/validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
 
 ESTIMATED_COST_USD="$(python3 - "$VM_COUNT" "$MAX_RUN_SECONDS" "$VM_HOURLY_CEILING_USD" "$BOOT_DISK_GB" "$DISK_GB_HOURLY_CEILING_USD" <<'PY'
 from decimal import Decimal
@@ -172,6 +192,10 @@ for command in awk basename cmp cut find gcloud gh git grep jq openssl python3 s
     exit 2
   }
 done
+if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
+  printf 'REFUSED: controller Python cannot import cryptography\n' >&2
+  exit 2
+fi
 for file in \
   "$HARNESS_SOURCE" "$FAULT_ORIGIN_SOURCE" "$STATE_WAITER_SOURCE" \
   "$SIGNER" "$PUBLISHER" "$BOOTSTRAP_BUILDER" "$BOOTSTRAP_PUBLISHER"; do
@@ -248,12 +272,24 @@ if [[ -n "$(git -C "$REPOSITORY_ROOT" status --short)" ]]; then
 fi
 
 gh auth status >/dev/null
-if [[ "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" != "false" ]]; then
-  printf 'REFUSED: bootstrap publication repository must be public\n' >&2
+TEST_GITHUB_RESOLVED_REPOSITORY="$(gh api "repos/${TEST_GITHUB_REPOSITORY}" --jq .full_name)"
+readonly TEST_GITHUB_RESOLVED_REPOSITORY
+if [[ "$TEST_GITHUB_RESOLVED_REPOSITORY" != "$TEST_GITHUB_REPOSITORY" ]]; then
+  printf 'REFUSED: TEST_GITHUB_REPOSITORY redirected or differs from its exact GitHub full_name\n' >&2
   exit 2
 fi
-if [[ "$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != "true" ]]; then
-  printf 'REFUSED: bootstrap publication repository must enforce immutable releases\n' >&2
+python3 - "$TEST_GITHUB_RESOLVED_REPOSITORY" "$SOURCE_GITHUB_REPOSITORY" <<'PY'
+import sys
+
+if sys.argv[1].casefold() == sys.argv[2].casefold():
+    raise SystemExit("REFUSED: resolved test repository is the canonical source")
+PY
+if [[ "$(gh api "repos/${TEST_GITHUB_REPOSITORY}" --jq .private)" != "false" ]]; then
+  printf 'REFUSED: TEST_GITHUB_REPOSITORY must be public\n' >&2
+  exit 2
+fi
+if [[ "$(gh api "repos/${TEST_GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != "true" ]]; then
+  printf 'REFUSED: TEST_GITHUB_REPOSITORY must enforce immutable releases\n' >&2
   exit 2
 fi
 gc auth list --filter=status:ACTIVE --format='value(account)' | grep -q .
@@ -261,16 +297,39 @@ gc compute machine-types describe "$MACHINE_TYPE" --zone="$ZONE" >/dev/null
 gcloud --quiet compute images describe-from-family "$IMAGE_FAMILY" --project="$IMAGE_PROJECT" >/dev/null
 
 for revision in "$SOURCE_REVISION_A" "$SOURCE_REVISION_B"; do
-  [[ "$(gh api "repos/${GITHUB_REPOSITORY}/commits/${revision}" --jq .sha)" == "$revision" ]] || {
-    printf 'REFUSED: GitHub did not resolve source revision %s exactly\n' "$revision" >&2
+  [[ "$(gh api "repos/${SOURCE_GITHUB_REPOSITORY}/commits/${revision}" --jq .sha)" == "$revision" ]] || {
+    printf 'REFUSED: canonical source did not resolve revision %s exactly\n' "$revision" >&2
     exit 2
   }
-  comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${revision}...main" --jq .status)"
+  comparison="$(gh api "repos/${SOURCE_GITHUB_REPOSITORY}/compare/${revision}...main" --jq .status)"
   if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
-    printf 'REFUSED: source revision %s is not merged into main\n' "$revision" >&2
+    printf 'REFUSED: canonical source revision %s is not merged into main\n' "$revision" >&2
+    exit 2
+  fi
+  if [[ "$(gh api "repos/${TEST_GITHUB_REPOSITORY}/commits/${revision}" --jq .sha)" != "$revision" ]]; then
+    printf 'REFUSED: test mirror does not contain source revision %s exactly\n' "$revision" >&2
     exit 2
   fi
 done
+TEST_MIRROR_MAIN_SHA="$(gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+readonly TEST_MIRROR_MAIN_SHA
+if [[ "$TEST_MIRROR_MAIN_SHA" != "$SOURCE_REVISION_B" ]]; then
+  printf 'REFUSED: test mirror main must equal SOURCE_REVISION_B exactly\n' >&2
+  exit 2
+fi
+
+assert_test_repository_boundary() {
+  local resolved
+  resolved="$(gh api "repos/${TEST_GITHUB_REPOSITORY}" --jq .full_name)"
+  if [[ "$resolved" != "$TEST_GITHUB_REPOSITORY" ]]; then
+    printf 'REFUSED: test repository identity changed or redirected\n' >&2
+    return 1
+  fi
+  if [[ "$(gh api "repos/${TEST_GITHUB_REPOSITORY}" --jq .private)" != "false" ]]; then
+    printf 'REFUSED: test repository is no longer public\n' >&2
+    return 1
+  fi
+}
 
 if gc compute instances describe "$CANARY_VM" --zone="$ZONE" >/dev/null 2>&1; then
   printf 'REFUSED: exact GCP test resource already exists: %s\n' "$CANARY_VM" >&2
@@ -301,7 +360,7 @@ if gc compute firewall-rules describe "$FIREWALL" >/dev/null 2>&1; then
   exit 2
 fi
 for branch in "$CANARY_BRANCH" "$STABLE_BRANCH" "$FAULT_BRANCH"; do
-  if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
+  if gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
     printf 'REFUSED: exact GitHub test branch already exists: %s\n' "$branch" >&2
     exit 2
   fi
@@ -313,6 +372,8 @@ if [[ "$MODE" == "--preflight" ]]; then
     "$NETWORK_ALLOWANCE_USD" "$PLANNING_TOTAL_USD"
   printf 'IMMUTABLE_TEST_CHANNELS canary=%s stable=%s fault=%s\n' \
     "$CANARY_BRANCH" "$STABLE_BRANCH" "$FAULT_BRANCH"
+  printf 'REPOSITORY_SPLIT source=%s test_publication=%s mirror_main=%s\n' \
+    "$SOURCE_GITHUB_REPOSITORY" "$TEST_GITHUB_REPOSITORY" "$TEST_MIRROR_MAIN_SHA"
   exit 0
 fi
 
@@ -453,9 +514,9 @@ cleanup() {
     "$status" "$teardown_ok" >"$EVIDENCE_DIR/teardown-status.txt"
   if [[ $status -eq 0 && "$teardown_ok" == 1 ]]; then
     printf 'TEARDOWN_COMPLETE run=%s\n' "$RUN_ID"
-    printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s\n' \
-      "$RUN_ID" "$EVIDENCE_DIR" "$ESTIMATED_COST_USD" \
-      "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG"
+    printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s test_repository=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s\n' \
+      "$RUN_ID" "$EVIDENCE_DIR" "$TEST_GITHUB_REPOSITORY" \
+      "$ESTIMATED_COST_USD" "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG"
   elif [[ "$teardown_ok" != 1 ]]; then
     printf 'TEARDOWN_NOT_PROVEN run=%s original_status=%s\n' "$RUN_ID" "$status" >&2
   else
@@ -486,6 +547,13 @@ assert_project_metadata_unchanged() {
     return 1
   fi
 }
+
+gh api "repos/${SOURCE_GITHUB_REPOSITORY}" >"$EVIDENCE_DIR/source-repository.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}" >"$EVIDENCE_DIR/test-publication-repository.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}/immutable-releases" \
+  >"$EVIDENCE_DIR/test-publication-immutable-releases.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/main" \
+  >"$EVIDENCE_DIR/test-publication-main-before.json"
 
 runtime_private="$KEY_DIR/runtime-private.pem"
 runtime_public="$KEY_DIR/runtime-public.pem"
@@ -604,12 +672,12 @@ for candidate_root in "$CANDIDATE_A_DIR" "$CANDIDATE_B_DIR"; do
   while IFS= read -r relative; do
     {
       printf '\nVERIFY %s\n' "$candidate_root/$relative"
-      gh attestation verify "$candidate_root/$relative" --repo "$GITHUB_REPOSITORY"
+      gh attestation verify "$candidate_root/$relative" --repo "$SOURCE_GITHUB_REPOSITORY"
     } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
   done < <(jq -r '.files | keys[]' "$candidate_root/INPUTS.json")
   {
     printf '\nVERIFY %s\n' "$candidate_root/INPUTS.json"
-    gh attestation verify "$candidate_root/INPUTS.json" --repo "$GITHUB_REPOSITORY"
+    gh attestation verify "$candidate_root/INPUTS.json" --repo "$SOURCE_GITHUB_REPOSITORY"
   } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
 done
 
@@ -646,13 +714,14 @@ if [[ "$BOOTSTRAP_SEQUENCE" != 1 ]]; then
   exit 2
 fi
 readonly BOOTSTRAP_TAG="validator-bootstrap-test-s${BOOTSTRAP_SEQUENCE}-${BOOTSTRAP_MANIFEST_SHA}"
-readonly BOOTSTRAP_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BOOTSTRAP_TAG}"
+readonly BOOTSTRAP_BASE_URL="https://github.com/${TEST_GITHUB_REPOSITORY}/releases/download/${BOOTSTRAP_TAG}"
 readonly BOOTSTRAP_BUNDLE_URL="${BOOTSTRAP_BASE_URL}/updater-bootstrap.tar.gz"
 readonly BOOTSTRAP_MANIFEST_URL="${BOOTSTRAP_BASE_URL}/updater-bootstrap.manifest.json"
 readonly BOOTSTRAP_SIGNATURE_URL="${BOOTSTRAP_BASE_URL}/updater-bootstrap.manifest.sig"
 readonly BOOTSTRAP_PUBLIC_KEY_URL="${BOOTSTRAP_BASE_URL}/bootstrap-signing-public-key.pem"
 
 bootstrap_publisher() {
+  assert_test_repository_boundary
   python3 "$BOOTSTRAP_PUBLISHER" \
     --bundle "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
     --manifest "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
@@ -660,25 +729,36 @@ bootstrap_publisher() {
     --bootstrap-public-key "$bootstrap_public" \
     --expected-bootstrap-key-fingerprint "$BOOTSTRAP_FINGERPRINT" \
     --minimum-bootstrap-sequence "$BOOTSTRAP_SEQUENCE" \
-    --repository "$GITHUB_REPOSITORY" \
+    --repository "$TEST_GITHUB_REPOSITORY" \
     --track test \
     --target-revision "$SOURCE_REVISION_B" \
     "$@"
+}
+
+assert_test_mirror_main_exact() {
+  local observed
+  observed="$(gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+  if [[ "$observed" != "$SOURCE_REVISION_B" ]]; then
+    printf 'REFUSED: test mirror main no longer equals SOURCE_REVISION_B\n' >&2
+    return 1
+  fi
 }
 
 readonly BOOTSTRAP_VALIDATE_LINE="CATHEDRAL_VALIDATOR_BOOTSTRAP_VALIDATED_NO_WRITE track=test sequence=${BOOTSTRAP_SEQUENCE} tag=${BOOTSTRAP_TAG} manifest_sha256=${BOOTSTRAP_MANIFEST_SHA} bundle_sha256=${BOOTSTRAP_BUNDLE_SHA}"
 readonly BOOTSTRAP_PUBLISH_LINE="CATHEDRAL_VALIDATOR_BOOTSTRAP_PUBLISHED track=test sequence=${BOOTSTRAP_SEQUENCE} tag=${BOOTSTRAP_TAG} manifest_sha256=${BOOTSTRAP_MANIFEST_SHA} bundle_sha256=${BOOTSTRAP_BUNDLE_SHA}"
 bootstrap_publisher | tee "$EVIDENCE_DIR/bootstrap-publication-validate.log"
 grep -Fx "$BOOTSTRAP_VALIDATE_LINE" "$EVIDENCE_DIR/bootstrap-publication-validate.log" >/dev/null
+assert_test_mirror_main_exact
 bootstrap_publisher --publish | tee "$EVIDENCE_DIR/bootstrap-publication-publish.log"
 grep -Fx "$BOOTSTRAP_PUBLISH_LINE" "$EVIDENCE_DIR/bootstrap-publication-publish.log" >/dev/null
-gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BOOTSTRAP_TAG}" \
+gh api "repos/${TEST_GITHUB_REPOSITORY}/releases/tags/${BOOTSTRAP_TAG}" \
   >"$EVIDENCE_DIR/bootstrap-release-record.json"
-gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${BOOTSTRAP_TAG}" \
+gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/tags/${BOOTSTRAP_TAG}" \
   >"$EVIDENCE_DIR/bootstrap-tag-record.json"
 
 python3 - \
-  "$EVIDENCE_DIR/bootstrap-publication.json" "$BOOTSTRAP_TAG" \
+  "$EVIDENCE_DIR/bootstrap-publication.json" "$SOURCE_GITHUB_REPOSITORY" \
+  "$TEST_GITHUB_REPOSITORY" "$BOOTSTRAP_TAG" \
   "$SOURCE_REVISION_B" "$BOOTSTRAP_SEQUENCE" "$BOOTSTRAP_FINGERPRINT" \
   "$RUNTIME_FINGERPRINT" "$BOOTSTRAP_BUNDLE_URL" "$BOOTSTRAP_BUNDLE_SHA" \
   "$BOOTSTRAP_MANIFEST_URL" "$BOOTSTRAP_MANIFEST_SHA" \
@@ -690,6 +770,8 @@ import sys
 
 (
     output,
+    source_repository,
+    test_repository,
     tag,
     target_revision,
     sequence,
@@ -706,6 +788,9 @@ import sys
 ) = sys.argv[1:]
 document = {
     "schema": "cathedral_validator_live_bootstrap_publication_v1",
+    "source_repository": source_repository,
+    "publication_repository": test_repository,
+    "canonical_source_write_allowed": False,
     "track": "test",
     "tag": tag,
     "target_revision": target_revision,
@@ -729,6 +814,7 @@ python3 - \
   "$EVIDENCE_DIR/control.json" "$RUN_ID" "$GCP_PROJECT" "$ZONE" \
   "$MACHINE_TYPE" "$VM_COUNT" "$MAX_RUN_SECONDS" "$ESTIMATED_COST_USD" \
   "$NETWORK_ALLOWANCE_USD" "$PLANNING_TOTAL_USD" \
+  "$SOURCE_GITHUB_REPOSITORY" "$TEST_GITHUB_REPOSITORY" "$TEST_MIRROR_MAIN_SHA" \
   "$SOURCE_REVISION_A" "$SOURCE_REVISION_B" "$ARCHIVE_A_SHA" "$ARCHIVE_B_SHA" \
   "$BOOTSTRAP_FINGERPRINT" "$RUNTIME_FINGERPRINT" "$CANARY_BRANCH" \
   "$STABLE_BRANCH" "$FAULT_BRANCH" "$BOOTSTRAP_TAG" \
@@ -750,6 +836,9 @@ import sys
     estimated_cost,
     network_allowance,
     planning_total,
+    source_repository,
+    test_repository,
+    test_mirror_main_sha,
     revision_a,
     revision_b,
     archive_a,
@@ -784,6 +873,10 @@ document = {
         "for two external IPv4 addresses and bounded network traffic; this is "
         "not a cloud billing cap"
     ),
+    "source_repository": source_repository,
+    "test_publication_repository": test_repository,
+    "test_mirror_main_sha": test_mirror_main_sha,
+    "canonical_source_write_allowed": False,
     "source_revision_a": revision_a,
     "source_revision_b": revision_b,
     "archive_a_sha256": archive_a,
@@ -812,17 +905,21 @@ publish_release() {
   local archive="$2"
   local branch="$3"
   local label="$4"
+  assert_test_repository_boundary
+  assert_test_mirror_main_exact
   python3 "$PUBLISHER" \
     --metadata "$metadata" \
     --archive "$archive" \
     --public-key "$runtime_public" \
-    --repository "$GITHUB_REPOSITORY" \
+    --repository "$TEST_GITHUB_REPOSITORY" \
     --channel-branch "$branch" | tee "$EVIDENCE_DIR/${label}-validate.log"
+  assert_test_repository_boundary
+  assert_test_mirror_main_exact
   python3 "$PUBLISHER" \
     --metadata "$metadata" \
     --archive "$archive" \
     --public-key "$runtime_public" \
-    --repository "$GITHUB_REPOSITORY" \
+    --repository "$TEST_GITHUB_REPOSITORY" \
     --channel-branch "$branch" \
     --publish | tee "$EVIDENCE_DIR/${label}-publish.log"
 }
@@ -830,10 +927,15 @@ publish_release() {
 create_branch() {
   local branch="$1"
   local base_sha
-  base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+  assert_test_repository_boundary
+  base_sha="$(gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+  if [[ "$base_sha" != "$SOURCE_REVISION_B" ]]; then
+    printf 'REFUSED: test mirror main changed before branch creation\n' >&2
+    return 1
+  fi
   jq -n --arg ref "refs/heads/$branch" --arg sha "$base_sha" \
     '{ref:$ref,sha:$sha}' | \
-    gh api "repos/${GITHUB_REPOSITORY}/git/refs" --method POST --input - >/dev/null
+    gh api "repos/${TEST_GITHUB_REPOSITORY}/git/refs" --method POST --input - >/dev/null
 }
 
 base64_file() {
@@ -852,7 +954,8 @@ put_pointer() {
   local outcome="$4"
   local path="validator/${channel}.json"
   local existing_sha=""
-  existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${branch}" --jq .sha 2>/dev/null || true)"
+  assert_test_repository_boundary
+  existing_sha="$(gh api "repos/${TEST_GITHUB_REPOSITORY}/contents/${path}?ref=${branch}" --jq .sha 2>/dev/null || true)"
   if [[ -n "$existing_sha" ]]; then
     jq -n \
       --arg message "test(release): ${RUN_ID} ${outcome}" \
@@ -866,7 +969,7 @@ put_pointer() {
       --arg content "$(base64_file "$source")" \
       --arg branch "$branch" \
       '{message:$message,content:$content,branch:$branch}'
-  fi | gh api "repos/${GITHUB_REPOSITORY}/contents/${path}" \
+  fi | gh api "repos/${TEST_GITHUB_REPOSITORY}/contents/${path}" \
     --method PUT --input - --jq .commit.sha
 }
 
@@ -932,7 +1035,7 @@ pin_fault_pointer() {
     printf 'REFUSED: GitHub did not return an exact fault commit\n' >&2
     return 1
   fi
-  url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${commit}/validator/${channel}.json"
+  url="https://raw.githubusercontent.com/${TEST_GITHUB_REPOSITORY}/${commit}/validator/${channel}.json"
   wait_raw_exact "$url" "$source"
   printf '%s\t%s\t%s\t%s\n' \
     "$outcome" "$commit" "$(shasum -a 256 "$source" | cut -d' ' -f1)" "$url" \
@@ -1460,8 +1563,8 @@ capture_host final-stable "$STABLE_VM"
 gc compute instances list \
   --filter="labels.cathedral-live-run=${RUN_ID}" \
   --format=json >"$EVIDENCE_DIR/pre-teardown-instances.json"
-gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANARY_BRANCH}" >"$EVIDENCE_DIR/canary-branch.json"
-gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${STABLE_BRANCH}" >"$EVIDENCE_DIR/stable-branch.json"
-gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${FAULT_BRANCH}" >"$EVIDENCE_DIR/fault-branch.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/${CANARY_BRANCH}" >"$EVIDENCE_DIR/canary-branch.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/${STABLE_BRANCH}" >"$EVIDENCE_DIR/stable-branch.json"
+gh api "repos/${TEST_GITHUB_REPOSITORY}/git/ref/heads/${FAULT_BRANCH}" >"$EVIDENCE_DIR/fault-branch.json"
 
 record_step "SCENARIOS_PASS_PENDING_TEARDOWN all bounded no-chain updater scenarios"
