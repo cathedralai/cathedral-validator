@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import tomllib
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -141,6 +142,81 @@ def _wheel(root: Path, *, private_marker: bool = False) -> tuple[Path, str]:
     path.write_bytes(output.getvalue())
     path.chmod(0o644)
     return wheelhouse, hashlib.sha256(output.getvalue()).hexdigest()
+
+
+def _wheel_member(path: Path, name: str, body: bytes) -> None:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.external_attr = 0o644 << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        bundle.writestr(info, body)
+    path.write_bytes(output.getvalue())
+
+
+def test_private_key_scan_accepts_source_code_literal_inside_wheel(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source-code-literal.whl"
+    _wheel_member(
+        path,
+        "package/ssh.py",
+        b'_SK_START = b"' + builder._PRIVATE_KEY_MARKERS[-1] + b'"\n',
+    )
+    builder._scan_wheel(path, path.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        builder._PRIVATE_KEY_MARKERS[0],
+        builder._PRIVATE_KEY_MARKERS[0] + b"\n",
+        b" \t" + builder._PRIVATE_KEY_MARKERS[2] + b"\t \r\n",
+    ],
+)
+def test_private_key_scan_refuses_marker_on_logical_line(body: bytes) -> None:
+    scanner = builder._PrivateKeyLineScanner("private-key fixture")
+    with pytest.raises(builder.BundleRefused, match="contains private-key material"):
+        scanner.feed(body)
+        scanner.finish()
+
+
+def test_control_file_scan_refuses_inline_private_key_marker() -> None:
+    body = b"IDENTITY_KEY=" + builder._PRIVATE_KEY_MARKERS[0] + b"\n"
+    with pytest.raises(builder.BundleRefused, match="contains private-key material"):
+        builder._refuse_private_key(body, "reviewed environment")
+
+
+def test_private_key_scan_refuses_marker_split_across_wheel_read_chunks(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chunked-private-key.whl"
+    prefix = b"-----BEGIN OPENSSH "
+    _wheel_member(
+        path,
+        "package/test.key",
+        b" " * (64 * 1024 - len(prefix)) + prefix + b"PRIVATE KEY-----\r\n",
+    )
+    with pytest.raises(builder.BundleRefused, match="contains private-key material"):
+        builder._scan_wheel(path, path.read_bytes())
+
+
+def test_private_key_scan_refuses_private_key_inside_wheel(tmp_path: Path) -> None:
+    path = tmp_path / "private-key.whl"
+    _wheel_member(
+        path,
+        "package/test.key",
+        builder._PRIVATE_KEY_MARKERS[0] + b"\nsecret\n",
+    )
+    with pytest.raises(builder.BundleRefused, match="contains private-key material"):
+        builder._scan_wheel(path, path.read_bytes())
+
+
+def test_project_and_scaffold_versions_remain_identical() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project_version = tomllib.load(handle)["project"]["version"]
+    scaffold = (ROOT / "scaffold" / "__init__.py").read_text(encoding="utf-8")
+    assert f'__version__ = "{project_version}"' in scaffold
 
 
 def _updater_dependency_wheelhouse(
