@@ -234,6 +234,30 @@ def test_strict_canary_rejects_uncontrolled_verifiers(tmp_path: Path) -> None:
         builder["_validated_executable"](Path("relative-qvl"), label="QVL")
 
 
+def test_canary_refuses_a_bundle_larger_than_the_updater_accepts(
+    tmp_path: Path,
+) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    pex, qvl, snpguest = _inputs(tmp_path)
+    builder["build_canary"].__globals__["MAX_TREE_BYTES"] = 1
+
+    with pytest.raises(UpdateRefused, match="updater tree limit"):
+        builder["build_canary"](
+            pex=pex,
+            qvl=qvl,
+            snpguest=snpguest,
+            source_revision=SOURCE_REVISION,
+            archive_out=tmp_path / "oversized.tar.gz",
+            metadata_out=tmp_path / "oversized.json",
+            archive_url_template=ARCHIVE_URL_TEMPLATE,
+            sequence=1,
+            private_key=private,
+            issued_unix=NOW,
+            lifetime_seconds=3600,
+        )
+
+
 @pytest.mark.parametrize(
     "template",
     (
@@ -350,6 +374,15 @@ def test_canary_rollback_refuses_replay_and_wrong_retained_bytes(
     for sequence in (4, 5):
         with pytest.raises(UpdateRefused, match="must exceed"):
             builder["resign_canary"](sequence=sequence, **arguments)
+
+    _future_archive, future_metadata = _build(
+        builder, tmp_path, private, name="future", sequence=7
+    )
+    with pytest.raises(UpdateRefused, match="retained canary sequence"):
+        builder["resign_canary"](
+            sequence=6,
+            **(arguments | {"retained_metadata": future_metadata}),
+        )
 
     retained_archive.write_bytes(retained_archive.read_bytes() + b"tampered")
     with pytest.raises(UpdateRefused, match="does not match signed metadata"):

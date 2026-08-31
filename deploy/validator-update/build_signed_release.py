@@ -33,6 +33,7 @@ from cathedral_thin.independent_runtime.updater import (
     MAX_ARCHIVE_BYTES,
     MAX_METADATA_LIFETIME_SECONDS,
     MAX_METADATA_BYTES,
+    MAX_TREE_BYTES,
     METADATA_SCHEMA,
     UpdateRefused,
     extract_release_archive,
@@ -42,7 +43,6 @@ from cathedral_thin.independent_runtime.updater import (
 
 VALIDATOR_PEX_ENTRY_POINT = "cathedral_thin.independent_runtime.direct_validator:main"
 TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
-LEGACY_VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v1"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 VALIDATOR_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 QVL_RELEASE_PATH = "bin/cathedral-tdx-verifier"
@@ -409,39 +409,25 @@ def validator_release_tree(
     pex: Path,
     destination: Path,
     *,
-    qvl: Path | None = None,
-    snpguest: Path | None = None,
-    source_revision: str | None = None,
+    qvl: Path,
+    snpguest: Path,
+    source_revision: str,
 ) -> ValidatedPex:
     """Create the only supported release-tree shape from one validated PEX."""
 
     if destination.exists() or destination.is_symlink():
         raise UpdateRefused("validator bundle destination already exists")
     validated = _validator_pex(pex)
-    strict_values = (qvl, snpguest, source_revision)
-    strict_bundle = all(value is not None for value in strict_values)
-    if any(value is not None for value in strict_values) and not strict_bundle:
-        raise UpdateRefused(
-            "validator bundle requires QVL, snpguest, and source revision together"
-        )
-    reviewed_qvl: ValidatedExecutable | None = None
-    reviewed_snpguest: ValidatedExecutable | None = None
-    reviewed_revision: str | None = None
-    if strict_bundle:
-        assert qvl is not None
-        assert snpguest is not None
-        reviewed_qvl = _validated_executable(qvl, label="QVL")
-        reviewed_snpguest = _validated_executable(snpguest, label="snpguest")
-        reviewed_revision = _source_revision(source_revision)
+    reviewed_qvl = _validated_executable(qvl, label="QVL")
+    reviewed_snpguest = _validated_executable(snpguest, label="snpguest")
+    reviewed_revision = _source_revision(source_revision)
 
     executable = destination / "bin" / "cathedral-validator"
     executable.parent.mkdir(mode=0o755, parents=True)
     executable.write_bytes(validated.raw)
     executable.chmod(0o755)
     manifest = {
-        "schema": (
-            VALIDATOR_BUNDLE_SCHEMA if strict_bundle else LEGACY_VALIDATOR_BUNDLE_SCHEMA
-        ),
+        "schema": VALIDATOR_BUNDLE_SCHEMA,
         "entry_point": VALIDATOR_PEX_ENTRY_POINT,
         "telemetry_module": TELEMETRY_PEX_MODULE,
         "pex_sha256": hashlib.sha256(validated.raw).hexdigest(),
@@ -449,27 +435,28 @@ def validator_release_tree(
         "project_distribution": validated.project_distribution,
         "interpreter_constraints": list(validated.interpreter_constraints),
     }
-    if strict_bundle:
-        assert reviewed_qvl is not None
-        assert reviewed_snpguest is not None
-        assert reviewed_revision is not None
-        qvl_executable = destination / QVL_RELEASE_PATH
-        qvl_executable.write_bytes(reviewed_qvl.raw)
-        qvl_executable.chmod(0o755)
-        snpguest_executable = destination / SNPGUEST_RELEASE_PATH
-        snpguest_executable.write_bytes(reviewed_snpguest.raw)
-        snpguest_executable.chmod(0o755)
-        manifest.update(
-            {
-                "source_revision": reviewed_revision,
-                "qvl_path": QVL_RELEASE_PATH,
-                "qvl_sha256": reviewed_qvl.sha256,
-                "snpguest_path": SNPGUEST_RELEASE_PATH,
-                "snpguest_sha256": reviewed_snpguest.sha256,
-            }
-        )
+    qvl_executable = destination / QVL_RELEASE_PATH
+    qvl_executable.write_bytes(reviewed_qvl.raw)
+    qvl_executable.chmod(0o755)
+    snpguest_executable = destination / SNPGUEST_RELEASE_PATH
+    snpguest_executable.write_bytes(reviewed_snpguest.raw)
+    snpguest_executable.chmod(0o755)
+    manifest.update(
+        {
+            "source_revision": reviewed_revision,
+            "qvl_path": QVL_RELEASE_PATH,
+            "qvl_sha256": reviewed_qvl.sha256,
+            "snpguest_path": SNPGUEST_RELEASE_PATH,
+            "snpguest_sha256": reviewed_snpguest.sha256,
+        }
+    )
     (destination / "RELEASE.json").write_bytes(canonical_document_bytes(manifest))
     (destination / "RELEASE.json").chmod(0o644)
+    tree_bytes = sum(
+        path.stat().st_size for path in destination.rglob("*") if path.is_file()
+    )
+    if tree_bytes > MAX_TREE_BYTES:
+        raise UpdateRefused("validator release exceeds the updater tree limit")
     return validated
 
 
@@ -702,28 +689,17 @@ def _load_retained_metadata(
 def build_canary(
     *,
     pex: Path,
+    qvl: Path,
+    snpguest: Path,
+    source_revision: str,
     archive_out: Path,
     metadata_out: Path,
-    archive_url: str | None = None,
-    archive_url_template: str | None = None,
+    archive_url_template: str,
     sequence: int,
     private_key: Ed25519PrivateKey,
     issued_unix: int | None,
     lifetime_seconds: int,
-    qvl: Path | None = None,
-    snpguest: Path | None = None,
-    source_revision: str | None = None,
 ) -> bytes:
-    strict_values = (qvl, snpguest, source_revision, archive_url_template)
-    strict_bundle = all(value is not None for value in strict_values)
-    if any(value is not None for value in strict_values) and not strict_bundle:
-        raise UpdateRefused(
-            "canary build requires QVL, snpguest, source revision, and archive URL template together"
-        )
-    if strict_bundle and archive_url is not None:
-        raise UpdateRefused("strict canary build accepts only an archive URL template")
-    if not strict_bundle and (not isinstance(archive_url, str) or not archive_url):
-        raise UpdateRefused("legacy canary build requires an archive URL")
     _release_sequence(sequence)
     with tempfile.TemporaryDirectory(prefix="cathedral-validator-release-") as work:
         source = Path(work) / "release"
@@ -735,19 +711,17 @@ def build_canary(
             source_revision=source_revision,
         )
         archive = deterministic_archive(source)
+        if len(archive) > MAX_ARCHIVE_BYTES:
+            raise UpdateRefused("validator release exceeds the updater archive limit")
         tree_sha256 = release_tree_sha256(source)
 
     issued, expires = _validity(
         issued_unix=issued_unix, lifetime_seconds=lifetime_seconds
     )
     archive_sha256 = hashlib.sha256(archive).hexdigest()
-    if strict_bundle:
-        resolved_archive_url = _archive_url_from_template(
-            archive_url_template, archive_sha256
-        )
-    else:
-        assert archive_url is not None
-        resolved_archive_url = archive_url
+    resolved_archive_url = _archive_url_from_template(
+        archive_url_template, archive_sha256
+    )
     release = {
         "version": validated.version,
         "archive_url": resolved_archive_url,
@@ -802,6 +776,10 @@ def resign_canary(
         retained_metadata,
         private_key=private_key,
     )
+    if retained.channel == "canary" and next_sequence <= retained.sequence:
+        raise UpdateRefused(
+            "re-signed canary sequence must exceed the retained canary sequence"
+        )
     _canonical_archive_url(retained.archive_url, retained.archive_sha256)
     _validated_retained_archive(
         retained_archive,
