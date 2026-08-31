@@ -1933,12 +1933,12 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
 
     assert "continue-on-error" not in release_job
     assert "pex==2.101.1" in release_job
-    assert "cathedral-scaffold[snp-production] @" in release_job
-    assert (
-        "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@"
-        "8dde6eaca27116eed53386a1fa33ec70b74a01fb" in release_job
+    assert "--lock requirements/validator-release-cpython312-linux-x86_64.pex.lock" in (
+        release_job
     )
-    assert release_job.count("CPython==3.12.*") == 2
+    assert 'runtime_lock=Path(' in release_job
+    assert 'runtime_distributions=Path(' in release_job
+    assert "CPython==3.12.*" in release_job
     assert "cmp /tmp/cathedral-validator-one.pex" in release_job
     assert 'builder["_validator_pex"](pex)' in release_job
     assert 'builder["validator_release_tree"](' in release_job
@@ -2041,7 +2041,7 @@ def test_offline_builder_rejects_decoy_telemetry_module_paths(tmp_path: Path) ->
     pex.write_bytes(b"#!/usr/bin/python3.12\n" + output.getvalue())
     pex.chmod(0o755)
 
-    with pytest.raises(UpdateRefused, match="private telemetry runtime"):
+    with pytest.raises(builder["UpdateRefused"], match="private telemetry runtime"):
         builder["_validator_pex"](pex)
 
 
@@ -2061,14 +2061,24 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     snpguest.write_bytes(b"#!/bin/sh\n# reviewed snpguest\n")
     snpguest.chmod(0o755)
     private = Ed25519PrivateKey.generate()
-    archive_one = tmp_path / "one.tar.gz"
-    archive_two = tmp_path / "two.tar.gz"
+    archive_dir_one = tmp_path / "archive-one"
+    archive_dir_two = tmp_path / "archive-two"
     canary_one = tmp_path / "canary-one.json"
     canary_two = tmp_path / "canary-two.json"
+    archive_dir_one.mkdir()
+    archive_dir_two.mkdir()
+    archive_dir_one.chmod(0o700)
+    archive_dir_two.chmod(0o700)
+    runtime_lock = root / "requirements/validator-release-cpython312-linux-x86_64.pex.lock"
+    with zipfile.ZipFile(io.BytesIO(pex.read_bytes()), mode="r") as bundle:
+        pex_info = bundle.read("PEX-INFO")
+    pex_document = json.loads(pex_info)
     kwargs = {
         "pex": pex,
         "qvl": qvl,
         "snpguest": snpguest,
+        "runtime_lock": runtime_lock,
+        "runtime_distributions": tmp_path / "validator-release-distributions.json",
         "source_revision": "a" * 40,
         "archive_url_template": (
             "https://github.com/cathedralai/cathedral-validator/releases/download/"
@@ -2080,8 +2090,27 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
         "issued_unix": NOW,
         "lifetime_seconds": 3600,
     }
-    builder["build_canary"](archive_out=archive_one, metadata_out=canary_one, **kwargs)
-    builder["build_canary"](archive_out=archive_two, metadata_out=canary_two, **kwargs)
+    kwargs["runtime_distributions"].write_text(
+        json.dumps(
+            {
+                "schema": "cathedral_validator_pex_distributions_v1",
+                "runtime_lock_sha256": hashlib.sha256(runtime_lock.read_bytes()).hexdigest(),
+                "pex_sha256": hashlib.sha256(pex.read_bytes()).hexdigest(),
+                "pex_info_sha256": hashlib.sha256(pex_info).hexdigest(),
+                "distributions": pex_document["distributions"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    archive_one = builder["build_canary"](
+        archive_out_dir=archive_dir_one, metadata_out=canary_one, **kwargs
+    )
+    archive_two = builder["build_canary"](
+        archive_out_dir=archive_dir_two, metadata_out=canary_two, **kwargs
+    )
     assert archive_one.read_bytes() == archive_two.read_bytes()
     assert canary_one.read_bytes() == canary_two.read_bytes()
 
