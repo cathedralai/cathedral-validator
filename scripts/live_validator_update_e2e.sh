@@ -25,7 +25,29 @@ readonly VM_HOURLY_CEILING_USD="0.075"
 readonly DISK_GB_HOURLY_CEILING_USD="0.00015"
 readonly FIXED_CHANNEL_CACHE_MAX_SECONDS=300
 readonly UPDATE_TIMER_INTERVAL_SECONDS=60
-readonly FIXED_CHANNEL_WAIT_SECONDS=420
+# The signed timer services retain the production updater's 20-minute
+# operation deadline plus the service manager's two-minute shutdown margin. A
+# fixed channel can also serve cached metadata until the next timer tick, so
+# the controller must not confuse a still-permitted update with a failed one.
+# Keep an extra three minutes beyond every enforced phase.
+readonly TIMER_OPERATION_TIMEOUT_SECONDS=1200
+readonly TIMER_SYSTEMD_MARGIN_SECONDS=120
+readonly FIXED_CHANNEL_WAIT_MARGIN_SECONDS=180
+readonly FIXED_CHANNEL_WAIT_SECONDS=1860
+readonly CAPTURE_RETRY_ATTEMPTS=6
+readonly CAPTURE_RETRY_INTERVAL_SECONDS=5
+readonly CRASH_PENDING_WAIT_SECONDS=120
+# This reserves planning time for the lightweight final checks. It is not a
+# command timeout. The fresh elapsed-time gate below remains authoritative.
+readonly CRASH_POST_PENDING_RESERVE_SECONDS=60
+readonly TRANSIENT_UPDATE_TIMEOUT_SECONDS=240
+readonly TRANSIENT_SYSTEMD_TIMEOUT_SECONDS=360
+readonly RESET_MINIMUM_HEADROOM_SECONDS=60
+readonly PRE_ACTION_READ_ATTEMPTS=3
+readonly PRE_ACTION_RETRY_INTERVAL_SECONDS=2
+readonly VALIDATOR_SERVICE_CONTROL_TIMEOUT_SECONDS=300
+readonly DIRECT_START_TIMEOUT_SECONDS=300
+readonly READINESS_DELAY_MAX_SECONDS=300
 readonly IMAGE_PROJECT="ubuntu-os-cloud"
 readonly IMAGE_FAMILY="ubuntu-2404-lts-amd64"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -38,8 +60,32 @@ readonly PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_chan
 readonly BOOTSTRAP_BUILDER="$REPOSITORY_ROOT/deploy/validator-update/build_updater_bundle.py"
 readonly BOOTSTRAP_PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_bootstrap.py"
 
-if (( FIXED_CHANNEL_WAIT_SECONDS <= FIXED_CHANNEL_CACHE_MAX_SECONDS + UPDATE_TIMER_INTERVAL_SECONDS )); then
-  printf 'REFUSED: fixed-channel wait must exceed cache maximum plus timer interval\n' >&2
+if (( FIXED_CHANNEL_WAIT_SECONDS < FIXED_CHANNEL_CACHE_MAX_SECONDS + UPDATE_TIMER_INTERVAL_SECONDS + TIMER_OPERATION_TIMEOUT_SECONDS + TIMER_SYSTEMD_MARGIN_SECONDS + FIXED_CHANNEL_WAIT_MARGIN_SECONDS )); then
+  printf 'REFUSED: fixed-channel wait must cover cache, timer, updater, systemd, and margin bounds\n' >&2
+  exit 2
+fi
+if (( TRANSIENT_UPDATE_TIMEOUT_SECONDS < CRASH_PENDING_WAIT_SECONDS + CRASH_POST_PENDING_RESERVE_SECONDS + RESET_MINIMUM_HEADROOM_SECONDS )); then
+  printf 'REFUSED: transient updater must cover pending wait, pre-action reserve, and action headroom\n' >&2
+  exit 2
+fi
+if (( TRANSIENT_SYSTEMD_TIMEOUT_SECONDS < TRANSIENT_UPDATE_TIMEOUT_SECONDS + TIMER_SYSTEMD_MARGIN_SECONDS )); then
+  printf 'REFUSED: transient systemd timeout must outlive the updater deadline and manager margin\n' >&2
+  exit 2
+fi
+if (( DIRECT_START_TIMEOUT_SECONDS < TRANSIENT_UPDATE_TIMEOUT_SECONDS + RESET_MINIMUM_HEADROOM_SECONDS )); then
+  printf 'REFUSED: direct-service test bound must cover the transient updater and action headroom\n' >&2
+  exit 2
+fi
+if (( READINESS_DELAY_MAX_SECONDS < TRANSIENT_UPDATE_TIMEOUT_SECONDS + RESET_MINIMUM_HEADROOM_SECONDS )); then
+  printf 'REFUSED: readiness test bound must cover the transient updater and action headroom\n' >&2
+  exit 2
+fi
+if (( DIRECT_START_TIMEOUT_SECONDS > VALIDATOR_SERVICE_CONTROL_TIMEOUT_SECONDS )); then
+  printf 'REFUSED: direct-service test bound exceeds the fixed updater service-control ceiling\n' >&2
+  exit 2
+fi
+if (( READINESS_DELAY_MAX_SECONDS > VALIDATOR_SERVICE_CONTROL_TIMEOUT_SECONDS )); then
+  printf 'REFUSED: readiness test bound exceeds the fixed updater service-control ceiling\n' >&2
   exit 2
 fi
 
@@ -1266,9 +1312,27 @@ remote() {
     --ssh-flag="-i${SSH_PRIVATE_KEY}" \
     --ssh-flag='-o IdentitiesOnly=yes' \
     --ssh-flag='-o ConnectTimeout=10' \
+    --ssh-flag='-o ServerAliveInterval=15' \
+    --ssh-flag='-o ServerAliveCountMax=2' \
     --ssh-flag='-o StrictHostKeyChecking=accept-new' \
     --ssh-flag="-o UserKnownHostsFile=${SSH_KNOWN_HOSTS}" \
     --command="$*"
+}
+
+canonical_boot_id() {
+  local value="${1//$'\r'/}"
+  local pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  if [[ ! "$value" =~ $pattern ]]; then
+    return 2
+  fi
+  printf '%s\n' "$value"
+}
+
+read_boot_id() {
+  local host="$1"
+  local raw
+  raw="$(remote "$host" 'cat /proc/sys/kernel/random/boot_id')" || return $?
+  canonical_boot_id "$raw"
 }
 
 wait_ssh() {
@@ -1281,6 +1345,34 @@ wait_ssh() {
     sleep 5
   done
   printf 'REFUSED: SSH did not become ready for %s\n' "$host" >&2
+  return 1
+}
+
+wait_boot_id_changed() {
+  local label="$1"
+  local host="$2"
+  local before="$3"
+  local deadline=$((SECONDS + 300))
+  local observed
+  if before="$(canonical_boot_id "$before")"; then
+    :
+  else
+    printf 'REFUSED: invalid pre-reset boot ID for %s\n' "$host" >&2
+    return 2
+  fi
+  while (( SECONDS < deadline )); do
+    if observed="$(read_boot_id "$host" \
+      2>>"$EVIDENCE_DIR/${label}-boot-id-ssh.stderr")"; then
+      printf 'before=%s observed=%s\n' "$before" "$observed" \
+        >>"$EVIDENCE_DIR/${label}-boot-id-observations.log"
+      if [[ "$observed" != "$before" ]]; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  printf 'REFUSED: reboot was not proven by a changed boot ID host=%s\n' \
+    "$host" >&2
   return 1
 }
 
@@ -1314,7 +1406,64 @@ assert_instance_metadata_unchanged "$STABLE_VM" stable after-scp
 capture_host() {
   local label="$1"
   local host="$2"
-  remote "$host" "printf '%s\n' '--- current ---'; sudo readlink /opt/cathedral-validator/current || true; printf '%s\n' '--- updater state ---'; sudo cat /var/lib/cathedral-validator-update/state.json || true; printf '%s\n' '--- direct unit state ---'; sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny || true; sudo systemctl status cathedral-validator-direct.service --full --no-pager || true; printf '%s\n' '--- direct unit definition ---'; sudo systemctl cat cathedral-validator-direct.service || true; printf '%s\n' '--- boot reconcile state ---'; sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager || true; printf '%s\n' '--- boot reconcile definition ---'; sudo systemctl cat cathedral-validator-boot-reconcile.service || true; printf '%s\n' '--- timers ---'; sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p DropInPaths || true; sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer || true; sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer' || true; printf '%s\n' '--- updater and runtime logs ---'; sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager || true" >"$EVIDENCE_DIR/${label}.txt" 2>&1
+  local transient_unit="${3:-}"
+  local generic_status=0
+  local transient_status=0
+  if [[ -n "$transient_unit" && ! "$transient_unit" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+    printf 'REFUSED: unsafe transient systemd unit for evidence capture: %s\n' \
+      "$transient_unit" >&2
+    return 2
+  fi
+  if remote "$host" "printf '%s\n' '--- current ---'; sudo readlink /opt/cathedral-validator/current || true; printf '%s\n' '--- updater state ---'; sudo cat /var/lib/cathedral-validator-update/state.json || true; printf '%s\n' '--- direct unit state ---'; sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny || true; sudo systemctl status cathedral-validator-direct.service --full --no-pager || true; printf '%s\n' '--- direct unit definition ---'; sudo systemctl cat cathedral-validator-direct.service || true; printf '%s\n' '--- boot reconcile state ---'; sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager || true; printf '%s\n' '--- boot reconcile definition ---'; sudo systemctl cat cathedral-validator-boot-reconcile.service || true; printf '%s\n' '--- updater service state ---'; sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager || true; printf '%s\n' '--- updater service definitions ---'; sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service || true; printf '%s\n' '--- timers ---'; sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths || true; sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer || true; sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer' || true; printf '%s\n' '--- updater and runtime logs ---'; sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager || true" >"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+    :
+  else
+    generic_status=$?
+  fi
+  if [[ -n "$transient_unit" ]]; then
+    if remote "$host" "printf '%s\n' '--- transient updater unit ---'; sudo systemctl show '${transient_unit}.service' -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID || true; sudo systemctl status '${transient_unit}.service' --full --no-pager || true; printf '%s\n' '--- transient updater journal ---'; sudo journalctl -u '${transient_unit}.service' -b -n 250 --no-pager || true" >>"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+      :
+    else
+      transient_status=$?
+    fi
+  fi
+  if (( generic_status != 0 )); then
+    return "$generic_status"
+  fi
+  return "$transient_status"
+}
+
+capture_host_with_retries() {
+  local label="$1"
+  local host="$2"
+  local transient_unit="${3:-}"
+  local attempt
+  local attempt_label
+  local capture_status=1
+  for attempt in $(seq 1 "$CAPTURE_RETRY_ATTEMPTS"); do
+    attempt_label="${label}-capture-attempt-${attempt}"
+    if capture_host "$attempt_label" "$host" "$transient_unit"; then
+      if cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt"; then
+        printf 'attempt=%s status=0\n' "$attempt" \
+          >>"$EVIDENCE_DIR/${label}-capture-retries.log"
+        return 0
+      else
+        capture_status=$?
+        printf 'attempt=%s status=%s promotion=failed\n' \
+          "$attempt" "$capture_status" \
+          >>"$EVIDENCE_DIR/${label}-capture-retries.log"
+      fi
+    else
+      capture_status=$?
+      printf 'attempt=%s status=%s\n' "$attempt" "$capture_status" \
+        >>"$EVIDENCE_DIR/${label}-capture-retries.log"
+    fi
+    if (( attempt < CAPTURE_RETRY_ATTEMPTS )); then
+      sleep "$CAPTURE_RETRY_INTERVAL_SECONDS"
+    fi
+  done
+  printf 'REFUSED: host evidence capture failed after retries label=%s host=%s\n' \
+    "$label" "$host" >&2
+  return "$capture_status"
 }
 
 configure_host() {
@@ -1326,14 +1475,14 @@ configure_host() {
   remote "$host" "sudo env DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl python3.12 python3.12-venv python3-cryptography >/dev/null"
   remote "$host" "sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-live-${RUN_ID} && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz '$BOOTSTRAP_BUNDLE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.json '$BOOTSTRAP_MANIFEST_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:manifest && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.sig '$BOOTSTRAP_SIGNATURE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:signature && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem '$BOOTSTRAP_PUBLIC_KEY_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:public_key && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz /var/tmp/cathedral-live-${RUN_ID}/manifest.json /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && sudo chmod 0444 /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem && sudo /usr/bin/python3 -c 'import hashlib,pathlib; expected={\"bundle.tar.gz\":\"$BOOTSTRAP_BUNDLE_SHA\",\"manifest.json\":\"$BOOTSTRAP_MANIFEST_SHA\",\"manifest.sig\":\"$BOOTSTRAP_SIGNATURE_SHA\",\"bootstrap-public.pem\":\"$BOOTSTRAP_PUBLIC_KEY_SHA\"}; root=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}\"); assert all(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest for name,digest in expected.items())' && printf '%s\n' ANONYMOUS_BOOTSTRAP_EXACT_BYTES_VERIFIED && sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -rawin -in /var/tmp/cathedral-live-${RUN_ID}/manifest.json -sigfile /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && test \"sha256:\$(sudo openssl pkey -pubin -in /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)\" = '$BOOTSTRAP_FINGERPRINT' && sudo /usr/bin/python3 -c 'import hashlib,json,pathlib; b=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz\").read_bytes(); m=json.loads(pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/manifest.json\").read_text(encoding=\"ascii\")); assert len(b)==m[\"bundle\"][\"size\"] and hashlib.sha256(b).hexdigest()==m[\"bundle\"][\"sha256\"]; assert m[\"bootstrap_signing_key\"][\"fingerprint\"]==\"$BOOTSTRAP_FINGERPRINT\"; assert m[\"bootstrap_metadata\"][\"sequence\"]>=1' && sudo sh -c 'tar -xOf /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py' && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py && sudo /usr/bin/python3.12 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py --bundle /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz --manifest /var/tmp/cathedral-live-${RUN_ID}/manifest.json --signature /var/tmp/cathedral-live-${RUN_ID}/manifest.sig --bootstrap-public-key /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem --expected-bootstrap-key-fingerprint '$BOOTSTRAP_FINGERPRINT' --minimum-bootstrap-sequence '$BOOTSTRAP_SEQUENCE'" | tee "$EVIDENCE_DIR/bootstrap-install-${host}.log"
   remote "$host" "test \"\$(sha256sum /tmp/cathedral_no_chain_readiness.py | cut -d' ' -f1)\" = '$HARNESS_SHA' && test \"\$(sha256sum /tmp/tampered_https_origin.py | cut -d' ' -f1)\" = '$FAULT_ORIGIN_SHA' && test \"\$(sha256sum /tmp/wait_updater_state.py | cut -d' ' -f1)\" = '$STATE_WAITER_SHA' && sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/cathedral-validator-live-test /etc/systemd/system/cathedral-validator-direct.service.d /etc/systemd/system/${timer}.d /etc/systemd/system/${other_timer}.d && sudo install -o root -g root -m 0555 /tmp/cathedral_no_chain_readiness.py /usr/local/libexec/cathedral-no-chain-readiness.py && sudo install -o root -g root -m 0555 /tmp/tampered_https_origin.py /usr/local/libexec/cathedral-tampered-https-origin.py && sudo install -o root -g root -m 0555 /tmp/wait_updater_state.py /usr/local/libexec/cathedral-wait-updater-state.py && printf '%s\n' 'CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$TEST_HOTKEY' | sudo tee /etc/cathedral-validator/identity.env >/dev/null && printf '%s\n' 'CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json' 'CATHEDRAL_VALIDATOR_INTERVAL_SECONDS=86400' | sudo tee /etc/cathedral-validator/direct.env >/dev/null && printf '%s\n' 'CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=$CANARY_URL' 'CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=$STABLE_URL' 'CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE=1' 'CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=1' | sudo tee /etc/cathedral-validator/update.env >/dev/null && printf '%s\n' '{\"schema\":\"cathedral_amd_sev_snp_policy_v1\",\"generations\":{\"genoa\":{\"allowed_measurements\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"minimum_tcb\":\"0x0000000000000001\"}}}' | sudo tee /etc/cathedral-validator/snp-policy.json >/dev/null && sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/validator-hotkey && sudo chmod 0600 /etc/cathedral-validator/identity.env /etc/cathedral-validator/direct.env /etc/cathedral-validator/update.env && sudo chown root:cathedral-validator /etc/cathedral-validator/snp-policy.json && sudo chmod 0440 /etc/cathedral-validator/snp-policy.json"
-  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Restart=no' 'TimeoutStartSec=180s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnBootSec=20s' 'OnUnitActiveSec=' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' 'Persistent=true' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
+  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnBootSec=20s' 'OnUnitActiveSec=' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' 'Persistent=true' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
   remote "$host" "printf '%s\n' 'CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex' | sudo tee -a /etc/cathedral-validator/direct.env >/dev/null"
   if [[ "$channel" == "canary" ]]; then
     if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=canary --metadata-url='$CANARY_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
       :
     else
       failure_status=$?
-      capture_host "first-install-failure-${channel}" "$host" || true
+      capture_host_with_retries "first-install-failure-${channel}" "$host" || true
       return "$failure_status"
     fi
   else
@@ -1341,7 +1490,7 @@ configure_host() {
       :
     else
       failure_status=$?
-      capture_host "first-install-failure-${channel}" "$host" || true
+      capture_host_with_retries "first-install-failure-${channel}" "$host" || true
       return "$failure_status"
     fi
   fi
@@ -1349,7 +1498,7 @@ configure_host() {
     :
   else
     failure_status=$?
-    capture_host "first-readiness-failure-${channel}" "$host" || true
+    capture_host_with_retries "first-readiness-failure-${channel}" "$host" || true
     return "$failure_status"
   fi
 }
@@ -1367,16 +1516,105 @@ main_pid() {
 }
 
 wait_sequence() {
-  local host="$1"
-  local channel="$2"
-  local sequence="$3"
-  remote "$host" "sudo /usr/bin/python3 /usr/local/libexec/cathedral-wait-updater-state.py --state /var/lib/cathedral-validator-update/state.json --timeout-seconds '$FIXED_CHANNEL_WAIT_SECONDS' --committed '$channel' '$sequence'"
+  local label="$1"
+  local host="$2"
+  local channel="$3"
+  local sequence="$4"
+  local deadline=$((SECONDS + FIXED_CHANNEL_WAIT_SECONDS))
+  local snapshot
+  while (( SECONDS < deadline )); do
+    if snapshot="$(snapshot_state "$host" "$channel" 2>>"$EVIDENCE_DIR/${label}-sequence-snapshot-ssh.stderr")"; then
+      printf '%s\n' "$snapshot"
+      if printf '%s\n' "$snapshot" | jq -e --argjson sequence "$sequence" \
+        '.sequence == $sequence and .pending == null' >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  printf 'REFUSED: timed out waiting for exact updater state host=%s channel=%s sequence=%s\n' \
+    "$host" "$channel" "$sequence" >&2
+  capture_host_with_retries "${label}-sequence-wait-failure" "$host" || true
+  return 1
 }
 
 start_update_timer() {
   local host="$1"
   local timer="$2"
-  remote "$host" "sudo systemctl enable --now '$timer' && sudo systemctl restart '$timer' && selected_timer_state=\"\$(sudo systemctl show '$timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$selected_timer_state\" | grep -Fx 'ActiveState=active' >/dev/null && printf '%s\n' \"\$selected_timer_state\" | grep -Fx 'ConditionResult=yes' >/dev/null && printf '%s\n' \"\$selected_timer_state\" | grep -Eq '^SubState=(waiting|running)$'"
+  remote "$host" "set +e; sudo systemctl enable --now '$timer' && sudo systemctl is-enabled --quiet '$timer' && sudo systemctl is-active --quiet '$timer'; timer_status=\$?; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic || true; sudo systemctl list-timers --all --no-pager '$timer' || true; exit \$timer_status"
+}
+
+timer_state_is_rearmed() {
+  local active="$1"
+  local substate="$2"
+  local next="$3"
+  [[ "$active" == active && "$substate" == waiting && -n "$next" && \
+    "$next" != 0 && "$next" != infinity && "$next" != n/a ]]
+}
+
+wait_timer_rearmed() {
+  local label="$1"
+  local host="$2"
+  local timer="$3"
+  local deadline=$((SECONDS + 120))
+  local active
+  local substate
+  local next
+  local timer_state=""
+  while (( SECONDS < deadline )); do
+    if timer_state="$(remote "$host" "sudo systemctl show '$timer' -p ActiveState -p SubState -p NextElapseUSecMonotonic" 2>>"$EVIDENCE_DIR/${label}-timer-rearm-ssh.stderr")"; then
+      active="$(printf '%s\n' "$timer_state" | sed -n 's/^ActiveState=//p')"
+      substate="$(printf '%s\n' "$timer_state" | sed -n 's/^SubState=//p')"
+      next="$(printf '%s\n' "$timer_state" | sed -n 's/^NextElapseUSecMonotonic=//p')"
+      if timer_state_is_rearmed "$active" "$substate" "$next"; then
+        printf '%s\n' "$timer_state"
+        return 0
+      fi
+    fi
+    printf '%s\n' "$timer_state"
+    sleep 2
+  done
+  printf 'REFUSED: timer did not re-arm after update host=%s timer=%s\n' \
+    "$host" "$timer" >&2
+  return 1
+}
+
+observe_timer_update() {
+  local label="$1"
+  local host="$2"
+  local timer="$3"
+  local channel="$4"
+  local sequence="$5"
+  local expected_digest="$6"
+  local failure_status
+  if start_update_timer "$host" "$timer" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-start-command.log"; then
+    :
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-timer-start-failure" "$host" || true
+    return "$failure_status"
+  fi
+  if wait_sequence "${label}-timer" "$host" "$channel" "$sequence" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-wait-command.log"; then
+    :
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-timer-wait-failure" "$host" || true
+    return "$failure_status"
+  fi
+  if assert_current "$host" "$expected_digest" "$label" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-current-command.log"; then
+    :
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-timer-current-failure" "$host" || true
+    return "$failure_status"
+  fi
+  if wait_timer_rearmed "$label" "$host" "$timer" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-rearm-command.log"; then
+    :
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-timer-rearm-failure" "$host" || true
+    return "$failure_status"
+  fi
 }
 
 run_update() {
@@ -1385,6 +1623,35 @@ run_update() {
   local url="$3"
   local cycle_wait="${4:-10}"
   remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel='$channel' --metadata-url='$url' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds='$cycle_wait' --operation-timeout-seconds=180"
+}
+
+require_host_proof() {
+  local label="$1"
+  local host="$2"
+  local failure_status
+  shift 2
+  if "$@" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
+    return 0
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-failure" "$host" || true
+    return "$failure_status"
+  fi
+}
+
+require_host_value() {
+  local label="$1"
+  local host="$2"
+  local failure_status
+  shift 2
+  if "$@" 2>"$EVIDENCE_DIR/${label}-value-command.stderr" \
+    | tee "$EVIDENCE_DIR/${label}-value.txt"; then
+    return 0
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-failure" "$host" || true
+    return "$failure_status"
+  fi
 }
 
 snapshot_state() {
@@ -1430,16 +1697,28 @@ assert_current() {
   local expected="$2"
   local label="$3"
   local observed
-  observed="$(current_digest "$host")"
+  local failure_status
+  if observed="$(current_digest "$host" 2>>"$EVIDENCE_DIR/${label}-current-ssh.stderr")"; then
+    :
+  else
+    failure_status=$?
+    printf 'expected=%s observed=unavailable\n' "$expected" \
+      >"$EVIDENCE_DIR/${label}-current-proof.txt"
+    capture_host_with_retries "${label}-current-read-failure" "$host" || true
+    return "$failure_status"
+  fi
+  printf 'expected=%s observed=%s\n' "$expected" "$observed" \
+    >"$EVIDENCE_DIR/${label}-current-proof.txt"
   if [[ "$observed" != "$expected" ]]; then
     printf 'REFUSED: %s current digest %s, expected %s\n' "$label" "$observed" "$expected" >&2
+    capture_host_with_retries "${label}-current-mismatch" "$host" || true
     return 1
   fi
 }
 
 record_step "prove both first installs committed exact release A"
-wait_sequence "$CANARY_VM" canary 1
-wait_sequence "$STABLE_VM" stable 1
+wait_sequence canary-first-install "$CANARY_VM" canary 1
+wait_sequence stable-first-install "$STABLE_VM" stable 1
 assert_current "$CANARY_VM" "$ARCHIVE_A_SHA" canary-first-install-a
 assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" stable-first-install-a
 
@@ -1471,29 +1750,30 @@ assert_current "$CANARY_VM" "$ARCHIVE_A_SHA" tampered-archive
 
 record_step "publish B and observe canary timer activate A to B"
 publish_release "$CANARY_B2" "$ARCHIVE_B" "$CANARY_BRANCH" "canary-b2"
-start_update_timer "$CANARY_VM" cathedral-validator-canary-update.timer
-wait_sequence "$CANARY_VM" canary 2
-assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" canary-timer-a-to-b
+observe_timer_update canary-timer-a-to-b "$CANARY_VM" \
+  cathedral-validator-canary-update.timer canary 2 "$ARCHIVE_B_SHA"
 remote "$CANARY_VM" 'sudo systemctl disable --now cathedral-validator-canary-update.timer'
-capture_host canary-after-timer-b "$CANARY_VM"
+capture_host_with_retries canary-after-timer-b "$CANARY_VM"
 
 record_step "promote exact B archive and observe stable timer activate it"
 publish_release "$STABLE_B2" "$ARCHIVE_B" "$STABLE_BRANCH" "stable-b2"
-start_update_timer "$STABLE_VM" cathedral-validator-update.timer
-wait_sequence "$STABLE_VM" stable 2
-assert_current "$STABLE_VM" "$ARCHIVE_B_SHA" stable-exact-promotion
+observe_timer_update stable-exact-promotion "$STABLE_VM" \
+  cathedral-validator-update.timer stable 2 "$ARCHIVE_B_SHA"
 remote "$STABLE_VM" 'sudo systemctl disable --now cathedral-validator-update.timer'
-capture_host stable-after-timer-b "$STABLE_VM"
+capture_host_with_retries stable-after-timer-b "$STABLE_VM"
 
 record_step "same B archive renewal advances signed sequence without restart"
-pid_before="$(main_pid "$CANARY_VM")"
+pid_before="$(require_host_value same-archive-pid-before "$CANARY_VM" \
+  main_pid "$CANARY_VM")"
 publish_release "$CANARY_B3" "$ARCHIVE_B" "$CANARY_BRANCH" "canary-b3-renewal"
-start_update_timer "$CANARY_VM" cathedral-validator-canary-update.timer
-wait_sequence "$CANARY_VM" canary 3
-pid_after="$(main_pid "$CANARY_VM")"
+observe_timer_update canary-same-archive-renewal "$CANARY_VM" \
+  cathedral-validator-canary-update.timer canary 3 "$ARCHIVE_B_SHA"
+pid_after="$(require_host_value same-archive-pid-after "$CANARY_VM" \
+  main_pid "$CANARY_VM")"
 remote "$CANARY_VM" 'sudo systemctl disable --now cathedral-validator-canary-update.timer'
 if [[ "$pid_before" != "$pid_after" || "$pid_before" == 0 ]]; then
   printf 'REFUSED: same-archive renewal restarted the direct service\n' >&2
+  capture_host_with_retries same-archive-renewal-pid-failure "$CANARY_VM" || true
   exit 1
 fi
 
@@ -1512,17 +1792,20 @@ assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" signed-metadata-faults
 
 record_step "pause blocks a valid newer release without changing B"
 pause_url="$(pin_fault_pointer canary "$CANARY_A4" "valid paused sequence 4")"
-pause_before="$(snapshot_state "$CANARY_VM" canary)"
+pause_before="$(require_host_value pause-before "$CANARY_VM" \
+  snapshot_state "$CANARY_VM" canary)"
 printf '%s\n' "$pause_before" >"$EVIDENCE_DIR/pause-before.json"
 printf '%s\n' "$pause_before" | jq -e '.pending == null' >/dev/null
 remote "$CANARY_VM" 'sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/update.pause'
 run_update "$CANARY_VM" canary "$pause_url" | tee "$EVIDENCE_DIR/pause.log"
 grep -Fx 'CATHEDRAL_VALIDATOR_UPDATE_PAUSED' "$EVIDENCE_DIR/pause.log" >/dev/null
 remote "$CANARY_VM" 'sudo rm /etc/cathedral-validator/update.pause'
-pause_after="$(snapshot_state "$CANARY_VM" canary)"
+pause_after="$(require_host_value pause-after "$CANARY_VM" \
+  snapshot_state "$CANARY_VM" canary)"
 printf '%s\n' "$pause_after" >"$EVIDENCE_DIR/pause-after.json"
 if [[ "$pause_before" != "$pause_after" ]]; then
   printf 'REFUSED: pause changed current, sequence, or pending state\n' >&2
+  capture_host_with_retries pause-state-failure "$CANARY_VM" || true
   exit 1
 fi
 assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" pause
@@ -1550,9 +1833,159 @@ assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" readiness-rollback
 remote "$CANARY_VM" "sudo systemctl is-active cathedral-validator-direct.service && sudo journalctl -u cathedral-validator-direct.service --no-pager | grep -F 'TEST_NO_CHAIN_TARGET_FAIL target=${ARCHIVE_A_SHA}' && sudo journalctl -u cathedral-validator-direct.service --no-pager | grep -F 'TEST_NO_CHAIN_READY target=${ARCHIVE_B_SHA}'"
 
 wait_pending() {
-  local host="$1"
-  local target="$2"
-  remote "$host" "sudo /usr/bin/python3 /usr/local/libexec/cathedral-wait-updater-state.py --state /var/lib/cathedral-validator-update/state.json --timeout-seconds 120 --pending-target '$target'"
+  local label="$1"
+  local host="$2"
+  local target="$3"
+  local transient_unit="$4"
+  local started_at="$5"
+  local deadline=$((SECONDS + CRASH_PENDING_WAIT_SECONDS))
+  local absolute_deadline
+  local snapshot
+  if [[ ! "$started_at" =~ ^[0-9]+$ ]]; then
+    printf 'REFUSED: pending wait requires a numeric updater start time host=%s\n' \
+      "$host" >&2
+    return 2
+  fi
+  absolute_deadline=$((
+    started_at + TRANSIENT_UPDATE_TIMEOUT_SECONDS -
+    CRASH_POST_PENDING_RESERVE_SECONDS - RESET_MINIMUM_HEADROOM_SECONDS
+  ))
+  if (( absolute_deadline < deadline )); then
+    deadline=$absolute_deadline
+  fi
+  printf 'started_at=%s absolute_deadline=%s selected_deadline=%s post_pending_reserve=%s action_headroom=%s\n' \
+    "$started_at" "$absolute_deadline" "$deadline" \
+    "$CRASH_POST_PENDING_RESERVE_SECONDS" "$RESET_MINIMUM_HEADROOM_SECONDS" \
+    >"$EVIDENCE_DIR/${label}-pending-deadline.txt"
+  while (( SECONDS < deadline )); do
+    if snapshot="$(snapshot_state "$host" stable 2>>"$EVIDENCE_DIR/${label}-pending-snapshot-ssh.stderr")"; then
+      printf '%s\n' "$snapshot"
+      if printf '%s\n' "$snapshot" | jq -e --arg target "releases/$target" \
+        '.pending.stage == "may_have_run" and .pending.target_current == $target' >/dev/null; then
+        if (( SECONDS < deadline )); then
+          return 0
+        fi
+        printf 'REFUSED: exact pending state arrived after the reserved action deadline host=%s target=%s\n' \
+          "$host" "$target" >&2
+        break
+      fi
+    fi
+    sleep 2
+  done
+  printf 'REFUSED: timed out waiting for exact pending updater state host=%s target=%s\n' \
+    "$host" "$target" >&2
+  capture_host_with_retries \
+    "${label}-pending-wait-failure" "$host" "$transient_unit" || true
+  return 1
+}
+
+assert_pending_pre_action() {
+  local label="$1"
+  local host="$2"
+  local target="$3"
+  local transient_unit="$4"
+  local started_at="$5"
+  local expected_boot_id="${6:-}"
+  local elapsed
+  local remaining
+  local attempt
+  local read_status
+  local snapshot
+  local unit_state
+  local observed_boot_id
+  if [[ ! "$transient_unit" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+    printf 'REFUSED: unsafe transient systemd unit at pre-action gate: %s\n' \
+      "$transient_unit" >&2
+    return 2
+  fi
+  if [[ -n "$expected_boot_id" ]]; then
+    if expected_boot_id="$(canonical_boot_id "$expected_boot_id")"; then
+      :
+    else
+      printf 'REFUSED: invalid expected boot ID at pre-action gate host=%s\n' \
+        "$host" >&2
+      return 2
+    fi
+  fi
+  for attempt in $(seq 1 "$PRE_ACTION_READ_ATTEMPTS"); do
+    if snapshot="$(snapshot_state "$host" stable 2>>"$EVIDENCE_DIR/${label}-state-ssh.stderr")"; then
+      printf '%s\n' "$snapshot" >"$EVIDENCE_DIR/${label}-state.json"
+      if ! printf '%s\n' "$snapshot" | jq -e --arg target "releases/$target" \
+        '.current == $target and .pending.stage == "may_have_run" and .pending.target_current == $target' >/dev/null; then
+        printf 'REFUSED: pending crash boundary changed before action host=%s target=%s\n' \
+          "$host" "$target" >&2
+        capture_host_with_retries "${label}-state-failure" \
+          "$host" "$transient_unit" || true
+        return 1
+      fi
+    else
+      read_status=$?
+      printf 'attempt=%s source=state status=%s\n' "$attempt" "$read_status" \
+        >>"$EVIDENCE_DIR/${label}-read-retries.log"
+      if (( attempt < PRE_ACTION_READ_ATTEMPTS )); then
+        sleep "$PRE_ACTION_RETRY_INTERVAL_SECONDS"
+      fi
+      continue
+    fi
+    if unit_state="$(remote "$host" "sudo systemctl show '${transient_unit}.service' -p ActiveState -p SubState -p MainPID; printf 'BootID=%s\n' \"\$(cat /proc/sys/kernel/random/boot_id)\"; printf '%s\n' '--- transient updater journal before action ---'; sudo journalctl -u '${transient_unit}.service' -b -n 80 --no-pager" 2>>"$EVIDENCE_DIR/${label}-unit-ssh.stderr")"; then
+      printf '%s\n' "$unit_state" >"$EVIDENCE_DIR/${label}-unit.txt"
+      if ! printf '%s\n' "$unit_state" | grep -Fx 'ActiveState=active' >/dev/null || \
+        ! printf '%s\n' "$unit_state" | grep -Fx 'SubState=running' >/dev/null || \
+        ! printf '%s\n' "$unit_state" | grep -Eq '^MainPID=[1-9][0-9]*$'; then
+        printf 'REFUSED: transient updater is no longer active at crash boundary host=%s unit=%s\n' \
+          "$host" "$transient_unit" >&2
+        capture_host_with_retries "${label}-unit-failure" \
+          "$host" "$transient_unit" || true
+        return 1
+      fi
+      observed_boot_id="$(printf '%s\n' "$unit_state" | sed -n 's/^BootID=//p')"
+      if observed_boot_id="$(canonical_boot_id "$observed_boot_id")"; then
+        :
+      else
+        printf 'REFUSED: transient updater boot ID is invalid before action host=%s\n' \
+          "$host" >&2
+        capture_host_with_retries "${label}-boot-id-failure" \
+          "$host" "$transient_unit" || true
+        return 1
+      fi
+      if [[ -n "$expected_boot_id" && "$observed_boot_id" != "$expected_boot_id" ]]; then
+        printf 'REFUSED: host rebooted during pending crash preparation host=%s\n' \
+          "$host" >&2
+        capture_host_with_retries "${label}-boot-id-changed" \
+          "$host" "$transient_unit" || true
+        return 1
+      fi
+    else
+      read_status=$?
+      printf 'attempt=%s source=unit status=%s\n' "$attempt" "$read_status" \
+        >>"$EVIDENCE_DIR/${label}-read-retries.log"
+      if (( attempt < PRE_ACTION_READ_ATTEMPTS )); then
+        sleep "$PRE_ACTION_RETRY_INTERVAL_SECONDS"
+      fi
+      continue
+    fi
+    if [[ "$started_at" =~ ^[0-9]+$ ]]; then
+      elapsed=$((SECONDS - started_at))
+      remaining=$((TRANSIENT_UPDATE_TIMEOUT_SECONDS - elapsed))
+      printf 'started_at=%s elapsed=%s remaining=%s required_headroom=%s\n' \
+        "$started_at" "$elapsed" "$remaining" \
+        "$RESET_MINIMUM_HEADROOM_SECONDS" \
+        >"$EVIDENCE_DIR/${label}-headroom.txt"
+      if (( remaining >= RESET_MINIMUM_HEADROOM_SECONDS )); then
+        return 0
+      fi
+    fi
+    printf 'REFUSED: insufficient updater deadline headroom before crash action host=%s\n' \
+      "$host" >&2
+    capture_host_with_retries "${label}-headroom-failure" \
+      "$host" "$transient_unit" || true
+    return 1
+  done
+  printf 'REFUSED: pre-action state could not be read after transport retries host=%s unit=%s\n' \
+    "$host" "$transient_unit" >&2
+  capture_host_with_retries "${label}-transport-failure" \
+    "$host" "$transient_unit" || true
+  return 1
 }
 
 launch_background_update() {
@@ -1560,43 +1993,88 @@ launch_background_update() {
   local unit="$2"
   local channel="$3"
   local url="$4"
-  remote "$host" "sudo systemd-run --unit='$unit' --collect /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel='$channel' --metadata-url='$url' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180"
+  remote "$host" "sudo systemd-run --unit='$unit' --collect --property=RuntimeMaxSec='${TRANSIENT_SYSTEMD_TIMEOUT_SECONDS}s' /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel='$channel' --metadata-url='$url' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds='$TRANSIENT_UPDATE_TIMEOUT_SECONDS'"
+}
+
+crash_pending_transient_for_rescue() {
+  local label="$1"
+  local host="$2"
+  local target="$3"
+  local transient_unit="$4"
+  local failure_status
+  if [[ ! "$transient_unit" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+    printf 'REFUSED: unsafe transient systemd unit at rescue crash gate: %s\n' \
+      "$transient_unit" >&2
+    return 2
+  fi
+  if remote "$host" "set -eu; expected='releases/$target'; current=\"\$(sudo readlink /opt/cathedral-validator/current)\"; printf 'current=%s\\n' \"\$current\"; test \"\$current\" = \"\$expected\"; sudo jq -e --arg target \"\$expected\" '.pending.stage == \"may_have_run\" and .pending.target_current == \$target' /var/lib/cathedral-validator-update/state.json; unit_state=\"\$(sudo systemctl show '${transient_unit}.service' -p ActiveState -p SubState -p MainPID)\"; printf '%s\\n' \"\$unit_state\"; printf '%s\\n' \"\$unit_state\" | grep -Fx 'ActiveState=active' >/dev/null; printf '%s\\n' \"\$unit_state\" | grep -Fx 'SubState=running' >/dev/null; printf '%s\\n' \"\$unit_state\" | grep -Eq '^MainPID=[1-9][0-9]*$'; main_pid=\"\$(printf '%s\\n' \"\$unit_state\" | sed -n 's/^MainPID=//p')\"; sudo kill -0 \"\$main_pid\"; sudo systemctl kill --kill-whom=main --signal=KILL '${transient_unit}.service'; printf 'TRANSIENT_UPDATER_KILL_ISSUED unit=%s pid=%s\\n' '${transient_unit}.service' \"\$main_pid\"; sudo systemctl stop cathedral-validator-direct.service; sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${target}; printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${target} >/dev/null" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
+    return 0
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-failure" "$host" "$transient_unit" || true
+    return "$failure_status"
+  fi
 }
 
 record_step "reset at durable may_have_run and reconcile exact A on boot"
 reset_url="$(pin_fault_pointer stable "$STABLE_A3" "stable reset target A sequence 3")"
-remote "$STABLE_VM" "printf '%s\n' 300 | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} >/dev/null"
+remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} >/dev/null"
+reset_boot_id="$(require_host_value stable-reset-boot-id-before "$STABLE_VM" \
+  read_boot_id "$STABLE_VM")"
+reset_started_at=$SECONDS
 launch_background_update "$STABLE_VM" "cathedral-live-reset-${RUN_ID}" stable "$reset_url"
-wait_pending "$STABLE_VM" "$ARCHIVE_A_SHA"
-capture_host stable-before-reset "$STABLE_VM"
-gc compute instances reset "$STABLE_VM" --zone="$ZONE"
-wait_ssh "$STABLE_VM"
-remote "$STABLE_VM" "sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} && sudo systemctl start cathedral-validator-direct.service"
-wait_sequence "$STABLE_VM" stable 3
+wait_pending stable-reset "$STABLE_VM" "$ARCHIVE_A_SHA" \
+  "cathedral-live-reset-${RUN_ID}" "$reset_started_at"
+assert_pending_pre_action stable-reset-pre-action "$STABLE_VM" \
+  "$ARCHIVE_A_SHA" "cathedral-live-reset-${RUN_ID}" "$reset_started_at" \
+  "$reset_boot_id"
+require_host_proof stable-reset-request "$STABLE_VM" \
+  gc compute instances reset "$STABLE_VM" --zone="$ZONE"
+require_host_proof stable-reset-reboot-observed "$STABLE_VM" \
+  wait_boot_id_changed stable-reset "$STABLE_VM" "$reset_boot_id"
+require_host_proof stable-reset-direct-restart "$STABLE_VM" \
+  remote "$STABLE_VM" \
+  "sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} && sudo systemctl start cathedral-validator-direct.service"
+wait_sequence stable-reset-reconcile "$STABLE_VM" stable 3
 assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" reset-may-have-run
-remote "$STABLE_VM" "sudo systemctl is-active cathedral-validator-direct.service && sudo journalctl -u cathedral-validator-boot-reconcile.service -n 80 --no-pager | grep CATHEDRAL_VALIDATOR_UPDATE_RECONCILED"
-capture_host stable-after-reset "$STABLE_VM"
+require_host_proof stable-reset-reconcile-proof "$STABLE_VM" \
+  remote "$STABLE_VM" \
+  "sudo systemctl is-active cathedral-validator-direct.service && sudo journalctl -u cathedral-validator-boot-reconcile.service -n 80 --no-pager | grep CATHEDRAL_VALIDATOR_UPDATE_RECONCILED"
+capture_host_with_retries stable-after-reset "$STABLE_VM"
 
 record_step "leave B crash-uncertain, then rescue with higher signed A sequence"
 uncertain_url="$(pin_fault_pointer stable "$STABLE_B4" "stable uncertain target B sequence 4")"
-remote "$STABLE_VM" "printf '%s\n' 300 | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_B_SHA} >/dev/null"
+remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_B_SHA} >/dev/null"
+rescue_started_at=$SECONDS
 launch_background_update "$STABLE_VM" "cathedral-live-rescue-${RUN_ID}" stable "$uncertain_url"
-wait_pending "$STABLE_VM" "$ARCHIVE_B_SHA"
-capture_host stable-before-rescue "$STABLE_VM"
-remote "$STABLE_VM" "sudo systemctl kill --kill-whom=all --signal=KILL cathedral-live-rescue-${RUN_ID}.service || true; sudo systemctl stop cathedral-validator-direct.service || true; sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_B_SHA}; printf '%s\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${ARCHIVE_B_SHA} >/dev/null"
+wait_pending stable-rescue "$STABLE_VM" "$ARCHIVE_B_SHA" \
+  "cathedral-live-rescue-${RUN_ID}" "$rescue_started_at"
+assert_pending_pre_action stable-rescue-pre-action "$STABLE_VM" \
+  "$ARCHIVE_B_SHA" "cathedral-live-rescue-${RUN_ID}" "$rescue_started_at"
+crash_pending_transient_for_rescue stable-rescue-crash "$STABLE_VM" \
+  "$ARCHIVE_B_SHA" "cathedral-live-rescue-${RUN_ID}"
+capture_host_with_retries stable-after-rescue-crash "$STABLE_VM" \
+  "cathedral-live-rescue-${RUN_ID}"
 rescue_url="$(pin_fault_pointer stable "$STABLE_A5" "stable higher sequence rescue A sequence 5")"
-run_update "$STABLE_VM" stable "$rescue_url" | tee "$EVIDENCE_DIR/higher-sequence-rescue.log"
-remote "$STABLE_VM" "sudo rm -f /etc/cathedral-validator-live-test/fail-before-ready.${ARCHIVE_B_SHA}"
-grep -q 'CATHEDRAL_VALIDATOR_UPDATE_ACTIVATED' "$EVIDENCE_DIR/higher-sequence-rescue.log"
-wait_sequence "$STABLE_VM" stable 5
+require_host_proof higher-sequence-rescue-update "$STABLE_VM" \
+  run_update "$STABLE_VM" stable "$rescue_url"
+require_host_proof stable-rescue-marker-clear "$STABLE_VM" \
+  remote "$STABLE_VM" \
+  "sudo rm -f /etc/cathedral-validator-live-test/fail-before-ready.${ARCHIVE_B_SHA}"
+require_host_proof higher-sequence-rescue-activation "$STABLE_VM" \
+  grep -q 'CATHEDRAL_VALIDATOR_UPDATE_ACTIVATED' \
+  "$EVIDENCE_DIR/higher-sequence-rescue-update-command.log"
+wait_sequence stable-higher-sequence-rescue "$STABLE_VM" stable 5
 assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" higher-sequence-rescue
-remote "$STABLE_VM" 'sudo systemctl is-active cathedral-validator-direct.service'
+require_host_proof higher-sequence-rescue-service "$STABLE_VM" \
+  remote "$STABLE_VM" \
+  'sudo systemctl is-active cathedral-validator-direct.service'
 
 assert_project_metadata_unchanged final
 assert_instance_metadata_unchanged "$CANARY_VM" canary final
 assert_instance_metadata_unchanged "$STABLE_VM" stable final
-capture_host final-canary "$CANARY_VM"
-capture_host final-stable "$STABLE_VM"
+capture_host_with_retries final-canary "$CANARY_VM"
+capture_host_with_retries final-stable "$STABLE_VM"
 gc compute instances list \
   --filter="labels.cathedral-live-run=${RUN_ID}" \
   --format=json >"$EVIDENCE_DIR/pre-teardown-instances.json"
