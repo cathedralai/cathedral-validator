@@ -860,6 +860,21 @@ def test_loaded_compute_imports_must_match_distribution_record(monkeypatch, tmp_
         preview._verify_loaded_compute_imports(recorded)
 
 
+def test_compute_distribution_refuses_a_preloaded_compute_module(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cathedral", SimpleNamespace())
+
+    class UnreadableDistribution:
+        @property
+        def files(self):
+            raise AssertionError("distribution data must not be read after preload")
+
+    with pytest.raises(
+        preview.AmdSnpDevPreviewError,
+        match="Compute modules were loaded before provenance verification",
+    ):
+        preview._verify_compute_distribution_before_import(UnreadableDistribution())
+
+
 def test_recorded_sha256_accepts_an_empty_source_module(tmp_path):
     source = tmp_path / "__init__.py"
     source.write_bytes(b"")

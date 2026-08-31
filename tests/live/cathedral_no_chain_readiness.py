@@ -120,9 +120,6 @@ def main() -> int:
     require_pex_origin(direct_validator)
     require_pex_origin(qvl)
     require_pex_origin(snp_production)
-    import cathedral
-
-    require_pex_origin(cathedral)
     root, manifest = active_release()
     validator = root / "bin" / "cathedral-validator"
     qvl_path = root / "bin" / "cathedral-tdx-verifier"
@@ -146,6 +143,13 @@ def main() -> int:
     )
     if not snp.digest.startswith("sha256:"):
         refuse("SNP verifier did not initialize")
+
+    # The production verifier validates the pinned Compute distribution before
+    # importing it.  Importing Compute earlier would correctly trip that
+    # fail-closed provenance boundary.
+    import cathedral
+
+    require_pex_origin(cathedral)
 
     apply_target_control(root.name)
     direct_validator._notify_ready()
