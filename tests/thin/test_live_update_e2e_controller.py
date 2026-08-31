@@ -32,7 +32,7 @@ def test_live_controller_records_both_timer_states_in_host_evidence():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
     capture_host = script.split("capture_host() {", 1)[1].split(
-        "current_digest() {", 1
+        "configure_host() {", 1
     )[0]
 
     assert (
@@ -40,6 +40,65 @@ def test_live_controller_records_both_timer_states_in_host_evidence():
         "cathedral-validator-update.timer -p Id -p UnitFileState "
         "-p ActiveState -p SubState -p ConditionResult -p DropInPaths"
     ) in capture_host
+
+
+def test_live_controller_captures_first_install_failures_before_teardown():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+
+    assert script.index("capture_host() {") < script.index("configure_host() {")
+    configure_host = script.split("configure_host() {", 1)[1].split(
+        'record_step "first install A', 1
+    )[0]
+    assert (
+        configure_host.count(
+            'capture_host "first-install-failure-${channel}" "$host" || true'
+        )
+        == 2
+    )
+    assert (
+        'capture_host "first-readiness-failure-${channel}" "$host" || true'
+        in configure_host
+    )
+    assert (
+        configure_host.count('tee "$EVIDENCE_DIR/first-install-command-${host}.log"')
+        == 2
+    )
+    assert 'tee "$EVIDENCE_DIR/first-readiness-command-${host}.log"' in configure_host
+    assert configure_host.count("failure_status=$?") == 3
+    assert configure_host.count('return "$failure_status"') == 3
+    assert "return 1" not in configure_host
+
+
+def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    capture_host = script.split("capture_host() {", 1)[1].split(
+        "configure_host() {", 1
+    )[0]
+
+    for unit in (
+        "cathedral-validator-direct.service",
+        "cathedral-validator-boot-reconcile.service",
+    ):
+        assert f"systemctl show {unit}" in capture_host
+        assert f"systemctl status {unit} --full --no-pager" in capture_host
+        assert f"systemctl cat {unit}" in capture_host
+        assert f"-u {unit}" in capture_host
+    for field in (
+        "Result",
+        "ExecMainCode",
+        "ExecMainStatus",
+        "ActiveState",
+        "SubState",
+        "FragmentPath",
+        "DropInPaths",
+    ):
+        assert f"-p {field}" in capture_host
+    assert "systemctl cat cathedral-validator-canary-update.timer" in capture_host
+    assert "cathedral-validator-update.timer" in capture_host
+    assert "-b -n 250 --no-pager" in capture_host
+    assert '>"$EVIDENCE_DIR/${label}.txt" 2>&1' in capture_host
 
 
 def test_live_controller_accepts_healthy_selected_timer_dispatch_states():
