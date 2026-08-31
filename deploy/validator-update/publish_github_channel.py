@@ -51,6 +51,7 @@ RELEASE_MANIFEST = "RELEASE.json"
 RELEASE_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _NOT_FOUND = re.compile(r"(?:HTTP 404|404 Not Found)", re.IGNORECASE)
+_DRAFT_ASSET_TOKEN = re.compile(r"untagged-[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
 _RELEASE_PAGE_SIZE = 100
 _RELEASE_MAX_PAGES = 10
 _HISTORY_NAME = re.compile(r"([1-9][0-9]{0,18})-([0-9a-f]{64})\.json")
@@ -737,9 +738,47 @@ def _verify_release_record(
         or record.get("state") != "uploaded"
         or record.get("size") != len(publication.archive)
         or record.get("digest") != f"sha256:{publication.archive_sha256}"
-        or record.get("browser_download_url") != publication.archive_url
     ):
         raise UpdateRefused("GitHub release asset differs from the signed archive")
+    url = record.get("browser_download_url")
+    if draft:
+        if not _safe_draft_asset_url(publication, url):
+            raise UpdateRefused("GitHub release draft asset URL differs")
+    elif url != publication.archive_url:
+        raise UpdateRefused("GitHub release asset differs from the signed archive")
+
+
+def _safe_draft_asset_url(publication: Publication, value: object) -> bool:
+    """Accept GitHub's draft-only untagged asset identity, not a redirect."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or hostname != "github.com"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    prefix = f"/{publication.repository}/releases/download/"
+    if not parsed.path.startswith(prefix):
+        return False
+    token, separator, name = parsed.path[len(prefix) :].partition("/")
+    return (
+        separator == "/"
+        and name == publication.asset_name
+        and _DRAFT_ASSET_TOKEN.fullmatch(token) is not None
+        and ".." not in token
+    )
 
 
 def _release_id(release: Mapping[str, Any]) -> int:
