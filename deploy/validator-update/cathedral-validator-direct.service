@@ -7,7 +7,8 @@ ConditionPathExists=/etc/cathedral-validator/direct.env
 ConditionPathExists=/etc/cathedral-validator/identity.env
 ConditionPathExists=/etc/cathedral-validator/validator-hotkey
 ConditionPathExists=/etc/cathedral-validator/snp-policy.json
-ConditionFileIsExecutable=/usr/local/lib/cathedral-validator/snpguest
+ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier
+ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest
 ConditionFileIsExecutable=/usr/bin/python3.12
 ConditionPathExists=/opt/cathedral-validator/current/bin/cathedral-validator
 
@@ -29,7 +30,7 @@ StateDirectory=cathedral-validator
 StateDirectoryMode=0700
 ExecStartPre=/usr/bin/install -d -m 0700 /run/cathedral-validator-wallet/validator/hotkeys
 ExecStartPre=/usr/bin/install -m 0400 ${CREDENTIALS_DIRECTORY}/validator-hotkey /run/cathedral-validator-wallet/validator/hotkeys/default
-ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator --network=finney --wallet-name=validator --wallet-hotkey=default --wallet-path=/run/cathedral-validator-wallet --expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY} --qvl=${CATHEDRAL_VALIDATOR_QVL} --snp-policy=${CATHEDRAL_SNP_POLICY} --snpguest=${CATHEDRAL_SNPGUEST} --interval-seconds=${CATHEDRAL_VALIDATOR_INTERVAL_SECONDS} --confirm-direct-write $CATHEDRAL_VALIDATOR_TELEMETRY_ARGS
+ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator --network=finney --wallet-name=validator --wallet-hotkey=default --wallet-path=/run/cathedral-validator-wallet --expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY} --qvl=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier --snp-policy=${CATHEDRAL_SNP_POLICY} --snpguest=/opt/cathedral-validator/current/bin/snpguest --interval-seconds=${CATHEDRAL_VALIDATOR_INTERVAL_SECONDS} --confirm-direct-write $CATHEDRAL_VALIDATOR_TELEMETRY_ARGS
 Restart=on-failure
 RestartPreventExitStatus=2
 RestartSec=15s
