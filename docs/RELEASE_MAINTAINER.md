@@ -306,7 +306,7 @@ live-test host.
 Install the published bootstrap on the live-test host as root with:
 
 ```bash
-python deploy/validator-update/install_updater_bundle.py \
+sudo /usr/bin/python3.12 deploy/validator-update/install_updater_bundle.py \
   --bundle /secure/signed/updater-bootstrap.tar.gz \
   --manifest /secure/signed/updater-bootstrap.manifest.json \
   --signature /secure/signed/updater-bootstrap.manifest.sig \
