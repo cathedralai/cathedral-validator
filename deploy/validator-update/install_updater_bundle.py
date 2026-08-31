@@ -52,6 +52,7 @@ COMMAND_TIMEOUT_SECONDS = 900
 MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
 BOOTSTRAP_STATE_SCHEMA = "cathedral_validator_bootstrap_state_v1"
 BOOTSTRAP_PENDING_SCHEMA = "cathedral_validator_bootstrap_pending_v1"
+VENV_INTERPRETER_NAME = "python3.12"
 
 SYSTEMD_ASSETS = frozenset(
     {
@@ -1123,7 +1124,7 @@ def _validate_venv_interpreter(
     *,
     expected_owner: int,
 ) -> None:
-    interpreter = version_dir / "bin" / "python"
+    interpreter = version_dir / "bin" / VENV_INTERPRETER_NAME
     try:
         metadata = interpreter.lstat()
     except OSError as exc:
@@ -1350,7 +1351,7 @@ def _validate_installed_venv(
         or not stat.S_IMODE(metadata.st_mode) & 0o111
     ):
         raise InstallRefused("installed updater entry point is unsafe")
-    expected_shebang = f"#!{version_dir}/bin/python".encode("utf-8")
+    expected_shebang = f"#!{version_dir}/bin/{VENV_INTERPRETER_NAME}".encode("utf-8")
     with executable.open("rb") as handle:
         first_line = handle.readline(4096).rstrip(b"\r\n")
     if first_line != expected_shebang:
@@ -1467,7 +1468,7 @@ def _install_verified_bundle_locked(
             )
             runner(
                 [
-                    str(version_dir / "bin" / "python"),
+                    str(version_dir / "bin" / VENV_INTERPRETER_NAME),
                     "-m",
                     "pip",
                     "install",
@@ -1487,7 +1488,7 @@ def _install_verified_bundle_locked(
             )
             runner(
                 [
-                    str(version_dir / "bin" / "python"),
+                    str(version_dir / "bin" / VENV_INTERPRETER_NAME),
                     "-I",
                     "-c",
                     "from cathedral_thin.independent_runtime import updater; "
@@ -1621,6 +1622,10 @@ def _runtime_guard() -> None:
         raise InstallRefused("installer runs only on Linux")
     if sys.version_info[:2] != (3, 12):
         raise InstallRefused("installer requires CPython 3.12")
+    if Path(sys.executable) != Path("/usr/bin/python3.12"):
+        raise InstallRefused(
+            "installer must be launched with /usr/bin/python3.12, not an alias"
+        )
     if not Path("/run/systemd/system").is_dir():
         raise InstallRefused("installer requires a running systemd host")
     if not hasattr(os, "memfd_create"):

@@ -175,6 +175,13 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
         "--minimum-bootstrap-sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE"
         in maintainer
     )
+    assert (
+        "sudo /usr/bin/python3.12 deploy/validator-update/install_updater_bundle.py"
+        in maintainer
+    )
+    assert (
+        "\npython deploy/validator-update/install_updater_bundle.py" not in maintainer
+    )
     assert "cathedral-validator-REPLACE_WITH_ARCHIVE_SHA256.tar.gz" in maintainer
     assert (
         "Routine validator and verifier releases are unattended after bootstrap"
