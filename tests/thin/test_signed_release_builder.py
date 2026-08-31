@@ -96,19 +96,11 @@ def _inputs(
     _validator_pex(pex)
     _executable(qvl, b"#!/bin/sh\n# qvl " + marker + b"\n")
     _executable(snpguest, b"#!/bin/sh\n# snpguest " + marker + b"\n")
-    runtime_lock = tmp_path / f"runtime-{marker.decode()}.pex.lock"
-    runtime_lock.write_bytes(
-        canonical_document_bytes(
-            {
-                "style": "strict",
-                "pex_version": "2.101.1",
-                "locked_resolves": [
-                    {"platform_tag": ["cp312", "cp312", "manylinux_2_17_x86_64"]}
-                ],
-            }
-        )
+    runtime_lock = (
+        Path(__file__).resolve().parents[2]
+        / "requirements"
+        / "validator-release-cpython312-linux-x86_64.pex.lock"
     )
-    runtime_lock.chmod(0o644)
     raw = pex.read_bytes()
     with zipfile.ZipFile(io.BytesIO(raw), "r") as bundle:
         info = bundle.read("PEX-INFO")
@@ -280,6 +272,49 @@ def test_strict_canary_binds_all_runtime_files_and_is_deterministic(
         "bin/snpguest",
     ):
         assert stat.S_IMODE((extracted / relative).stat().st_mode) == 0o555
+
+
+def test_canary_refuses_a_different_valid_shape_runtime_lock(tmp_path: Path) -> None:
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    pex, qvl, snpguest, _runtime_lock, runtime_distributions = _inputs(tmp_path)
+    alternate_lock = tmp_path / "alternate-runtime.pex.lock"
+    alternate_lock.write_bytes(
+        canonical_document_bytes(
+            {
+                "style": "strict",
+                "pex_version": "2.101.1",
+                "locked_resolves": [
+                    {"platform_tag": ["cp312", "cp312", "manylinux_2_17_x86_64"]}
+                ],
+            }
+        )
+    )
+    alternate_lock.chmod(0o644)
+    distributions = json.loads(runtime_distributions.read_text())
+    distributions["runtime_lock_sha256"] = hashlib.sha256(
+        alternate_lock.read_bytes()
+    ).hexdigest()
+    alternate_distributions = tmp_path / "alternate-runtime-distributions.json"
+    alternate_distributions.write_bytes(canonical_document_bytes(distributions))
+    alternate_distributions.chmod(0o644)
+
+    with pytest.raises(builder["UpdateRefused"], match="reviewed lock digest"):
+        builder["build_canary"](
+            pex=pex,
+            qvl=qvl,
+            snpguest=snpguest,
+            runtime_lock=alternate_lock,
+            runtime_distributions=alternate_distributions,
+            source_revision=SOURCE_REVISION,
+            archive_out_dir=tmp_path / "alternate-archives",
+            metadata_out=tmp_path / "alternate.json",
+            archive_url_template=ARCHIVE_URL_TEMPLATE,
+            sequence=1,
+            private_key=private,
+            issued_unix=NOW,
+            lifetime_seconds=3600,
+        )
 
 
 @pytest.mark.parametrize(

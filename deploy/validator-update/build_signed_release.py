@@ -357,6 +357,9 @@ VALIDATOR_PEX_ENTRY_POINT = "cathedral_thin.independent_runtime.direct_validator
 TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 RUNTIME_DISTRIBUTIONS_SCHEMA = "cathedral_validator_pex_distributions_v1"
+EXPECTED_RUNTIME_LOCK_SHA256 = (
+    "9fa73c20f0f77684ebbe24cf8bb384f03d31b6bf3be205ae9fbd8a83f9899938"
+)
 VALIDATOR_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 QVL_RELEASE_PATH = "bin/cathedral-tdx-verifier"
 SNPGUEST_RELEASE_PATH = "bin/snpguest"
@@ -653,7 +656,10 @@ def _runtime_lock_sha256(path: Path) -> str:
         or "x86_64" not in platform_tag[2]
     ):
         raise UpdateRefused("runtime lock is not CPython 3.12 Linux x86_64")
-    return hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != EXPECTED_RUNTIME_LOCK_SHA256:
+        raise UpdateRefused("runtime lock does not match the reviewed lock digest")
+    return digest
 
 
 def _expected_runtime_distributions(

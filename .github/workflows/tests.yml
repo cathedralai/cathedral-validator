@@ -18,7 +18,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Refuse private-key PEM markers in tracked files
         run: |
-          matches="$(git grep -nE -- '-----BEGIN (ENCRYPTED )?PRIVATE KEY-----' || true)"
+          private_pem='-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----'
+          if printf '%s\n' '-----BEGIN PUBLIC KEY-----' | grep -Eq -- "$private_pem"; then
+            echo 'The private-key pattern must not reject public PEM.'
+            exit 1
+          fi
+          matches="$(git grep -lE -- "$private_pem" || true)"
           if [ -n "$matches" ]; then
             printf '%s\n' "$matches"
             echo 'Tracked private PEM material is forbidden. Public PEM is allowed.'
