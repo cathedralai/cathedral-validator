@@ -19,15 +19,21 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import cathedral_thin.independent_runtime.updater as updater_module
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 from cathedral_thin.independent_runtime.updater import (
     DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
+    DEFAULT_OPERATION_TIMEOUT_SECONDS,
+    DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS,
     METADATA_SCHEMA,
     SYSTEMCTL,
+    SYSTEMD_TIMEOUT_MARGIN_SECONDS,
+    UPDATER_STATE_SCHEMA,
     VALIDATOR_SERVICE,
     SignedReleaseUpdater,
     UpdateRefused,
     direct_writer_journal_path,
+    extract_release_archive,
     load_expected_hotkey_identity,
     parse_release_metadata,
     release_tree_sha256,
@@ -253,6 +259,23 @@ def _seed_current(tmp_path: Path) -> None:
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o555)
     (install / "current").symlink_to(PREVIOUS_TARGET)
+
+
+def _record_for(
+    raw: bytes, private: Ed25519PrivateKey, *, channel: str
+) -> dict[str, object]:
+    release = parse_release_metadata(
+        raw,
+        channel=channel,
+        public_key=private.public_key(),
+        now_unix=NOW,
+    )
+    return {
+        "sequence": release.sequence,
+        "archive_sha256": release.archive_sha256,
+        "signed_sha256": release.signed_sha256,
+        "metadata_sha256": release.metadata_sha256,
+    }
 
 
 def _updater(
@@ -625,6 +648,361 @@ def test_activation_crash_is_reconciled_before_new_metadata(tmp_path: Path) -> N
     assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
 
 
+def test_selected_channel_is_immutable_and_v2_state_migrates_safely(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive(marker_path=tmp_path / "canary-marker")
+    tree = _tree_digest(tmp_path, archive, name="canary-tree")
+    canary = _canary_metadata(
+        private,
+        sequence=4,
+        archive=archive,
+        tree=tree,
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=canary,
+        archive=archive,
+        restarts=restarts,
+    )
+
+    assert _update(updater, private, channel="canary", sequence=4) == "ACTIVATED"
+    state_path = tmp_path / "state" / "state.json"
+    state = json.loads(state_path.read_text())
+    assert state["schema"] == UPDATER_STATE_SCHEMA
+    assert state["selected_channel"] == "canary"
+
+    legacy = dict(state)
+    legacy["schema"] = "cathedral_validator_updater_state_v2"
+    legacy.pop("selected_channel")
+    state_path.write_bytes(canonical_document_bytes(legacy))
+    assert _update(updater, private, channel="canary", sequence=4) == "CURRENT"
+    migrated = json.loads(state_path.read_text())
+    assert migrated["schema"] == UPDATER_STATE_SCHEMA
+    assert migrated["selected_channel"] == "canary"
+
+    stable = _stable_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=tree,
+    )
+    updater.fetcher = lambda _url, _maximum: stable
+    with pytest.raises(UpdateRefused, match="pinned to the canary"):
+        _update(updater, private, channel="stable", sequence=1)
+
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    assert json.loads(state_path.read_text())["selected_channel"] == "canary"
+
+
+def test_v2_state_spanning_both_channels_is_not_migrated_by_guessing(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive, name="ambiguous-tree"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    record = _record_for(metadata, private, channel="canary")
+    state_root.joinpath("state.json").write_bytes(
+        canonical_document_bytes(
+            {
+                "schema": "cathedral_validator_updater_state_v2",
+                "channels": {"canary": record, "stable": record},
+                "pending": None,
+            }
+        )
+    )
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+    )
+
+    with pytest.raises(UpdateRefused, match="spans more than one release channel"):
+        _update(updater, private, channel="canary", sequence=1)
+
+    assert restarts == []
+    assert json.loads(state_root.joinpath("state.json").read_text())["schema"] == (
+        "cathedral_validator_updater_state_v2"
+    )
+
+
+def test_higher_metadata_for_current_archive_advances_without_restart(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive(marker_path=tmp_path / "same-archive")
+    tree = _tree_digest(tmp_path, archive, name="same-tree")
+    first = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=tree,
+    )
+    second = _canary_metadata(
+        private,
+        sequence=2,
+        archive=archive,
+        tree=tree,
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=first,
+        archive=archive,
+        restarts=restarts,
+    )
+
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    original_target = os.readlink(tmp_path / "install" / "current")
+    original_restart_count = len(restarts)
+    fetches: list[str] = []
+
+    def metadata_only(url: str, _maximum: int) -> bytes:
+        fetches.append(url)
+        if url.endswith(".json"):
+            return second
+        raise AssertionError("same-archive metadata renewal fetched an archive")
+
+    updater.fetcher = metadata_only
+    assert _update(updater, private, channel="canary", sequence=2) == "ADVANCED"
+    assert _update(updater, private, channel="canary", sequence=2) == "CURRENT"
+
+    assert fetches == [
+        "https://releases.example/canary.json",
+        "https://releases.example/canary.json",
+    ]
+    assert len(restarts) == original_restart_count
+    assert os.readlink(tmp_path / "install" / "current") == original_target
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["channels"]["canary"]["sequence"] == 2
+
+
+def test_crash_uncertain_target_is_rescued_by_higher_remote_release(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "release-one")
+    archive_two = _archive(marker_path=tmp_path / "release-two")
+    archive_three = _archive(marker_path=tmp_path / "release-three")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=8,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=9,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="tree-two"),
+    )
+    metadata_three = _canary_metadata(
+        private,
+        sequence=10,
+        archive=archive_three,
+        tree=_tree_digest(tmp_path, archive_three, name="tree-three"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=8) == "ACTIVATED"
+
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def crash_after_restart_authorized(_command) -> None:
+        raise KeyboardInterrupt("simulated crash after systemctl authorization")
+
+    updater.service_restarter = crash_after_restart_authorized
+    with pytest.raises(KeyboardInterrupt, match="after systemctl authorization"):
+        _update(updater, private, channel="canary", sequence=9)
+
+    target_two = f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    pending = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert pending["pending"]["stage"] == "may_have_run"
+    assert os.readlink(tmp_path / "install" / "current") == target_two
+
+    recovery_targets: list[str] = []
+
+    def fail_uncertain_then_start_rescue(_command) -> None:
+        recovery_targets.append(os.readlink(tmp_path / "install" / "current"))
+        if len(recovery_targets) == 1:
+            raise OSError("uncertain target never reached readiness")
+
+    recovered = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_three,
+        archive=archive_three,
+        service_restarter=fail_uncertain_then_start_rescue,
+    )
+    assert _update(recovered, private, channel="canary", sequence=10) == "ACTIVATED"
+
+    target_three = f"releases/{hashlib.sha256(archive_three).hexdigest()}"
+    assert recovery_targets == [target_two, target_three]
+    assert os.readlink(tmp_path / "install" / "current") == target_three
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["pending"] is None
+    assert state["channels"]["canary"]["sequence"] == 10
+
+
+def test_boot_reconcile_rolls_back_only_before_restart_is_authorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "boot-one")
+    archive_two = _archive(marker_path=tmp_path / "boot-two")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="boot-tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="boot-tree-two"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    target_one = os.readlink(tmp_path / "install" / "current")
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    real_write_state = updater_module._write_update_state
+
+    def crash_before_authorization(root: Path, state: dict[str, object]) -> None:
+        pending = state.get("pending")
+        if isinstance(pending, dict) and pending.get("stage") == "may_have_run":
+            raise KeyboardInterrupt("simulated crash before authorization is durable")
+        real_write_state(root, state)
+
+    monkeypatch.setattr(
+        updater_module, "_write_update_state", crash_before_authorization
+    )
+    with pytest.raises(KeyboardInterrupt, match="before authorization is durable"):
+        _update(updater, private, channel="canary", sequence=2)
+    monkeypatch.setattr(updater_module, "_write_update_state", real_write_state)
+
+    target_two = f"releases/{hashlib.sha256(archive_two).hexdigest()}"
+    pending = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert pending["pending"]["stage"] == "prepared"
+    assert os.readlink(tmp_path / "install" / "current") == target_two
+
+    assert updater.reconcile_boot(cycle_wait_seconds=0.1) == "RECONCILED"
+    assert os.readlink(tmp_path / "install" / "current") == target_one
+    reconciled = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert reconciled["pending"] is None
+    assert reconciled["channels"]["canary"]["sequence"] == 1
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+
+
+def test_boot_reconcile_treats_legacy_pending_as_may_have_run(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive_one = _archive(marker_path=tmp_path / "legacy-one")
+    archive_two = _archive(marker_path=tmp_path / "legacy-two")
+    metadata_one = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive_one,
+        tree=_tree_digest(tmp_path, archive_one, name="legacy-tree-one"),
+    )
+    metadata_two = _canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=_tree_digest(tmp_path, archive_two, name="legacy-tree-two"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata_one,
+        archive=archive_one,
+        restarts=restarts,
+    )
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+    restart_attempts: list[tuple[str, ...]] = []
+
+    def crash_after_authorization(command) -> None:
+        restart_attempts.append(tuple(command))
+        raise KeyboardInterrupt("simulated reboot after restart authorization")
+
+    updater.service_restarter = crash_after_authorization
+    with pytest.raises(KeyboardInterrupt, match="after restart authorization"):
+        _update(updater, private, channel="canary", sequence=2)
+
+    state_path = tmp_path / "state" / "state.json"
+    uncertain = json.loads(state_path.read_text())
+    assert uncertain["pending"]["stage"] == "may_have_run"
+    legacy_pending = dict(uncertain["pending"])
+    legacy_pending.pop("stage")
+    state_path.write_bytes(
+        canonical_document_bytes(
+            {
+                "schema": "cathedral_validator_updater_state_v2",
+                "channels": uncertain["channels"],
+                "pending": legacy_pending,
+            }
+        )
+    )
+
+    assert updater.reconcile_boot(cycle_wait_seconds=0.1) == "RECONCILED"
+    reconciled = json.loads(state_path.read_text())
+    assert reconciled["schema"] == UPDATER_STATE_SCHEMA
+    assert reconciled["selected_channel"] == "canary"
+    assert reconciled["pending"] is None
+    assert reconciled["channels"]["canary"]["sequence"] == 2
+    assert restart_attempts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+
+
 def test_readiness_failure_rolls_back_before_cycle_lock_is_released(
     tmp_path: Path,
 ) -> None:
@@ -846,12 +1224,250 @@ def test_bad_signature_is_refused(tmp_path: Path) -> None:
         )
 
 
+def test_corrupt_inactive_release_directory_is_repaired_from_signed_archive(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive(marker_path=tmp_path / "repair-marker")
+    metadata = _canary_metadata(
+        private,
+        sequence=3,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive, name="repair-tree"),
+    )
+    digest = hashlib.sha256(archive).hexdigest()
+    corrupt = tmp_path / "install" / "releases" / digest
+    corrupt.mkdir(parents=True, mode=0o755)
+    (corrupt / "README").write_text("truncated\n")
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+    )
+
+    assert _update(updater, private, channel="canary", sequence=3) == "ACTIVATED"
+    assert (corrupt / "README").read_text() == "immutable release\n"
+    assert (corrupt / "bin" / "cathedral-validator").is_file()
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+
+
+def test_corrupt_current_release_directory_is_never_deleted(tmp_path: Path) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive(marker_path=tmp_path / "protected-marker")
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive, name="protected-tree"),
+    )
+    digest = hashlib.sha256(archive).hexdigest()
+    target = f"releases/{digest}"
+    corrupt = tmp_path / "install" / target
+    corrupt.mkdir(parents=True, mode=0o755)
+    sentinel = corrupt / "do-not-delete"
+    sentinel.write_text("current release\n")
+    (tmp_path / "install" / "current").symlink_to(target)
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+
+    with pytest.raises(UpdateRefused, match="current release tree"):
+        _update(updater, private, channel="canary", sequence=1)
+
+    assert sentinel.read_text() == "current release\n"
+    assert os.readlink(tmp_path / "install" / "current") == target
+    assert restarts == []
+
+
+def test_operation_deadline_stops_work_after_a_slow_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive, name="deadline-tree"),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+    )
+    clock = [0.0]
+    monkeypatch.setattr(updater_module.time, "monotonic", lambda: clock[0])
+
+    def slow_fetch(_url: str, _maximum: int) -> bytes:
+        clock[0] = 2.0
+        return metadata
+
+    updater.fetcher = slow_fetch
+    with pytest.raises(UpdateRefused, match="deadline expired during release download"):
+        updater.update(
+            metadata_url="https://releases.example/canary.json",
+            channel="canary",
+            public_key=private.public_key(),
+            pause_file=tmp_path / "pause",
+            minimum_sequence=1,
+            cycle_wait_seconds=0.1,
+            operation_timeout_seconds=1.0,
+        )
+
+    assert restarts == []
+    assert os.readlink(tmp_path / "install" / "current") == PREVIOUS_TARGET
+
+
+def test_systemctl_timeout_is_bounded_by_both_service_and_operation_deadlines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeouts: list[float] = []
+
+    def fake_run(command, **kwargs) -> None:
+        assert command == [SYSTEMCTL, "restart", VALIDATOR_SERVICE]
+        assert kwargs["check"] is True
+        observed_timeouts.append(kwargs["timeout"])
+
+    monkeypatch.setattr(updater_module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(updater_module.subprocess, "run", fake_run)
+    updater = SignedReleaseUpdater(
+        install_root=tmp_path / "install",
+        state_root=tmp_path / "state",
+        expected_hotkey="5ExpectedValidator",
+        journal_scope_root=tmp_path / "journal-scope",
+    )
+
+    updater._restart_service(deadline_monotonic=1_000.0)
+    updater._restart_service(deadline_monotonic=250.0)
+
+    assert observed_timeouts == [DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS, 250.0]
+
+
+def test_https_fetch_uses_single_raw_reads_and_rechecks_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    calls = {"read": 0, "read1": 0}
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return "https://releases.example/archive"
+
+        def read(self, _size: int) -> bytes:
+            calls["read"] += 1
+            raise AssertionError("buffered read must not be used when read1 exists")
+
+        def read1(self, _size: int) -> bytes:
+            calls["read1"] += 1
+            clock[0] = 2.0
+            return b"partial"
+
+    class FakeOpener:
+        def open(self, _request, *, timeout: float):
+            assert timeout == 1.0
+            return FakeResponse()
+
+    monkeypatch.setattr(updater_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        updater_module.urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(UpdateRefused, match="deadline expired during HTTPS download"):
+        updater_module.fetch_bounded_https(
+            "https://releases.example/archive",
+            maximum_bytes=100,
+            timeout_seconds=20.0,
+            deadline_monotonic=1.0,
+        )
+
+    assert calls == {"read": 0, "read1": 1}
+
+
+def test_boot_reconcile_cli_accepts_no_release_channel_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    reconciliations: list[dict[str, float]] = []
+
+    class FakeUpdater:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def reconcile_boot(self, **kwargs) -> str:
+            reconciliations.append(kwargs)
+            return "RECONCILED"
+
+    monkeypatch.setattr(updater_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        updater_module,
+        "load_expected_hotkey_identity",
+        lambda _path: "5ExpectedValidator",
+    )
+    monkeypatch.setattr(updater_module, "SignedReleaseUpdater", FakeUpdater)
+
+    refused = updater_module.main(
+        ["--reconcile-boot", "--channel=canary", "--identity-file=/ignored"]
+    )
+    assert refused == 2
+    assert "does not accept a caller-selected channel" in capsys.readouterr().err
+    assert reconciliations == []
+
+    accepted = updater_module.main(
+        [
+            "--reconcile-boot",
+            "--identity-file=/ignored",
+            "--cycle-wait-seconds=17",
+            "--operation-timeout-seconds=41",
+        ]
+    )
+    assert accepted == 0
+    assert "CATHEDRAL_VALIDATOR_UPDATE_RECONCILED" in capsys.readouterr().out
+    assert reconciliations == [
+        {"cycle_wait_seconds": 17.0, "operation_timeout_seconds": 41.0}
+    ]
+
+
 def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     root = Path(__file__).resolve().parents[2]
     deploy = root / "deploy" / "validator-update"
     sysusers = (deploy / "cathedral-validator.sysusers").read_text()
     assert "u cathedral-validator" in sysusers
     direct = (deploy / "cathedral-validator-direct.service").read_text()
+    assert "Requires=cathedral-validator-boot-reconcile.service" in direct
+    assert (
+        "After=network-online.target cathedral-validator-boot-reconcile.service"
+        in direct
+    )
     assert "User=cathedral-validator" in direct
     assert "Type=notify" in direct
     assert "NotifyAccess=main" in direct
@@ -874,12 +1490,19 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in direct
     assert "ConditionPathExists=/etc/cathedral-validator/snp-policy.json" in direct
     assert (
-        "ConditionFileIsExecutable=/usr/local/lib/cathedral-validator/snpguest"
+        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/"
+        "cathedral-tdx-verifier" in direct
+    )
+    assert (
+        "ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/snpguest"
         in direct
     )
     assert "ConditionFileIsExecutable=/usr/bin/python3.12" in direct
     assert "--snp-policy=${CATHEDRAL_SNP_POLICY}" in direct
-    assert "--snpguest=${CATHEDRAL_SNPGUEST}" in direct
+    assert "--qvl=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier" in direct
+    assert "--snpguest=/opt/cathedral-validator/current/bin/snpguest" in direct
+    assert "${CATHEDRAL_VALIDATOR_QVL}" not in direct
+    assert "${CATHEDRAL_SNPGUEST}" not in direct
     assert "coldkey" not in direct.lower()
     assert "ReadWritePaths=/var/lib/cathedral-validator" in direct
     assert (
@@ -891,9 +1514,6 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
 
     direct_env = (deploy / "direct.env.example").read_text()
     assert "CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json" in direct_env
-    assert (
-        "CATHEDRAL_SNPGUEST=/usr/local/lib/cathedral-validator/snpguest" in direct_env
-    )
     telemetry_env = (deploy / "direct-telemetry.env.example").read_text()
     assert (
         'CATHEDRAL_VALIDATOR_TELEMETRY_ARGS="--telemetry-spool '
@@ -942,6 +1562,41 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
             "-/var/lib/cathedral-validator/.bittensor "
             "-/run/cathedral-validator-wallet -/run/cathedral-validator-pex"
         ) in unit
+        assert (
+            f"TimeoutStartSec={int(DEFAULT_OPERATION_TIMEOUT_SECONDS + SYSTEMD_TIMEOUT_MARGIN_SECONDS)}s"
+            in unit
+        )
+
+    assert DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS >= 150 + 120 + 30
+
+    boot_reconcile = (deploy / "cathedral-validator-boot-reconcile.service").read_text()
+    assert "\nCondition" not in boot_reconcile
+    assert "Before=cathedral-validator-direct.service" in boot_reconcile
+    assert (
+        "ExecStart=/usr/local/lib/cathedral-validator-updater/bin/"
+        "cathedral-validator-update --reconcile-boot "
+        "--identity-file=/etc/cathedral-validator/identity.env\n"
+    ) in boot_reconcile
+    for forbidden in (
+        "--channel",
+        "--metadata-url",
+        "--public-key",
+        "--minimum-sequence",
+        "--bootstrap-first-install",
+    ):
+        assert forbidden not in boot_reconcile
+    assert (
+        f"TimeoutStartSec={int(DEFAULT_OPERATION_TIMEOUT_SECONDS + SYSTEMD_TIMEOUT_MARGIN_SECONDS)}s"
+        in boot_reconcile
+    )
+    assert "LoadCredential=" not in boot_reconcile
+    assert "EnvironmentFile=" not in boot_reconcile
+    assert (
+        "InaccessiblePaths=/etc/cathedral-validator/validator-hotkey "
+        "-/var/lib/cathedral-validator/.bittensor "
+        "-/run/cathedral-validator-wallet -/run/cathedral-validator-pex"
+        in boot_reconcile
+    )
 
 
 def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
@@ -959,7 +1614,10 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert release_job.count("CPython==3.12.*") == 2
     assert "cmp /tmp/cathedral-validator-one.pex" in release_job
     assert 'builder["_validator_pex"](pex)' in release_job
-    assert 'builder["validator_release_tree"](pex, release)' in release_job
+    assert 'builder["validator_release_tree"](' in release_job
+    assert 'qvl=Path("/tmp/cathedral-tdx-verifier")' in release_job
+    assert 'snpguest=Path("/tmp/snpguest")' in release_job
+    assert 'source_revision=os.environ["GITHUB_SHA"]' in release_job
     assert "PEX_INTERPRETER=1" in release_job
     assert "PEX_ROOT=/tmp/cathedral-validator-pex-root" in release_job
     assert "CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=" in release_job
@@ -1007,6 +1665,24 @@ def test_extracted_release_is_traversable_but_not_writable_by_service(
     assert stat.S_IMODE((release / "README").stat().st_mode) == 0o444
 
 
+def test_extraction_fsyncs_every_file_and_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_types: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        observed_types.append(stat.S_IFMT(os.fstat(descriptor).st_mode))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(updater_module.os, "fsync", recording_fsync)
+    extract_release_archive(_archive(), tmp_path / "durable-release")
+
+    assert observed_types.count(stat.S_IFREG) >= 2
+    assert observed_types.count(stat.S_IFDIR) >= 2
+
+
 def test_offline_builder_rejects_decoy_telemetry_module_paths(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     builder = runpy.run_path(
@@ -1045,6 +1721,12 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     )
     pex = tmp_path / "cathedral-validator.pex"
     _validator_pex(pex)
+    qvl = tmp_path / "cathedral-tdx-verifier"
+    qvl.write_bytes(b"#!/bin/sh\n# reviewed qvl\n")
+    qvl.chmod(0o755)
+    snpguest = tmp_path / "snpguest"
+    snpguest.write_bytes(b"#!/bin/sh\n# reviewed snpguest\n")
+    snpguest.chmod(0o755)
     private = Ed25519PrivateKey.generate()
     archive_one = tmp_path / "one.tar.gz"
     archive_two = tmp_path / "two.tar.gz"
@@ -1052,7 +1734,14 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     canary_two = tmp_path / "canary-two.json"
     kwargs = {
         "pex": pex,
-        "archive_url": "https://releases.example/validator.tar.gz",
+        "qvl": qvl,
+        "snpguest": snpguest,
+        "source_revision": "a" * 40,
+        "archive_url_template": (
+            "https://github.com/cathedralai/cathedral-validator/releases/download/"
+            "validator-{archive_sha256}/"
+            "cathedral-validator-{archive_sha256}.tar.gz"
+        ),
         "sequence": 4,
         "private_key": private,
         "issued_unix": NOW,
@@ -1068,7 +1757,7 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     release = tmp_path / "extracted"
     extract_release_archive(archive_one.read_bytes(), release)
     manifest = json.loads((release / "RELEASE.json").read_text())
-    assert manifest["schema"] == "cathedral_validator_bundle_v1"
+    assert manifest["schema"] == "cathedral_validator_bundle_v2"
     assert manifest["entry_point"] == (
         "cathedral_thin.independent_runtime.direct_validator:main"
     )
@@ -1076,6 +1765,11 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
         "cathedral_thin.independent_runtime.telemetry_exporter"
     )
     assert manifest["project_distribution"].startswith("cathedral_scaffold-1.2.3")
+    assert manifest["source_revision"] == "a" * 40
+    assert manifest["qvl_path"] == "bin/cathedral-tdx-verifier"
+    assert manifest["snpguest_path"] == "bin/snpguest"
+    assert (release / manifest["qvl_path"]).read_bytes() == qvl.read_bytes()
+    assert (release / manifest["snpguest_path"]).read_bytes() == snpguest.read_bytes()
     executable = release / "bin" / "cathedral-validator"
     assert stat.S_IMODE(executable.stat().st_mode) == 0o555
 
@@ -1126,6 +1820,7 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
         private_key=private,
         issued_unix=NOW,
         lifetime_seconds=3600,
+        enforce_content_addressed=True,
     )
     canary = parse_release_metadata(
         canary_one.read_bytes(),

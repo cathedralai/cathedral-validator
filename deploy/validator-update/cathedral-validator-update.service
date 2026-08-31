@@ -13,7 +13,9 @@ User=root
 Group=root
 EnvironmentFile=/etc/cathedral-validator/update.env
 ExecStart=/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel=stable --metadata-url=${CATHEDRAL_VALIDATOR_STABLE_METADATA_URL} --public-key=/etc/cathedral-validator/update-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=${CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE}
-TimeoutStartSec=480s
+# The updater enforces a 20-minute monotonic deadline. Keep a two-minute
+# manager margin so systemd never kills it between durable activation phases.
+TimeoutStartSec=1320s
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

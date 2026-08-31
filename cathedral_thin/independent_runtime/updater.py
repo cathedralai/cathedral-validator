@@ -47,10 +47,14 @@ from .preview_io import canonical_document_bytes
 
 
 METADATA_SCHEMA = "cathedral_validator_release_v1"
-UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v2"
+LEGACY_UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v2"
+UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v3"
 VALIDATOR_SERVICE = "cathedral-validator-direct.service"
 SYSTEMCTL = "/usr/bin/systemctl"
 DEFAULT_CYCLE_WAIT_SECONDS = 300.0
+DEFAULT_OPERATION_TIMEOUT_SECONDS = 1_200.0
+DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS = 300.0
+SYSTEMD_TIMEOUT_MARGIN_SECONDS = 120.0
 MAX_METADATA_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 MAX_METADATA_BYTES = 131_072
 MAX_ARCHIVE_BYTES = 536_870_912
@@ -62,10 +66,20 @@ DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT = Path(
 )
 DEFAULT_IDENTITY_FILE = Path("/etc/cathedral-validator/identity.env")
 _HEX = frozenset("0123456789abcdef")
+_PENDING_PREPARED = "prepared"
+_PENDING_MAY_HAVE_RUN = "may_have_run"
 
 
 class UpdateRefused(RuntimeError):
     """The local updater intentionally refused to make a release current."""
+
+
+class _PendingReadinessUnconfirmed(UpdateRefused):
+    """A crash-uncertain target could not prove readiness during recovery."""
+
+
+class _OperationDeadlineExpired(UpdateRefused):
+    """The monotonic updater operation deadline was exhausted."""
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,30 @@ def _strict_json(raw: bytes, *, label: str) -> dict[str, Any]:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _operation_deadline(timeout_seconds: float) -> float:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 1 <= float(timeout_seconds) <= 3_600
+    ):
+        raise UpdateRefused("update operation timeout is invalid")
+    return time.monotonic() + float(timeout_seconds)
+
+
+def _remaining_seconds(deadline: float, *, label: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _OperationDeadlineExpired(
+            f"update operation deadline expired during {label}"
+        )
+    return remaining
+
+
+def _check_deadline(deadline: float | None, *, label: str) -> None:
+    if deadline is not None:
+        _remaining_seconds(deadline, label=label)
 
 
 def _hex_digest(value: object, *, label: str) -> str:
@@ -308,7 +346,11 @@ class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def fetch_bounded_https(
-    url: str, *, maximum_bytes: int, timeout_seconds: float = 20.0
+    url: str,
+    *,
+    maximum_bytes: int,
+    timeout_seconds: float = 20.0,
+    deadline_monotonic: float | None = None,
 ) -> bytes:
     """Fetch bounded bytes without credentials or a downgrade redirect."""
 
@@ -318,7 +360,13 @@ def fetch_bounded_https(
         url, headers={"Accept": "application/json,application/octet-stream"}
     )
     try:
-        with opener.open(request, timeout=timeout_seconds) as response:
+        open_timeout = timeout_seconds
+        if deadline_monotonic is not None:
+            open_timeout = min(
+                open_timeout,
+                _remaining_seconds(deadline_monotonic, label="HTTPS connection"),
+            )
+        with opener.open(request, timeout=open_timeout) as response:
             final_url = str(response.geturl())
             _https_url(final_url, label="download response URL")
             stated = response.headers.get("Content-Length")
@@ -328,8 +376,17 @@ def fetch_bounded_https(
                 raise UpdateRefused("download exceeds its size limit")
             chunks: list[bytes] = []
             total = 0
+            reader = getattr(response, "read1", None)
+            if not callable(reader):
+                reader = response.read
             while True:
-                chunk = response.read(min(65_536, maximum_bytes + 1 - total))
+                _check_deadline(deadline_monotonic, label="HTTPS download")
+                # Buffered read() may wait for its entire requested size while a
+                # peer trickles bytes.  HTTPResponse.read1() returns after one raw
+                # read, allowing the monotonic deadline to be checked each time.
+                # One raw read remains bounded by the <=20 second socket timeout,
+                # well inside the systemd unit's 120 second outer margin.
+                chunk = reader(min(65_536, maximum_bytes + 1 - total))
                 if not chunk:
                     break
                 total += len(chunk)
@@ -353,7 +410,12 @@ def _safe_member_path(name: str) -> PurePosixPath:
     return path
 
 
-def extract_release_archive(archive: bytes, destination: Path) -> None:
+def extract_release_archive(
+    archive: bytes,
+    destination: Path,
+    *,
+    deadline_monotonic: float | None = None,
+) -> None:
     """Extract a bounded regular-file-only release archive into an empty directory."""
 
     if destination.exists() or destination.is_symlink():
@@ -366,6 +428,7 @@ def extract_release_archive(archive: bytes, destination: Path) -> None:
 
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as bundle:
             for member in bundle:
+                _check_deadline(deadline_monotonic, label="release extraction")
                 path = _safe_member_path(member.name)
                 if member.isdir():
                     (destination / path).mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -382,21 +445,38 @@ def extract_release_archive(archive: bytes, destination: Path) -> None:
                 if source is None:
                     raise UpdateRefused("release archive member is unreadable")
                 with target.open("xb") as output:
-                    shutil.copyfileobj(source, output, length=65_536)
-                os.chmod(target, 0o555 if member.mode & 0o111 else 0o444)
-        for root, _directories, _files in os.walk(destination):
+                    while True:
+                        _check_deadline(deadline_monotonic, label="release extraction")
+                        chunk = source.read(65_536)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                    output.flush()
+                    os.fchmod(output.fileno(), 0o555 if member.mode & 0o111 else 0o444)
+                    os.fsync(output.fileno())
+        for root, _directories, _files in os.walk(destination, topdown=False):
+            _check_deadline(deadline_monotonic, label="release directory sync")
             os.chmod(root, 0o755)
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            descriptor = os.open(root, flags)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     except (tarfile.TarError, OSError) as exc:
         raise UpdateRefused("release archive extraction failed") from exc
 
 
-def release_tree_sha256(root: Path) -> str:
+def release_tree_sha256(root: Path, *, deadline_monotonic: float | None = None) -> str:
     """Hash release paths and bytes, with no metadata, links, or special files."""
 
     if root.is_symlink() or not root.is_dir():
         raise UpdateRefused("release tree is invalid")
     entries: list[Path] = []
     for path in root.rglob("*"):
+        _check_deadline(deadline_monotonic, label="release tree validation")
         if path.is_symlink():
             raise UpdateRefused("release tree contains a symlink")
         if path.is_file():
@@ -405,18 +485,26 @@ def release_tree_sha256(root: Path) -> str:
             raise UpdateRefused("release tree contains an unsupported file")
     digest = hashlib.sha256()
     for path in sorted(entries, key=lambda item: item.relative_to(root).as_posix()):
+        _check_deadline(deadline_monotonic, label="release tree hashing")
         relative = path.relative_to(root).as_posix().encode("utf-8")
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
         digest.update(path.stat().st_size.to_bytes(8, "big"))
         with path.open("rb") as handle:
             while chunk := handle.read(65_536):
+                _check_deadline(deadline_monotonic, label="release tree hashing")
                 digest.update(chunk)
     return digest.hexdigest()
 
 
-def _require_owned_release_tree(root: Path, *, expected_uid: int) -> None:
+def _require_owned_release_tree(
+    root: Path,
+    *,
+    expected_uid: int,
+    deadline_monotonic: float | None = None,
+) -> None:
     for path in (root, *root.rglob("*")):
+        _check_deadline(deadline_monotonic, label="release ownership validation")
         metadata = path.stat()
         if (
             metadata.st_uid != expected_uid
@@ -524,7 +612,12 @@ def _state_path(root: Path) -> Path:
 
 
 def _initial_update_state() -> dict[str, Any]:
-    return {"schema": UPDATER_STATE_SCHEMA, "channels": {}, "pending": None}
+    return {
+        "schema": UPDATER_STATE_SCHEMA,
+        "selected_channel": None,
+        "channels": {},
+        "pending": None,
+    }
 
 
 def _validate_channel_record(value: object, *, label: str) -> dict[str, Any]:
@@ -552,15 +645,22 @@ def _validate_channel_record(value: object, *, label: str) -> dict[str, Any]:
     }
 
 
-def _validate_pending(value: object) -> dict[str, Any] | None:
+def _validate_pending(
+    value: object, *, legacy_without_stage: bool = False
+) -> dict[str, Any] | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) != {
+    expected = {
         "channel",
         "record",
         "previous_current",
         "target_current",
-    }:
+        "stage",
+    }
+    if not isinstance(value, dict) or (
+        set(value) != expected
+        and not (legacy_without_stage and set(value) == expected - {"stage"})
+    ):
         raise UpdateRefused("pending activation record is invalid")
     if value["channel"] not in {"canary", "stable"}:
         raise UpdateRefused("pending activation channel is invalid")
@@ -570,6 +670,9 @@ def _validate_pending(value: object) -> dict[str, Any] | None:
     target = value["target_current"]
     if not isinstance(target, str):
         raise UpdateRefused("pending target release is invalid")
+    stage = value.get("stage", _PENDING_MAY_HAVE_RUN)
+    if stage not in {_PENDING_PREPARED, _PENDING_MAY_HAVE_RUN}:
+        raise UpdateRefused("pending activation stage is invalid")
     for label, stored in (("previous", previous), ("target", target)):
         if stored is None:
             continue
@@ -581,13 +684,17 @@ def _validate_pending(value: object) -> dict[str, Any] | None:
             != _hex_digest(parts[1], label=f"pending {label} release digest")
         ):
             raise UpdateRefused(f"pending {label} release is not canonical")
+    record = _validate_channel_record(
+        value["record"], label="pending activation record"
+    )
+    if target != _release_target(record["archive_sha256"]):
+        raise UpdateRefused("pending target does not match its signed archive")
     return {
         "channel": value["channel"],
-        "record": _validate_channel_record(
-            value["record"], label="pending activation record"
-        ),
+        "record": record,
         "previous_current": previous,
         "target_current": target,
+        "stage": stage,
     }
 
 
@@ -599,9 +706,16 @@ def _read_update_state(root: Path) -> dict[str, Any]:
         raise UpdateRefused("updater state is a symlink")
     raw = path.read_bytes()
     document = _strict_json(raw, label="updater state")
+    schema = document.get("schema")
+    legacy = schema == LEGACY_UPDATER_STATE_SCHEMA
+    expected_fields = (
+        {"schema", "channels", "pending"}
+        if legacy
+        else {"schema", "selected_channel", "channels", "pending"}
+    )
     if (
-        set(document) != {"schema", "channels", "pending"}
-        or document["schema"] != UPDATER_STATE_SCHEMA
+        set(document) != expected_fields
+        or schema not in {LEGACY_UPDATER_STATE_SCHEMA, UPDATER_STATE_SCHEMA}
         or not isinstance(document["channels"], dict)
     ):
         raise UpdateRefused("updater state is invalid")
@@ -612,16 +726,37 @@ def _read_update_state(root: Path) -> dict[str, Any]:
         channels[channel] = _validate_channel_record(
             record, label=f"updater {channel} record"
         )
+    pending = _validate_pending(document["pending"], legacy_without_stage=legacy)
+    if legacy:
+        candidates = set(channels)
+        if pending is not None:
+            candidates.add(pending["channel"])
+        if len(candidates) > 1:
+            raise UpdateRefused(
+                "legacy updater state spans more than one release channel"
+            )
+        selected_channel = next(iter(candidates), None)
+    else:
+        selected_channel = document["selected_channel"]
+        if selected_channel not in {None, "canary", "stable"}:
+            raise UpdateRefused("selected release channel is invalid")
+    if selected_channel is None and (channels or pending is not None):
+        raise UpdateRefused("updater state has no selected release channel")
+    if any(channel != selected_channel for channel in channels):
+        raise UpdateRefused("updater state crosses its selected release channel")
+    if pending is not None and pending["channel"] != selected_channel:
+        raise UpdateRefused("pending activation crosses the selected release channel")
     return {
         "schema": UPDATER_STATE_SCHEMA,
+        "selected_channel": selected_channel,
         "channels": channels,
-        "pending": _validate_pending(document["pending"]),
+        "pending": pending,
     }
 
 
 def _write_update_state(root: Path, state: Mapping[str, Any]) -> None:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if set(state) != {"schema", "channels", "pending"}:
+    if set(state) != {"schema", "selected_channel", "channels", "pending"}:
         raise UpdateRefused("updater state fields are invalid")
     body = canonical_document_bytes(state)
     temporary: str | None = None
@@ -647,6 +782,36 @@ def _write_update_state(root: Path, state: Mapping[str, Any]) -> None:
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def _bind_selected_channel(state: Mapping[str, Any], *, channel: str) -> dict[str, Any]:
+    selected = state.get("selected_channel")
+    if selected is not None and selected != channel:
+        raise UpdateRefused(
+            f"validator host is pinned to the {selected} release channel"
+        )
+    bound = {
+        "schema": UPDATER_STATE_SCHEMA,
+        "selected_channel": channel,
+        "channels": dict(state["channels"]),
+        "pending": _validate_pending(state.get("pending")),
+    }
+    if any(name != channel for name in bound["channels"]):
+        raise UpdateRefused("updater state crosses its selected release channel")
+    pending = bound["pending"]
+    if pending is not None and pending["channel"] != channel:
+        raise UpdateRefused("pending activation crosses the selected release channel")
+    return bound
+
+
+def _pending_at_stage(pending: Mapping[str, Any], *, stage: str) -> dict[str, Any]:
+    updated = dict(_validate_pending(pending) or {})
+    if not updated:
+        raise UpdateRefused("updater has no pending activation to stage")
+    if stage not in {_PENDING_PREPARED, _PENDING_MAY_HAVE_RUN}:
+        raise UpdateRefused("pending activation stage is invalid")
+    updated["stage"] = stage
+    return updated
 
 
 def enforce_monotonic_release(state: Mapping[str, Any], release: Release) -> None:
@@ -680,6 +845,22 @@ def _root_owned_directory(path: Path, *, expected_uid: int, required_mode: int) 
     ):
         raise UpdateRefused("update installation directory is not root-controlled")
     os.chmod(path, required_mode)
+
+
+def _require_root_owned_directory(
+    path: Path, *, expected_uid: int, required_mode: int
+) -> None:
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        raise UpdateRefused("update installation directory is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or stat.S_IMODE(metadata.st_mode) != required_mode
+    ):
+        raise UpdateRefused("update installation directory is not root-controlled")
 
 
 def _release_target(archive_sha256: str) -> str:
@@ -763,13 +944,13 @@ class SignedReleaseUpdater:
             scope_root=journal_scope_root,
         )
         self.expected_uid = expected_uid
-        self.fetcher = fetcher or (
-            lambda url, maximum: fetch_bounded_https(url, maximum_bytes=maximum)
-        )
-        self.service_restarter = service_restarter or self._control_validator_service
+        self.fetcher = fetcher
+        self.service_restarter = service_restarter
 
     @staticmethod
-    def _control_validator_service(command: Sequence[str]) -> None:
+    def _control_validator_service(
+        command: Sequence[str], *, timeout_seconds: float
+    ) -> None:
         if tuple(command) not in {
             (SYSTEMCTL, "restart", VALIDATOR_SERVICE),
             (SYSTEMCTL, "stop", VALIDATOR_SERVICE),
@@ -779,24 +960,59 @@ class SignedReleaseUpdater:
             list(command),
             check=True,
             stdin=subprocess.DEVNULL,
-            timeout=180,
+            timeout=timeout_seconds,
         )
 
-    def _restart_service(self) -> None:
+    def _run_service_command(
+        self, command: Sequence[str], *, deadline_monotonic: float
+    ) -> None:
+        remaining = _remaining_seconds(
+            deadline_monotonic, label="validator service control"
+        )
+        timeout_seconds = min(DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS, remaining)
         try:
-            self.service_restarter((SYSTEMCTL, "restart", VALIDATOR_SERVICE))
+            if self.service_restarter is None:
+                self._control_validator_service(
+                    command, timeout_seconds=timeout_seconds
+                )
+            else:
+                self.service_restarter(command)
+                _check_deadline(deadline_monotonic, label="validator service control")
         except UpdateRefused:
             raise
         except (OSError, subprocess.SubprocessError) as exc:
-            raise UpdateRefused("fixed validator service restart failed") from exc
+            action = command[1] if len(command) > 1 else "control"
+            raise UpdateRefused(f"fixed validator service {action} failed") from exc
 
-    def _stop_service(self) -> None:
-        try:
-            self.service_restarter((SYSTEMCTL, "stop", VALIDATOR_SERVICE))
-        except UpdateRefused:
-            raise
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise UpdateRefused("fixed validator service stop failed") from exc
+    def _restart_service(self, *, deadline_monotonic: float) -> None:
+        self._run_service_command(
+            (SYSTEMCTL, "restart", VALIDATOR_SERVICE),
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _stop_service(self, *, deadline_monotonic: float) -> None:
+        self._run_service_command(
+            (SYSTEMCTL, "stop", VALIDATOR_SERVICE),
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _fetch_bytes(
+        self, url: str, maximum_bytes: int, *, deadline_monotonic: float
+    ) -> bytes:
+        _remaining_seconds(deadline_monotonic, label="release download")
+        if self.fetcher is not None:
+            body = self.fetcher(url, maximum_bytes)
+            _check_deadline(deadline_monotonic, label="release download")
+            return body
+        return fetch_bounded_https(
+            url,
+            maximum_bytes=maximum_bytes,
+            timeout_seconds=min(
+                20.0,
+                _remaining_seconds(deadline_monotonic, label="release download"),
+            ),
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def _prepare_bootstrap_journal(
         self, *, validator_uid: int, validator_gid: int
@@ -939,6 +1155,36 @@ class SignedReleaseUpdater:
             finally:
                 os.close(descriptor)
 
+    @contextmanager
+    def _updater_locked(self) -> Iterator[None]:
+        lock_path = self.state_root / "updater.lock"
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise UpdateRefused("local updater lock is unavailable") from exc
+        try:
+            os.fchmod(descriptor, 0o600)
+            lock_metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(lock_metadata.st_mode)
+                or lock_metadata.st_uid != self.expected_uid
+                or stat.S_IMODE(lock_metadata.st_mode) != 0o600
+            ):
+                raise UpdateRefused("local updater lock is not root-controlled")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise UpdateRefused("another local updater is running") from exc
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
     @staticmethod
     def _record(release: Release) -> dict[str, Any]:
         return {
@@ -956,6 +1202,7 @@ class SignedReleaseUpdater:
         channels[pending["channel"]] = pending["record"]
         committed = {
             "schema": UPDATER_STATE_SCHEMA,
+            "selected_channel": state["selected_channel"],
             "channels": channels,
             "pending": None,
         }
@@ -965,6 +1212,7 @@ class SignedReleaseUpdater:
     def _clear_pending(self, state: Mapping[str, Any]) -> dict[str, Any]:
         cleared = {
             "schema": UPDATER_STATE_SCHEMA,
+            "selected_channel": state["selected_channel"],
             "channels": dict(state["channels"]),
             "pending": None,
         }
@@ -977,6 +1225,7 @@ class SignedReleaseUpdater:
         *,
         allow_first_install: bool,
         rollback_on_failure: bool,
+        deadline_monotonic: float,
     ) -> dict[str, Any]:
         """Require readiness or restore the prior release before writes resume."""
 
@@ -990,16 +1239,16 @@ class SignedReleaseUpdater:
                     "unfinished first installation requires the bootstrap command"
                 )
             try:
-                self._restart_service()
+                self._restart_service(deadline_monotonic=deadline_monotonic)
             except UpdateRefused as startup_error:
                 if not rollback_on_failure:
-                    raise UpdateRefused(
+                    raise _PendingReadinessUnconfirmed(
                         "first release readiness is unconfirmed after recovery; "
                         "pending activation remains"
                     ) from startup_error
                 stop_error: UpdateRefused | None = None
                 try:
-                    self._stop_service()
+                    self._stop_service(deadline_monotonic=deadline_monotonic)
                 except UpdateRefused as exc:
                     stop_error = exc
                 _remove_current_symlink(
@@ -1016,16 +1265,16 @@ class SignedReleaseUpdater:
                 ) from startup_error
             return self._commit_pending(state)
         try:
-            self._restart_service()
+            self._restart_service(deadline_monotonic=deadline_monotonic)
         except UpdateRefused as startup_error:
             if not rollback_on_failure:
-                raise UpdateRefused(
+                raise _PendingReadinessUnconfirmed(
                     "release readiness is unconfirmed after recovery; "
                     "pending activation remains"
                 ) from startup_error
             try:
                 _atomic_current_symlink(self.install_root, previous)
-                self._restart_service()
+                self._restart_service(deadline_monotonic=deadline_monotonic)
             except UpdateRefused as rollback_error:
                 raise UpdateRefused(
                     "new release failed readiness and prior release restart failed; "
@@ -1043,33 +1292,101 @@ class SignedReleaseUpdater:
         *,
         cycle_wait_seconds: float,
         allow_first_install: bool,
-    ) -> dict[str, Any]:
+        deadline_monotonic: float,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = _validate_pending(state.get("pending"))
         if pending is None:
-            return state
+            return state, None
         current = _current_target(self.install_root)
+        wait_seconds = min(
+            float(cycle_wait_seconds),
+            _remaining_seconds(deadline_monotonic, label="cycle lock wait"),
+        )
         if current == pending["previous_current"]:
             if current is None:
                 if not allow_first_install:
                     raise UpdateRefused(
                         "unfinished first installation requires the bootstrap command"
                     )
-                return self._clear_pending(state)
-            with self._cycle_locked(wait_seconds=cycle_wait_seconds):
+                if pending["stage"] == _PENDING_PREPARED:
+                    return self._clear_pending(state), None
+                return state, pending
+            with self._cycle_locked(wait_seconds=wait_seconds):
                 require_idle_direct_writer_journal(self.journal)
-                self._restart_service()
-                return self._clear_pending(state)
+                if pending["stage"] == _PENDING_PREPARED:
+                    return self._clear_pending(state), None
+                try:
+                    self._restart_service(deadline_monotonic=deadline_monotonic)
+                except UpdateRefused:
+                    return state, pending
+                return self._clear_pending(state), None
         if current != pending["target_current"]:
             raise UpdateRefused("pending activation contradicts the current release")
-        with self._cycle_locked(wait_seconds=cycle_wait_seconds):
+        with self._cycle_locked(wait_seconds=wait_seconds):
             require_idle_direct_writer_journal(self.journal)
-            return self._restart_pending_or_rollback(
-                state,
-                allow_first_install=allow_first_install,
-                rollback_on_failure=False,
-            )
+            if pending["stage"] == _PENDING_PREPARED:
+                previous = pending["previous_current"]
+                if previous is None:
+                    _remove_current_symlink(
+                        self.install_root,
+                        expected_target=pending["target_current"],
+                    )
+                else:
+                    _atomic_current_symlink(self.install_root, previous)
+                return self._clear_pending(state), None
+            try:
+                reconciled = self._restart_pending_or_rollback(
+                    state,
+                    allow_first_install=allow_first_install,
+                    rollback_on_failure=False,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except _PendingReadinessUnconfirmed:
+                return state, pending
+            return reconciled, None
 
-    def _install_release(self, release: Release, archive: bytes) -> Path:
+    def _remove_corrupt_inactive_release(
+        self,
+        release_dir: Path,
+        *,
+        protected_targets: set[str],
+    ) -> None:
+        target = _release_target(release_dir.name)
+        if target in protected_targets:
+            raise UpdateRefused(
+                "a current or pending release directory does not match its signed tree"
+            )
+        try:
+            metadata = release_dir.lstat()
+        except OSError as exc:
+            raise UpdateRefused("corrupt release directory is unavailable") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or release_dir.is_symlink()
+            or metadata.st_uid != self.expected_uid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise UpdateRefused("corrupt release path is not safely repairable")
+        try:
+            shutil.rmtree(release_dir)
+            directory = os.open(release_dir.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as exc:
+            raise UpdateRefused(
+                "corrupt inactive release could not be removed"
+            ) from exc
+
+    def _install_release(
+        self,
+        release: Release,
+        archive: bytes,
+        *,
+        protected_targets: set[str],
+        deadline_monotonic: float,
+    ) -> Path:
         releases = self.install_root / "releases"
         _root_owned_directory(
             releases, expected_uid=self.expected_uid, required_mode=0o755
@@ -1079,27 +1396,60 @@ class SignedReleaseUpdater:
             raise UpdateRefused("release archive exceeds its size limit")
         if _sha256(archive) != release.archive_sha256:
             raise UpdateRefused("release archive digest does not match signed metadata")
+        if release_dir.is_symlink():
+            raise UpdateRefused("release directory is a symlink")
         if release_dir.exists():
-            _require_owned_release_tree(release_dir, expected_uid=self.expected_uid)
-            if release_tree_sha256(release_dir) != release.tree_sha256:
-                raise UpdateRefused(
-                    "existing release directory does not match signed tree"
+            try:
+                _require_owned_release_tree(
+                    release_dir,
+                    expected_uid=self.expected_uid,
+                    deadline_monotonic=deadline_monotonic,
                 )
-        else:
+                if (
+                    release_tree_sha256(
+                        release_dir, deadline_monotonic=deadline_monotonic
+                    )
+                    != release.tree_sha256
+                ):
+                    raise UpdateRefused(
+                        "existing release directory does not match signed tree"
+                    )
+            except _OperationDeadlineExpired:
+                raise
+            except (OSError, UpdateRefused):
+                self._remove_corrupt_inactive_release(
+                    release_dir, protected_targets=protected_targets
+                )
+        if not release_dir.exists():
             temporary = releases / f".{release.archive_sha256}.staging-{os.getpid()}"
             try:
-                extract_release_archive(archive, temporary)
-                _require_owned_release_tree(temporary, expected_uid=self.expected_uid)
-                if release_tree_sha256(temporary) != release.tree_sha256:
+                extract_release_archive(
+                    archive,
+                    temporary,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _require_owned_release_tree(
+                    temporary,
+                    expected_uid=self.expected_uid,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if (
+                    release_tree_sha256(
+                        temporary, deadline_monotonic=deadline_monotonic
+                    )
+                    != release.tree_sha256
+                ):
                     raise UpdateRefused(
                         "release tree digest does not match signed metadata"
                     )
+                _check_deadline(deadline_monotonic, label="release installation")
                 os.replace(temporary, release_dir)
                 directory = os.open(releases, os.O_RDONLY)
                 try:
                     os.fsync(directory)
                 finally:
                     os.close(directory)
+                _check_deadline(deadline_monotonic, label="release installation")
             finally:
                 if temporary.exists():
                     shutil.rmtree(temporary)
@@ -1123,6 +1473,7 @@ class SignedReleaseUpdater:
         validator_uid: int,
         validator_gid: int,
         cycle_wait_seconds: float = DEFAULT_CYCLE_WAIT_SECONDS,
+        operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
     ) -> str:
         """Install the first release on an otherwise clean validator host."""
 
@@ -1133,6 +1484,7 @@ class SignedReleaseUpdater:
             pause_file=pause_file,
             minimum_sequence=minimum_sequence,
             cycle_wait_seconds=cycle_wait_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
             bootstrap_owner=(validator_uid, validator_gid),
         )
 
@@ -1145,6 +1497,7 @@ class SignedReleaseUpdater:
         pause_file: Path,
         minimum_sequence: int,
         cycle_wait_seconds: float = DEFAULT_CYCLE_WAIT_SECONDS,
+        operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
     ) -> str:
         """Update an already bootstrapped validator release."""
 
@@ -1155,8 +1508,98 @@ class SignedReleaseUpdater:
             pause_file=pause_file,
             minimum_sequence=minimum_sequence,
             cycle_wait_seconds=cycle_wait_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
             bootstrap_owner=None,
         )
+
+    def _require_committed_current(
+        self, state: Mapping[str, Any], *, deadline_monotonic: float
+    ) -> None:
+        selected = state.get("selected_channel")
+        if selected not in {"canary", "stable"}:
+            raise UpdateRefused("validator host has no selected release channel")
+        record = state["channels"].get(selected)
+        if record is None:
+            raise UpdateRefused("validator host has no committed release")
+        record = _validate_channel_record(record, label="selected channel record")
+        target = _release_target(record["archive_sha256"])
+        if _current_target(self.install_root) != target:
+            raise UpdateRefused("committed release contradicts the current release")
+        release_dir = self.install_root / target
+        try:
+            _require_owned_release_tree(
+                release_dir,
+                expected_uid=self.expected_uid,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except OSError as exc:
+            raise UpdateRefused("current release tree is unavailable") from exc
+        executable = release_dir / "bin" / "cathedral-validator"
+        if (
+            not executable.is_file()
+            or executable.is_symlink()
+            or not os.access(executable, os.X_OK)
+        ):
+            raise UpdateRefused("current release entrypoint is not executable")
+
+    def reconcile_boot(
+        self,
+        *,
+        cycle_wait_seconds: float = DEFAULT_CYCLE_WAIT_SECONDS,
+        operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
+    ) -> str:
+        """Resolve durable activation state before systemd may start the writer."""
+
+        deadline = _operation_deadline(operation_timeout_seconds)
+        _require_root_owned_directory(
+            self.install_root, expected_uid=self.expected_uid, required_mode=0o755
+        )
+        _require_root_owned_directory(
+            self.state_root, expected_uid=self.expected_uid, required_mode=0o700
+        )
+        with self._updater_locked():
+            state = _read_update_state(self.state_root)
+            selected = state.get("selected_channel")
+            if selected not in {"canary", "stable"}:
+                raise UpdateRefused("validator host has no selected release channel")
+            # Persist a safely inferred v2 channel and conservative pending stage.
+            _write_update_state(self.state_root, state)
+            pending = _validate_pending(state.get("pending"))
+            if pending is not None:
+                current = _current_target(self.install_root)
+                if current not in {
+                    pending["previous_current"],
+                    pending["target_current"],
+                }:
+                    raise UpdateRefused(
+                        "pending activation contradicts the current release"
+                    )
+                wait_seconds = min(
+                    float(cycle_wait_seconds),
+                    _remaining_seconds(deadline, label="boot cycle lock wait"),
+                )
+                with self._cycle_locked(wait_seconds=wait_seconds):
+                    require_idle_direct_writer_journal(self.journal)
+                    if pending["stage"] == _PENDING_PREPARED:
+                        if current == pending["target_current"]:
+                            previous = pending["previous_current"]
+                            if previous is None:
+                                _remove_current_symlink(
+                                    self.install_root,
+                                    expected_target=pending["target_current"],
+                                )
+                            else:
+                                _atomic_current_symlink(self.install_root, previous)
+                        state = self._clear_pending(state)
+                    elif current == pending["target_current"]:
+                        # Once restart was durably authorized, the target might have
+                        # run. Never roll it back during boot; authorize that exact
+                        # signed record so a later higher sequence can rescue it.
+                        state = self._commit_pending(state)
+                    else:
+                        state = self._clear_pending(state)
+            self._require_committed_current(state, deadline_monotonic=deadline)
+        return "RECONCILED"
 
     def _update_release(
         self,
@@ -1167,8 +1610,10 @@ class SignedReleaseUpdater:
         pause_file: Path,
         minimum_sequence: int,
         cycle_wait_seconds: float,
+        operation_timeout_seconds: float,
         bootstrap_owner: tuple[int, int] | None,
     ) -> str:
+        deadline = _operation_deadline(operation_timeout_seconds)
         if channel not in {"canary", "stable"}:
             raise UpdateRefused("release channel is invalid")
         if (
@@ -1183,25 +1628,12 @@ class SignedReleaseUpdater:
         _root_owned_directory(
             self.state_root, expected_uid=self.expected_uid, required_mode=0o700
         )
-        lock_path = self.state_root / "updater.lock"
-        flags = os.O_CREAT | os.O_RDWR
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(lock_path, flags, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            lock_metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(lock_metadata.st_mode)
-                or lock_metadata.st_uid != self.expected_uid
-                or stat.S_IMODE(lock_metadata.st_mode) != 0o600
-            ):
-                raise UpdateRefused("local updater lock is not root-controlled")
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise UpdateRefused("another local updater is running") from exc
+        with self._updater_locked():
             state = _read_update_state(self.state_root)
+            state = _bind_selected_channel(state, channel=channel)
+            # This persists a safely inferred legacy v2 channel before any
+            # activation and makes a host's channel choice immutable.
+            _write_update_state(self.state_root, state)
             allow_first_install = bootstrap_owner is not None
             if bootstrap_owner is not None:
                 pending = _validate_pending(state.get("pending"))
@@ -1221,10 +1653,11 @@ class SignedReleaseUpdater:
                     validator_uid=bootstrap_owner[0],
                     validator_gid=bootstrap_owner[1],
                 )
-            state = self._reconcile_pending(
+            state, rescue_pending = self._reconcile_pending(
                 state,
                 cycle_wait_seconds=cycle_wait_seconds,
                 allow_first_install=allow_first_install,
+                deadline_monotonic=deadline,
             )
             if pause_file.exists():
                 return "PAUSED"
@@ -1233,8 +1666,10 @@ class SignedReleaseUpdater:
                     "automatic update requires an existing current release; "
                     "run the first-install bootstrap command"
                 )
-            metadata = self.fetcher(
-                _https_url(metadata_url, label="metadata URL"), MAX_METADATA_BYTES
+            metadata = self._fetch_bytes(
+                _https_url(metadata_url, label="metadata URL"),
+                MAX_METADATA_BYTES,
+                deadline_monotonic=deadline,
             )
             release = parse_release_metadata(
                 metadata, channel=channel, public_key=public_key
@@ -1243,14 +1678,30 @@ class SignedReleaseUpdater:
                 raise UpdateRefused("release is below the trusted bootstrap sequence")
             enforce_monotonic_release(state, release)
             target = _release_target(release.archive_sha256)
+            if rescue_pending is not None:
+                pending_record = rescue_pending["record"]
+                if release.sequence <= pending_record["sequence"]:
+                    raise UpdateRefused(
+                        "crash-uncertain activation requires a strictly higher "
+                        "signed release sequence"
+                    )
+                if target == _current_target(self.install_root):
+                    raise UpdateRefused(
+                        "crash-uncertain activation requires a different release archive"
+                    )
             existing = state["channels"].get(channel)
-            if (
-                existing == self._record(release)
-                and _current_target(self.install_root) == target
-            ):
+            current = _current_target(self.install_root)
+            if rescue_pending is None and current == target:
                 release_dir = self.install_root / target
-                _require_owned_release_tree(release_dir, expected_uid=self.expected_uid)
-                if release_tree_sha256(release_dir) != release.tree_sha256:
+                _require_owned_release_tree(
+                    release_dir,
+                    expected_uid=self.expected_uid,
+                    deadline_monotonic=deadline,
+                )
+                if (
+                    release_tree_sha256(release_dir, deadline_monotonic=deadline)
+                    != release.tree_sha256
+                ):
                     raise UpdateRefused("current release tree is not the signed tree")
                 executable = release_dir / release.entrypoint
                 if (
@@ -1259,14 +1710,61 @@ class SignedReleaseUpdater:
                     or not os.access(executable, os.X_OK)
                 ):
                     raise UpdateRefused("current release entrypoint is not executable")
-                return "CURRENT"
-            archive = self.fetcher(release.archive_url, MAX_ARCHIVE_BYTES)
-            self._install_release(release, archive)
-            with self._cycle_locked(wait_seconds=cycle_wait_seconds):
+                if existing == self._record(release):
+                    return "CURRENT"
+                channels = dict(state["channels"])
+                channels[channel] = self._record(release)
+                advanced = {
+                    "schema": UPDATER_STATE_SCHEMA,
+                    "selected_channel": channel,
+                    "channels": channels,
+                    "pending": None,
+                }
+                _write_update_state(self.state_root, advanced)
+                return "ADVANCED"
+            archive = self._fetch_bytes(
+                release.archive_url,
+                MAX_ARCHIVE_BYTES,
+                deadline_monotonic=deadline,
+            )
+            protected_targets = {item for item in (current,) if item is not None}
+            if rescue_pending is not None:
+                protected_targets.update(
+                    item
+                    for item in (
+                        rescue_pending["previous_current"],
+                        rescue_pending["target_current"],
+                    )
+                    if item is not None
+                )
+            self._install_release(
+                release,
+                archive,
+                protected_targets=protected_targets,
+                deadline_monotonic=deadline,
+            )
+            wait_seconds = min(
+                float(cycle_wait_seconds),
+                _remaining_seconds(deadline, label="cycle lock wait"),
+            )
+            with self._cycle_locked(wait_seconds=wait_seconds):
                 state = _read_update_state(self.state_root)
-                if state.get("pending") is not None:
-                    raise UpdateRefused("another activation became pending")
+                state = _bind_selected_channel(state, channel=channel)
+                observed_pending = _validate_pending(state.get("pending"))
+                if rescue_pending is None:
+                    if observed_pending is not None:
+                        raise UpdateRefused("another activation became pending")
+                elif observed_pending != rescue_pending:
+                    raise UpdateRefused(
+                        "crash-uncertain activation changed before rescue"
+                    )
+                elif release.sequence <= observed_pending["record"]["sequence"]:
+                    raise UpdateRefused(
+                        "rescue release is not newer than the pending activation"
+                    )
                 enforce_monotonic_release(state, release)
+                if pause_file.exists():
+                    return "PAUSED"
                 require_idle_direct_writer_journal(self.journal)
                 previous = _current_target(self.install_root)
                 if previous is None and not allow_first_install:
@@ -1278,47 +1776,60 @@ class SignedReleaseUpdater:
                     "record": self._record(release),
                     "previous_current": previous,
                     "target_current": target,
+                    "stage": _PENDING_PREPARED,
                 }
                 pending_state = dict(state)
                 pending_state["pending"] = pending
                 _write_update_state(self.state_root, pending_state)
                 if previous != target:
                     _atomic_current_symlink(self.install_root, target)
+                authorized_state = dict(pending_state)
+                authorized_state["pending"] = _pending_at_stage(
+                    pending, stage=_PENDING_MAY_HAVE_RUN
+                )
+                _write_update_state(self.state_root, authorized_state)
                 self._restart_pending_or_rollback(
-                    pending_state,
+                    authorized_state,
                     allow_first_install=allow_first_install,
                     rollback_on_failure=True,
+                    deadline_monotonic=deadline,
                 )
             return "ACTIVATED"
-        finally:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Install one locally verified Cathedral validator release"
     )
-    parser.add_argument("--channel", required=True, choices=("canary", "stable"))
-    parser.add_argument("--metadata-url", required=True)
-    parser.add_argument("--public-key", required=True, type=Path)
+    parser.add_argument("--channel", choices=("canary", "stable"))
+    parser.add_argument("--metadata-url")
+    parser.add_argument("--public-key", type=Path)
     parser.add_argument(
         "--identity-file",
         type=Path,
         default=DEFAULT_IDENTITY_FILE,
     )
-    parser.add_argument("--minimum-sequence", required=True, type=int)
-    parser.add_argument(
+    parser.add_argument("--minimum-sequence", type=int)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--bootstrap-first-install",
         action="store_true",
         help="create the first idle journal and activate only on a clean host",
+    )
+    mode.add_argument(
+        "--reconcile-boot",
+        action="store_true",
+        help="resolve durable activation state without starting the validator",
     )
     parser.add_argument(
         "--cycle-wait-seconds",
         type=float,
         default=DEFAULT_CYCLE_WAIT_SECONDS,
+    )
+    parser.add_argument(
+        "--operation-timeout-seconds",
+        type=float,
+        default=DEFAULT_OPERATION_TIMEOUT_SECONDS,
     )
     parser.add_argument(
         "--install-root", type=Path, default=Path("/opt/cathedral-validator")
@@ -1333,13 +1844,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     if os.geteuid() != 0:
         parser.error("the updater must run as root")
     try:
-        key = load_pinned_public_key(options.public_key)
         expected_hotkey = load_expected_hotkey_identity(options.identity_file)
         updater = SignedReleaseUpdater(
             install_root=options.install_root,
             state_root=options.state_root,
             expected_hotkey=expected_hotkey,
         )
+        if options.reconcile_boot:
+            if any(
+                value is not None
+                for value in (
+                    options.channel,
+                    options.metadata_url,
+                    options.public_key,
+                    options.minimum_sequence,
+                )
+            ):
+                raise UpdateRefused(
+                    "boot reconciliation does not accept a caller-selected channel"
+                )
+            status = updater.reconcile_boot(
+                cycle_wait_seconds=options.cycle_wait_seconds,
+                operation_timeout_seconds=options.operation_timeout_seconds,
+            )
+            print(f"CATHEDRAL_VALIDATOR_UPDATE_{status}")
+            return 0
+        if any(
+            value is None
+            for value in (
+                options.channel,
+                options.metadata_url,
+                options.public_key,
+                options.minimum_sequence,
+            )
+        ):
+            raise UpdateRefused(
+                "release update requires channel, metadata URL, public key, "
+                "and minimum sequence"
+            )
+        key = load_pinned_public_key(options.public_key)
         arguments = {
             "metadata_url": options.metadata_url,
             "channel": options.channel,
@@ -1347,6 +1890,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "pause_file": options.pause_file,
             "minimum_sequence": options.minimum_sequence,
             "cycle_wait_seconds": options.cycle_wait_seconds,
+            "operation_timeout_seconds": options.operation_timeout_seconds,
         }
         if options.bootstrap_first_install:
             try:
