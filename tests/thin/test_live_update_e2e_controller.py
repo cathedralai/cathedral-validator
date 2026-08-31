@@ -1,4 +1,22 @@
+import runpy
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+
+def _live_readiness_guard(monkeypatch):
+    package = ModuleType("cathedral_thin")
+    runtime = ModuleType("cathedral_thin.independent_runtime")
+    for name in ("direct_validator", "qvl", "snp_production"):
+        setattr(runtime, name, ModuleType(f"{runtime.__name__}.{name}"))
+    package.independent_runtime = runtime
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    root = Path(__file__).resolve().parents[2]
+    namespace = runpy.run_path(str(root / "tests/live/cathedral_no_chain_readiness.py"))
+    return namespace["require_pex_origin"]
 
 
 def test_live_controller_isolates_the_unselected_timer_without_masking_units():
@@ -26,6 +44,7 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "SubState=dead" in configure_host
     assert "! sudo systemctl is-active --quiet '$other_timer'" in configure_host
     assert "ConditionResult=no" not in configure_host
+    assert "CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex" in configure_host
 
 
 def test_live_controller_records_both_timer_states_in_host_evidence():
@@ -122,3 +141,41 @@ def test_live_controller_accepts_healthy_selected_timer_dispatch_states():
         script.count('start_update_timer "$STABLE_VM" cathedral-validator-update.timer')
         == 1
     )
+
+
+def test_live_readiness_preserves_the_expected_pex_root(tmp_path, monkeypatch):
+    require_pex_origin = _live_readiness_guard(monkeypatch)
+    pex_root = tmp_path / "pex-root"
+    module_path = pex_root / "installed_wheels/project/module.py"
+    module_path.parent.mkdir(parents=True)
+    module_path.touch()
+    module = SimpleNamespace(__name__="packaged.module", __file__=str(module_path))
+
+    monkeypatch.setenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", str(pex_root))
+    monkeypatch.setenv("PEX_ROOT", str(tmp_path / "stripped-pex-variable"))
+    require_pex_origin(module)
+
+
+def test_live_readiness_refuses_missing_or_outside_preserved_pex_root(
+    tmp_path, monkeypatch
+):
+    require_pex_origin = _live_readiness_guard(monkeypatch)
+    pex_root = tmp_path / "pex-root"
+    pex_root.mkdir()
+    outside = tmp_path / "checkout/module.py"
+    outside.parent.mkdir()
+    outside.touch()
+    module = SimpleNamespace(__name__="unpackaged.module", __file__=str(outside))
+
+    monkeypatch.delenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", raising=False)
+    monkeypatch.setenv("PEX_ROOT", str(pex_root))
+    with pytest.raises(SystemExit, match="preserved live-test PEX root is unavailable"):
+        require_pex_origin(module)
+
+    monkeypatch.setenv("CATHEDRAL_LIVE_TEST_PEX_ROOT", str(pex_root))
+    without_file = SimpleNamespace(__name__="packaged.without_file", __file__=None)
+    with pytest.raises(SystemExit, match="has no module file"):
+        require_pex_origin(without_file)
+
+    with pytest.raises(SystemExit, match="did not load from the preserved live-test"):
+        require_pex_origin(module)
