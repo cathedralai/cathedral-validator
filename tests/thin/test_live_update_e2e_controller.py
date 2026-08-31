@@ -65,7 +65,9 @@ def test_live_controller_captures_first_install_failures_before_teardown():
         == 2
     )
     assert 'tee "$EVIDENCE_DIR/first-readiness-command-${host}.log"' in configure_host
-    assert configure_host.count("return 1") == 3
+    assert configure_host.count("failure_status=$?") == 3
+    assert configure_host.count('return "$failure_status"') == 3
+    assert "return 1" not in configure_host
 
 
 def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
