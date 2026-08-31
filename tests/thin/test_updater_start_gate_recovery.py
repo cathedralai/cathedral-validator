@@ -28,8 +28,9 @@ def _spawn_transition_gate(
     updater: SignedReleaseUpdater,
     *,
     observed_cycle_check: Path,
+    observe_held_cycle_lock: bool = False,
 ) -> subprocess.Popen[str]:
-    """Run a process gate that reports its first observed free cycle lock."""
+    """Run a process gate that reports one chosen cycle-lock observation."""
 
     root = Path(__file__).resolve().parents[2]
     program = """\\
@@ -42,7 +43,7 @@ from cathedral_thin.independent_runtime.updater import SignedReleaseUpdater, Upd
 class MarkingGate(SignedReleaseUpdater):
     def _cycle_lock_is_held_elsewhere(self):
         held = super()._cycle_lock_is_held_elsewhere()
-        if not held:
+        if held == (sys.argv[6] == "held"):
             Path(sys.argv[5]).touch(exist_ok=True)
         return held
 
@@ -76,6 +77,7 @@ except UpdateRefused as exc:
             updater.journal.parent.name,
             str(updater.journal.parent.parent),
             str(observed_cycle_check),
+            "held" if observe_held_cycle_lock else "free",
         ],
         cwd=root,
         env=environment,
@@ -156,6 +158,50 @@ def test_start_gate_refuses_when_precycle_updater_lock_does_not_clear(
     assert os.readlink(tmp_path / "install" / "current") == before_target
 
 
+def test_start_gate_waits_through_unrelated_writer_cycle_then_reconciles(
+    tmp_path: Path,
+) -> None:
+    updater, _private, journal, _archive, _metadata = _active_updater(tmp_path)
+    state_path = tmp_path / "state" / "state.json"
+    before_state = state_path.read_bytes()
+    before_target = os.readlink(tmp_path / "install" / "current")
+    observed = tmp_path / "observed-held-cycle-lock"
+    updater_lock = fixture._lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = fixture._lock_for_other_process(journal.with_name("cycle.lock"))
+    gate = _spawn_transition_gate(
+        updater,
+        observed_cycle_check=observed,
+        observe_held_cycle_lock=True,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while not observed.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert observed.exists(), "start gate did not observe the unrelated writer cycle"
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        cycle_lock = -1
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+        updater_lock = -1
+        stdout, stderr = gate.communicate(timeout=3.0)
+    finally:
+        if cycle_lock >= 0:
+            fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+            os.close(cycle_lock)
+        if updater_lock >= 0:
+            fcntl.flock(updater_lock, fcntl.LOCK_UN)
+            os.close(updater_lock)
+        if gate.poll() is None:
+            gate.kill()
+            gate.communicate(timeout=1.0)
+
+    assert gate.returncode == 0, stderr
+    assert stdout.strip() == "RECONCILED"
+    assert state_path.read_bytes() == before_state
+    assert os.readlink(tmp_path / "install" / "current") == before_target
+
+
 def test_start_gate_switches_to_nested_authorization_when_cycle_lock_appears(
     tmp_path: Path,
 ) -> None:
@@ -201,6 +247,67 @@ def test_start_gate_switches_to_nested_authorization_when_cycle_lock_appears(
 
     assert gate.returncode == 0, stderr
     assert stdout.strip() == "START_AUTHORIZED"
+
+
+def test_start_gate_waits_for_prepared_record_to_become_restart_authorized(
+    tmp_path: Path,
+) -> None:
+    updater, private, journal, _archive, _metadata = _active_updater(tmp_path)
+    archive_two = fixture._archive(marker_path=tmp_path / "prepared-two")
+    metadata_two = fixture._canary_metadata(
+        private,
+        sequence=2,
+        archive=archive_two,
+        tree=fixture._tree_digest(tmp_path, archive_two, name="prepared-tree"),
+    )
+    updater.fetcher = lambda url, _maximum: (
+        metadata_two if url.endswith(".json") else archive_two
+    )
+
+    def interrupt_after_authorization(_command: object) -> None:
+        raise KeyboardInterrupt("leave a prepared transition for the gate")
+
+    updater.service_restarter = interrupt_after_authorization
+    with pytest.raises(KeyboardInterrupt, match="prepared transition"):
+        fixture._update(updater, private, channel="canary", sequence=2)
+
+    state_path = tmp_path / "state" / "state.json"
+    authorized_state = updater_module._read_update_state(updater.state_root)
+    prepared_state = dict(authorized_state)
+    prepared_pending = dict(authorized_state["pending"])
+    prepared_pending["stage"] = "prepared"
+    prepared_state["pending"] = prepared_pending
+    updater_module._write_update_state(updater.state_root, prepared_state)
+
+    observed = tmp_path / "observed-prepared-cycle-lock"
+    updater_lock = fixture._lock_for_other_process(tmp_path / "state" / "updater.lock")
+    cycle_lock = fixture._lock_for_other_process(journal.with_name("cycle.lock"))
+    gate = _spawn_transition_gate(
+        updater,
+        observed_cycle_check=observed,
+        observe_held_cycle_lock=True,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while not observed.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert observed.exists(), "start gate did not observe the prepared record"
+        updater_module._write_update_state(updater.state_root, authorized_state)
+        stdout, stderr = gate.communicate(timeout=3.0)
+    finally:
+        fcntl.flock(cycle_lock, fcntl.LOCK_UN)
+        os.close(cycle_lock)
+        fcntl.flock(updater_lock, fcntl.LOCK_UN)
+        os.close(updater_lock)
+        if gate.poll() is None:
+            gate.kill()
+            gate.communicate(timeout=1.0)
+
+    assert gate.returncode == 0, stderr
+    assert stdout.strip() == "START_AUTHORIZED"
+    assert state_path.read_bytes() == updater_module.canonical_document_bytes(
+        authorized_state
+    )
 
 
 @pytest.mark.parametrize("roll_back", (False, True), ids=("target", "rollback"))

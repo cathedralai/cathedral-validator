@@ -1156,7 +1156,7 @@ def test_separate_start_gate_accepts_only_updater_authorized_target_while_locks_
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "START_AUTHORIZED"
     assert prepared_guard.returncode == 23
-    assert "no restart-authorized pending activation" in prepared_guard.stderr
+    assert "did not finish before timeout" in prepared_guard.stderr
     assert unresolved_journal_guard.returncode == 23
     assert "unresolved or ambiguous submission" in unresolved_journal_guard.stderr
     assert missing_cycle_guard.returncode == 23
@@ -1267,7 +1267,7 @@ def test_separate_start_gate_rejects_unrelated_start_while_updater_lock_is_held(
         os.close(updater_lock)
 
     assert result.returncode == 23
-    assert "no restart-authorized pending activation" in result.stderr
+    assert "did not finish before timeout" in result.stderr
 
 
 def test_first_install_start_gate_accepts_exact_authorized_target_with_locks_held(

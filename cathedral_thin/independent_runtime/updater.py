@@ -1747,6 +1747,13 @@ class SignedReleaseUpdater:
         self._require_cycle_lock_held_elsewhere()
         require_idle_direct_writer_journal(self.journal)
 
+    def _has_restart_authorized_pending(self) -> bool:
+        """Read the durable state that distinguishes a restart from writer work."""
+
+        state = _read_update_state(self.state_root)
+        pending = _validate_pending(state.get("pending"))
+        return pending is not None and pending["stage"] == _PENDING_MAY_HAVE_RUN
+
     def _reconcile_boot_under_updater_lock(
         self,
         *,
@@ -1824,7 +1831,10 @@ class SignedReleaseUpdater:
                         deadline_monotonic=deadline,
                     )
                     return "RECONCILED"
-                if self._cycle_lock_is_held_elsewhere():
+                if (
+                    self._cycle_lock_is_held_elsewhere()
+                    and self._has_restart_authorized_pending()
+                ):
                     self._require_inflight_start_authorized(
                         deadline_monotonic=deadline
                     )
