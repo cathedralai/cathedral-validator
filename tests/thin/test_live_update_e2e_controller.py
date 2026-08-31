@@ -32,7 +32,7 @@ def test_live_controller_records_both_timer_states_in_host_evidence():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
     capture_host = script.split("capture_host() {", 1)[1].split(
-        "current_digest() {", 1
+        "configure_host() {", 1
     )[0]
 
     assert (
