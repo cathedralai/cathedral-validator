@@ -199,6 +199,24 @@ mirror branches. The canary host uses the internal direct-updater path, which is
 not a public operating mode. The disposable hotkey is never registered and never
 written to evidence.
 
+Create a dedicated Ed25519 key for live-test evidence. This key is not a
+validator wallet key, subnet wallet key, runtime-release key, bootstrap-release
+key, or production signing key. Keep its private half outside the checkout,
+candidate directories, and evidence directory; pin the public-key fingerprint
+through the operator's separate review process.
+
+```bash
+install -d -m 0700 /secure/live-e2e-result-key
+openssl genpkey -algorithm ED25519 \
+  -out /secure/live-e2e-result-key/private.pem
+openssl pkey \
+  -in /secure/live-e2e-result-key/private.pem \
+  -pubout \
+  -out /secure/live-e2e-result-key/public.pem
+chmod 0600 /secure/live-e2e-result-key/private.pem
+chmod 0644 /secure/live-e2e-result-key/public.pem
+```
+
 ```bash
 env \
   RUN_ID=REPLACE_WITH_UNIQUE_RUN_ID \
@@ -208,15 +226,41 @@ env \
   SOURCE_REVISION_B=REPLACE_WITH_MERGED_RELEASE_B_SHA \
   EVIDENCE_DIR=/secure/empty-live-test-evidence \
   TEST_GITHUB_REPOSITORY=cathedralai/cathedral-validator-release-e2e \
+  E2E_RESULT_SIGNING_PRIVATE_KEY=/secure/live-e2e-result-key/private.pem \
+  E2E_RESULT_SIGNING_PUBLIC_KEY=/secure/live-e2e-result-key/public.pem \
+  E2E_RESULT_SIGNER_KEY_ID=REPLACE_WITH_REVIEWED_TEST_KEY_ID \
   BUDGET_USD=2.00 \
   ./scripts/live_validator_update_e2e.sh --preflight
 ```
 
 Run the identical environment with `--execute` only after preflight prints
-`PREFLIGHT_PASS`. Success prints `TEARDOWN_COMPLETE`, followed by
-`LIVE_UPDATE_E2E_PASS`. The controller returns failure unless both hosts, boot
-disks, firewall, subnet, and network are proven absent. The test mirror's
-branches and immutable prerelease remain public as the audit record.
+`PREFLIGHT_PASS`. Required host evidence includes the release pointer, updater
+state, service and timer properties, unit definitions, and timer inventory.
+Status output and journals are explicitly optional diagnostics: their failures
+are recorded but do not hide a missing required section.
+
+The success grammar is result finalization and signature verification, then
+`TEARDOWN_COMPLETE`, then `LIVE_UPDATE_E2E_RESULT`, followed by
+`LIVE_UPDATE_E2E_PASS` as the final line. The controller returns failure unless
+both hosts, boot disks, firewall, subnet, and network are proven absent and the
+canonical result still verifies every captured file. The result artifacts are:
+
+```text
+live_update_e2e_result_v1.json
+live_update_e2e_result_v1.json.sha256
+live_update_e2e_result_v1.json.sig
+live-update-e2e-result-public-key.pem
+```
+
+Independent verification must use a separately reviewed and pinned copy of the
+result-signing public key, or its recorded fingerprint. The public key bundled
+with the evidence is a transport copy and is not, by itself, an authenticated
+trust root.
+
+The test mirror's branches and immutable bootstrap prerelease remain public as
+the remote test record. The controller does not upload the raw evidence bundle
+or its result: immutable publication is a separate, owner-authorized action
+after reviewing the bundle for infrastructure or operator metadata.
 
 ## Promote the exact canary
 

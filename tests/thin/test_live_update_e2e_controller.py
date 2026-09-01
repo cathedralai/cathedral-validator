@@ -539,6 +539,9 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
         'cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt"'
         in retry_capture
     )
+    assert "verify-capture" in retry_capture
+    assert '"$EVIDENCE_DIR/${label}-sections.json"' in retry_capture
+    assert '"$EVIDENCE_DIR/${label}.d"' in retry_capture
     assert '>>"$EVIDENCE_DIR/${label}-capture-retries.log"' in retry_capture
     assert "attempt < CAPTURE_RETRY_ATTEMPTS" in retry_capture
     assert 'sleep "$CAPTURE_RETRY_INTERVAL_SECONDS"' in retry_capture
@@ -553,10 +556,16 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "CAPTURE_RETRY_ATTEMPTS=6\n"
             "CAPTURE_RETRY_INTERVAL_SECONDS=5\n"
             f"EVIDENCE_DIR={evidence!s}\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
             "capture_attempts=0\n"
             "capture_host() { capture_attempts=$((capture_attempts + 1)); "
             "printf 'attempt-%s\\n' \"$capture_attempts\" "
-            '>"$EVIDENCE_DIR/$1.txt"; (( capture_attempts >= 3 )); }\n'
+            '>"$EVIDENCE_DIR/$1.txt"; '
+            'printf \'{}\\n\' >"$EVIDENCE_DIR/$1-sections.json"; '
+            'mkdir "$EVIDENCE_DIR/$1.d"; printf \'section\\n\' '
+            '>"$EVIDENCE_DIR/$1.d/section.txt"; '
+            "(( capture_attempts >= 3 )); }\n"
+            "python3() { return 0; }\n"
             "sleep() { :; }\n"
             "capture_host_with_retries() {" + retry_capture + "\n"
             "capture_host_with_retries transient-host vm-a\n"
@@ -570,7 +579,9 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "grep -Fx 'attempt-2' "
             '"$EVIDENCE_DIR/transient-host-capture-attempt-2.txt"\n'
             "grep -Fx 'attempt-3' "
-            '"$EVIDENCE_DIR/transient-host.txt"',
+            '"$EVIDENCE_DIR/transient-host.txt"\n'
+            'test -f "$EVIDENCE_DIR/transient-host-sections.json"\n'
+            'test -f "$EVIDENCE_DIR/transient-host.d/section.txt"',
         ],
         check=False,
         capture_output=True,
@@ -587,6 +598,7 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "CAPTURE_RETRY_ATTEMPTS=6\n"
             "CAPTURE_RETRY_INTERVAL_SECONDS=5\n"
             f"EVIDENCE_DIR={exhausted!s}\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
             "capture_attempts=0\n"
             "capture_host() { capture_attempts=$((capture_attempts + 1)); "
             "if (( capture_attempts == 1 )); then printf 'useful-partial\\n' "
@@ -714,7 +726,14 @@ def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     assert "systemctl cat cathedral-validator-canary-update.timer" in capture_host
     assert "cathedral-validator-update.timer" in capture_host
     assert "-b -n 250 --no-pager" in capture_host
-    assert '>"$EVIDENCE_DIR/${label}.txt" 2>&1' in capture_host
+    assert '>"$EVIDENCE_DIR/${label}-sections.tsv"' in capture_host
+    assert '2>"$EVIDENCE_DIR/${label}-ssh.stderr"' in capture_host
+    assert "decode-capture" in capture_host
+    assert "command_exit_status" not in capture_host
+    assert "capture_section current_release required" in capture_host
+    assert "capture_section updater_state required" in capture_host
+    assert "capture_section direct_unit_status optional" in capture_host
+    assert "capture_section updater_runtime_journal optional" in capture_host
     assert "unsafe transient systemd unit for evidence capture" in capture_host
     assert "systemctl show '${transient_unit}.service'" in capture_host
     assert (
@@ -723,7 +742,8 @@ def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     assert (
         "journalctl -u '${transient_unit}.service' -b -n 250 --no-pager" in capture_host
     )
-    assert '>>"$EVIDENCE_DIR/${label}.txt" 2>&1' in capture_host
+    assert '>>"$EVIDENCE_DIR/${label}-sections.tsv"' in capture_host
+    assert '2>>"$EVIDENCE_DIR/${label}-ssh.stderr"' in capture_host
     assert script.count('capture_host "$attempt_label" "$host" "$transient_unit"') == 1
     assert script.count("\ncapture_host ") == 0
 
@@ -746,6 +766,8 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
             "-c",
             "set -Eeuo pipefail\n"
             'EVIDENCE_DIR="$1"\n'
+            "RESULT_TOOL=/reviewed/result-tool\n"
+            "python3() { return 0; }\n"
             "remote_calls=0\n"
             "generic_result=0\n"
             "transient_result=0\n"
@@ -756,8 +778,8 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
             '  return "$transient_result"\n'
             "}\n" + capture_host + "\n"
             "capture_host both-ok vm-a transient-a\n"
-            "grep -Fx 'remote-1' \"$EVIDENCE_DIR/both-ok.txt\"\n"
-            "grep -Fx 'remote-2' \"$EVIDENCE_DIR/both-ok.txt\"\n"
+            "grep -Fx 'remote-1' \"$EVIDENCE_DIR/both-ok-sections.tsv\"\n"
+            "grep -Fx 'remote-2' \"$EVIDENCE_DIR/both-ok-sections.tsv\"\n"
             "remote_calls=0\n"
             "generic_result=255\n"
             "transient_result=0\n"

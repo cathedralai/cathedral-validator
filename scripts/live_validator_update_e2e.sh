@@ -114,6 +114,7 @@ readonly SIGNER="$REPOSITORY_ROOT/deploy/validator-update/build_signed_release.p
 readonly PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_channel.py"
 readonly BOOTSTRAP_BUILDER="$REPOSITORY_ROOT/deploy/validator-update/build_updater_bundle.py"
 readonly BOOTSTRAP_PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_bootstrap.py"
+readonly RESULT_TOOL="$REPOSITORY_ROOT/scripts/live_update_e2e_result.py"
 
 if (( FIXED_CHANNEL_WAIT_SECONDS < FIXED_CHANNEL_CACHE_MAX_SECONDS + UPDATE_TIMER_INTERVAL_SECONDS + TIMER_OPERATION_TIMEOUT_SECONDS + TIMER_SYSTEMD_MARGIN_SECONDS + FIXED_CHANNEL_WAIT_MARGIN_SECONDS )); then
   printf 'REFUSED: fixed-channel wait must cover cache, timer, updater, systemd, and margin bounds\n' >&2
@@ -165,7 +166,9 @@ required_env() {
 
 for variable in \
   RUN_ID CANDIDATE_A_DIR CANDIDATE_B_DIR \
-  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY; do
+  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY \
+  E2E_RESULT_SIGNING_PRIVATE_KEY E2E_RESULT_SIGNING_PUBLIC_KEY \
+  E2E_RESULT_SIGNER_KEY_ID; do
   required_env "$variable"
 done
 
@@ -217,8 +220,9 @@ if [[ "$SOURCE_REVISION_A" == "$SOURCE_REVISION_B" ]]; then
   printf 'REFUSED: A and B must be distinct reviewed source revisions\n' >&2
   exit 2
 fi
-if [[ "$EVIDENCE_DIR" != /* || "$CANDIDATE_A_DIR" != /* || "$CANDIDATE_B_DIR" != /* ]]; then
-  printf 'REFUSED: evidence and candidate directories must be absolute paths\n' >&2
+if [[ "$EVIDENCE_DIR" != /* || "$CANDIDATE_A_DIR" != /* || "$CANDIDATE_B_DIR" != /* || \
+  "$E2E_RESULT_SIGNING_PRIVATE_KEY" != /* || "$E2E_RESULT_SIGNING_PUBLIC_KEY" != /* ]]; then
+  printf 'REFUSED: evidence, candidate, and result signing key paths must be absolute\n' >&2
   exit 2
 fi
 
@@ -285,7 +289,7 @@ if total > requested:
     raise SystemExit(f"REFUSED: planning total ${total} exceeds requested budget ${requested}")
 PY
 
-for command in awk basename cmp curl cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
+for command in awk basename cmp cp curl cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
   command -v "$command" >/dev/null || {
     printf 'REFUSED: required command is missing: %s\n' "$command" >&2
     exit 2
@@ -301,12 +305,46 @@ if ! python3 -c 'import bittensor_wallet' >/dev/null 2>&1; then
 fi
 for file in \
   "$HARNESS_SOURCE" "$FAULT_ORIGIN_SOURCE" "$STATE_WAITER_SOURCE" \
-  "$SIGNER" "$PUBLISHER" "$BOOTSTRAP_BUILDER" "$BOOTSTRAP_PUBLISHER"; do
+  "$SIGNER" "$PUBLISHER" "$BOOTSTRAP_BUILDER" "$BOOTSTRAP_PUBLISHER" \
+  "$RESULT_TOOL"; do
   [[ -f "$file" && ! -L "$file" ]] || {
     printf 'REFUSED: required reviewed file is unavailable: %s\n' "$file" >&2
     exit 2
   }
 done
+
+RESULT_SIGNER_FINGERPRINT="$(python3 "$RESULT_TOOL" validate-key-pair \
+  --private-key "$E2E_RESULT_SIGNING_PRIVATE_KEY" \
+  --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+  --key-id "$E2E_RESULT_SIGNER_KEY_ID")"
+readonly RESULT_SIGNER_FINGERPRINT
+python3 - \
+  "$E2E_RESULT_SIGNING_PRIVATE_KEY" "$EVIDENCE_DIR" \
+  "$CANDIDATE_A_DIR" "$CANDIDATE_B_DIR" "$REPOSITORY_ROOT" <<'PY'
+import pathlib
+import sys
+
+private_key = pathlib.Path(sys.argv[1]).resolve(strict=True)
+evidence = pathlib.Path(sys.argv[2]).resolve(strict=False)
+evidence_input = pathlib.Path(sys.argv[2])
+if evidence_input.is_symlink() or (
+    evidence_input.exists() and not evidence_input.is_dir()
+):
+    raise SystemExit("REFUSED: EVIDENCE_DIR must be a directory and not a symlink")
+candidate_roots = [pathlib.Path(value).resolve(strict=True) for value in sys.argv[3:5]]
+repository = pathlib.Path(sys.argv[5]).resolve(strict=True)
+for forbidden_root in [evidence, *candidate_roots, repository]:
+    resolved = forbidden_root
+    if private_key == resolved or resolved in private_key.parents:
+        raise SystemExit(
+            f"REFUSED: result signing private key must remain outside {resolved}"
+        )
+for forbidden_root in [*candidate_roots, repository]:
+    if evidence == forbidden_root or forbidden_root in evidence.parents:
+        raise SystemExit(
+            f"REFUSED: EVIDENCE_DIR must remain outside {forbidden_root}"
+        )
+PY
 
 gc() {
   gcloud --quiet --project="$GCP_PROJECT" "$@"
@@ -713,6 +751,8 @@ if [[ -n "$(find "$EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   exit 2
 fi
 chmod 0700 "$EVIDENCE_DIR"
+install -m 0444 "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+  "$EVIDENCE_DIR/live-update-e2e-result-public-key.pem"
 jq -n \
   --arg cloud_resource_manager "$CLOUD_RESOURCE_MANAGER_API" \
   --arg iap "$IAP_API" \
@@ -934,6 +974,9 @@ cleanup_resource_until_absent() {
 
 cleanup() {
   local status=$?
+  local observed_result_digest=""
+  local result_digest=""
+  local result_ok=0
   local teardown_ok=1
   local final_status
   trap - EXIT INT TERM
@@ -1027,10 +1070,34 @@ cleanup() {
   printf 'original_status=%s\nteardown_verified=%s\n' \
     "$status" "$teardown_ok" >"$EVIDENCE_DIR/teardown-status.txt"
   if [[ $status -eq 0 && "$teardown_ok" == 1 ]]; then
+    if [[ "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD 2>/dev/null)" != "$SOURCE_REVISION_B" || \
+      -n "$(git -C "$REPOSITORY_ROOT" status --short 2>/dev/null)" ]]; then
+      printf 'REFUSED: controller source identity changed during the live test\n' >&2
+    elif result_digest="$(python3 "$RESULT_TOOL" finalize \
+      --evidence-dir "$EVIDENCE_DIR" \
+      --private-key "$E2E_RESULT_SIGNING_PRIVATE_KEY" \
+      --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+      --key-id "$E2E_RESULT_SIGNER_KEY_ID" \
+      --controller-script "$REPOSITORY_ROOT/scripts/live_validator_update_e2e.sh")" && \
+      observed_result_digest="$(python3 "$RESULT_TOOL" verify-result \
+        --evidence-dir "$EVIDENCE_DIR" \
+        --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY")" && \
+      [[ "$observed_result_digest" == "$result_digest" ]]; then
+      result_ok=1
+    fi
     printf 'TEARDOWN_COMPLETE run=%s\n' "$RUN_ID"
-    printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s test_repository=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s\n' \
-      "$RUN_ID" "$EVIDENCE_DIR" "$TEST_GITHUB_REPOSITORY" \
-      "$ESTIMATED_COST_USD" "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG"
+    if [[ "$result_ok" == 1 ]]; then
+      printf 'LIVE_UPDATE_E2E_RESULT run=%s schema=cathedral_validator_live_update_e2e_result_v1 sha256=%s signature=%s\n' \
+        "$RUN_ID" "$result_digest" \
+        "$EVIDENCE_DIR/live_update_e2e_result_v1.json.sig"
+      printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s test_repository=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s result_sha256=%s\n' \
+        "$RUN_ID" "$EVIDENCE_DIR" "$TEST_GITHUB_REPOSITORY" \
+        "$ESTIMATED_COST_USD" "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG" \
+        "$result_digest"
+    else
+      final_status=1
+      printf 'LIVE_UPDATE_E2E_RESULT_NOT_PROVEN run=%s\n' "$RUN_ID" >&2
+    fi
   elif [[ "$teardown_ok" != 1 ]]; then
     printf 'TEARDOWN_NOT_PROVEN run=%s original_status=%s\n' "$RUN_ID" "$status" >&2
   else
@@ -1262,6 +1329,11 @@ install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
 BOOTSTRAP_FINGERPRINT="$(printf '%s' "$bootstrap_build_json" | jq -er '.bootstrap_signing_key_fingerprint')"
 RUNTIME_FINGERPRINT="$(printf '%s' "$bootstrap_build_json" | jq -er '.runtime_release_key_fingerprint')"
 readonly BOOTSTRAP_FINGERPRINT RUNTIME_FINGERPRINT
+if [[ "$RESULT_SIGNER_FINGERPRINT" == "$BOOTSTRAP_FINGERPRINT" || \
+  "$RESULT_SIGNER_FINGERPRINT" == "$RUNTIME_FINGERPRINT" ]]; then
+  printf 'REFUSED: result evidence key must be distinct from release signing keys\n' >&2
+  exit 2
+fi
 BOOTSTRAP_SEQUENCE="$(printf '%s' "$bootstrap_build_json" | jq -er '.bootstrap_sequence')"
 BOOTSTRAP_MANIFEST_SHA="$(printf '%s' "$bootstrap_build_json" | jq -er '.manifest_sha256')"
 BOOTSTRAP_BUNDLE_SHA="$(printf '%s' "$bootstrap_build_json" | jq -er '.bundle_sha256')"
@@ -1382,7 +1454,8 @@ python3 - \
   "$STABLE_BRANCH" "$FAULT_BRANCH" "$BOOTSTRAP_TAG" \
   "$FIXED_CHANNEL_CACHE_MAX_SECONDS" "$UPDATE_TIMER_INTERVAL_SECONDS" \
   "$FIXED_CHANNEL_WAIT_SECONDS" \
-  "$HARNESS_SHA" "$FAULT_ORIGIN_SHA" "$STATE_WAITER_SHA" <<'PY'
+  "$HARNESS_SHA" "$FAULT_ORIGIN_SHA" "$STATE_WAITER_SHA" \
+  "$E2E_RESULT_SIGNER_KEY_ID" "$RESULT_SIGNER_FINGERPRINT" <<'PY'
 import json
 import pathlib
 import sys
@@ -1419,6 +1492,8 @@ import sys
     harness_sha256,
     fault_origin_sha256,
     state_waiter_sha256,
+    result_signer_key_id,
+    result_signer_fingerprint,
 ) = sys.argv[1:]
 path = pathlib.Path(output)
 document = {
@@ -1456,6 +1531,12 @@ document = {
     "no_chain_harness_sha256": harness_sha256,
     "fault_origin_sha256": fault_origin_sha256,
     "state_waiter_sha256": state_waiter_sha256,
+    "result_signer": {
+        "purpose": "live_e2e_test_evidence_only",
+        "key_id": result_signer_key_id,
+        "algorithm": "ed25519",
+        "public_key_fingerprint": result_signer_fingerprint,
+    },
     "bootstrap_track": "test",
     "bootstrap_tag": bootstrap_tag,
     "bootstrap_transport": "anonymous_immutable_github_release",
@@ -2010,29 +2091,58 @@ capture_host() {
   local label="$1"
   local host="$2"
   local transient_unit="${3:-}"
+  local capture_prelude
+  local decode_status=0
   local generic_status=0
   local transient_status=0
+  local -a decode_args
+  if [[ ! "$label" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+    printf 'REFUSED: unsafe evidence capture label: %s\n' "$label" >&2
+    return 2
+  fi
   if [[ -n "$transient_unit" && ! "$transient_unit" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
     printf 'REFUSED: unsafe transient systemd unit for evidence capture: %s\n' \
       "$transient_unit" >&2
     return 2
   fi
-  if remote "$host" "printf '%s\n' '--- current ---'; sudo readlink /opt/cathedral-validator/current || true; printf '%s\n' '--- updater state ---'; sudo cat /var/lib/cathedral-validator-update/state.json || true; printf '%s\n' '--- direct unit state ---'; sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny || true; sudo systemctl status cathedral-validator-direct.service --full --no-pager || true; printf '%s\n' '--- direct unit definition ---'; sudo systemctl cat cathedral-validator-direct.service || true; printf '%s\n' '--- boot reconcile state ---'; sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager || true; printf '%s\n' '--- boot reconcile definition ---'; sudo systemctl cat cathedral-validator-boot-reconcile.service || true; printf '%s\n' '--- updater service state ---'; sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager || true; printf '%s\n' '--- updater service definitions ---'; sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service || true; printf '%s\n' '--- timers ---'; sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths || true; sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer || true; sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer' || true; printf '%s\n' '--- updater and runtime logs ---'; sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager || true" >"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+  capture_prelude='capture_failed=0; capture_section() { section="$1"; requirement="$2"; shift 2; output="$(mktemp)" || exit 70; "$@" >"$output" 2>&1; command_status=$?; byte_count="$(wc -c <"$output")"; digest="$(sha256sum "$output" | cut -d" " -f1)"; encoded="$(base64 -w 0 "$output")"; printf "CATHEDRAL_EVIDENCE_SECTION_V1\t%s\t%s\t%s\t%s\t%s\t%s\n" "$section" "$requirement" "$command_status" "$byte_count" "$digest" "$encoded"; rm -f -- "$output"; if [ "$requirement" = required ] && { [ "$command_status" -ne 0 ] || [ "$byte_count" -eq 0 ]; }; then capture_failed=1; fi; }'
+  if remote "$host" "$capture_prelude; capture_section current_release required sudo readlink /opt/cathedral-validator/current; capture_section updater_state required sudo cat /var/lib/cathedral-validator-update/state.json; capture_section direct_unit_show required sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny; capture_section direct_unit_status optional sudo systemctl status cathedral-validator-direct.service --full --no-pager; capture_section direct_unit_definition required sudo systemctl cat cathedral-validator-direct.service; capture_section boot_reconcile_show required sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section boot_reconcile_status optional sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager; capture_section boot_reconcile_definition required sudo systemctl cat cathedral-validator-boot-reconcile.service; capture_section updater_services_show required sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section updater_services_status optional sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager; capture_section updater_services_definitions required sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service; capture_section timers_show required sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths; capture_section timer_definitions required sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer; capture_section timer_list required sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer'; capture_section updater_runtime_journal optional sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager; exit \"\$capture_failed\"" >"$EVIDENCE_DIR/${label}-sections.tsv" 2>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
     :
   else
     generic_status=$?
   fi
   if [[ -n "$transient_unit" ]]; then
-    if remote "$host" "printf '%s\n' '--- transient updater unit ---'; sudo systemctl show '${transient_unit}.service' -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID || true; sudo systemctl status '${transient_unit}.service' --full --no-pager || true; printf '%s\n' '--- transient updater journal ---'; sudo journalctl -u '${transient_unit}.service' -b -n 250 --no-pager || true" >>"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+    if remote "$host" "$capture_prelude; capture_section transient_unit_show optional sudo systemctl show '${transient_unit}.service' -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID; capture_section transient_unit_status optional sudo systemctl status '${transient_unit}.service' --full --no-pager; capture_section transient_unit_journal optional sudo journalctl -u '${transient_unit}.service' -b -n 250 --no-pager; exit \"\$capture_failed\"" >>"$EVIDENCE_DIR/${label}-sections.tsv" 2>>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
       :
     else
       transient_status=$?
     fi
   fi
+  decode_args=(
+    decode-capture
+    --input "$EVIDENCE_DIR/${label}-sections.tsv"
+    --ssh-stderr "$EVIDENCE_DIR/${label}-ssh.stderr"
+    --text-output "$EVIDENCE_DIR/${label}.txt"
+    --manifest-output "$EVIDENCE_DIR/${label}-sections.json"
+    --artifacts-dir "$EVIDENCE_DIR/${label}.d"
+    --label "$label"
+    --host "$host"
+  )
+  if [[ -n "$transient_unit" ]]; then
+    decode_args+=(--transient-unit "$transient_unit")
+  fi
+  if python3 "$RESULT_TOOL" "${decode_args[@]}"; then
+    :
+  else
+    decode_status=$?
+  fi
   if (( generic_status != 0 )); then
     return "$generic_status"
   fi
-  return "$transient_status"
+  if (( transient_status != 0 )); then
+    return "$transient_status"
+  fi
+  return "$decode_status"
 }
 
 capture_host_with_retries() {
@@ -2045,7 +2155,15 @@ capture_host_with_retries() {
   for attempt in $(seq 1 "$CAPTURE_RETRY_ATTEMPTS"); do
     attempt_label="${label}-capture-attempt-${attempt}"
     if capture_host "$attempt_label" "$host" "$transient_unit"; then
-      if cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt"; then
+      rm -f -- "$EVIDENCE_DIR/${label}.txt" "$EVIDENCE_DIR/${label}-sections.json"
+      rm -rf -- "$EVIDENCE_DIR/${label}.d"
+      if cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt" && \
+        cp "$EVIDENCE_DIR/${attempt_label}-sections.json" \
+          "$EVIDENCE_DIR/${label}-sections.json" && \
+        cp -R "$EVIDENCE_DIR/${attempt_label}.d" "$EVIDENCE_DIR/${label}.d" && \
+        python3 "$RESULT_TOOL" verify-capture \
+          --manifest "$EVIDENCE_DIR/${label}-sections.json" \
+          --artifacts-dir "$EVIDENCE_DIR/${label}.d"; then
         printf 'attempt=%s status=0\n' "$attempt" \
           >>"$EVIDENCE_DIR/${label}-capture-retries.log"
         return 0
@@ -2054,6 +2172,8 @@ capture_host_with_retries() {
         printf 'attempt=%s status=%s promotion=failed\n' \
           "$attempt" "$capture_status" \
           >>"$EVIDENCE_DIR/${label}-capture-retries.log"
+        rm -f -- "$EVIDENCE_DIR/${label}.txt" "$EVIDENCE_DIR/${label}-sections.json"
+        rm -rf -- "$EVIDENCE_DIR/${label}.d"
       fi
     else
       capture_status=$?
