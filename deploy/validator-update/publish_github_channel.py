@@ -56,10 +56,34 @@ _RELEASE_PAGE_SIZE = 100
 _RELEASE_MAX_PAGES = 10
 _HISTORY_NAME = re.compile(r"([1-9][0-9]{0,18})-([0-9a-f]{64})\.json")
 _MAX_HISTORY_RECORDS = 1_000
-_POINTER_VERIFY_ATTEMPTS = 6
-_POINTER_VERIFY_DEADLINE_SECONDS = 30.0
-_POINTER_VERIFY_RETRY_SECONDS = 1.0
+_RAW_POINTER_CACHE_MAX_AGE_SECONDS = 300.0
+_RAW_POINTER_CACHE_SAFETY_MARGIN_SECONDS = 60.0
+_MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS = (
+    _RAW_POINTER_CACHE_MAX_AGE_SECONDS + _RAW_POINTER_CACHE_SAFETY_MARGIN_SECONDS
+)
+_POINTER_VERIFY_RETRY_SECONDS = 5.0
 _POINTER_VERIFY_REQUEST_SECONDS = 5.0
+_POINTER_VERIFY_DEADLINE_SECONDS = (
+    _MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS
+    + _POINTER_VERIFY_RETRY_SECONDS
+    + _POINTER_VERIFY_REQUEST_SECONDS
+)
+_POINTER_VERIFY_ATTEMPTS = (
+    int(_POINTER_VERIFY_DEADLINE_SECONDS / _POINTER_VERIFY_RETRY_SECONDS) + 1
+)
+_PINNED_POINTER_VERIFY_ATTEMPTS = 31
+_PINNED_POINTER_VERIFY_DEADLINE_SECONDS = 60.0
+_PINNED_POINTER_VERIFY_RETRY_SECONDS = 2.0
+_POINTER_PUBLICATION_SAFETY_SECONDS = 30
+_MIN_POINTER_VERIFICATION_REMAINING_SECONDS = int(
+    _PINNED_POINTER_VERIFY_DEADLINE_SECONDS
+    + _POINTER_VERIFY_DEADLINE_SECONDS
+    + _POINTER_PUBLICATION_SAFETY_SECONDS
+)
+_PUBLICATION_OPERATION_SAFETY_SECONDS = 300
+_MIN_PUBLICATION_REMAINING_SECONDS = int(
+    _MIN_POINTER_VERIFICATION_REMAINING_SECONDS + _PUBLICATION_OPERATION_SAFETY_SECONDS
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +92,7 @@ class Publication:
     channel_branch: str
     channel: str
     sequence: int
+    expires_unix: int
     metadata: bytes
     metadata_sha256: str
     archive: bytes
@@ -260,12 +285,20 @@ def validate_publication(
         raise UpdateRefused("signed release inputs are unreadable") from exc
     if channel not in {"canary", "stable"}:
         raise UpdateRefused("signed release channel is invalid")
+    observed_now = int(time.time()) if now_unix is None else now_unix
     release = parse_release_metadata(
         metadata,
         channel=channel,
         public_key=load_pinned_public_key(public_key_path, expected_uid=os.geteuid()),
-        now_unix=int(time.time()) if now_unix is None else now_unix,
+        now_unix=observed_now,
     )
+    if release.expires_unix - observed_now <= _MIN_PUBLICATION_REMAINING_SECONDS:
+        remaining = release.expires_unix - observed_now
+        raise UpdateRefused(
+            "signed release lacks required publication headroom "
+            f"(remaining_seconds={remaining}, "
+            f"required_seconds>{_MIN_PUBLICATION_REMAINING_SECONDS})"
+        )
     if not 1 <= len(archive) <= MAX_ARCHIVE_BYTES:
         raise UpdateRefused("release archive size is invalid")
     archive_sha256 = hashlib.sha256(archive).hexdigest()
@@ -290,6 +323,7 @@ def validate_publication(
         channel_branch=channel_branch,
         channel=channel,
         sequence=release.sequence,
+        expires_unix=release.expires_unix,
         metadata=metadata,
         metadata_sha256=hashlib.sha256(metadata).hexdigest(),
         archive=archive,
@@ -882,57 +916,92 @@ def _anonymous_fetch(url: str, *, maximum: int, timeout_seconds: float = 60.0) -
     return body
 
 
-def _cache_busted_url(url: str, *, metadata_sha256: str, attempt: int) -> str:
-    parsed = urllib.parse.urlsplit(url)
-    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    query.append(("cathedral_verify", f"{metadata_sha256}-{attempt}"))
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), "")
-    )
-
-
 def _verify_anonymous_pointer(
     url: str,
     expected: bytes,
     *,
-    metadata_sha256: str,
+    label: str,
     attempts: int = _POINTER_VERIFY_ATTEMPTS,
     deadline_seconds: float = _POINTER_VERIFY_DEADLINE_SECONDS,
     retry_seconds: float = _POINTER_VERIFY_RETRY_SECONDS,
     request_seconds: float = _POINTER_VERIFY_REQUEST_SECONDS,
+    minimum_success_elapsed_seconds: float = 0.0,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
-    deadline = clock() + deadline_seconds
+    started = clock()
+    deadline = started + deadline_seconds
+    success_not_before = started + minimum_success_elapsed_seconds
     last_error: UpdateRefused | None = None
-    for attempt in range(1, attempts + 1):
-        remaining = deadline - clock()
+    last_observed_sha256: str | None = None
+    successful_fetches = 0
+    transport_errors = 0
+    post_threshold_attempted = False
+    for attempt in range(attempts):
+        now = clock()
+        remaining = deadline - now
         if remaining <= 0:
             break
+        if now >= success_not_before:
+            post_threshold_attempted = True
         try:
             observed = _anonymous_fetch(
-                _cache_busted_url(
-                    url, metadata_sha256=metadata_sha256, attempt=attempt
-                ),
+                url,
                 maximum=MAX_METADATA_BYTES,
                 timeout_seconds=min(request_seconds, remaining),
             )
         except UpdateRefused as exc:
             last_error = exc
+            last_observed_sha256 = None
+            transport_errors += 1
+            matched = False
         else:
-            if observed == expected:
+            successful_fetches += 1
+            matched = observed == expected
+            if matched and now >= success_not_before and clock() <= deadline:
                 return
+            last_observed_sha256 = hashlib.sha256(observed).hexdigest()
             last_error = None
-        if attempt == attempts:
+        if attempt + 1 == attempts:
             break
         remaining = deadline - clock()
         if remaining <= 0:
             break
-        sleeper(min(retry_seconds, remaining))
+        current = clock()
+        if not post_threshold_attempted and current >= success_not_before:
+            delay = 0.0
+        elif matched and not post_threshold_attempted:
+            delay = max(0.0, success_not_before - current)
+        else:
+            delay = retry_seconds
+        if delay > 0:
+            sleeper(min(delay, remaining))
+    diagnostic = (
+        f"; last_observed_sha256={last_observed_sha256}"
+        if last_observed_sha256 is not None
+        else "; last_result=transport_error"
+    )
     raise UpdateRefused(
-        "anonymous channel pointer did not converge to the exact published "
-        "metadata within its bounded retry window"
+        f"anonymous {label} did not converge to the exact published metadata "
+        f"within its bounded retry window{diagnostic}; "
+        f"successful_fetches={successful_fetches}; transport_errors={transport_errors}"
     ) from last_error
+
+
+def _require_publication_lifetime(
+    publication: Publication,
+    *,
+    wall_clock: Callable[[], float],
+    minimum_remaining_seconds: int,
+    stage: str,
+) -> None:
+    remaining = publication.expires_unix - int(wall_clock())
+    if remaining <= minimum_remaining_seconds:
+        raise UpdateRefused(
+            f"signed release expires too soon {stage} "
+            f"(remaining_seconds={remaining}, required_seconds>"
+            f"{minimum_remaining_seconds})"
+        )
 
 
 def publish(
@@ -940,7 +1009,14 @@ def publish(
     *,
     public_key_path: Path,
     github: GitHub,
-) -> None:
+    wall_clock: Callable[[], float] = time.time,
+) -> str:
+    _require_publication_lifetime(
+        publication,
+        wall_clock=wall_clock,
+        minimum_remaining_seconds=_MIN_PUBLICATION_REMAINING_SECONDS,
+        stage="before publication",
+    )
     github.ensure_release(publication)
     downloaded = _anonymous_fetch(publication.archive_url, maximum=MAX_ARCHIVE_BYTES)
     if hashlib.sha256(downloaded).hexdigest() != publication.archive_sha256:
@@ -998,21 +1074,49 @@ def publish(
     if history is not None and history[1] != publication.metadata:
         raise UpdateRefused("immutable release history path already has other bytes")
 
+    _require_publication_lifetime(
+        publication,
+        wall_clock=wall_clock,
+        minimum_remaining_seconds=_MIN_POINTER_VERIFICATION_REMAINING_SECONDS,
+        stage="before the channel update",
+    )
+    published_revision = branch.revision
     if not pointer_identical or not history_identical:
-        github.commit_channel(
+        published_revision = github.commit_channel(
             publication,
             base_revision=branch.revision,
         )
+    encoded_revision = urllib.parse.quote(published_revision, safe="")
     encoded_branch = urllib.parse.quote(publication.channel_branch, safe="")
+    pinned_url = (
+        f"https://raw.githubusercontent.com/{publication.repository}/"
+        f"{encoded_revision}/{publication.pointer_path}"
+    )
     raw_url = (
         f"https://raw.githubusercontent.com/{publication.repository}/"
         f"{encoded_branch}/{publication.pointer_path}"
     )
     _verify_anonymous_pointer(
+        pinned_url,
+        publication.metadata,
+        label="commit-pinned channel pointer",
+        attempts=_PINNED_POINTER_VERIFY_ATTEMPTS,
+        deadline_seconds=_PINNED_POINTER_VERIFY_DEADLINE_SECONDS,
+        retry_seconds=_PINNED_POINTER_VERIFY_RETRY_SECONDS,
+    )
+    _verify_anonymous_pointer(
         raw_url,
         publication.metadata,
-        metadata_sha256=publication.metadata_sha256,
+        label="mutable channel pointer",
+        minimum_success_elapsed_seconds=(_MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS),
     )
+    _require_publication_lifetime(
+        publication,
+        wall_clock=wall_clock,
+        minimum_remaining_seconds=0,
+        stage="after pointer verification",
+    )
+    return published_revision
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1042,8 +1146,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository=options.repository,
             channel_branch=options.channel_branch,
         )
+        published_revision: str | None = None
         if options.publish:
-            publish(
+            published_revision = publish(
                 publication,
                 public_key_path=options.public_key,
                 github=GitHub(publication.repository),
@@ -1058,6 +1163,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"channel={publication.channel} sequence={publication.sequence} "
         f"archive_sha256={publication.archive_sha256} "
         f"metadata_sha256={publication.metadata_sha256}"
+        + (
+            f" channel_revision={published_revision}"
+            if published_revision is not None
+            else ""
+        )
     )
     return 0
 

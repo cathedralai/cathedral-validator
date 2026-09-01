@@ -118,17 +118,40 @@ in this order:
 3. publish and verify the immutable release and tag
 4. anonymously download and verify the archive
 5. atomically commit immutable signed history and the mutable canary pointer
-6. anonymously verify the pointer
+6. anonymously verify the exact commit-pinned pointer
+7. wait for the mutable branch pointer to serve the same bytes
 
 An interrupted retry resumes an exact empty or fully uploaded draft. It refuses
 partial or different draft assets and never overwrites them.
-Raw pointer verification uses cache-busted bounded retries but still requires
-the exact signed bytes. If a pointer is missing on an existing branch, the next
-release must exceed a stable set of retained signed history. An exact retained
-record resumes an interrupted pointer write. An empty initial branch resumes
-only at its exact source commit. Missing, invalid, duplicated, deleted, or
-changing history stops publication. History and pointer move in one commit with
-a non-force branch compare-and-swap, so a concurrent lower sequence loses.
+GitHub raw branch URLs advertise a five-minute cache and ignore query strings
+for cache selection. The publisher first proves the immutable commit URL. It
+then waits through the full advertised cache lifetime plus one minute and
+confirms the fixed branch URL serves the same bytes from the publisher's
+anonymous network vantage. This does not claim global CDN observation. It does
+prevent a successful publication before an old response's advertised lifetime
+has elapsed. A refusal includes only digests and outcome counts and is safe to
+retry. Signed metadata must retain enough life for both bounded checks and an
+additional five-minute publication margin.
+Validation applies this headroom even without `--publish`, so a dry check does
+not approve metadata too old for a later write. The publisher checks lifetime
+again before moving the channel and again before reporting success. If slow
+release preparation consumes the margin, it can leave the immutable release
+and tag published while refusing to move the channel. These margins are
+admission headroom, not promises that external GitHub operations finish within
+that time. Re-sign a higher sequence that references the same content-addressed
+archive, then retry.
+
+If the final lifetime check refuses after pointer verification, the channel has
+already moved to metadata that is now expired. Updaters reject it and retain
+their current installed release. New installs can fail until recovery. Re-sign
+the same content-addressed archive with a higher sequence and fresh lifetime,
+then publish it immediately. Never replay or edit the expired signed bytes.
+If a pointer is missing on an existing branch, the next release must exceed a
+stable set of retained signed history. An exact retained record resumes an
+interrupted pointer write. An empty initial branch resumes only at its exact
+source commit. Missing, invalid, duplicated, deleted, or changing history stops
+publication. History and pointer move in one commit with a non-force branch
+compare-and-swap, so a concurrent lower sequence loses.
 
 ```bash
 python deploy/validator-update/publish_github_channel.py \
