@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -125,6 +126,47 @@ def _keypair(
     public_path.chmod(0o644)
     fingerprint = installer.ed25519_public_key_fingerprint(public, label)
     return private, private_path, public_path, fingerprint
+
+
+def _stable_metadata(
+    root: Path,
+    *,
+    private: Ed25519PrivateKey,
+    sequence: int,
+    issued_unix: int,
+) -> Path:
+    archive_digest = "a" * 64
+    signed = {
+        "schema": "cathedral_validator_release_v1",
+        "channel": "stable",
+        "sequence": sequence,
+        "issued_unix": issued_unix,
+        "expires_unix": issued_unix + 3600,
+        "release": {
+            "version": "4.0.0",
+            "archive_url": "https://example.invalid/release.tar.gz",
+            "archive_sha256": archive_digest,
+            "tree_sha256": "b" * 64,
+            "entrypoint": "bin/cathedral-validator",
+            "promoted_canary": {
+                "sequence": sequence,
+                "signed_sha256": "c" * 64,
+                "metadata_sha256": "d" * 64,
+                "archive_sha256": archive_digest,
+            },
+        },
+    }
+    payload = builder.canonical_json(signed)
+    body = builder.canonical_json(
+        {
+            "signed": signed,
+            "signature": base64.b64encode(private.sign(payload)).decode("ascii"),
+        }
+    )
+    path = root / "stable.json"
+    path.write_bytes(body)
+    path.chmod(0o644)
+    return path
 
 
 def _wheel(root: Path, *, private_marker: bool = False) -> tuple[Path, str]:
@@ -284,7 +326,7 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
         bootstrap_fingerprint,
     ) = _keypair(tmp_path / "bootstrap-key", "bootstrap")
     (
-        _,
+        runtime_private,
         _,
         runtime_public_path,
         runtime_fingerprint,
@@ -296,6 +338,8 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     requirements.chmod(0o644)
+    issued_unix = int(time.time()) - 60
+    stable_sequence = 7
     return {
         "bootstrap_private": bootstrap_private,
         "bootstrap_private_path": bootstrap_private_path,
@@ -303,8 +347,15 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
         "bootstrap_fingerprint": bootstrap_fingerprint,
         "runtime_public_path": runtime_public_path,
         "runtime_fingerprint": runtime_fingerprint,
+        "stable_sequence": stable_sequence,
+        "stable_metadata": _stable_metadata(
+            tmp_path,
+            private=runtime_private,
+            sequence=stable_sequence,
+            issued_unix=issued_unix,
+        ),
         "sequence": 1,
-        "issued_unix": int(time.time()) - 60,
+        "issued_unix": issued_unix,
         "lifetime_seconds": 24 * 60 * 60,
         "wheelhouse": wheelhouse,
         "requirements": requirements,
@@ -321,6 +372,7 @@ def _build(
         bootstrap_signing_private_key_path=values["bootstrap_private_path"],
         bootstrap_signing_public_key_path=values["bootstrap_public_path"],
         runtime_release_public_key_path=values["runtime_public_path"],
+        stable_release_metadata_path=values["stable_metadata"],
         assets_dir=values["assets"],
         sequence=values["sequence"],
         issued_unix=values["issued_unix"],
@@ -452,7 +504,7 @@ def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
     assert b"PRIVATE KEY" not in archive
     assert b"PRIVATE KEY" not in manifest
     document = json.loads(manifest)
-    assert document["schema"] == "cathedral_validator_updater_bootstrap_v2"
+    assert document["schema"] == "cathedral_validator_updater_bootstrap_v3"
     assert document["bootstrap_signing_key"] == {
         "algorithm": "Ed25519",
         "fingerprint": values["bootstrap_fingerprint"],
@@ -468,6 +520,12 @@ def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
         "fingerprint": values["runtime_fingerprint"],
         "path": "payload/runtime-release-public-key.pem",
     }
+    assert document["stable_release_floor"] == {
+        "metadata_sha256": hashlib.sha256(
+            values["stable_metadata"].read_bytes()
+        ).hexdigest(),
+        "sequence": values["stable_sequence"],
+    }
     assert "public_key" not in document
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
         names = bundle.getnames()
@@ -479,12 +537,30 @@ def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
         runtime_member = bundle.extractfile("payload/runtime-release-public-key.pem")
         assert runtime_member is not None
         assert runtime_member.read() == values["runtime_public_path"].read_bytes()
+        update_member = bundle.extractfile("payload/examples/update.env.example")
+        assert update_member is not None
+        update_body = update_member.read()
+        assert (
+            f"CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE={values['stable_sequence']}\n".encode()
+            in update_body
+        )
+        assert builder.STABLE_SEQUENCE_PLACEHOLDER not in update_body
 
 
 def test_builder_requires_matching_bootstrap_pair_and_distinct_runtime_key(tmp_path):
     values = _inputs(tmp_path / "mismatch")
     values["bootstrap_public_path"] = values["runtime_public_path"]
     with pytest.raises(builder.BundleRefused, match="does not match"):
+        _build(values)
+
+
+def test_builder_binds_floor_to_verified_stable_metadata(tmp_path):
+    values = _inputs(tmp_path)
+    metadata = json.loads(values["stable_metadata"].read_bytes())
+    metadata["signed"]["sequence"] += 1
+    values["stable_metadata"].write_bytes(builder.canonical_json(metadata))
+
+    with pytest.raises(builder.BundleRefused, match="signature is invalid"):
         _build(values)
 
     values = _inputs(tmp_path / "same-key")
@@ -502,6 +578,7 @@ def test_builder_cli_names_bootstrap_and_runtime_key_roles() -> None:
     assert "--bootstrap-signing-private-key" in options
     assert "--bootstrap-signing-public-key" in options
     assert "--runtime-release-public-key" in options
+    assert "--stable-release-metadata" in options
     assert "--sequence" in options
     assert "--issued-unix" in options
     assert "--lifetime-seconds" in options
@@ -1080,6 +1157,12 @@ def test_install_is_idempotent_preserves_secrets_and_never_enables_units(tmp_pat
         root / "usr/local/share/cathedral-validator-updater/bootstrap/"
         "install_updater_bundle.py"
     ).read_bytes() == verified.files[installer.INSTALLER_ARCHIVE_PATH].body
+    for command in installer.OPERATOR_ASSETS:
+        installed = root / "usr/local/sbin" / command
+        assert (
+            installed.read_bytes() == verified.files[f"payload/operator/{command}"].body
+        )
+        assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     version = (
         root
         / "usr/local/lib"
@@ -1432,8 +1515,9 @@ def test_same_bootstrap_sequence_with_different_manifest_is_refused(tmp_path):
         runner=_fake_runner([]),
     )
 
-    values["assets"].joinpath("update.env.example").write_text(
-        "signed but equivocal contents\n"
+    values["assets"].joinpath("direct.env.example").write_text(
+        values["assets"].joinpath("direct.env.example").read_text()
+        + "# signed but equivocal contents\n"
     )
     equivocal, _ = _verify_values(tmp_path / "equivocal-artifacts", values)
     with pytest.raises(installer.InstallRefused, match="equivocal"):
@@ -1844,3 +1928,5 @@ def test_installed_files_are_root_style_modes_and_manifest_is_immutable(tmp_path
         assert (
             stat.S_IMODE((root / "etc/systemd/system" / unit).stat().st_mode) == 0o644
         )
+    for command in installer.OPERATOR_ASSETS:
+        assert stat.S_IMODE((root / "usr/local/sbin" / command).stat().st_mode) == 0o755

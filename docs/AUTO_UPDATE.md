@@ -46,14 +46,12 @@ Changing one of those items requires a separately authenticated bootstrap
 migration. Routine validator and verifier changes do not require operator
 action.
 
-## Choose one channel
+## Release channel
 
-Use `stable` for a normal validator. `canary` is for a dedicated release-test
-host.
-
-The first installation records this choice. It is immutable for that host. The
-updater refuses metadata from the other channel. Do not delete updater state to
-force a switch. Use a new host for a different channel.
+Public setup follows `stable`. Cathedral uses a separate internal canary host
+to test the same signed archive before publishing its signed stable record.
+Your validator never receives Cathedral wallet keys and Cathedral never
+receives yours.
 
 ## Before installation
 
@@ -69,8 +67,8 @@ Prepare these operator-owned inputs:
 1. The hotkey file from
    `~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY`.
 2. The public SS58 address belonging to that hotkey.
-3. A root-owned AMD SEV-SNP policy at
-   `/etc/cathedral-validator/snp-policy.json`.
+3. An owner-controlled AMD SEV-SNP policy file containing only measurements
+   and TCB floors you reviewed.
 
 Do not place the coldkey file, mnemonic, or coldkey password on this host.
 
@@ -122,86 +120,34 @@ key only through `--bootstrap-public-key`, its pin through
 Until those values are present, public installation is closed.
 <!-- END GENERATED UPDATER BOOTSTRAP -->
 
-After a successful bootstrap install, the signed examples are under:
+## Set up and start
 
-```text
-/usr/local/share/cathedral-validator-updater/examples/
-```
-
-The updater executable is:
-
-```text
-/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update
-```
-
-## Operator inputs
-
-Install the hotkey file, policy, and signed configuration examples. Replace
-every placeholder and set the authenticated minimum sequences before
-continuing.
+After installing the authenticated bootstrap, run its guided command:
 
 ```bash
-sudo install -o root -g root -m 0600 \
-  "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
-  /etc/cathedral-validator/validator-hotkey
-sudo install -o root -g cathedral-validator -m 0440 \
-  /absolute/reviewed/amd-sev-snp-policy.json \
-  /etc/cathedral-validator/snp-policy.json
-sudo install -o root -g root -m 0600 \
-  /usr/local/share/cathedral-validator-updater/examples/direct.env.example \
-  /etc/cathedral-validator/direct.env
-sudo install -o root -g root -m 0600 \
-  /usr/local/share/cathedral-validator-updater/examples/identity.env.example \
-  /etc/cathedral-validator/identity.env
-sudo install -o root -g root -m 0600 \
-  /usr/local/share/cathedral-validator-updater/examples/update.env.example \
-  /etc/cathedral-validator/update.env
-sudoedit /etc/cathedral-validator/identity.env
-sudoedit /etc/cathedral-validator/update.env
+sudo cathedral-validator-setup \
+  --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
+  --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
+  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
+  --confirm-direct-write
 ```
 
-`identity.env` contains only the public SS58 address. `update.env` contains the
-published channel URLs and authenticated minimum sequences. Neither contains a
-wallet key.
+The command verifies the inputs, checks that the hotkey file names the public
+address you supplied, installs the signed stable release, starts the direct
+validator on first installation, and enables only the stable update timer. It
+refuses files outside a Bittensor `hotkeys` directory, unsafe existing files,
+or unresolved updater state. It never prints the hotkey. Re-running setup never
+restarts a stopped validator because a stopped writer might need review.
 
-## First signed start
-
-After the bootstrap is published and installed, run one first-install activation
-using the exact stable URL and minimum sequence published on `README.md`:
+## Check it
 
 ```bash
-sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update \
-  --bootstrap-first-install \
-  --channel=stable \
-  --metadata-url=REPLACE_WITH_PUBLISHED_STABLE_URL \
-  --public-key=/etc/cathedral-validator/runtime-release-public-key.pem \
-  --identity-file=/etc/cathedral-validator/identity.env \
-  --minimum-sequence=REPLACE_WITH_AUTHENTICATED_STABLE_SEQUENCE
+sudo cathedral-validator-status
 ```
 
-Do not guess either replacement value. The command refuses a host with an
-existing release or committed channel. On success it installs the signed
-release and starts the direct validator through the boot safety gate.
-
-Enable the service and stable timer for future boots and releases:
-
-```bash
-sudo systemctl enable cathedral-validator-direct.service
-sudo systemctl enable --now cathedral-validator-update.timer
-```
-
-Never enable both update timers.
-
-## Confirm operation
-
-```bash
-sudo systemctl status cathedral-validator-direct.service
-sudo systemctl status cathedral-validator-update.timer
-sudo systemctl list-timers cathedral-validator-update.timer
-sudo journalctl -u cathedral-validator-direct.service -n 100 --no-pager
-sudo journalctl -u cathedral-validator-update.service -n 100 --no-pager
-sudo journalctl -u cathedral-validator-boot-reconcile.service -n 100 --no-pager
-```
+The result separates local service health, signed release state, updater state,
+and the latest recorded weight result. A locally confirmed record does not by
+itself prove current finalized chain state.
 
 The updater reports one of these normal results:
 

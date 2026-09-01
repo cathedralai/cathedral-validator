@@ -59,7 +59,8 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "cathedral-validator-boot-reconcile.service" in guide
     assert "pinned TDX verifier, and pinned SNP verifier together" in words
     assert "bootstrap updater, systemd units, host Python" in words
-    assert "Each host chooses `stable` or `canary` once" in guide
+    assert "Public setup follows `stable` only" in guide
+    assert "sudo cathedral-validator-status" in guide
     assert "git clone" not in guide
     assert "python3.12 -m venv" not in guide
     assert "cathedral-tdx-verifier-v1.0.0" not in guide
@@ -89,6 +90,10 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
     assert "signed installation path" in guide
     assert "The updater has no access to the hotkey" in updater
     assert "repository home page is the only operator install guide" in updater
+    assert "sudo cathedral-validator-setup" in updater
+    assert "sudo cathedral-validator-status" in updater
+    assert "--channel=stable" not in updater
+    assert "sudo systemctl enable" not in updater
 
 
 def test_readme_snp_policy_template_is_strict_json_with_the_runtime_shape() -> None:

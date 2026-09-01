@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -109,11 +110,51 @@ def _assets(root: Path) -> Path:
     return assets
 
 
+def _stable_metadata(root: Path, private_path: Path) -> Path:
+    private = serialization.load_pem_private_key(
+        private_path.read_bytes(), password=None
+    )
+    assert isinstance(private, Ed25519PrivateKey)
+    archive_digest = "a" * 64
+    signed = {
+        "schema": "cathedral_validator_release_v1",
+        "channel": "stable",
+        "sequence": 9,
+        "issued_unix": NOW - 60,
+        "expires_unix": NOW + 3600,
+        "release": {
+            "version": "4.0.0",
+            "archive_url": "https://example.invalid/release.tar.gz",
+            "archive_sha256": archive_digest,
+            "tree_sha256": "b" * 64,
+            "entrypoint": "bin/cathedral-validator",
+            "promoted_canary": {
+                "sequence": 9,
+                "signed_sha256": "c" * 64,
+                "metadata_sha256": "d" * 64,
+                "archive_sha256": archive_digest,
+            },
+        },
+    }
+    payload = builder.canonical_json(signed)
+    path = root / "stable.json"
+    path.write_bytes(
+        builder.canonical_json(
+            {
+                "signed": signed,
+                "signature": base64.b64encode(private.sign(payload)).decode("ascii"),
+            }
+        )
+    )
+    path.chmod(0o644)
+    return path
+
+
 def _validated(tmp_path: Path, *, track: str = "test"):
     bootstrap_private, bootstrap_public, bootstrap_fingerprint = _keypair(
         tmp_path / "bootstrap", "bootstrap"
     )
-    _runtime_private, runtime_public, _runtime_fingerprint = _keypair(
+    runtime_private, runtime_public, _runtime_fingerprint = _keypair(
         tmp_path / "runtime", "runtime"
     )
     wheelhouse, requirements = _wheelhouse(tmp_path)
@@ -123,6 +164,7 @@ def _validated(tmp_path: Path, *, track: str = "test"):
         bootstrap_signing_private_key_path=bootstrap_private,
         bootstrap_signing_public_key_path=bootstrap_public,
         runtime_release_public_key_path=runtime_public,
+        stable_release_metadata_path=_stable_metadata(tmp_path, runtime_private),
         assets_dir=_assets(tmp_path),
         sequence=7,
         issued_unix=NOW - 60,

@@ -1165,6 +1165,7 @@ bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --bootstrap-signing-private-key "$bootstrap_private" \
   --bootstrap-signing-public-key "$bootstrap_public" \
   --runtime-release-public-key "$runtime_public" \
+  --stable-release-metadata "$STABLE_A1" \
   --assets-dir "$REPOSITORY_ROOT/deploy/validator-update" \
   --bundle-out "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
   --manifest-out "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \

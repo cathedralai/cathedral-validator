@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v2"
+BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v3"
 RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH = "payload/runtime-release-public-key.pem"
 REQUIREMENTS_ARCHIVE_PATH = "payload/requirements.txt"
 INSTALLER_ARCHIVE_PATH = "payload/installer/install_updater_bundle.py"
@@ -76,9 +76,16 @@ EXAMPLE_ASSETS = frozenset(
         "update.env.example",
     }
 )
+OPERATOR_ASSETS = frozenset(
+    {
+        "cathedral-validator-setup",
+        "cathedral-validator-status",
+    }
+)
 EXPECTED_NON_WHEEL_PATHS = (
     {f"payload/systemd/{name}" for name in SYSTEMD_ASSETS}
     | {f"payload/examples/{name}" for name in EXAMPLE_ASSETS}
+    | {f"payload/operator/{name}" for name in OPERATOR_ASSETS}
     | {
         RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
         REQUIREMENTS_ARCHIVE_PATH,
@@ -110,6 +117,7 @@ class VerifiedBundle:
     manifest_sha256: str
     bootstrap_signing_key_fingerprint: str
     runtime_release_key_fingerprint: str
+    stable_release_minimum_sequence: int
     bootstrap_sequence: int
     issued_unix: int
     expires_unix: int
@@ -296,6 +304,7 @@ def _parse_manifest(raw: bytes) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             "files",
             "install",
             "runtime_release_key",
+            "stable_release_floor",
             "schema",
         },
         "manifest",
@@ -360,6 +369,19 @@ def _parse_manifest(raw: bytes) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise InstallRefused(
             "bootstrap signing key and runtime release key must be distinct"
         )
+    stable_release_floor = _object(
+        document["stable_release_floor"],
+        {"metadata_sha256", "sequence"},
+        "stable release floor",
+    )
+    if (
+        isinstance(stable_release_floor["sequence"], bool)
+        or not isinstance(stable_release_floor["sequence"], int)
+        or not 1 <= stable_release_floor["sequence"] <= 2**63 - 1
+        or not isinstance(stable_release_floor["metadata_sha256"], str)
+        or DIGEST.fullmatch(stable_release_floor["metadata_sha256"]) is None
+    ):
+        raise InstallRefused("stable release floor is invalid")
     install = _object(
         document["install"],
         {"enable_units", "installer", "python", "requirements", "wheelhouse"},
@@ -470,6 +492,21 @@ def _archive_files(
     return extracted
 
 
+def _stable_sequence_from_example(body: bytes) -> int:
+    try:
+        lines = body.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise InstallRefused("signed update example is not ASCII") from exc
+    prefix = "CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE="
+    values = [line[len(prefix) :] for line in lines if line.startswith(prefix)]
+    if len(values) != 1 or not values[0].isdecimal():
+        raise InstallRefused("signed update example has no exact stable sequence")
+    sequence = int(values[0])
+    if not 1 <= sequence <= 2**63 - 1:
+        raise InstallRefused("signed update example stable sequence is invalid")
+    return sequence
+
+
 def verify_bundle(
     *,
     bundle_path: Path,
@@ -552,6 +589,14 @@ def verify_bundle(
         raise InstallRefused("bundle bytes differ from the signed manifest")
     records = _manifest_records(record_list)
     files = _archive_files(archive, records)
+    stable_release_floor = document["stable_release_floor"]
+    if (
+        _stable_sequence_from_example(files["payload/examples/update.env.example"].body)
+        != stable_release_floor["sequence"]
+    ):
+        raise InstallRefused(
+            "signed update example differs from the authenticated stable floor"
+        )
     bundled_runtime_key = files[RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH].body
     runtime_fingerprint = ed25519_public_key_fingerprint(
         bundled_runtime_key,
@@ -567,6 +612,7 @@ def verify_bundle(
         manifest_sha256=hashlib.sha256(manifest).hexdigest(),
         bootstrap_signing_key_fingerprint=bootstrap_fingerprint,
         runtime_release_key_fingerprint=runtime_fingerprint,
+        stable_release_minimum_sequence=stable_release_floor["sequence"],
         bootstrap_sequence=bootstrap_metadata["sequence"],
         issued_unix=bootstrap_metadata["issued_unix"],
         expires_unix=bootstrap_metadata["expires_unix"],
@@ -1315,6 +1361,11 @@ def _destinations(root: Path, bundle: VerifiedBundle) -> dict[Path, tuple[bytes,
                 root, f"usr/local/share/cathedral-validator-updater/examples/{name}"
             )
         ] = (bundle.files[f"payload/examples/{name}"].body, 0o644)
+    for name in OPERATOR_ASSETS:
+        result[_relative(root, f"usr/local/sbin/{name}")] = (
+            bundle.files[f"payload/operator/{name}"].body,
+            0o755,
+        )
     return result
 
 
