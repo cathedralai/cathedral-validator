@@ -391,11 +391,17 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     for timer in ("$timer", "$other_timer"):
         assert f"systemctl show '{timer}' -p UnitFileState --value" in configure_host
     assert "systemctl show '$timer' -p ActiveState --value" in configure_host
-    assert "'OnBootSec=' 'OnBootSec=20s'" in configure_host
+    assert "'OnBootSec=' 'OnActiveSec=20s'" in configure_host
+    assert "'OnBootSec=20s'" not in configure_host
     assert "'OnUnitActiveSec='" not in configure_host
     assert "'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s'" in configure_host
+    assert "'Persistent=true'" not in configure_host
     assert "systemctl show '$timer' -p TimersMonotonic --value" in configure_host
-    assert "grep -F 'OnBootUSec='" in configure_host
+    assert (
+        "! printf '%s\\n' \\\"\\$timer_schedule\\\" | grep -F 'OnBootUSec='"
+        in configure_host
+    )
+    assert "grep -F 'OnActiveUSec='" in configure_host
     assert "grep -F 'OnUnitActiveUSec='" in configure_host
     assert configure_host.count("= disabled") == 2
     assert "systemctl cat '$other_timer'" in configure_host
@@ -537,6 +543,70 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
     assert exhausted_check.returncode == 0, exhausted_check.stderr
 
 
+def test_live_controller_retries_exact_resource_teardown(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    delete_until_absent = script.split("cleanup_resource_until_absent() {", 1)[1].split(
+        "cleanup() {", 1
+    )[0]
+
+    assert "readonly TEARDOWN_DELETE_ATTEMPTS=5" in script
+    assert "readonly TEARDOWN_RETRY_INTERVAL_SECONDS=5" in script
+    assert "cleanup_resource_snapshot" in delete_until_absent
+    assert "cleanup_resource_delete" in delete_until_absent
+    assert "delete_status=" in delete_until_absent
+    assert "TEARDOWN_RESOURCE_ABSENT" in delete_until_absent
+    assert "TEARDOWN_RESOURCE_REMAINS" in delete_until_absent
+    cleanup_block = script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    expected_order = (
+        "canary-vm",
+        "stable-vm",
+        "canary-disk",
+        "stable-disk",
+        "firewall",
+        "subnet",
+        "network",
+    )
+    positions = [
+        cleanup_block.index(f"cleanup_resource_until_absent {label}")
+        for label in expected_order
+    ]
+    assert positions == sorted(positions)
+
+    evidence = tmp_path / "teardown-retry"
+    evidence.mkdir()
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "TEARDOWN_DELETE_ATTEMPTS=3\n"
+            "TEARDOWN_RETRY_INTERVAL_SECONDS=0\n"
+            'EVIDENCE_DIR="$1"\n'
+            "checks=0\n"
+            "deletes=0\n"
+            "cleanup_resource_snapshot() { checks=$((checks + 1)); "
+            'if (( checks < 3 )); then printf \'[{"name":"resource"}]\\n\'; '
+            "else printf '[]\\n'; fi; }\n"
+            "cleanup_resource_delete() { deletes=$((deletes + 1)); return 1; }\n"
+            "sleep() { :; }\n"
+            "cleanup_resource_until_absent() {"
+            + delete_until_absent
+            + "\ncleanup_resource_until_absent test network resource\n"
+            'test "$checks" -eq 3\n'
+            'test "$deletes" -eq 2\n'
+            "grep -F 'TEARDOWN_RESOURCE_ABSENT' "
+            '"$EVIDENCE_DIR/teardown-test-result.txt"',
+            "teardown-retry-test",
+            str(evidence),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
@@ -666,6 +736,15 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
         )[0]
     )
     rearm_timer = script.split("wait_timer_rearmed() {", 1)[1].split(
+        "wait_timer_reactivation() {", 1
+    )[0]
+    wait_reactivation = script.split("wait_timer_reactivation() {", 1)[1].split(
+        "start_reactivation_proof_timer() {", 1
+    )[0]
+    start_reactivation = script.split("start_reactivation_proof_timer() {", 1)[1].split(
+        "observe_timer_reactivation() {", 1
+    )[0]
+    observe_reactivation = script.split("observe_timer_reactivation() {", 1)[1].split(
         "observe_timer_update() {", 1
     )[0]
     observe_timer = script.split("observe_timer_update() {", 1)[1].split(
@@ -683,7 +762,16 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     assert "timer_status=\\$?" in start_timer
     assert "exit \\$timer_status" in start_timer
     assert "grep -Eq" not in start_timer
-    assert ".sequence == $sequence and .pending == null" in wait_sequence
+    assert (
+        'timer_state_is_started "$active" "$substate" "$next" "$service_active"'
+        in start_timer
+    )
+    assert "TriggeredServiceActiveState=" in start_timer
+    assert "enabled timer has no scheduled trigger" in start_timer
+    assert ".record == $expected" in wait_sequence
+    assert ".sequence == $expected.sequence" in wait_sequence
+    assert ".pending == null" in wait_sequence
+    assert 'expected_channel_record "$metadata" "$channel"' in wait_sequence
     assert '2>>"$EVIDENCE_DIR/${label}-sequence-snapshot-ssh.stderr"' in wait_sequence
     assert (
         'capture_host_with_retries "${label}-sequence-wait-failure" '
@@ -717,6 +805,46 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
             check=False,
         )
         assert unhealthy_rearm.returncode != 0
+
+    elapsed_start = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "remote() { printf '%s\\n' 'ActiveState=active' "
+            "'SubState=elapsed' 'NextElapseUSecMonotonic=infinity'; }\n"
+            + timer_state_check
+            + "\nstart_update_timer() {"
+            + start_timer
+            + "\n"
+            + "if start_update_timer vm-a timer-a; then exit 11; fi",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert elapsed_start.returncode == 0, elapsed_start.stderr
+    assert "enabled timer has no scheduled trigger" in elapsed_start.stderr
+
+    running_start = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "remote() { printf '%s\\n' 'ActiveState=active' "
+            "'SubState=running' 'NextElapseUSecMonotonic=infinity' "
+            "'TriggeredServiceActiveState=activating'; }\n"
+            + timer_state_check
+            + "\nstart_update_timer() {"
+            + start_timer
+            + "\n"
+            + "start_update_timer vm-a timer-a",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert running_start.returncode == 0, running_start.stderr
 
     rearm_evidence = tmp_path / "rearm-evidence"
     rearm_evidence.mkdir()
@@ -757,6 +885,40 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
         text=True,
     )
     assert dynamic_rearm.returncode == 0, dynamic_rearm.stderr
+    assert "ServiceInvocationID=" in wait_reactivation
+    assert "LastTriggerUSec=" in wait_reactivation
+    assert '"$invocation" != "$before_invocation"' in wait_reactivation
+    assert '"$trigger" != "$before_trigger"' in wait_reactivation
+    assert '"$result" == success' in wait_reactivation
+    assert '"$exec_status" == 0' in wait_reactivation
+    assert '"$service_active" == inactive' in wait_reactivation
+    assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in wait_reactivation
+    assert "SECONDS + REACTIVATION_PROOF_WAIT_SECONDS" in wait_reactivation
+    assert "readonly REACTIVATION_PROOF_WAIT_SECONDS=1860" in script
+    assert "sudo systemctl show '$timer'" in wait_reactivation
+    assert "sudo systemctl show '$service'" in wait_reactivation
+    assert "sed 's/^/Service/'" in wait_reactivation
+    assert "systemctl disable --now '$timer'" in start_reactivation
+    assert "'OnBootSec='" in start_reactivation
+    assert "'OnActiveSec=${REACTIVATION_PROOF_DELAY_SECONDS}s'" in start_reactivation
+    assert (
+        "'OnUnitActiveSec=${REACTIVATION_PROOF_REARM_SECONDS}s'" in start_reactivation
+    )
+    assert "grep -F 'OnActiveUSec='" in start_reactivation
+    assert "grep -F 'OnUnitActiveUSec='" in start_reactivation
+    assert (
+        "! printf '%s\\n' \\\"\\$timer_schedule\\\" | grep -F 'OnBootUSec='"
+        in start_reactivation
+    )
+    assert start_reactivation.count("= '$before_invocation'") == 2
+    assert start_reactivation.count("= '$before_trigger'") == 2
+    assert "systemctl enable --now '$timer'" in start_reactivation
+    assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in start_reactivation
+    assert "start_reactivation_proof_timer" in observe_reactivation
+    assert "timer-reactivation-start-failure" in observe_reactivation
+    assert "wait_timer_reactivation" in observe_reactivation
+    assert "wait_sequence" in observe_reactivation
+    assert "assert_current" in observe_reactivation
     for phase in ("start", "wait", "current", "rearm"):
         assert f"${{label}}-timer-{phase}-command.log" in observe_timer
         assert (
@@ -768,6 +930,89 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     assert (
         script.count('observe_timer_update canary-same-archive-renewal "$CANARY_VM"')
         == 1
+    )
+    assert (
+        script.count(
+            'observe_timer_reactivation canary-same-boot-reactivation "$CANARY_VM"'
+        )
+        == 1
+    )
+    canary_scenario = script.split(
+        'record_step "publish B and observe canary timer activate A to B"', 1
+    )[1].split(
+        'record_step "replay, equivocation, and metadata outage fail closed"', 1
+    )[0]
+    renewal = 'observe_timer_update canary-same-archive-renewal "$CANARY_VM"'
+    reactivation = (
+        'observe_timer_reactivation canary-same-boot-reactivation "$CANARY_VM"'
+    )
+    disable = (
+        'remote "$CANARY_VM" \'sudo systemctl disable --now '
+        "cathedral-validator-canary-update.timer'"
+    )
+    assert canary_scenario.index(renewal) < canary_scenario.index(reactivation)
+    assert canary_scenario.index(reactivation) < canary_scenario.index(disable)
+    assert canary_scenario.count(disable) == 1
+
+
+def test_live_controller_binds_refusals_to_an_uninterrupted_direct_service():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    active_check = (
+        "direct_service_identity_is_active() {"
+        + script.split("direct_service_identity_is_active() {", 1)[1].split(
+            "wait_direct_service_active() {", 1
+        )[0]
+    )
+    refusal = script.split("expect_update_refused() {", 1)[1].split(
+        "assert_current() {", 1
+    )[0]
+    pause = script.split('record_step "pause blocks', 1)[1].split(
+        'record_step "held cycle lock', 1
+    )[0]
+
+    valid = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            + active_check
+            + '\ndirect_service_identity_is_active "$1"',
+            "direct-service-identity-test",
+            "ActiveState=active\nSubState=running\nMainPID=42\nInvocationID=abc123",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert valid.returncode == 0, valid.stderr
+    for invalid in (
+        "ActiveState=inactive\nSubState=dead\nMainPID=0\nInvocationID=abc",
+        "ActiveState=active\nSubState=running\nMainPID=42\nInvocationID=",
+    ):
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                active_check + '\ndirect_service_identity_is_active "$1"',
+                "direct-service-identity-test",
+                invalid,
+            ],
+            check=False,
+        )
+        assert result.returncode != 0
+
+    assert 'local service_policy="${8:-unchanged}"' in refusal
+    assert '"$before_service" != "$after_service"' in refusal
+    assert '"$before_invocation" == "$after_invocation"' in refusal
+    assert "left the direct service unhealthy" in refusal
+    assert "did not prove a fresh healthy rollback invocation" in refusal
+    assert "pause_service_before" in pause
+    assert "pause_service_after" in pause
+    assert '"$pause_service_before" != "$pause_service_after"' in pause
+    assert (
+        "'new release failed readiness; prior release was restored' 10 system restarted"
+        in script
     )
 
 
@@ -975,6 +1220,7 @@ def test_live_controller_revalidates_crash_boundary_after_capture(
     transient_systemd_timeout = shell_constant("TRANSIENT_SYSTEMD_TIMEOUT_SECONDS")
     timer_systemd_margin = shell_constant("TIMER_SYSTEMD_MARGIN_SECONDS")
     reset_headroom = shell_constant("RESET_MINIMUM_HEADROOM_SECONDS")
+    reset_request_timeout = shell_constant("RESET_REQUEST_TIMEOUT_SECONDS")
     pending_wait = shell_constant("CRASH_PENDING_WAIT_SECONDS")
     post_pending_reserve = shell_constant("CRASH_POST_PENDING_RESERVE_SECONDS")
     service_control_timeout = shell_constant(
@@ -997,6 +1243,7 @@ def test_live_controller_revalidates_crash_boundary_after_capture(
     live_readiness = _live_readiness_namespace(monkeypatch)
     assert transient_timeout == 240
     assert reset_headroom == 60
+    assert reset_request_timeout < reset_headroom
     assert transient_timeout >= pending_wait + post_pending_reserve + reset_headroom
     assert transient_systemd_timeout >= transient_timeout + timer_systemd_margin
     assert direct_timeout >= transient_timeout + reset_headroom
@@ -1021,11 +1268,20 @@ def test_live_controller_revalidates_crash_boundary_after_capture(
         < (reset_transition.index("assert_pending_pre_action stable-reset-pre-action"))
         < reset_transition.index("require_host_proof stable-reset-request")
         < reset_transition.index("require_host_proof stable-reset-reboot-observed")
-        < reset_transition.index("require_host_proof stable-reset-direct-restart")
+        < reset_transition.index("require_host_proof stable-reset-delay-clear")
+        < reset_transition.index("require_host_proof stable-reset-direct-auto-start")
+        < reset_transition.index("require_host_proof stable-reset-reconcile-proof")
+        < reset_transition.index("wait_sequence stable-reset-reconcile")
         < reset_transition.index("capture_host_with_retries stable-after-reset")
     )
     assert 'read_boot_id "$STABLE_VM"' in reset_transition
     assert '"$reset_started_at" \\\n  "$reset_boot_id"' in reset_transition
+    assert 'request_instance_reset "$STABLE_VM"' in reset_transition
+    assert "systemctl start cathedral-validator-direct.service" not in reset_transition
+    assert "journalctl -b -u cathedral-validator-boot-reconcile.service" in (
+        reset_transition
+    )
+    assert "wait_direct_service_active stable-reset" in reset_transition
     assert (
         rescue_transition.index("rescue_started_at=$SECONDS")
         < rescue_transition.index("launch_background_update")
@@ -1043,8 +1299,14 @@ def test_live_controller_revalidates_crash_boundary_after_capture(
     assert rescue_crash.index("ActiveState=active") < rescue_crash.index(kill)
     assert rescue_crash.index("SubState=running") < rescue_crash.index(kill)
     assert rescue_crash.index("sudo kill -0") < rescue_crash.index(kill)
-    kill_fragment = rescue_crash.split(kill, 1)[1].split(";", 1)[0]
+    assert "TRANSIENT_UPDATER_KILL_CONFIRMED" in rescue_crash
+    assert "! sudo kill -0" in rescue_crash
+    assert "! sudo systemctl is-active --quiet" in rescue_crash
+    kill_fragment = rescue_crash.split(kill, 1)[1].split(
+        "sudo systemctl stop cathedral-validator-direct.service", 1
+    )[0]
     assert "|| true" not in kill_fragment
+    assert kill_fragment.count(".pending.stage") == 1
 
     boot_evidence = tmp_path / "boot-evidence"
     boot_evidence.mkdir()
@@ -1335,7 +1597,8 @@ def test_live_controller_captures_terminal_recovery_proofs(tmp_path):
     for label in (
         "stable-reset-request",
         "stable-reset-reboot-observed",
-        "stable-reset-direct-restart",
+        "stable-reset-delay-clear",
+        "stable-reset-direct-auto-start",
         "stable-reset-reconcile-proof",
     ):
         assert f"require_host_proof {label}" in reset_transition
@@ -1477,6 +1740,57 @@ def test_live_controller_captures_terminal_recovery_proofs(tmp_path):
     assert dynamic_current.returncode == 0, dynamic_current.stderr
 
 
+def test_live_state_snapshot_preserves_the_exact_committed_record(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    waiter = root / "tests" / "live" / "wait_updater_state.py"
+    state_path = tmp_path / "state.json"
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    (install_root / "current").symlink_to("releases/archive")
+    record = {
+        "sequence": 3,
+        "archive_sha256": "a" * 64,
+        "signed_sha256": "b" * 64,
+        "metadata_sha256": "c" * 64,
+    }
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema": "cathedral_validator_update_state_v1",
+                "channels": {"canary": record},
+                "pending": None,
+            }
+        ),
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(waiter),
+            "--state",
+            str(state_path),
+            "--install-root",
+            str(install_root),
+            "--snapshot",
+            "canary",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot == {
+        "channel": "canary",
+        "current": "releases/archive",
+        "record": record,
+        "sequence": 3,
+        "pending": None,
+    }
+
+
 def test_live_controller_timer_wait_covers_service_deadline_and_waiter_cap():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
@@ -1495,15 +1809,36 @@ def test_live_controller_timer_wait_covers_service_deadline_and_waiter_cap():
     assert "ServerAliveInterval=15" in script
     assert "ServerAliveCountMax=2" in script
     assert "MAX_WAIT_SECONDS = 600" in waiter.read_text()
+    assert '"record": record' in waiter.read_text()
     assert "wait_sequence() {" in script
-    assert script.count('wait_sequence canary-first-install "$CANARY_VM" canary 1') == 1
-    assert script.count('wait_sequence stable-first-install "$STABLE_VM" stable 1') == 1
+    assert "expected_channel_record() {" in script
     assert (
-        script.count('wait_sequence stable-reset-reconcile "$STABLE_VM" stable 3') == 1
+        "parse_release_metadata"
+        in script.split("expected_channel_record() {", 1)[1].split("ARCHIVE_A_SHA=", 1)[
+            0
+        ]
     )
     assert (
         script.count(
-            'wait_sequence stable-higher-sequence-rescue "$STABLE_VM" stable 5'
+            'wait_sequence canary-first-install "$CANARY_VM" canary "$CANARY_A1"'
+        )
+        == 1
+    )
+    assert (
+        script.count(
+            'wait_sequence stable-first-install "$STABLE_VM" stable "$STABLE_A1"'
+        )
+        == 1
+    )
+    assert (
+        script.count(
+            'wait_sequence stable-reset-reconcile "$STABLE_VM" stable "$STABLE_A3"'
+        )
+        == 1
+    )
+    assert (
+        script.count(
+            'wait_sequence stable-higher-sequence-rescue "$STABLE_VM" stable "$STABLE_A5"'
         )
         == 1
     )

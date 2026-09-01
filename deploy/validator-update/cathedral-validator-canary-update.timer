@@ -2,10 +2,9 @@
 Description=Check for a verified Cathedral validator UID30 canary release
 
 [Timer]
-OnBootSec=15min
+OnActiveSec=15min
 OnUnitActiveSec=6h
 RandomizedDelaySec=20min
-Persistent=true
 
 [Install]
 WantedBy=timers.target

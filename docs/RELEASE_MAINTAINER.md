@@ -162,10 +162,11 @@ python deploy/validator-update/publish_github_channel.py \
 ```
 
 Observe a real canary host updating from its timer. Test activation, restart,
-power-loss recovery, pause, invalid signature, archive tamper, replay,
-same-sequence equivocation, unreachable metadata, busy-cycle lock, pending
-writer journal, and failed readiness. Record the signed sequence, archive
-digest, old and new process state, and final healthy release for each case.
+same-boot timer disable and re-enable, power-loss recovery, pause, invalid
+signature, archive tamper, replay, same-sequence equivocation, unreachable
+metadata, busy-cycle lock, pending writer journal, and failed readiness. Record
+the signed sequence, archive digest, old and new process state, and final
+healthy release for each case.
 
 ### Run the bounded live acceptance controller
 
@@ -199,8 +200,8 @@ env \
 ```
 
 Run the identical environment with `--execute` only after preflight prints
-`PREFLIGHT_PASS`. Success is `LIVE_UPDATE_E2E_PASS`, followed by
-`TEARDOWN_COMPLETE`. The controller returns failure unless both hosts, boot
+`PREFLIGHT_PASS`. Success prints `TEARDOWN_COMPLETE`, followed by
+`LIVE_UPDATE_E2E_PASS`. The controller returns failure unless both hosts, boot
 disks, firewall, subnet, and network are proven absent. The test mirror's
 branches and immutable prerelease remain public as the audit record.
 
