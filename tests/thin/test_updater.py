@@ -2046,12 +2046,10 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "Do not install\nor enable updater units from a source checkout" in docs
     assert "signed manifest" in docs
     assert "two distinct Ed25519 keys" in docs
-    assert "/etc/cathedral-validator/runtime-release-public-key.pem" in docs
+    assert "There is no runtime-key argument." in docs
     assert "/etc/cathedral-validator/update-public-key.pem" not in docs
-    assert (
-        "/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update"
-        in docs
-    )
+    assert "sudo cathedral-validator-setup" in docs
+    assert "sudo cathedral-validator-status" in docs
     assert "The updater has no access to the hotkey" in docs
     assert "releases.cathedral.com" not in docs
     assert "$(command -v cathedral-validator-update)" not in docs
