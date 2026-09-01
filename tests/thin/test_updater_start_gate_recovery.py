@@ -583,6 +583,7 @@ def test_first_install_timeout_preserves_recovery_record_and_target(
             minimum_sequence=1,
             validator_uid=os.geteuid(),
             validator_gid=os.getegid(),
+            first_install_metadata_sha256=hashlib.sha256(metadata).hexdigest(),
             cycle_wait_seconds=0.1,
             operation_timeout_seconds=1.0,
         )

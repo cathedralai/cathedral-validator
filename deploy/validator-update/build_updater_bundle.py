@@ -22,18 +22,20 @@ import re
 import stat
 import tarfile
 import time
+import urllib.parse
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 
-BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v2"
+BUNDLE_SCHEMA = "cathedral_validator_updater_bootstrap_v3"
 RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH = "payload/runtime-release-public-key.pem"
 REQUIREMENTS_ARCHIVE_PATH = "payload/requirements.txt"
 INSTALLER_ARCHIVE_PATH = "payload/installer/install_updater_bundle.py"
@@ -43,6 +45,13 @@ MAX_WHEEL_BYTES = 512 * 1024 * 1024
 MAX_WHEEL_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
+MAX_RELEASE_METADATA_BYTES = 131_072
+MAX_RELEASE_METADATA_LIFETIME_SECONDS = 14 * 24 * 60 * 60
+STABLE_SEQUENCE_PLACEHOLDER = b"REPLACE_WITH_AUTHENTICATED_STABLE_SEQUENCE"
+STABLE_METADATA_SHA256_PLACEHOLDER = (
+    b"REPLACE_WITH_AUTHENTICATED_STABLE_METADATA_SHA256"
+)
+_HEX = frozenset("0123456789abcdef")
 
 SYSTEMD_ASSETS = frozenset(
     {
@@ -62,8 +71,14 @@ EXAMPLE_ASSETS = frozenset(
         "update.env.example",
     }
 )
+OPERATOR_ASSETS = frozenset(
+    {
+        "cathedral-validator-setup",
+        "cathedral-validator-status",
+    }
+)
 SYSUSERS_SOURCE = "cathedral-validator.sysusers"
-REQUIRED_ASSETS = SYSTEMD_ASSETS | EXAMPLE_ASSETS | {SYSUSERS_SOURCE}
+REQUIRED_ASSETS = SYSTEMD_ASSETS | EXAMPLE_ASSETS | OPERATOR_ASSETS | {SYSUSERS_SOURCE}
 
 _LOCKED_REQUIREMENT = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -416,7 +431,203 @@ def _requirements(path: Path, wheel_digests: set[str]) -> bytes:
     return normalized
 
 
-def _assets(path: Path) -> list[PayloadFile]:
+# Keep these release-field checks in lockstep with the installed updater's
+# parse_release_metadata contract. This signer remains self-contained because
+# importing checkout code while the bootstrap private key is loaded would
+# widen the offline signing boundary.
+def _release_digest(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(item not in _HEX for item in value)
+    ):
+        raise BundleRefused(f"{label} is not a lower-case SHA-256 digest")
+    return value
+
+
+def _release_url(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 4096:
+        raise BundleRefused("archive URL is invalid")
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+    ):
+        raise BundleRefused("archive URL must be HTTPS without credentials")
+    return value
+
+
+def _release_entrypoint(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise BundleRefused("release entrypoint is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
+        raise BundleRefused("release entrypoint escapes its release")
+    return str(path)
+
+
+def _stable_release_sequence(
+    path: Path,
+    *,
+    public_key: Ed25519PublicKey,
+    now_unix: int,
+) -> tuple[int, str]:
+    raw = _read_controlled_file(
+        path,
+        "signed stable release metadata",
+        maximum=MAX_RELEASE_METADATA_BYTES,
+    )
+
+    def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise BundleRefused("signed stable release metadata repeats a key")
+            result[key] = value
+        return result
+
+    try:
+        envelope = json.loads(raw.decode("ascii"), object_pairs_hook=strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BundleRefused(
+            "signed stable release metadata is not strict JSON"
+        ) from exc
+    if not isinstance(envelope, dict) or set(envelope) != {"signed", "signature"}:
+        raise BundleRefused("signed stable release metadata fields are invalid")
+    signed = envelope["signed"]
+    signature = envelope["signature"]
+    if not isinstance(signed, dict) or not isinstance(signature, str):
+        raise BundleRefused("signed stable release metadata shape is invalid")
+    try:
+        signature_bytes = base64.b64decode(signature.encode("ascii"), validate=True)
+        payload = (
+            json.dumps(
+                signed,
+                sort_keys=True,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("ascii")
+            + b"\n"
+        )
+        public_key.verify(signature_bytes, payload)
+    except (InvalidSignature, UnicodeEncodeError, ValueError, TypeError) as exc:
+        raise BundleRefused(
+            "signed stable release metadata signature is invalid"
+        ) from exc
+    if (
+        set(signed)
+        != {
+            "schema",
+            "channel",
+            "sequence",
+            "issued_unix",
+            "expires_unix",
+            "release",
+        }
+        or signed.get("schema") != "cathedral_validator_release_v1"
+    ):
+        raise BundleRefused("signed stable release metadata contract is invalid")
+    if signed.get("channel") != "stable":
+        raise BundleRefused("release metadata is not the stable channel")
+    sequence = signed.get("sequence")
+    issued = signed.get("issued_unix")
+    expires = signed.get("expires_unix")
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 1 <= sequence <= 2**63 - 1
+        or isinstance(issued, bool)
+        or not isinstance(issued, int)
+        or issued < 1
+        or isinstance(expires, bool)
+        or not isinstance(expires, int)
+        or expires <= issued
+        or expires - issued > MAX_RELEASE_METADATA_LIFETIME_SECONDS
+        or now_unix < issued - 300
+        or now_unix >= expires
+    ):
+        raise BundleRefused("signed stable release metadata validity is invalid")
+    release = signed.get("release")
+    if not isinstance(release, dict) or set(release) != {
+        "version",
+        "archive_url",
+        "archive_sha256",
+        "tree_sha256",
+        "entrypoint",
+        "promoted_canary",
+    }:
+        raise BundleRefused("signed stable release record is invalid")
+    version = release.get("version")
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        or not version.isascii()
+    ):
+        raise BundleRefused("signed stable release version is invalid")
+    archive_sha256 = _release_digest(
+        release.get("archive_sha256"), label="archive digest"
+    )
+    promoted = release.get("promoted_canary")
+    if not isinstance(promoted, dict) or set(promoted) != {
+        "sequence",
+        "signed_sha256",
+        "metadata_sha256",
+        "archive_sha256",
+    }:
+        raise BundleRefused("signed stable release has no exact canary promotion")
+    promoted_sequence = promoted.get("sequence")
+    if (
+        isinstance(promoted_sequence, bool)
+        or not isinstance(promoted_sequence, int)
+        or not 1 <= promoted_sequence <= 2**63 - 1
+    ):
+        raise BundleRefused("promoted canary sequence is invalid")
+    _release_digest(
+        promoted.get("signed_sha256"), label="promoted canary signed digest"
+    )
+    _release_digest(
+        promoted.get("metadata_sha256"), label="promoted canary metadata digest"
+    )
+    if promoted.get("archive_sha256") != archive_sha256:
+        raise BundleRefused("stable release is not the exact promoted canary archive")
+    _release_url(release.get("archive_url"))
+    _release_digest(release.get("tree_sha256"), label="tree digest")
+    _release_entrypoint(release.get("entrypoint"))
+    return sequence, hashlib.sha256(raw).hexdigest()
+
+
+def _render_stable_floor(body: bytes, sequence: int, metadata_sha256: str) -> bytes:
+    """Bind the signed example to the exact verified stable record.
+
+    The sequence is the authenticated floor every later update must meet. The
+    metadata digest lets the first install treat the stable record this
+    bootstrap was built from as its committed anchor, so a different validly
+    signed record at the same sequence cannot be served to an empty host.
+    """
+
+    if body.count(STABLE_SEQUENCE_PLACEHOLDER) != 1:
+        raise BundleRefused(
+            "stable release sequence placeholder is missing or repeated"
+        )
+    if body.count(STABLE_METADATA_SHA256_PLACEHOLDER) != 1:
+        raise BundleRefused(
+            "stable release metadata digest placeholder is missing or repeated"
+        )
+    return body.replace(
+        STABLE_SEQUENCE_PLACEHOLDER, str(sequence).encode("ascii")
+    ).replace(STABLE_METADATA_SHA256_PLACEHOLDER, metadata_sha256.encode("ascii"))
+
+
+def _assets(
+    path: Path,
+    *,
+    stable_minimum_sequence: int,
+    stable_metadata_sha256: str,
+) -> list[PayloadFile]:
     _controlled_directory(path, "reviewed asset directory")
     actual = {item.name for item in path.iterdir() if item.name in REQUIRED_ASSETS}
     if actual != REQUIRED_ASSETS:
@@ -429,9 +640,15 @@ def _assets(path: Path) -> list[PayloadFile]:
             f"reviewed asset {name}",
             maximum=MAX_CONTROL_FILE_BYTES,
         )
+        if name == "update.env.example":
+            body = _render_stable_floor(
+                body, stable_minimum_sequence, stable_metadata_sha256
+            )
         _refuse_private_key(body, f"reviewed asset {name}")
         if name in SYSTEMD_ASSETS:
             archive_path = f"payload/systemd/{name}"
+        elif name in OPERATOR_ASSETS:
+            archive_path = f"payload/operator/{name}"
         elif name == SYSUSERS_SOURCE:
             archive_path = "payload/sysusers/cathedral-validator.conf"
         else:
@@ -505,6 +722,7 @@ def build_bundle(
     bootstrap_signing_private_key_path: Path,
     bootstrap_signing_public_key_path: Path,
     runtime_release_public_key_path: Path,
+    stable_release_metadata_path: Path,
     assets_dir: Path,
     sequence: int,
     issued_unix: int | None,
@@ -546,6 +764,11 @@ def build_bundle(
         raise BundleRefused(
             "bootstrap signing key and runtime release key must be distinct"
         )
+    stable_minimum_sequence, stable_metadata_sha256 = _stable_release_sequence(
+        stable_release_metadata_path,
+        public_key=runtime_public_key,
+        now_unix=issued_unix,
+    )
 
     wheels, wheel_digests = _wheelhouse(wheelhouse)
     requirements_body = _requirements(requirements, wheel_digests)
@@ -556,7 +779,11 @@ def build_bundle(
             runtime_public_pem,
         ),
         PayloadFile(REQUIREMENTS_ARCHIVE_PATH, requirements_body),
-        *_assets(assets_dir),
+        *_assets(
+            assets_dir,
+            stable_minimum_sequence=stable_minimum_sequence,
+            stable_metadata_sha256=stable_metadata_sha256,
+        ),
         *wheels,
     ]
     archive = deterministic_archive(files)
@@ -591,6 +818,10 @@ def build_bundle(
                 "algorithm": "Ed25519",
                 "fingerprint": runtime_fingerprint,
                 "path": RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
+            },
+            "stable_release_floor": {
+                "metadata_sha256": stable_metadata_sha256,
+                "sequence": stable_minimum_sequence,
             },
             "schema": BUNDLE_SCHEMA,
         }
@@ -683,6 +914,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
     )
+    parser.add_argument("--stable-release-metadata", required=True, type=Path)
     parser.add_argument("--assets-dir", required=True, type=Path)
     parser.add_argument("--bundle-out", required=True, type=Path)
     parser.add_argument("--manifest-out", required=True, type=Path)
@@ -712,6 +944,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             bootstrap_signing_private_key_path=(options.bootstrap_signing_private_key),
             bootstrap_signing_public_key_path=(options.bootstrap_signing_public_key),
             runtime_release_public_key_path=(options.runtime_release_public_key),
+            stable_release_metadata_path=options.stable_release_metadata,
             assets_dir=options.assets_dir,
             sequence=options.sequence,
             issued_unix=options.issued_unix,
@@ -735,6 +968,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "bootstrap_sequence": options.sequence,
                 "bootstrap_signing_key_fingerprint": bootstrap_fingerprint,
                 "runtime_release_key_fingerprint": runtime_fingerprint,
+                "stable_release_minimum_sequence": json.loads(manifest)[
+                    "stable_release_floor"
+                ]["sequence"],
                 "signature_base64": base64.b64encode(signature).decode("ascii"),
             }
         ).decode("ascii"),

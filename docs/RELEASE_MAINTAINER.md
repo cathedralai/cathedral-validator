@@ -277,6 +277,7 @@ python deploy/validator-update/build_updater_bundle.py \
     /secure/offline/bootstrap-signing-public-key.pem \
   --runtime-release-public-key \
     /secure/offline/runtime-release-public-key.pem \
+  --stable-release-metadata /secure/signed/current-stable.json \
   --assets-dir /absolute/reviewed/deploy/validator-update \
   --bundle-out /secure/signed/updater-bootstrap.tar.gz \
   --manifest-out /secure/signed/updater-bootstrap.manifest.json \
@@ -284,6 +285,10 @@ python deploy/validator-update/build_updater_bundle.py \
   --sequence REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE \
   --lifetime-seconds 2592000
 ```
+
+The builder verifies `current-stable.json` with the runtime release public key
+and embeds its exact sequence as the first-install rollback floor. Do not enter
+the sequence by hand.
 
 The target repository must be public and have GitHub immutable releases
 enabled. The publishing identity needs release write access and permission to

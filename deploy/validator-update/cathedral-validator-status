@@ -1,0 +1,512 @@
+#!/usr/bin/python3.12
+"""Read local Cathedral validator state without starting or contacting anything."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+
+ETC = Path("/etc/cathedral-validator")
+INSTALL_ROOT = Path("/opt/cathedral-validator")
+UPDATER_STATE = Path("/var/lib/cathedral-validator-update/state.json")
+DIRECT_SCOPE = Path(
+    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0"
+)
+DIRECT_UNIT = "cathedral-validator-direct.service"
+STABLE_TIMER = "cathedral-validator-update.timer"
+MAX_STATE_BYTES = 1024 * 1024
+MAX_CONFIRMED_AGE_SECONDS = 60 * 60
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+_CHAIN_HASH = re.compile(r"0x[0-9a-f]{64}")
+_ATTEMPT_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_FINALIZED_RESULTS = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
+_TERMINAL_RESULTS = _FINALIZED_RESULTS | {"EXPIRED_WITHOUT_INCLUSION"}
+ROOT_UID = 0
+
+
+class StatusUnavailable(ValueError):
+    pass
+
+
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StatusUnavailable("state repeats a key")
+        result[key] = value
+    return result
+
+
+def _is_bittensor_ss58(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    number = 0
+    try:
+        for character in value:
+            number = number * 58 + _BASE58_VALUES[character]
+    except KeyError:
+        return False
+    leading_zeroes = len(value) - len(value.lstrip("1"))
+    decoded_length = max(1, (number.bit_length() + 7) // 8)
+    decoded = b"\x00" * leading_zeroes + number.to_bytes(decoded_length, "big")
+    if len(decoded) != 35 or decoded[0] != 42:
+        return False
+    expected_checksum = hashlib.blake2b(
+        b"SS58PRE" + decoded[:-2], digest_size=64
+    ).digest()[:2]
+    return decoded[-2:] == expected_checksum
+
+
+def _read_controlled_file(
+    path: Path,
+    *,
+    maximum: int,
+    owners: set[int] | None = None,
+    required_mode: int | None = None,
+) -> bytes:
+    if not path.is_absolute() or path.is_symlink() or not hasattr(os, "O_NOFOLLOW"):
+        raise StatusUnavailable("local state path is unsafe")
+    allowed_owners = {ROOT_UID} if owners is None else owners
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise StatusUnavailable("local state is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in allowed_owners
+            or stat.S_IMODE(before.st_mode) & 0o077
+            or (
+                required_mode is not None
+                and stat.S_IMODE(before.st_mode) != required_mode
+            )
+            or not 1 <= before.st_size <= maximum
+        ):
+            raise StatusUnavailable("local state is not root-controlled")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(body) != before.st_size
+            or len(body) > maximum
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise StatusUnavailable("local state changed while read")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def _json_state(path: Path, *, maximum: int) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            _read_controlled_file(path, maximum=maximum).decode("ascii"),
+            object_pairs_hook=_strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StatusUnavailable("local state is not strict JSON") from exc
+    if not isinstance(value, dict):
+        raise StatusUnavailable("local state is not an object")
+    return value
+
+
+def _identity() -> str:
+    raw = _read_controlled_file(ETC / "identity.env", maximum=4096)
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise StatusUnavailable("identity is not ASCII") from exc
+    values = [line for line in lines if line and not line.startswith("#")]
+    prefix = "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY="
+    if (
+        len(values) != 1
+        or not values[0].startswith(prefix)
+        or values[0].count("=") != 1
+    ):
+        raise StatusUnavailable("identity has unexpected fields")
+    identity = values[0][len(prefix) :]
+    if not _is_bittensor_ss58(identity):
+        raise StatusUnavailable("identity is invalid")
+    return identity
+
+
+def _systemd_state(runner: Runner, verb: str, unit: str) -> bool:
+    try:
+        result = runner(
+            ["/usr/bin/systemctl", verb, "--quiet", unit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _current_release() -> str | None:
+    current = INSTALL_ROOT / "current"
+    try:
+        metadata = current.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISLNK(metadata.st_mode):
+        return None
+    try:
+        target = current.resolve(strict=True)
+    except OSError:
+        return None
+    if (
+        target.parent != INSTALL_ROOT / "releases"
+        or _DIGEST.fullmatch(target.name) is None
+    ):
+        return None
+    return target.name
+
+
+def _updater_summary() -> dict[str, Any]:
+    document = _json_state(UPDATER_STATE, maximum=MAX_STATE_BYTES)
+    if set(document) != {"schema", "selected_channel", "channels", "pending"}:
+        raise StatusUnavailable("updater state has unsupported fields")
+    if document["schema"] != "cathedral_validator_updater_state_v3":
+        raise StatusUnavailable("updater state schema is unsupported")
+    if document["selected_channel"] not in {None, "stable"}:
+        raise StatusUnavailable("updater channel is not stable")
+    channels = document["channels"]
+    if not isinstance(channels, dict) or set(channels) - {"stable"}:
+        raise StatusUnavailable("updater channel state is invalid")
+    record = channels.get("stable")
+    if record is not None and (
+        not isinstance(record, dict)
+        or set(record)
+        != {"sequence", "archive_sha256", "signed_sha256", "metadata_sha256"}
+    ):
+        raise StatusUnavailable("updater stable record is invalid")
+    sequence = record.get("sequence") if isinstance(record, dict) else None
+    digest = record.get("archive_sha256") if isinstance(record, dict) else None
+    if sequence is not None and (
+        isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1
+    ):
+        raise StatusUnavailable("updater sequence is invalid")
+    if digest is not None and (
+        not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None
+    ):
+        raise StatusUnavailable("updater archive digest is invalid")
+    if isinstance(record, dict) and any(
+        not isinstance(record[field], str) or _DIGEST.fullmatch(record[field]) is None
+        for field in ("signed_sha256", "metadata_sha256")
+    ):
+        raise StatusUnavailable("updater signed digest is invalid")
+    pending = document["pending"]
+    if pending is not None and not isinstance(pending, dict):
+        raise StatusUnavailable("updater recovery state is invalid")
+    return {
+        "channel": document["selected_channel"],
+        "sequence": sequence,
+        "archive_digest": digest,
+        "pending_recovery": pending is not None,
+    }
+
+
+def _nonnegative_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _attempt_id(identity: dict[str, Any], intent: dict[str, Any]) -> str:
+    try:
+        body = (
+            json.dumps(
+                {"identity": identity, "intent": intent},
+                sort_keys=True,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise StatusUnavailable("direct journal last attempt is invalid") from exc
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def _last_attempt_summary(
+    last: object, *, expected_identity: str
+) -> tuple[str | None, int | None]:
+    if last is None:
+        return None, None
+    if not isinstance(last, dict) or set(last) != {
+        "attempt_id",
+        "status",
+        "identity",
+        "intent",
+        "receipt",
+    }:
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    attempt_id = last["attempt_id"]
+    result = last["status"]
+    identity = last["identity"]
+    intent = last["intent"]
+    receipt = last["receipt"]
+    if (
+        not isinstance(attempt_id, str)
+        or _ATTEMPT_ID.fullmatch(attempt_id) is None
+        or not isinstance(result, str)
+        or result not in _TERMINAL_RESULTS
+        or not isinstance(identity, dict)
+        or identity.get("schema") != "cathedral_direct_validator_plan_v1"
+        or not isinstance(intent, dict)
+        or set(intent)
+        != {
+            "extrinsic_hash",
+            "validator_hotkey",
+            "nonce",
+            "era_reference_block",
+            "mortal_period_blocks",
+            "kwargs",
+            "eligibility",
+        }
+        or intent.get("validator_hotkey") != expected_identity
+        or not _nonnegative_int(intent.get("nonce"))
+        or not _nonnegative_int(intent.get("era_reference_block"))
+        or isinstance(intent.get("mortal_period_blocks"), bool)
+        or not isinstance(intent.get("mortal_period_blocks"), int)
+        or intent["mortal_period_blocks"] <= 0
+        or not isinstance(intent.get("kwargs"), dict)
+        or not isinstance(intent.get("eligibility"), dict)
+        or _attempt_id(identity, intent) != attempt_id
+    ):
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    anchor = identity.get("anchor")
+    validator = anchor.get("validator") if isinstance(anchor, dict) else None
+    if (
+        not isinstance(validator, dict)
+        or validator.get("hotkey") != expected_identity
+        or identity.get("kwargs") != intent["kwargs"]
+    ):
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "status",
+        "attempt_id",
+        "extrinsic_hash",
+        "block_hash",
+        "block_number",
+        "recovered",
+        "confirmation_heads",
+    }:
+        raise StatusUnavailable("direct journal receipt is invalid")
+    extrinsic_hash = receipt["extrinsic_hash"]
+    if (
+        receipt["status"] != result
+        or receipt["attempt_id"] != attempt_id
+        or not isinstance(extrinsic_hash, str)
+        or _CHAIN_HASH.fullmatch(extrinsic_hash) is None
+        or intent["extrinsic_hash"] != extrinsic_hash
+        or type(receipt["recovered"]) is not bool
+        or not isinstance(receipt["confirmation_heads"], list)
+    ):
+        raise StatusUnavailable("direct journal receipt is invalid")
+
+    if result == "EXPIRED_WITHOUT_INCLUSION":
+        if (
+            receipt["block_hash"] is not None
+            or receipt["block_number"] is not None
+            or receipt["recovered"] is not True
+            or receipt["confirmation_heads"] != []
+        ):
+            raise StatusUnavailable("direct journal receipt is invalid")
+        return result, None
+
+    block_number = receipt["block_number"]
+    block_hash = receipt["block_hash"]
+    expected_recovered = result == "RECOVERED_CONFIRMED"
+    heads = receipt["confirmation_heads"]
+    if (
+        not _nonnegative_int(block_number)
+        or not isinstance(block_hash, str)
+        or _CHAIN_HASH.fullmatch(block_hash) is None
+        or receipt["recovered"] is not expected_recovered
+        or not (
+            intent["era_reference_block"]
+            <= block_number
+            < intent["era_reference_block"] + intent["mortal_period_blocks"]
+        )
+        or len(heads) != 3
+    ):
+        raise StatusUnavailable("direct journal receipt is invalid")
+    for offset, row in enumerate(heads):
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not _nonnegative_int(row[0])
+            or row[0] != block_number + offset
+            or not isinstance(row[1], str)
+            or _CHAIN_HASH.fullmatch(row[1]) is None
+        ):
+            raise StatusUnavailable("direct journal receipt is invalid")
+    if heads[0][1] != block_hash:
+        raise StatusUnavailable("direct journal receipt is invalid")
+    return result, block_number
+
+
+def _direct_summary(identity: str) -> dict[str, Any]:
+    path = DIRECT_SCOPE / identity / "state.json"
+    try:
+        service_uid = pwd.getpwnam("cathedral-validator").pw_uid
+    except KeyError as exc:
+        raise StatusUnavailable("validator service account is unavailable") from exc
+    try:
+        value = json.loads(
+            _read_controlled_file(
+                path,
+                maximum=MAX_STATE_BYTES,
+                owners={service_uid},
+                required_mode=0o600,
+            ).decode("ascii"),
+            object_pairs_hook=_strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StatusUnavailable("direct journal is not strict JSON") from exc
+    if not isinstance(value, dict):
+        raise StatusUnavailable("direct journal is not an object")
+    try:
+        journal_mtime_unix = int(path.stat(follow_symlinks=False).st_mtime)
+    except OSError as exc:
+        raise StatusUnavailable("direct journal metadata is unavailable") from exc
+    document = value
+    if (
+        set(document) != {"schema", "pending", "last_attempt"}
+        or document["schema"] != "cathedral_direct_validator_state_v1"
+    ):
+        raise StatusUnavailable("direct journal has unsupported fields")
+    pending = document["pending"]
+    last = document["last_attempt"]
+    if pending is not None and not isinstance(pending, dict):
+        raise StatusUnavailable("direct journal pending state is invalid")
+    status, block_number = _last_attempt_summary(last, expected_identity=identity)
+    return {
+        "pending": pending is not None,
+        "last_result": status,
+        "block_number": block_number,
+        "recorded_unix": journal_mtime_unix,
+    }
+
+
+def _default_runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(*args, **kwargs)
+
+
+def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "schema": "cathedral_validator_local_status_v1",
+        "service_active": _systemd_state(runner, "is-active", DIRECT_UNIT),
+        "stable_timer_active": _systemd_state(runner, "is-active", STABLE_TIMER),
+        "stable_timer_enabled": _systemd_state(runner, "is-enabled", STABLE_TIMER),
+        "release": _current_release(),
+        "evidence": "local process and durable state only. This does not prove current chain inclusion.",
+    }
+    try:
+        identity = _identity()
+        report["updater"] = _updater_summary()
+        report["direct"] = _direct_summary(identity)
+        release_after = _current_release()
+        updater_after = _updater_summary()
+        direct_after = _direct_summary(identity)
+        if (
+            release_after != report["release"]
+            or release_after is None
+            or release_after != report["updater"]["archive_digest"]
+            or updater_after != report["updater"]
+            or direct_after != report["direct"]
+        ):
+            raise StatusUnavailable("release and signed updater state disagree")
+    except StatusUnavailable:
+        report["result"] = "NOT_PROVEN"
+        report["action"] = (
+            "Inspect the local service and durable state before changing configuration."
+        )
+        return report
+    direct = report["direct"]
+    updater = report["updater"]
+    direct["recorded_age_seconds"] = max(
+        0,
+        int(time.time()) - direct.pop("recorded_unix"),
+    )
+    if not report["service_active"]:
+        report["result"] = "NEEDS_REVIEW"
+        report["action"] = (
+            "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
+        )
+    elif (
+        report["stable_timer_active"]
+        and report["stable_timer_enabled"]
+        and report["release"] is not None
+        and updater["channel"] == "stable"
+        and not updater["pending_recovery"]
+        and not direct["pending"]
+        and direct["last_result"] in {"CONFIRMED", "RECOVERED_CONFIRMED"}
+        and direct["recorded_age_seconds"] <= MAX_CONFIRMED_AGE_SECONDS
+    ):
+        report["result"] = "OPERATING_CONFIRMED"
+        report["action"] = "No action required."
+    else:
+        report["result"] = "NOT_PROVEN"
+        report["action"] = (
+            "Wait for recovery or the next cycle. Do not retry or replace the journal."
+        )
+    return report
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Show local Cathedral validator status"
+    )
+    parser.add_argument("--json", action="store_true")
+    options = parser.parse_args(argv)
+    if os.geteuid() != 0:
+        parser.error("status must run as root")
+    report = collect()
+    if options.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        for key in (
+            "result",
+            "service_active",
+            "stable_timer_active",
+            "stable_timer_enabled",
+            "release",
+            "updater",
+            "direct",
+            "action",
+            "evidence",
+        ):
+            if key in report:
+                print(f"{key}: {report[key]}")
+    return 0 if report["result"] == "OPERATING_CONFIRMED" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

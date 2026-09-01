@@ -316,6 +316,8 @@ jobs:
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
+            deploy/validator-update/cathedral-validator-setup \
+            deploy/validator-update/cathedral-validator-status \
             deploy/validator-update/compose_updater_requirements.py \
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \
@@ -328,6 +330,8 @@ jobs:
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
+            deploy/validator-update/cathedral-validator-setup \
+            deploy/validator-update/cathedral-validator-status \
             deploy/validator-update/compose_updater_requirements.py \
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \

@@ -1609,10 +1609,20 @@ class SignedReleaseUpdater:
         minimum_sequence: int,
         validator_uid: int,
         validator_gid: int,
+        first_install_metadata_sha256: str,
         cycle_wait_seconds: float = DEFAULT_CYCLE_WAIT_SECONDS,
         operation_timeout_seconds: float = DEFAULT_OPERATION_TIMEOUT_SECONDS,
     ) -> str:
-        """Install the first release on an otherwise clean validator host."""
+        """Install the first release on an otherwise clean validator host.
+
+        ``first_install_metadata_sha256`` is the digest of the signed stable
+        record at ``minimum_sequence`` that the bootstrap was built from. Until
+        a stable record is committed locally that record stands in for the
+        committed one: a different validly signed record at the same sequence
+        is refused as equivocation, and only a strictly higher signed release
+        may supersede it. A bootstrap therefore stays usable after later
+        stable publications without weakening the same-sequence guarantee.
+        """
 
         return self._update_release(
             metadata_url=metadata_url,
@@ -1623,6 +1633,7 @@ class SignedReleaseUpdater:
             cycle_wait_seconds=cycle_wait_seconds,
             operation_timeout_seconds=operation_timeout_seconds,
             bootstrap_owner=(validator_uid, validator_gid),
+            first_install_metadata_sha256=first_install_metadata_sha256,
         )
 
     def update(
@@ -1647,6 +1658,7 @@ class SignedReleaseUpdater:
             cycle_wait_seconds=cycle_wait_seconds,
             operation_timeout_seconds=operation_timeout_seconds,
             bootstrap_owner=None,
+            first_install_metadata_sha256=None,
         )
 
     def _require_exact_current_record(
@@ -1879,10 +1891,26 @@ class SignedReleaseUpdater:
         cycle_wait_seconds: float,
         operation_timeout_seconds: float,
         bootstrap_owner: tuple[int, int] | None,
+        first_install_metadata_sha256: str | None,
     ) -> str:
         deadline = _operation_deadline(operation_timeout_seconds)
         if channel not in {"canary", "stable"}:
             raise UpdateRefused("release channel is invalid")
+        bound_metadata_sha256: str | None = None
+        if bootstrap_owner is not None:
+            if first_install_metadata_sha256 is None:
+                raise UpdateRefused(
+                    "first-install bootstrap requires the exact stable metadata "
+                    "digest bound by the signed bootstrap"
+                )
+            bound_metadata_sha256 = _hex_digest(
+                first_install_metadata_sha256,
+                label="first-install stable metadata digest",
+            )
+        elif first_install_metadata_sha256 is not None:
+            raise UpdateRefused(
+                "the first-install metadata digest applies only to the bootstrap"
+            )
         if (
             isinstance(minimum_sequence, bool)
             or not isinstance(minimum_sequence, int)
@@ -1947,6 +1975,20 @@ class SignedReleaseUpdater:
             )
             if release.sequence < minimum_sequence:
                 raise UpdateRefused("release is below the trusted bootstrap sequence")
+            if (
+                bound_metadata_sha256 is not None
+                and not state["channels"]
+                and release.sequence == minimum_sequence
+                and release.metadata_sha256 != bound_metadata_sha256
+            ):
+                # No stable record is committed yet, so the record bound by the
+                # signed bootstrap is the anchor for the monotonic contract. A
+                # different record at the bound sequence is equivocation, the
+                # same refusal a committed host gives at its committed sequence.
+                raise UpdateRefused(
+                    "first stable release metadata equivocates with the record "
+                    "bound by the signed bootstrap"
+                )
             enforce_monotonic_release(state, release)
             target = _release_target(release.archive_sha256)
             if rescue_pending is not None:
@@ -2105,6 +2147,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="gate validator startup and reconcile durable activation state",
     )
     parser.add_argument(
+        "--first-install-metadata-sha256",
+        help=(
+            "SHA-256 of the signed stable record at --minimum-sequence that the "
+            "signed bootstrap was built from; required with and only valid for "
+            "--bootstrap-first-install"
+        ),
+    )
+    parser.add_argument(
         "--cycle-wait-seconds",
         type=float,
         default=DEFAULT_CYCLE_WAIT_SECONDS,
@@ -2141,6 +2191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     options.metadata_url,
                     options.public_key,
                     options.minimum_sequence,
+                    options.first_install_metadata_sha256,
                 )
             ):
                 raise UpdateRefused(
@@ -2176,6 +2227,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "operation_timeout_seconds": options.operation_timeout_seconds,
         }
         if options.bootstrap_first_install:
+            if options.first_install_metadata_sha256 is None:
+                raise UpdateRefused(
+                    "first-install bootstrap requires the exact stable metadata "
+                    "digest bound by the signed bootstrap"
+                )
             try:
                 validator = pwd.getpwnam("cathedral-validator")
             except KeyError as exc:
@@ -2186,8 +2242,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **arguments,
                 validator_uid=validator.pw_uid,
                 validator_gid=validator.pw_gid,
+                first_install_metadata_sha256=options.first_install_metadata_sha256,
             )
         else:
+            if options.first_install_metadata_sha256 is not None:
+                raise UpdateRefused(
+                    "the first-install metadata digest applies only to "
+                    "--bootstrap-first-install"
+                )
             status = updater.update(**arguments)
     except UpdateRefused as exc:
         print(f"CATHEDRAL_VALIDATOR_UPDATE_REFUSED: {exc}", file=sys.stderr)

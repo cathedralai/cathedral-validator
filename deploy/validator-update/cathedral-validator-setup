@@ -1,0 +1,816 @@
+#!/usr/bin/python3.12
+"""Install the one supported Cathedral validator operator configuration.
+
+This program is shipped in the signed bootstrap, not in a validator runtime
+release.  It intentionally has no release URL, key, channel, or wallet-name
+override: those are authenticated bootstrap settings.  The only private input
+is copied directly into the root-owned systemd credential source and is never
+printed or passed to a child process.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+
+ETC = Path("/etc/cathedral-validator")
+EXAMPLES = Path("/usr/local/share/cathedral-validator-updater/examples")
+UPDATER = Path(
+    "/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update"
+)
+RUNTIME_KEY = ETC / "runtime-release-public-key.pem"
+INSTALL_ROOT = Path("/opt/cathedral-validator")
+UPDATER_STATE = Path("/var/lib/cathedral-validator-update/state.json")
+SYSTEMD = Path("/etc/systemd/system")
+DIRECT_UNIT = "cathedral-validator-direct.service"
+STABLE_TIMER = "cathedral-validator-update.timer"
+REFUSED_UNITS = (
+    "cathedral-validator-canary-update.timer",
+    "cathedral-validator-canary-update.service",
+    "cathedral-validator-sn39.service",
+    "cathedral-validator-sn39-relay.service",
+    "cathedral-confidential-validator-sn39.service",
+    "cathedral-confidential-validator.service",
+    "cathedral-validator.service",
+)
+MAX_HOTKEY_BYTES = 1024 * 1024
+MAX_POLICY_BYTES = 128 * 1024
+MAX_UPDATER_STATE_BYTES = 1024 * 1024
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
+_MEASUREMENT = re.compile(r"[0-9a-f]{96}")
+_TCB = re.compile(r"0x[0-9a-f]{16}")
+_GENERATIONS = frozenset({"milan", "genoa", "turin"})
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+# The unencrypted bittensor-wallet keyfile is a JSON object drawn from exactly
+# these fields. The pinned bittensor-wallet 4.1.0 reader derives the signing key
+# from secretPhrase, then secretSeed, then privateKey, only fails at signing
+# time when none is present, treats a missing cryptoType as sr25519, and
+# tolerates unknown fields. Setup is stricter than the reader on purpose: it
+# accepts only the fields btcli writes and only the sr25519 crypto type the
+# validator signs with. Encrypted keyfiles carry one of the listed prefixes and
+# need a password the unattended service never has.
+_HOTKEY_FIELDS = frozenset(
+    {
+        "accountId",
+        "cryptoType",
+        "privateKey",
+        "publicKey",
+        "secretPhrase",
+        "secretSeed",
+        "ss58Address",
+    }
+)
+_SR25519_CRYPTO_TYPE = 1
+_ENCRYPTED_KEYFILE_PREFIXES = (b"$NACL", b"$ANSIBLE_VAULT", b"gAAAAA")
+_HEX_PUBLIC_KEY = re.compile(r"0x[0-9a-fA-F]{64}")
+_HEX_SEED = re.compile(r"0x[0-9a-fA-F]{64}")
+_HEX_PRIVATE_KEY = re.compile(r"0x[0-9a-fA-F]{128}")
+_RELEASE_TARGET = re.compile(r"releases/[0-9a-f]{64}")
+_UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v3"
+BOOTSTRAP_OWNER = 0
+ROOT_UID = 0
+ROOT_GID = 0
+
+
+class SetupRefused(ValueError):
+    """The requested setup would weaken a local safety boundary."""
+
+
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise SetupRefused("JSON input repeats a key")
+        document[key] = value
+    return document
+
+
+def _operator_uids() -> set[int]:
+    allowed = {0}
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_uid and sudo_uid.isdecimal():
+        allowed.add(int(sudo_uid))
+    return allowed
+
+
+def _read_regular(
+    path: Path,
+    *,
+    maximum: int,
+    owners: set[int],
+    label: str,
+    pin_parent: bool = False,
+    required_mode: int | None = None,
+    owner_only: bool = False,
+) -> bytes:
+    if not path.is_absolute() or path.is_symlink() or not hasattr(os, "O_NOFOLLOW"):
+        raise SetupRefused(f"{label} must be an absolute non-symlink file")
+    parent_descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        if pin_parent:
+            if not hasattr(os, "O_DIRECTORY"):
+                raise SetupRefused(f"{label} parent cannot be pinned safely")
+            parent_descriptor = os.open(
+                path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        else:
+            descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SetupRefused(f"{label} is unavailable") from exc
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in owners
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or (
+                required_mode is not None
+                and stat.S_IMODE(before.st_mode) != required_mode
+            )
+            or not 1 <= before.st_size <= maximum
+        ):
+            raise SetupRefused(f"{label} is not an owner-controlled regular file")
+        if owner_only and stat.S_IMODE(before.st_mode) & 0o077:
+            raise SetupRefused(
+                f"{label} must be readable only by its owner (mode 0600)"
+            )
+        body = b""
+        while len(body) <= maximum:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - len(body)))
+            if not chunk:
+                break
+            body += chunk
+        after = os.fstat(descriptor)
+        if (
+            len(body) != before.st_size
+            or len(body) > maximum
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise SetupRefused(f"{label} changed while it was read")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def _parse_hotkey(body: bytes, expected: str) -> None:
+    """Require the unencrypted bittensor-wallet hotkey shape the service can use.
+
+    Setup cannot derive sr25519 keys with the standard library, so it proves
+    the shape here and the running validator proves the loaded signing key
+    matches ``--expected-hotkey`` before its first chain access. A public-only
+    document would pass every check the old parser made and then fail at the
+    first signature, after the credential had already been installed.
+    """
+
+    if body.startswith(_ENCRYPTED_KEYFILE_PREFIXES):
+        raise SetupRefused(
+            "hotkey file is encrypted; the unattended validator service "
+            "cannot decrypt it"
+        )
+    try:
+        document = json.loads(body.decode("utf-8"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupRefused(
+            "hotkey file is not an unencrypted Bittensor keyfile"
+        ) from exc
+    if not isinstance(document, dict) or not set(document) <= _HOTKEY_FIELDS:
+        raise SetupRefused("hotkey file is not an unencrypted Bittensor keyfile")
+    address = document.get("ss58Address")
+    public_key = _decode_bittensor_ss58(address)
+    if public_key is None:
+        raise SetupRefused("hotkey file has no valid public SS58 address")
+    if address != expected:
+        raise SetupRefused("hotkey public address does not match --expected-hotkey")
+    crypto_type = document.get("cryptoType")
+    if crypto_type is not None and (
+        isinstance(crypto_type, bool)
+        or not isinstance(crypto_type, int)
+        or crypto_type != _SR25519_CRYPTO_TYPE
+    ):
+        raise SetupRefused("hotkey file cryptoType is not sr25519")
+    for field in ("publicKey", "accountId"):
+        value = document.get(field)
+        if value is None:
+            continue
+        if (
+            not isinstance(value, str)
+            or _HEX_PUBLIC_KEY.fullmatch(value) is None
+            or bytes.fromhex(value[2:]) != public_key
+        ):
+            raise SetupRefused(f"hotkey file {field} does not match its SS58 address")
+    seed = document.get("secretSeed")
+    phrase = document.get("secretPhrase")
+    private_key = document.get("privateKey")
+    if seed is not None and (
+        not isinstance(seed, str) or _HEX_SEED.fullmatch(seed) is None
+    ):
+        raise SetupRefused("hotkey file secretSeed is malformed")
+    if phrase is not None and (
+        not isinstance(phrase, str) or not phrase.strip() or not phrase.isascii()
+    ):
+        raise SetupRefused("hotkey file secretPhrase is malformed")
+    if private_key is not None and (
+        not isinstance(private_key, str)
+        or _HEX_PRIVATE_KEY.fullmatch(private_key) is None
+    ):
+        raise SetupRefused("hotkey file privateKey is malformed")
+    if seed is None and phrase is None and private_key is None:
+        raise SetupRefused(
+            "hotkey file has no signing secret; a public-only keyfile cannot "
+            "sign weights"
+        )
+
+
+def _decode_bittensor_ss58(value: object) -> bytes | None:
+    """Return the 32-byte public key of one Bittensor SS58 format-42 address."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    number = 0
+    try:
+        for character in value:
+            number = number * 58 + _BASE58_VALUES[character]
+    except KeyError:
+        return None
+    leading_zeroes = len(value) - len(value.lstrip("1"))
+    decoded_length = max(1, (number.bit_length() + 7) // 8)
+    decoded = b"\x00" * leading_zeroes + number.to_bytes(decoded_length, "big")
+    if len(decoded) != 35 or decoded[0] != 42:
+        return None
+    expected_checksum = hashlib.blake2b(
+        b"SS58PRE" + decoded[:-2], digest_size=64
+    ).digest()[:2]
+    if decoded[-2:] != expected_checksum:
+        return None
+    return decoded[1:-2]
+
+
+def _is_bittensor_ss58(value: object) -> bool:
+    """Validate one 32-byte public key using Bittensor's SS58 format 42."""
+
+    return _decode_bittensor_ss58(value) is not None
+
+
+def _validate_policy(body: bytes) -> None:
+    try:
+        document = json.loads(body.decode("ascii"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupRefused("SNP policy is not strict JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "generations"}
+        or document["schema"] != "cathedral_amd_sev_snp_policy_v1"
+        or not isinstance(document["generations"], dict)
+        or not document["generations"]
+    ):
+        raise SetupRefused("SNP policy has an unsupported production shape")
+    for generation, policy in document["generations"].items():
+        if (
+            generation not in _GENERATIONS
+            or not isinstance(policy, dict)
+            or set(policy)
+            != {
+                "allowed_measurements",
+                "minimum_tcb",
+            }
+        ):
+            raise SetupRefused("SNP policy generation is malformed")
+        measurements = policy["allowed_measurements"]
+        tcb = policy["minimum_tcb"]
+        if (
+            not isinstance(measurements, list)
+            or not measurements
+            or measurements != sorted(measurements)
+            or len(measurements) != len(set(measurements))
+            or any(
+                not isinstance(item, str) or _MEASUREMENT.fullmatch(item) is None
+                for item in measurements
+            )
+            or not isinstance(tcb, str)
+            or _TCB.fullmatch(tcb) is None
+        ):
+            raise SetupRefused("SNP policy measurements or TCB are malformed")
+        packed = int(tcb, 16)
+        if packed == 0:
+            raise SetupRefused("SNP policy minimum TCB must be nonzero")
+        encoded = packed.to_bytes(8, "little")
+        reserved = range(2, 6) if generation in {"milan", "genoa"} else range(4, 7)
+        if any(encoded[index] for index in reserved):
+            raise SetupRefused("SNP policy TCB sets reserved bytes")
+
+
+def _parse_signed_update_example(body: bytes) -> tuple[str, int, str]:
+    try:
+        lines = body.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise SetupRefused("signed update example is not ASCII") from exc
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        if line.count("=") != 1:
+            raise SetupRefused("signed update example is malformed")
+        key, value = line.split("=", 1)
+        if key in values:
+            raise SetupRefused("signed update example repeats a field")
+        values[key] = value
+    url = values.get("CATHEDRAL_VALIDATOR_STABLE_METADATA_URL")
+    sequence = values.get("CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE")
+    metadata_sha256 = values.get("CATHEDRAL_VALIDATOR_STABLE_METADATA_SHA256")
+    if not isinstance(url, str) or not url.startswith("https://") or not url[8:]:
+        raise SetupRefused("signed stable metadata URL is invalid")
+    if not isinstance(sequence, str) or not sequence.isdecimal() or int(sequence) < 1:
+        raise SetupRefused("signed stable minimum sequence is invalid")
+    if (
+        not isinstance(metadata_sha256, str)
+        or _DIGEST.fullmatch(metadata_sha256) is None
+    ):
+        raise SetupRefused("signed stable metadata digest is invalid")
+    return url, int(sequence), metadata_sha256
+
+
+def _service_gid() -> int:
+    try:
+        return pwd.getpwnam("cathedral-validator").pw_gid
+    except KeyError as exc:
+        raise SetupRefused(
+            "cathedral-validator service account is unavailable"
+        ) from exc
+
+
+def _ensure_root_directory(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        metadata = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise SetupRefused("configuration directory is unsafe")
+        return
+    path.mkdir(mode=0o700, parents=True)
+
+
+def _existing_matches(path: Path, body: bytes, *, mode: int, gid: int) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink():
+        raise SetupRefused("existing configuration file is a symlink")
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != gid
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise SetupRefused("existing configuration file is not safely managed")
+    existing = _read_regular(
+        path,
+        maximum=max(len(body), 1) + 1,
+        owners={ROOT_UID},
+        label="existing configuration",
+    )
+    if existing != body:
+        raise SetupRefused("existing configuration differs and will not be overwritten")
+    return True
+
+
+def _install_once(path: Path, body: bytes, *, mode: int, gid: int) -> None:
+    if _existing_matches(path, body, mode=mode, gid=gid):
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        try:
+            remaining = memoryview(body)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("protected configuration write made no progress")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+            os.fchmod(descriptor, mode)
+            os.fchown(descriptor, ROOT_UID, gid)
+        except OSError as exc:
+            raise SetupRefused("cannot create protected configuration") from exc
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if not _existing_matches(path, body, mode=mode, gid=gid):
+                raise SetupRefused(
+                    "existing configuration differs and will not be overwritten"
+                )
+        directory = os.open(path.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        raise SetupRefused("cannot commit protected configuration") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _default_runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(*args, **kwargs)
+
+
+def _run_checked(runner: Runner, command: list[str], label: str) -> None:
+    try:
+        runner(command, check=True, text=True, capture_output=True, timeout=1320)
+    except subprocess.CalledProcessError as exc:
+        for output in (exc.stderr, exc.stdout):
+            if not isinstance(output, str):
+                continue
+            for line in output.splitlines():
+                prefix = "CATHEDRAL_VALIDATOR_UPDATE_REFUSED: "
+                if line.startswith(prefix):
+                    reason = line[len(prefix) :]
+                    if (
+                        reason.isascii()
+                        and len(reason) <= 300
+                        and re.fullmatch(r"[A-Za-z0-9 .,:/_()'=-]+", reason)
+                    ):
+                        raise SetupRefused(f"{label} refused: {reason}") from exc
+        raise SetupRefused(f"{label} failed") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupRefused(f"{label} failed") from exc
+
+
+def _unit_is_active_or_enabled(runner: Runner, unit: str) -> bool:
+    for verb in ("is-active", "is-enabled"):
+        try:
+            result = runner(
+                ["/usr/bin/systemctl", verb, "--quiet", unit],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SetupRefused("cannot inspect conflicting systemd units") from exc
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def _unit_is_active(runner: Runner, unit: str) -> bool:
+    try:
+        result = runner(
+            ["/usr/bin/systemctl", "is-active", "--quiet", unit],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupRefused("cannot inspect direct validator service") from exc
+    return result.returncode == 0
+
+
+def _has_verified_current_release() -> bool:
+    current = INSTALL_ROOT / "current"
+    if not current.exists() and not current.is_symlink():
+        return False
+    try:
+        metadata = current.lstat()
+        target = current.resolve(strict=True)
+    except OSError as exc:
+        raise SetupRefused("existing runtime release is unavailable") from exc
+    if (
+        not stat.S_ISLNK(metadata.st_mode)
+        or target.parent != INSTALL_ROOT / "releases"
+        or _DIGEST.fullmatch(target.name) is None
+    ):
+        raise SetupRefused("existing runtime release is not updater-managed")
+    return True
+
+
+def _validate_updater_record(value: object, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "sequence",
+        "archive_sha256",
+        "signed_sha256",
+        "metadata_sha256",
+    }:
+        raise SetupRefused(f"{label} is invalid")
+    sequence = value["sequence"]
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+        raise SetupRefused(f"{label} sequence is invalid")
+    for field in ("archive_sha256", "signed_sha256", "metadata_sha256"):
+        digest = value[field]
+        if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+            raise SetupRefused(f"{label} digest is invalid")
+    return dict(value)
+
+
+def _validate_updater_pending(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "channel",
+        "record",
+        "previous_current",
+        "target_current",
+        "stage",
+    }:
+        raise SetupRefused("updater pending activation is invalid")
+    if value["channel"] != "stable":
+        raise SetupRefused("updater pending activation is not stable")
+    previous = value["previous_current"]
+    target = value["target_current"]
+    if previous is not None and (
+        not isinstance(previous, str) or _RELEASE_TARGET.fullmatch(previous) is None
+    ):
+        raise SetupRefused("updater pending previous release is invalid")
+    if not isinstance(target, str) or _RELEASE_TARGET.fullmatch(target) is None:
+        raise SetupRefused("updater pending target release is invalid")
+    if not isinstance(value["stage"], str) or value["stage"] not in {
+        "prepared",
+        "may_have_run",
+    }:
+        raise SetupRefused("updater pending activation stage is invalid")
+    record = _validate_updater_record(value["record"], label="updater pending record")
+    if target != f"releases/{record['archive_sha256']}":
+        raise SetupRefused("updater pending target does not match its record")
+    return dict(value)
+
+
+def _requires_first_install() -> bool:
+    """Trust only a committed stable record as proof of a completed install."""
+
+    try:
+        UPDATER_STATE.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise SetupRefused("updater state is unavailable") from exc
+    body = _read_regular(
+        UPDATER_STATE,
+        maximum=MAX_UPDATER_STATE_BYTES,
+        owners={BOOTSTRAP_OWNER},
+        label="updater state",
+        pin_parent=True,
+        required_mode=0o600,
+    )
+    try:
+        document = json.loads(body.decode("ascii"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupRefused("updater state is not strict JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "selected_channel", "channels", "pending"}
+        or document["schema"] != _UPDATER_STATE_SCHEMA
+        or not isinstance(document["channels"], dict)
+        or set(document["channels"]) - {"stable"}
+        or (
+            document["selected_channel"] is not None
+            and document["selected_channel"] != "stable"
+        )
+    ):
+        raise SetupRefused("updater state is invalid or not stable-only")
+    channels = document["channels"]
+    committed = None
+    if "stable" in channels:
+        committed = _validate_updater_record(
+            channels["stable"], label="updater stable record"
+        )
+    pending = _validate_updater_pending(document["pending"])
+    selected = document["selected_channel"]
+    if selected is None and (channels or pending is not None):
+        raise SetupRefused("updater state has no selected stable channel")
+    if pending is not None and (
+        (committed is None and pending["previous_current"] is not None)
+        or (committed is not None and pending["previous_current"] is None)
+    ):
+        raise SetupRefused("pending updater state contradicts committed installation")
+    if committed is None:
+        return True
+    if not _has_verified_current_release():
+        raise SetupRefused("committed updater state has no managed current release")
+    return False
+
+
+def _setup_completion_body(expected_hotkey: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schema": "cathedral_validator_setup_complete_v1",
+                "expected_hotkey": expected_hotkey,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def configure(
+    *,
+    hotkey_file: Path,
+    expected_hotkey: str,
+    snp_policy: Path,
+    runner: Runner = _default_runner,
+) -> None:
+    if not _is_bittensor_ss58(expected_hotkey):
+        raise SetupRefused("--expected-hotkey must be a public SS58 address")
+    if hotkey_file.parent.name != "hotkeys" or "coldkey" in hotkey_file.name.casefold():
+        raise SetupRefused(
+            "--hotkey-file must be the named file inside a Bittensor hotkeys directory"
+        )
+    owners = _operator_uids()
+    hotkey = _read_regular(
+        hotkey_file,
+        maximum=MAX_HOTKEY_BYTES,
+        owners=owners,
+        label="hotkey file",
+        pin_parent=True,
+        owner_only=True,
+    )
+    policy = _read_regular(
+        snp_policy, maximum=MAX_POLICY_BYTES, owners=owners, label="SNP policy"
+    )
+    _parse_hotkey(hotkey, expected_hotkey)
+    _validate_policy(policy)
+    direct_example = _read_regular(
+        EXAMPLES / "direct.env.example",
+        maximum=4096,
+        owners={BOOTSTRAP_OWNER},
+        label="signed direct example",
+    )
+    update_example = _read_regular(
+        EXAMPLES / "update.env.example",
+        maximum=8192,
+        owners={BOOTSTRAP_OWNER},
+        label="signed update example",
+    )
+    stable_url, stable_sequence, stable_metadata_sha256 = _parse_signed_update_example(
+        update_example
+    )
+    _read_regular(
+        RUNTIME_KEY,
+        maximum=8192,
+        owners={BOOTSTRAP_OWNER},
+        label="signed runtime release key",
+    )
+    if (
+        not UPDATER.is_absolute()
+        or UPDATER.is_symlink()
+        or not os.access(UPDATER, os.X_OK)
+    ):
+        raise SetupRefused("signed updater is unavailable")
+    for unit in (DIRECT_UNIT, STABLE_TIMER):
+        unit_path = SYSTEMD / unit
+        _read_regular(
+            unit_path,
+            maximum=65536,
+            owners={BOOTSTRAP_OWNER},
+            label="signed systemd unit",
+        )
+    for unit in REFUSED_UNITS:
+        if _unit_is_active_or_enabled(runner, unit):
+            raise SetupRefused(
+                "a conflicting validator or canary unit is active or enabled"
+            )
+    requires_first_install = _requires_first_install()
+    completion = _setup_completion_body(expected_hotkey)
+    setup_complete = _existing_matches(
+        ETC / "setup-complete.json",
+        completion,
+        mode=0o600,
+        gid=ROOT_GID,
+    )
+    if requires_first_install and setup_complete:
+        raise SetupRefused("setup completion contradicts updater state")
+    if not requires_first_install and not _unit_is_active(runner, DIRECT_UNIT):
+        # A committed installation whose writer is not running is refused
+        # whether or not the completion marker exists. The first-install
+        # updater starts the writer before it returns, so an absent marker
+        # only proves that setup was interrupted afterwards; it cannot prove
+        # the writer was not later stopped on purpose, including by a
+        # contradiction stop that RestartPreventExitStatus=2 keeps stopped.
+        raise SetupRefused("existing direct validator is stopped and needs review")
+
+    service_gid = _service_gid()
+    identity = f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={expected_hotkey}\n".encode(
+        "ascii"
+    )
+    update = (
+        "# Generated from signed bootstrap defaults. Stable is the only operator channel.\n"
+        f"CATHEDRAL_VALIDATOR_STABLE_METADATA_URL={stable_url}\n"
+        f"CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE={stable_sequence}\n"
+    ).encode("ascii")
+    destinations = (
+        (ETC / "validator-hotkey", hotkey, 0o600, ROOT_GID),
+        (ETC / "snp-policy.json", policy, 0o440, service_gid),
+        (ETC / "identity.env", identity, 0o600, ROOT_GID),
+        (ETC / "direct.env", direct_example, 0o600, ROOT_GID),
+        (ETC / "update.env", update, 0o600, ROOT_GID),
+    )
+    # Validate every existing destination before the first persistent mutation.
+    for path, body, mode, gid in destinations:
+        _existing_matches(path, body, mode=mode, gid=gid)
+    _ensure_root_directory(ETC)
+    for path, body, mode, gid in destinations:
+        _install_once(path, body, mode=mode, gid=gid)
+
+    if requires_first_install:
+        updater_command = [
+            str(UPDATER),
+            "--bootstrap-first-install",
+            "--channel=stable",
+            f"--metadata-url={stable_url}",
+            f"--public-key={RUNTIME_KEY}",
+            f"--identity-file={ETC / 'identity.env'}",
+            f"--minimum-sequence={stable_sequence}",
+            f"--first-install-metadata-sha256={stable_metadata_sha256}",
+        ]
+        _run_checked(runner, updater_command, "first signed install")
+    # The first-install updater has already started the writer, and a
+    # committed rerun proved it active before any mutation. Enabling only
+    # records the boot dependency; setup never starts or restarts the writer.
+    _run_checked(
+        runner,
+        ["/usr/bin/systemctl", "enable", DIRECT_UNIT],
+        "direct service enable",
+    )
+    _run_checked(
+        runner,
+        ["/usr/bin/systemctl", "enable", "--now", STABLE_TIMER],
+        "stable update timer enable",
+    )
+    _run_checked(
+        runner,
+        ["/usr/bin/systemctl", "is-active", "--quiet", DIRECT_UNIT],
+        "direct service readiness",
+    )
+    _run_checked(
+        runner,
+        ["/usr/bin/systemctl", "is-active", "--quiet", STABLE_TIMER],
+        "stable update timer readiness",
+    )
+    _install_once(
+        ETC / "setup-complete.json",
+        completion,
+        mode=0o600,
+        gid=ROOT_GID,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Configure the stable Cathedral direct validator"
+    )
+    parser.add_argument("--hotkey-file", type=Path, required=True)
+    parser.add_argument("--expected-hotkey", required=True)
+    parser.add_argument("--snp-policy", type=Path, required=True)
+    parser.add_argument("--confirm-direct-write", action="store_true")
+    options = parser.parse_args(argv)
+    if os.geteuid() != 0:
+        parser.error("setup must run as root")
+    if not options.confirm_direct_write:
+        parser.error("--confirm-direct-write is required")
+    try:
+        configure(
+            hotkey_file=options.hotkey_file,
+            expected_hotkey=options.expected_hotkey,
+            snp_policy=options.snp_policy,
+        )
+    except SetupRefused as exc:
+        print(f"SETUP_REFUSED: {exc}", file=sys.stderr)
+        return 2
+    print("SETUP_COMPLETE: stable direct validator configured")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

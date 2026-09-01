@@ -24,7 +24,9 @@ pinned TDX and SNP verifier programs.
 ## What you need
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
-- Your Bittensor validator hotkey file and its public SS58 address.
+- Your Bittensor validator hotkey file and its public SS58 address. The file
+  must be unencrypted (the `btcli` default for hotkeys) and readable only by
+  its owner.
 - A reviewed AMD SEV-SNP policy containing only measurements and TCB floors you
   trust.
 
@@ -47,9 +49,10 @@ After publication, the signed installation path will:
 
 1. Verify the bootstrap with the separately pinned bootstrap key.
 2. Install the fixed updater, service files, and bundled runtime release key.
-3. Let you add the hotkey file, public hotkey address, and SNP policy.
-4. Install the first signed stable release and start the validator.
-5. Enable one stable-channel timer for later releases.
+3. Run one guided setup command with your hotkey file, its public address, and
+   your reviewed SNP policy.
+4. Install the first signed stable release, start the validator, and enable its
+   stable update timer.
 
 The detailed operator path and trust boundary are in
 [Validator auto-update](docs/AUTO_UPDATE.md).
@@ -60,6 +63,10 @@ The validator is one recurring process. There is no alternate scoring mode and
 no non-writing mode. A successful cycle prints `CONFIRMED` or
 `RECOVERED_CONFIRMED` after the exact row is confirmed at inclusion and two
 later finalized heads.
+
+`sudo cathedral-validator-status` gives one local summary of the validator,
+signed release, update timer, and latest recorded weight result. It does not
+replace finalized chain verification.
 
 - `NOT_PROVEN` means success is unresolved. Keep the journal. The next cycle
   resumes recovery before any new write.
@@ -92,7 +99,6 @@ Python, bootstrap signing key, runtime release public key, hotkey, SNP policy,
 or operator configuration. Those are host trust settings and need an explicit
 bootstrap migration when they change.
 
-Each host chooses `stable` or `canary` once. The updater refuses a later channel
-switch. Normal operators use `stable`. Canary is for one explicit release-test
-host. The public signed bootstrap stays unpublished until this path passes live
-stable and canary testing end to end.
+Public setup follows `stable` only. Cathedral tests the same signed release on
+its separate canary host before publishing it to `stable`. The public signed
+bootstrap stays unpublished until both paths pass live testing end to end.
