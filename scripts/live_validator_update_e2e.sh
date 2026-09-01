@@ -26,6 +26,9 @@ readonly VM_HOURLY_CEILING_USD="0.075"
 readonly DISK_GB_HOURLY_CEILING_USD="0.00015"
 readonly FIXED_CHANNEL_CACHE_MAX_SECONDS=300
 readonly UPDATE_TIMER_INTERVAL_SECONDS=60
+readonly REACTIVATION_PROOF_DELAY_SECONDS=60
+readonly REACTIVATION_PROOF_REARM_SECONDS=86400
+readonly REACTIVATION_PROOF_WAIT_SECONDS=1860
 # The signed timer services retain the production updater's 20-minute
 # operation deadline plus the service manager's two-minute shutdown margin. A
 # fixed channel can also serve cached metadata until the next timer tick, so
@@ -44,6 +47,7 @@ readonly CRASH_POST_PENDING_RESERVE_SECONDS=60
 readonly TRANSIENT_UPDATE_TIMEOUT_SECONDS=240
 readonly TRANSIENT_SYSTEMD_TIMEOUT_SECONDS=360
 readonly RESET_MINIMUM_HEADROOM_SECONDS=60
+readonly RESET_REQUEST_TIMEOUT_SECONDS=45
 readonly PRE_ACTION_READ_ATTEMPTS=3
 readonly PRE_ACTION_RETRY_INTERVAL_SECONDS=2
 readonly VALIDATOR_SERVICE_CONTROL_TIMEOUT_SECONDS=300
@@ -60,6 +64,8 @@ readonly GOOGLE_API_TOTAL_TIMEOUT_SECONDS=100
 readonly GOOGLE_AUTH_TIMEOUT_SECONDS=10
 readonly GOOGLE_API_CURL_TIMEOUT_SECONDS=20
 readonly IAP_SCP_MAX_ATTEMPTS=3
+readonly TEARDOWN_DELETE_ATTEMPTS=5
+readonly TEARDOWN_RETRY_INTERVAL_SECONDS=5
 readonly CONTROLLER_PROJECT_PERMISSIONS=(
   "compute.disks.create"
   "compute.disks.delete"
@@ -115,6 +121,10 @@ if (( FIXED_CHANNEL_WAIT_SECONDS < FIXED_CHANNEL_CACHE_MAX_SECONDS + UPDATE_TIME
 fi
 if (( TRANSIENT_UPDATE_TIMEOUT_SECONDS < CRASH_PENDING_WAIT_SECONDS + CRASH_POST_PENDING_RESERVE_SECONDS + RESET_MINIMUM_HEADROOM_SECONDS )); then
   printf 'REFUSED: transient updater must cover pending wait, pre-action reserve, and action headroom\n' >&2
+  exit 2
+fi
+if (( RESET_REQUEST_TIMEOUT_SECONDS >= RESET_MINIMUM_HEADROOM_SECONDS )); then
+  printf 'REFUSED: reset request timeout must fit inside reserved action headroom\n' >&2
   exit 2
 fi
 if (( TRANSIENT_SYSTEMD_TIMEOUT_SECONDS < TRANSIENT_UPDATE_TIMEOUT_SECONDS + TIMER_SYSTEMD_MARGIN_SECONDS )); then
@@ -348,10 +358,11 @@ google_api_post() {
   local url="$1"
   local body="$2"
   local label="$3"
+  local total_timeout_seconds="${4:-$GOOGLE_API_TOTAL_TIMEOUT_SECONDS}"
   local access_token
   local attempt
   local curl_status
-  local deadline=$((SECONDS + GOOGLE_API_TOTAL_TIMEOUT_SECONDS))
+  local deadline=$((SECONDS + total_timeout_seconds))
   local http_status
   local phase_timeout
   local remaining
@@ -451,6 +462,16 @@ google_api_post() {
     sleep "$sleep_seconds"
   done
   return 1
+}
+
+request_instance_reset() {
+  local host="$1"
+  local response
+  response="$(google_api_post \
+    "https://compute.googleapis.com/compute/v1/projects/${GCP_PROJECT}/zones/${ZONE}/instances/${host}/reset" \
+    '{}' "reset-${host}" "$RESET_REQUEST_TIMEOUT_SECONDS")"
+  printf '%s\n' "$response" | jq -e \
+    '{name: (.name | select(type == "string" and length > 0)), status: (.status | select(type == "string" and length > 0))}'
 }
 
 require_exact_permissions() {
@@ -734,6 +755,103 @@ CREATED_FIREWALL=0
 CREATED_SUBNET=0
 CREATED_NETWORK=0
 
+cleanup_resource_snapshot() {
+  local kind="$1"
+  local name="$2"
+  case "$kind" in
+    instance)
+      gc compute instances list --filter="name=${name}" --format=json | \
+        jq --arg name "$name" '[.[] | select(.name == $name)]'
+      ;;
+    disk)
+      gc compute disks list --zones="$ZONE" --filter="name=${name}" \
+        --format=json | jq --arg name "$name" '[.[] | select(.name == $name)]'
+      ;;
+    firewall)
+      gc compute firewall-rules list --filter="name=${name}" --format=json | \
+        jq --arg name "$name" '[.[] | select(.name == $name)]'
+      ;;
+    subnet)
+      gc compute networks subnets list --regions="$REGION" \
+        --filter="name=${name}" --format=json | \
+        jq --arg name "$name" '[.[] | select(.name == $name)]'
+      ;;
+    network)
+      gc compute networks list --filter="name=${name}" --format=json | \
+        jq --arg name "$name" '[.[] | select(.name == $name)]'
+      ;;
+    *)
+      printf 'REFUSED: unsupported cleanup resource kind: %s\n' "$kind" >&2
+      return 2
+      ;;
+  esac
+}
+
+cleanup_resource_delete() {
+  local kind="$1"
+  local name="$2"
+  case "$kind" in
+    instance)
+      gc compute instances delete "$name" --zone="$ZONE"
+      ;;
+    disk)
+      gc compute disks delete "$name" --zone="$ZONE"
+      ;;
+    firewall)
+      gc compute firewall-rules delete "$name"
+      ;;
+    subnet)
+      gc compute networks subnets delete "$name" --region="$REGION"
+      ;;
+    network)
+      gc compute networks delete "$name"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+cleanup_resource_until_absent() {
+  local label="$1"
+  local kind="$2"
+  local name="$3"
+  local attempt
+  local delete_status
+  local snapshot
+  for attempt in $(seq 1 "$TEARDOWN_DELETE_ATTEMPTS"); do
+    snapshot="$EVIDENCE_DIR/teardown-${label}-check-${attempt}.json"
+    if cleanup_resource_snapshot "$kind" "$name" >"$snapshot" \
+      2>"$EVIDENCE_DIR/teardown-${label}-check-${attempt}.err" && \
+      jq -e 'length == 0' "$snapshot" >/dev/null; then
+      printf 'TEARDOWN_RESOURCE_ABSENT kind=%s name=%s attempt=%s\n' \
+        "$kind" "$name" "$attempt" \
+        >"$EVIDENCE_DIR/teardown-${label}-result.txt"
+      return 0
+    fi
+    if cleanup_resource_delete "$kind" "$name" \
+      >"$EVIDENCE_DIR/teardown-${label}-delete-${attempt}.log" 2>&1; then
+      delete_status=0
+    else
+      delete_status=$?
+    fi
+    printf 'delete_status=%s\n' "$delete_status" \
+      >>"$EVIDENCE_DIR/teardown-${label}-delete-${attempt}.log"
+    sleep "$TEARDOWN_RETRY_INTERVAL_SECONDS"
+  done
+  snapshot="$EVIDENCE_DIR/teardown-${label}-final.json"
+  if cleanup_resource_snapshot "$kind" "$name" >"$snapshot" \
+    2>"$EVIDENCE_DIR/teardown-${label}-final.err" && \
+    jq -e 'length == 0' "$snapshot" >/dev/null; then
+    printf 'TEARDOWN_RESOURCE_ABSENT kind=%s name=%s attempt=final\n' \
+      "$kind" "$name" >"$EVIDENCE_DIR/teardown-${label}-result.txt"
+    return 0
+  fi
+  printf 'TEARDOWN_RESOURCE_REMAINS kind=%s name=%s attempts=%s\n' \
+    "$kind" "$name" "$TEARDOWN_DELETE_ATTEMPTS" >&2
+  return 1
+}
+
 cleanup() {
   local status=$?
   local teardown_ok=1
@@ -741,32 +859,25 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   if [[ "$CREATED_CANARY_VM" == 1 ]]; then
-    gc compute instances delete "$CANARY_VM" --zone="$ZONE" \
-      >"$EVIDENCE_DIR/delete-canary-vm.log" 2>&1 || true
+    cleanup_resource_until_absent canary-vm instance "$CANARY_VM" || teardown_ok=0
   fi
   if [[ "$CREATED_STABLE_VM" == 1 ]]; then
-    gc compute instances delete "$STABLE_VM" --zone="$ZONE" \
-      >"$EVIDENCE_DIR/delete-stable-vm.log" 2>&1 || true
+    cleanup_resource_until_absent stable-vm instance "$STABLE_VM" || teardown_ok=0
   fi
   if [[ "$CREATED_CANARY_VM" == 1 ]]; then
-    gc compute disks delete "$CANARY_VM" --zone="$ZONE" \
-      >"$EVIDENCE_DIR/delete-canary-disk.log" 2>&1 || true
+    cleanup_resource_until_absent canary-disk disk "$CANARY_VM" || teardown_ok=0
   fi
   if [[ "$CREATED_STABLE_VM" == 1 ]]; then
-    gc compute disks delete "$STABLE_VM" --zone="$ZONE" \
-      >"$EVIDENCE_DIR/delete-stable-disk.log" 2>&1 || true
+    cleanup_resource_until_absent stable-disk disk "$STABLE_VM" || teardown_ok=0
   fi
   if [[ "$CREATED_FIREWALL" == 1 ]]; then
-    gc compute firewall-rules delete "$FIREWALL" \
-      >"$EVIDENCE_DIR/delete-firewall.log" 2>&1 || true
+    cleanup_resource_until_absent firewall firewall "$FIREWALL" || teardown_ok=0
   fi
   if [[ "$CREATED_SUBNET" == 1 ]]; then
-    gc compute networks subnets delete "$SUBNET" --region="$REGION" \
-      >"$EVIDENCE_DIR/delete-subnet.log" 2>&1 || true
+    cleanup_resource_until_absent subnet subnet "$SUBNET" || teardown_ok=0
   fi
   if [[ "$CREATED_NETWORK" == 1 ]]; then
-    gc compute networks delete "$NETWORK" \
-      >"$EVIDENCE_DIR/delete-network.log" 2>&1 || true
+    cleanup_resource_until_absent network network "$NETWORK" || teardown_ok=0
   fi
 
   if ! gc compute instances list \
@@ -980,6 +1091,48 @@ metadata_field() {
   local path="$1"
   local expression="$2"
   jq -er "$expression" "$path"
+}
+
+expected_channel_record() {
+  local metadata="$1"
+  local channel="$2"
+  python3 - "$REPOSITORY_ROOT" "$runtime_public" "$metadata" "$channel" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+repository_root = Path(sys.argv[1])
+public_key_path = Path(sys.argv[2])
+metadata_path = Path(sys.argv[3])
+channel = sys.argv[4]
+sys.path.insert(0, str(repository_root))
+
+from cathedral_thin.independent_runtime.updater import parse_release_metadata
+
+public_key = serialization.load_pem_public_key(public_key_path.read_bytes())
+if not isinstance(public_key, Ed25519PublicKey):
+    raise SystemExit("runtime release public key is not Ed25519")
+release = parse_release_metadata(
+    metadata_path.read_bytes(),
+    channel=channel,
+    public_key=public_key,
+)
+print(
+    json.dumps(
+        {
+            "sequence": release.sequence,
+            "archive_sha256": release.archive_sha256,
+            "signed_sha256": release.signed_sha256,
+            "metadata_sha256": release.metadata_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
 }
 
 ARCHIVE_A_SHA="$(metadata_field "$CANARY_A1" '.signed.release.archive_sha256')"
@@ -1831,7 +1984,7 @@ configure_host() {
   remote "$host" "sudo env DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl python3.12 python3.12-venv python3-cryptography >/dev/null"
   remote "$host" "sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-live-${RUN_ID} && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz '$BOOTSTRAP_BUNDLE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.json '$BOOTSTRAP_MANIFEST_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:manifest && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.sig '$BOOTSTRAP_SIGNATURE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:signature && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem '$BOOTSTRAP_PUBLIC_KEY_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:public_key && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz /var/tmp/cathedral-live-${RUN_ID}/manifest.json /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && sudo chmod 0444 /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem && sudo /usr/bin/python3 -c 'import hashlib,pathlib; expected={\"bundle.tar.gz\":\"$BOOTSTRAP_BUNDLE_SHA\",\"manifest.json\":\"$BOOTSTRAP_MANIFEST_SHA\",\"manifest.sig\":\"$BOOTSTRAP_SIGNATURE_SHA\",\"bootstrap-public.pem\":\"$BOOTSTRAP_PUBLIC_KEY_SHA\"}; root=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}\"); assert all(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest for name,digest in expected.items())' && printf '%s\n' ANONYMOUS_BOOTSTRAP_EXACT_BYTES_VERIFIED && sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -rawin -in /var/tmp/cathedral-live-${RUN_ID}/manifest.json -sigfile /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && test \"sha256:\$(sudo openssl pkey -pubin -in /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)\" = '$BOOTSTRAP_FINGERPRINT' && sudo /usr/bin/python3 -c 'import hashlib,json,pathlib; b=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz\").read_bytes(); m=json.loads(pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/manifest.json\").read_text(encoding=\"ascii\")); assert len(b)==m[\"bundle\"][\"size\"] and hashlib.sha256(b).hexdigest()==m[\"bundle\"][\"sha256\"]; assert m[\"bootstrap_signing_key\"][\"fingerprint\"]==\"$BOOTSTRAP_FINGERPRINT\"; assert m[\"bootstrap_metadata\"][\"sequence\"]>=1' && sudo sh -c 'tar -xOf /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py' && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py && sudo /usr/bin/python3.12 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py --bundle /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz --manifest /var/tmp/cathedral-live-${RUN_ID}/manifest.json --signature /var/tmp/cathedral-live-${RUN_ID}/manifest.sig --bootstrap-public-key /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem --expected-bootstrap-key-fingerprint '$BOOTSTRAP_FINGERPRINT' --minimum-bootstrap-sequence '$BOOTSTRAP_SEQUENCE'" | tee "$EVIDENCE_DIR/bootstrap-install-${host}.log"
   remote "$host" "test \"\$(sha256sum /tmp/cathedral_no_chain_readiness.py | cut -d' ' -f1)\" = '$HARNESS_SHA' && test \"\$(sha256sum /tmp/tampered_https_origin.py | cut -d' ' -f1)\" = '$FAULT_ORIGIN_SHA' && test \"\$(sha256sum /tmp/wait_updater_state.py | cut -d' ' -f1)\" = '$STATE_WAITER_SHA' && sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/cathedral-validator-live-test /etc/systemd/system/cathedral-validator-direct.service.d /etc/systemd/system/${timer}.d /etc/systemd/system/${other_timer}.d && sudo install -o root -g root -m 0555 /tmp/cathedral_no_chain_readiness.py /usr/local/libexec/cathedral-no-chain-readiness.py && sudo install -o root -g root -m 0555 /tmp/tampered_https_origin.py /usr/local/libexec/cathedral-tampered-https-origin.py && sudo install -o root -g root -m 0555 /tmp/wait_updater_state.py /usr/local/libexec/cathedral-wait-updater-state.py && printf '%s\n' 'CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$TEST_HOTKEY' | sudo tee /etc/cathedral-validator/identity.env >/dev/null && printf '%s\n' 'CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json' 'CATHEDRAL_VALIDATOR_INTERVAL_SECONDS=86400' | sudo tee /etc/cathedral-validator/direct.env >/dev/null && printf '%s\n' 'CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=$CANARY_URL' 'CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=$STABLE_URL' 'CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE=1' 'CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=1' | sudo tee /etc/cathedral-validator/update.env >/dev/null && printf '%s\n' '{\"schema\":\"cathedral_amd_sev_snp_policy_v1\",\"generations\":{\"genoa\":{\"allowed_measurements\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"minimum_tcb\":\"0x0000000000000001\"}}}' | sudo tee /etc/cathedral-validator/snp-policy.json >/dev/null && sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/validator-hotkey && sudo chmod 0600 /etc/cathedral-validator/identity.env /etc/cathedral-validator/direct.env /etc/cathedral-validator/update.env && sudo chown root:cathedral-validator /etc/cathedral-validator/snp-policy.json && sudo chmod 0440 /etc/cathedral-validator/snp-policy.json"
-  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnBootSec=20s' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' 'Persistent=true' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\" && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
+  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=20s' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\" && ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
   remote "$host" "printf '%s\n' 'CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex' | sudo tee -a /etc/cathedral-validator/direct.env >/dev/null"
   if [[ "$channel" == "canary" ]]; then
     if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=canary --metadata-url='$CANARY_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
@@ -1871,18 +2024,62 @@ main_pid() {
   remote "$1" 'sudo systemctl show cathedral-validator-direct.service -p MainPID --value' | tr -d '\r'
 }
 
+main_invocation_id() {
+  remote "$1" 'sudo systemctl show cathedral-validator-direct.service -p InvocationID --value' | tr -d '\r'
+}
+
+direct_service_identity() {
+  remote "$1" 'sudo systemctl show cathedral-validator-direct.service -p ActiveState -p SubState -p MainPID -p InvocationID' | tr -d '\r'
+}
+
+direct_service_identity_is_active() {
+  local identity="$1"
+  local invocation
+  local pid
+  invocation="$(printf '%s\n' "$identity" | sed -n 's/^InvocationID=//p')"
+  pid="$(printf '%s\n' "$identity" | sed -n 's/^MainPID=//p')"
+  [[ "$(printf '%s\n' "$identity" | sed -n 's/^ActiveState=//p')" == active && \
+    "$(printf '%s\n' "$identity" | sed -n 's/^SubState=//p')" == running && \
+    "$pid" =~ ^[1-9][0-9]*$ && -n "$invocation" ]]
+}
+
+wait_direct_service_active() {
+  local label="$1"
+  local host="$2"
+  local deadline=$((SECONDS + DIRECT_START_TIMEOUT_SECONDS))
+  local identity=""
+  while (( SECONDS < deadline )); do
+    if identity="$(direct_service_identity "$host" \
+      2>>"$EVIDENCE_DIR/${label}-direct-service-ssh.stderr")"; then
+      printf '%s\n' "$identity"
+      if direct_service_identity_is_active "$identity"; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  printf 'REFUSED: direct service did not become healthy without controller start host=%s\n' \
+    "$host" >&2
+  capture_host_with_retries "${label}-direct-service-timeout" "$host" || true
+  return 1
+}
+
 wait_sequence() {
   local label="$1"
   local host="$2"
   local channel="$3"
-  local sequence="$4"
+  local metadata="$4"
+  local expected_record
+  local sequence
   local deadline=$((SECONDS + FIXED_CHANNEL_WAIT_SECONDS))
   local snapshot
+  expected_record="$(expected_channel_record "$metadata" "$channel")"
+  sequence="$(printf '%s\n' "$expected_record" | jq -er '.sequence')"
   while (( SECONDS < deadline )); do
     if snapshot="$(snapshot_state "$host" "$channel" 2>>"$EVIDENCE_DIR/${label}-sequence-snapshot-ssh.stderr")"; then
       printf '%s\n' "$snapshot"
-      if printf '%s\n' "$snapshot" | jq -e --argjson sequence "$sequence" \
-        '.sequence == $sequence and .pending == null' >/dev/null; then
+      if printf '%s\n' "$snapshot" | jq -e --argjson expected "$expected_record" \
+        '.record == $expected and .sequence == $expected.sequence and .pending == null' >/dev/null; then
         return 0
       fi
     fi
@@ -1897,7 +2094,31 @@ wait_sequence() {
 start_update_timer() {
   local host="$1"
   local timer="$2"
-  remote "$host" "set +e; sudo systemctl enable --now '$timer' && sudo systemctl is-enabled --quiet '$timer' && sudo systemctl is-active --quiet '$timer'; timer_status=\$?; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic || true; sudo systemctl list-timers --all --no-pager '$timer' || true; exit \$timer_status"
+  local active
+  local next
+  local service="${timer%.timer}.service"
+  local service_active
+  local status
+  local substate
+  local timer_output
+  if timer_output="$(remote "$host" "set +e; sudo systemctl enable --now '$timer' && sudo systemctl is-enabled --quiet '$timer' && sudo systemctl is-active --quiet '$timer'; timer_status=\$?; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic || true; printf 'TriggeredServiceActiveState=%s\n' \"\$(sudo systemctl show '$service' -p ActiveState --value 2>/dev/null)\"; sudo systemctl list-timers --all --no-pager '$timer' || true; exit \$timer_status" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$timer_output"
+  if (( status != 0 )); then
+    return "$status"
+  fi
+  active="$(printf '%s\n' "$timer_output" | sed -n 's/^ActiveState=//p' | head -n 1)"
+  substate="$(printf '%s\n' "$timer_output" | sed -n 's/^SubState=//p' | head -n 1)"
+  next="$(printf '%s\n' "$timer_output" | sed -n 's/^NextElapseUSecMonotonic=//p' | head -n 1)"
+  service_active="$(printf '%s\n' "$timer_output" | sed -n 's/^TriggeredServiceActiveState=//p' | head -n 1)"
+  if ! timer_state_is_started "$active" "$substate" "$next" "$service_active"; then
+    printf 'REFUSED: enabled timer has no scheduled trigger host=%s timer=%s active=%s substate=%s next=%s\n' \
+      "$host" "$timer" "$active" "$substate" "$next" >&2
+    return 1
+  fi
 }
 
 timer_state_is_rearmed() {
@@ -1906,6 +2127,18 @@ timer_state_is_rearmed() {
   local next="$3"
   [[ "$active" == active && "$substate" == waiting && -n "$next" && \
     "$next" != 0 && "$next" != infinity && "$next" != n/a ]]
+}
+
+timer_state_is_started() {
+  local active="$1"
+  local substate="$2"
+  local next="$3"
+  local service_active="$4"
+  if timer_state_is_rearmed "$active" "$substate" "$next"; then
+    return 0
+  fi
+  [[ "$active" == active && "$substate" == running && \
+    ("$service_active" == active || "$service_active" == activating) ]]
 }
 
 wait_timer_rearmed() {
@@ -1935,12 +2168,119 @@ wait_timer_rearmed() {
   return 1
 }
 
+wait_timer_reactivation() {
+  local label="$1"
+  local host="$2"
+  local timer="$3"
+  local before_invocation="$4"
+  local before_trigger="$5"
+  local service="${timer%.timer}.service"
+  local deadline=$((SECONDS + REACTIVATION_PROOF_WAIT_SECONDS))
+  local active
+  local exec_status
+  local invocation
+  local next
+  local result
+  local service_active
+  local state=""
+  local substate
+  local trigger
+  while (( SECONDS < deadline )); do
+    if state="$(remote "$host" "sudo systemctl show '$timer' -p ActiveState -p SubState -p NextElapseUSecMonotonic -p LastTriggerUSec; sudo systemctl show '$service' -p InvocationID -p Result -p ExecMainStatus -p ActiveState | sed 's/^/Service/'" 2>>"$EVIDENCE_DIR/${label}-timer-reactivation-ssh.stderr")"; then
+      active="$(printf '%s\n' "$state" | sed -n 's/^ActiveState=//p')"
+      substate="$(printf '%s\n' "$state" | sed -n 's/^SubState=//p')"
+      next="$(printf '%s\n' "$state" | sed -n 's/^NextElapseUSecMonotonic=//p')"
+      trigger="$(printf '%s\n' "$state" | sed -n 's/^LastTriggerUSec=//p')"
+      invocation="$(printf '%s\n' "$state" | sed -n 's/^ServiceInvocationID=//p')"
+      result="$(printf '%s\n' "$state" | sed -n 's/^ServiceResult=//p')"
+      exec_status="$(printf '%s\n' "$state" | sed -n 's/^ServiceExecMainStatus=//p')"
+      service_active="$(printf '%s\n' "$state" | sed -n 's/^ServiceActiveState=//p')"
+      if [[ -n "$invocation" && "$invocation" != "$before_invocation" && \
+        -n "$trigger" && "$trigger" != "$before_trigger" && \
+        "$result" == success && "$exec_status" == 0 && \
+        "$service_active" == inactive ]] && \
+        timer_state_is_rearmed "$active" "$substate" "$next"; then
+        printf '%s\n' "$state"
+        return 0
+      fi
+    fi
+    printf '%s\n' "$state"
+    sleep 2
+  done
+  printf 'REFUSED: re-enabled timer did not launch and complete a fresh update host=%s timer=%s\n' \
+    "$host" "$timer" >&2
+  capture_host_with_retries "${label}-timer-reactivation-failure" "$host" || true
+  return 1
+}
+
+start_reactivation_proof_timer() {
+  local host="$1"
+  local timer="$2"
+  local before_invocation="$3"
+  local before_trigger="$4"
+  local service="${timer%.timer}.service"
+  local active
+  local next
+  local substate
+  local timer_output
+  if timer_output="$(remote "$host" "set -eu; sudo systemctl disable --now '$timer'; printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=${REACTIVATION_PROOF_DELAY_SECONDS}s' 'OnUnitActiveSec=${REACTIVATION_PROOF_REARM_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/reactivation-proof.conf >/dev/null; sudo systemctl daemon-reload; timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\"; printf '%s\n' \"\$timer_schedule\"; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null; ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null; test \"\$(sudo systemctl show '$service' -p InvocationID --value)\" = '$before_invocation'; test \"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\" = '$before_trigger'; sudo systemctl enable --now '$timer'; sudo systemctl is-enabled --quiet '$timer'; sudo systemctl is-active --quiet '$timer'; test \"\$(sudo systemctl show '$service' -p InvocationID --value)\" = '$before_invocation'; test \"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\" = '$before_trigger'; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic; sudo systemctl list-timers --all --no-pager '$timer'")"; then
+    :
+  else
+    return $?
+  fi
+  printf '%s\n' "$timer_output"
+  active="$(printf '%s\n' "$timer_output" | sed -n 's/^ActiveState=//p' | tail -n 1)"
+  substate="$(printf '%s\n' "$timer_output" | sed -n 's/^SubState=//p' | tail -n 1)"
+  next="$(printf '%s\n' "$timer_output" | sed -n 's/^NextElapseUSecMonotonic=//p' | tail -n 1)"
+  if ! timer_state_is_rearmed "$active" "$substate" "$next"; then
+    printf 'REFUSED: isolated reactivation timer has no scheduled trigger host=%s timer=%s active=%s substate=%s next=%s\n' \
+      "$host" "$timer" "$active" "$substate" "$next" >&2
+    return 1
+  fi
+}
+
+observe_timer_reactivation() {
+  local label="$1"
+  local host="$2"
+  local timer="$3"
+  local channel="$4"
+  local metadata="$5"
+  local expected_digest="$6"
+  local service="${timer%.timer}.service"
+  local before_invocation
+  local before_trigger
+  local failure_status
+  before_invocation="$(remote "$host" "sudo systemctl show '$service' -p InvocationID --value" | tr -d '\r')"
+  before_trigger="$(remote "$host" "sudo systemctl show '$timer' -p LastTriggerUSec --value" | tr -d '\r')"
+  if [[ -z "$before_invocation" || -z "$before_trigger" ]]; then
+    printf 'REFUSED: timer reactivation requires prior timer and service evidence host=%s timer=%s\n' \
+      "$host" "$timer" >&2
+    return 1
+  fi
+  if start_reactivation_proof_timer "$host" "$timer" \
+    "$before_invocation" "$before_trigger" 2>&1 | \
+    tee "$EVIDENCE_DIR/${label}-timer-reactivation-start.log"; then
+    :
+  else
+    failure_status=$?
+    capture_host_with_retries "${label}-timer-reactivation-start-failure" \
+      "$host" || true
+    return "$failure_status"
+  fi
+  wait_timer_reactivation "$label" "$host" "$timer" \
+    "$before_invocation" "$before_trigger" 2>&1 | \
+    tee "$EVIDENCE_DIR/${label}-timer-reactivation-wait.log"
+  wait_sequence "${label}-state" "$host" "$channel" "$metadata" 2>&1 | \
+    tee "$EVIDENCE_DIR/${label}-timer-reactivation-state.log"
+  assert_current "$host" "$expected_digest" "$label"
+}
+
 observe_timer_update() {
   local label="$1"
   local host="$2"
   local timer="$3"
   local channel="$4"
-  local sequence="$5"
+  local metadata="$5"
   local expected_digest="$6"
   local failure_status
   if start_update_timer "$host" "$timer" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-start-command.log"; then
@@ -1950,7 +2290,7 @@ observe_timer_update() {
     capture_host_with_retries "${label}-timer-start-failure" "$host" || true
     return "$failure_status"
   fi
-  if wait_sequence "${label}-timer" "$host" "$channel" "$sequence" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-wait-command.log"; then
+  if wait_sequence "${label}-timer" "$host" "$channel" "$metadata" 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-wait-command.log"; then
     :
   else
     failure_status=$?
@@ -2024,11 +2364,29 @@ expect_update_refused() {
   local expected_refusal="$5"
   local cycle_wait="${6:-10}"
   local trust_mode="${7:-system}"
+  local service_policy="${8:-unchanged}"
   local before
   local after
+  local before_service
+  local after_service
+  local before_invocation
+  local after_invocation
+  if [[ "$service_policy" != unchanged && "$service_policy" != restarted ]]; then
+    printf 'REFUSED: invalid negative-scenario service policy: %s\n' \
+      "$service_policy" >&2
+    return 2
+  fi
   before="$(snapshot_state "$host" "$channel")"
   printf '%s\n' "$before" >"$EVIDENCE_DIR/${label}-before.json"
   printf '%s\n' "$before" | jq -e '.pending == null' >/dev/null
+  before_service="$(require_host_value "${label}-service-before" "$host" \
+    direct_service_identity "$host")"
+  printf '%s\n' "$before_service" >"$EVIDENCE_DIR/${label}-service-before.txt"
+  if ! direct_service_identity_is_active "$before_service"; then
+    printf 'REFUSED: %s began without a healthy direct service\n' "$label" >&2
+    capture_host_with_retries "${label}-service-before-unhealthy" "$host" || true
+    return 1
+  fi
   if [[ "$trust_mode" == "combined-test-ca" ]]; then
     if remote "$host" "sudo env -u HTTPS_PROXY -u https_proxy SSL_CERT_FILE=/etc/cathedral-validator-live-test/combined-ca.pem NO_PROXY=github.com,raw.githubusercontent.com no_proxy=github.com,raw.githubusercontent.com /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --channel='$channel' --metadata-url='$url' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds='$cycle_wait' --operation-timeout-seconds=180" >"$EVIDENCE_DIR/${label}.log" 2>&1; then
       printf 'REFUSED: negative scenario unexpectedly succeeded: %s\n' "$label" >&2
@@ -2045,6 +2403,30 @@ expect_update_refused() {
   if [[ "$before" != "$after" ]]; then
     printf 'REFUSED: %s changed current, sequence, or pending state\n' "$label" >&2
     return 1
+  fi
+  after_service="$(require_host_value "${label}-service-after" "$host" \
+    direct_service_identity "$host")"
+  printf '%s\n' "$after_service" >"$EVIDENCE_DIR/${label}-service-after.txt"
+  if ! direct_service_identity_is_active "$after_service"; then
+    printf 'REFUSED: %s left the direct service unhealthy\n' "$label" >&2
+    capture_host_with_retries "${label}-service-after-unhealthy" "$host" || true
+    return 1
+  fi
+  if [[ "$service_policy" == unchanged ]]; then
+    if [[ "$before_service" != "$after_service" ]]; then
+      printf 'REFUSED: %s restarted or changed the direct service\n' "$label" >&2
+      capture_host_with_retries "${label}-service-changed" "$host" || true
+      return 1
+    fi
+  else
+    before_invocation="$(printf '%s\n' "$before_service" | sed -n 's/^InvocationID=//p')"
+    after_invocation="$(printf '%s\n' "$after_service" | sed -n 's/^InvocationID=//p')"
+    if [[ "$before_invocation" == "$after_invocation" ]]; then
+      printf 'REFUSED: %s did not prove a fresh healthy rollback invocation\n' \
+        "$label" >&2
+      capture_host_with_retries "${label}-service-not-restarted" "$host" || true
+      return 1
+    fi
   fi
 }
 
@@ -2073,8 +2455,8 @@ assert_current() {
 }
 
 record_step "prove both first installs committed exact release A"
-wait_sequence canary-first-install "$CANARY_VM" canary 1
-wait_sequence stable-first-install "$STABLE_VM" stable 1
+wait_sequence canary-first-install "$CANARY_VM" canary "$CANARY_A1"
+wait_sequence stable-first-install "$STABLE_VM" stable "$STABLE_A1"
 assert_current "$CANARY_VM" "$ARCHIVE_A_SHA" canary-first-install-a
 assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" stable-first-install-a
 
@@ -2107,28 +2489,41 @@ assert_current "$CANARY_VM" "$ARCHIVE_A_SHA" tampered-archive
 record_step "publish B and observe canary timer activate A to B"
 publish_release "$CANARY_B2" "$ARCHIVE_B" "$CANARY_BRANCH" "canary-b2"
 observe_timer_update canary-timer-a-to-b "$CANARY_VM" \
-  cathedral-validator-canary-update.timer canary 2 "$ARCHIVE_B_SHA"
-remote "$CANARY_VM" 'sudo systemctl disable --now cathedral-validator-canary-update.timer'
+  cathedral-validator-canary-update.timer canary "$CANARY_B2" "$ARCHIVE_B_SHA"
 capture_host_with_retries canary-after-timer-b "$CANARY_VM"
 
 record_step "promote exact B archive and observe stable timer activate it"
 publish_release "$STABLE_B2" "$ARCHIVE_B" "$STABLE_BRANCH" "stable-b2"
 observe_timer_update stable-exact-promotion "$STABLE_VM" \
-  cathedral-validator-update.timer stable 2 "$ARCHIVE_B_SHA"
+  cathedral-validator-update.timer stable "$STABLE_B2" "$ARCHIVE_B_SHA"
 remote "$STABLE_VM" 'sudo systemctl disable --now cathedral-validator-update.timer'
 capture_host_with_retries stable-after-timer-b "$STABLE_VM"
 
 record_step "same B archive renewal advances signed sequence without restart"
 pid_before="$(require_host_value same-archive-pid-before "$CANARY_VM" \
   main_pid "$CANARY_VM")"
+invocation_before="$(require_host_value same-archive-invocation-before \
+  "$CANARY_VM" main_invocation_id "$CANARY_VM")"
 publish_release "$CANARY_B3" "$ARCHIVE_B" "$CANARY_BRANCH" "canary-b3-renewal"
 observe_timer_update canary-same-archive-renewal "$CANARY_VM" \
-  cathedral-validator-canary-update.timer canary 3 "$ARCHIVE_B_SHA"
+  cathedral-validator-canary-update.timer canary "$CANARY_B3" "$ARCHIVE_B_SHA"
 pid_after="$(require_host_value same-archive-pid-after "$CANARY_VM" \
   main_pid "$CANARY_VM")"
+invocation_after="$(require_host_value same-archive-invocation-after \
+  "$CANARY_VM" main_invocation_id "$CANARY_VM")"
+observe_timer_reactivation canary-same-boot-reactivation "$CANARY_VM" \
+  cathedral-validator-canary-update.timer canary "$CANARY_B3" "$ARCHIVE_B_SHA"
+pid_after_reactivation="$(require_host_value same-boot-reactivation-pid-after \
+  "$CANARY_VM" main_pid "$CANARY_VM")"
+invocation_after_reactivation="$(require_host_value \
+  same-boot-reactivation-invocation-after "$CANARY_VM" \
+  main_invocation_id "$CANARY_VM")"
 remote "$CANARY_VM" 'sudo systemctl disable --now cathedral-validator-canary-update.timer'
-if [[ "$pid_before" != "$pid_after" || "$pid_before" == 0 ]]; then
-  printf 'REFUSED: same-archive renewal restarted the direct service\n' >&2
+if ! [[ "$pid_before" == "$pid_after" && \
+  "$pid_before" == "$pid_after_reactivation" && "$pid_before" != 0 && \
+  -n "$invocation_before" && "$invocation_before" == "$invocation_after" && \
+  "$invocation_before" == "$invocation_after_reactivation" ]]; then
+  printf 'REFUSED: same-archive renewal or timer reactivation restarted the direct service\n' >&2
   capture_host_with_retries same-archive-renewal-pid-failure "$CANARY_VM" || true
   exit 1
 fi
@@ -2150,17 +2545,26 @@ record_step "pause blocks a valid newer release without changing B"
 pause_url="$(pin_fault_pointer canary "$CANARY_A4" "valid paused sequence 4")"
 pause_before="$(require_host_value pause-before "$CANARY_VM" \
   snapshot_state "$CANARY_VM" canary)"
+pause_service_before="$(require_host_value pause-service-before "$CANARY_VM" \
+  direct_service_identity "$CANARY_VM")"
 printf '%s\n' "$pause_before" >"$EVIDENCE_DIR/pause-before.json"
+printf '%s\n' "$pause_service_before" >"$EVIDENCE_DIR/pause-service-before.txt"
 printf '%s\n' "$pause_before" | jq -e '.pending == null' >/dev/null
+direct_service_identity_is_active "$pause_service_before"
 remote "$CANARY_VM" 'sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/update.pause'
 run_update "$CANARY_VM" canary "$pause_url" | tee "$EVIDENCE_DIR/pause.log"
 grep -Fx 'CATHEDRAL_VALIDATOR_UPDATE_PAUSED' "$EVIDENCE_DIR/pause.log" >/dev/null
 remote "$CANARY_VM" 'sudo rm /etc/cathedral-validator/update.pause'
 pause_after="$(require_host_value pause-after "$CANARY_VM" \
   snapshot_state "$CANARY_VM" canary)"
+pause_service_after="$(require_host_value pause-service-after "$CANARY_VM" \
+  direct_service_identity "$CANARY_VM")"
 printf '%s\n' "$pause_after" >"$EVIDENCE_DIR/pause-after.json"
-if [[ "$pause_before" != "$pause_after" ]]; then
-  printf 'REFUSED: pause changed current, sequence, or pending state\n' >&2
+printf '%s\n' "$pause_service_after" >"$EVIDENCE_DIR/pause-service-after.txt"
+if [[ "$pause_before" != "$pause_after" || \
+  "$pause_service_before" != "$pause_service_after" ]] || \
+  ! direct_service_identity_is_active "$pause_service_after"; then
+  printf 'REFUSED: pause changed updater state or the direct service\n' >&2
   capture_host_with_retries pause-state-failure "$CANARY_VM" || true
   exit 1
 fi
@@ -2170,7 +2574,7 @@ record_step "held cycle lock times out without activation"
   remote "$CANARY_VM" "sudo -u cathedral-validator sh -c 'nohup python3 -c \"import fcntl,time,pathlib; p=pathlib.Path(\\\"${JOURNAL%/*}/cycle.lock\\\"); f=p.open(\\\"r+\\\"); fcntl.flock(f,fcntl.LOCK_EX); pathlib.Path(\\\"/tmp/cathedral-cycle-held\\\").write_text(\\\"ready\\\"); time.sleep(120)\" >/tmp/cathedral-cycle-holder.log 2>&1 & echo \$! >/tmp/cathedral-cycle-holder.pid' && timeout 10 sh -c 'until test -f /tmp/cathedral-cycle-held; do sleep 0.2; done'"
 expect_update_refused held-cycle "$CANARY_VM" canary "$pause_url" \
   'direct validator did not finish its cycle before timeout' 3
-remote "$CANARY_VM" "sudo sh -c 'kill \"\$(cat /tmp/cathedral-cycle-holder.pid)\" 2>/dev/null || true'; sudo rm -f /tmp/cathedral-cycle-holder.pid /tmp/cathedral-cycle-held"
+remote "$CANARY_VM" "set -eu; holder_pid=\"\$(cat /tmp/cathedral-cycle-holder.pid)\"; case \"\$holder_pid\" in ''|*[!0-9]*) exit 2;; esac; sudo kill \"\$holder_pid\"; holder_stopped=0; for attempt in \$(seq 1 30); do if ! sudo kill -0 \"\$holder_pid\" 2>/dev/null; then holder_stopped=1; break; fi; sleep 1; done; test \"\$holder_stopped\" = 1; sudo -u cathedral-validator python3 -c 'import fcntl,pathlib; p=pathlib.Path(\"${JOURNAL%/*}/cycle.lock\"); f=p.open(\"r+\"); fcntl.flock(f,fcntl.LOCK_EX | fcntl.LOCK_NB)' ; sudo rm -f /tmp/cathedral-cycle-holder.pid /tmp/cathedral-cycle-held"
 assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" held-cycle
 
 record_step "unresolved writer journal blocks activation"
@@ -2183,7 +2587,7 @@ assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" unresolved-journal
 record_step "target-specific readiness failure rolls A back to B"
 remote "$CANARY_VM" "printf '%s\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${ARCHIVE_A_SHA} >/dev/null"
 expect_update_refused readiness-rollback "$CANARY_VM" canary "$pause_url" \
-  'new release failed readiness; prior release was restored'
+  'new release failed readiness; prior release was restored' 10 system restarted
 remote "$CANARY_VM" "sudo rm -f /etc/cathedral-validator-live-test/fail-before-ready.${ARCHIVE_A_SHA}"
 assert_current "$CANARY_VM" "$ARCHIVE_B_SHA" readiness-rollback
 remote "$CANARY_VM" "sudo systemctl is-active cathedral-validator-direct.service && sudo journalctl -u cathedral-validator-direct.service --no-pager | grep -F 'TEST_NO_CHAIN_TARGET_FAIL target=${ARCHIVE_A_SHA}' && sudo journalctl -u cathedral-validator-direct.service --no-pager | grep -F 'TEST_NO_CHAIN_READY target=${ARCHIVE_B_SHA}'"
@@ -2363,7 +2767,36 @@ crash_pending_transient_for_rescue() {
       "$transient_unit" >&2
     return 2
   fi
-  if remote "$host" "set -eu; expected='releases/$target'; current=\"\$(sudo readlink /opt/cathedral-validator/current)\"; printf 'current=%s\\n' \"\$current\"; test \"\$current\" = \"\$expected\"; sudo jq -e --arg target \"\$expected\" '.pending.stage == \"may_have_run\" and .pending.target_current == \$target' /var/lib/cathedral-validator-update/state.json; unit_state=\"\$(sudo systemctl show '${transient_unit}.service' -p ActiveState -p SubState -p MainPID)\"; printf '%s\\n' \"\$unit_state\"; printf '%s\\n' \"\$unit_state\" | grep -Fx 'ActiveState=active' >/dev/null; printf '%s\\n' \"\$unit_state\" | grep -Fx 'SubState=running' >/dev/null; printf '%s\\n' \"\$unit_state\" | grep -Eq '^MainPID=[1-9][0-9]*$'; main_pid=\"\$(printf '%s\\n' \"\$unit_state\" | sed -n 's/^MainPID=//p')\"; sudo kill -0 \"\$main_pid\"; sudo systemctl kill --kill-whom=main --signal=KILL '${transient_unit}.service'; printf 'TRANSIENT_UPDATER_KILL_ISSUED unit=%s pid=%s\\n' '${transient_unit}.service' \"\$main_pid\"; sudo systemctl stop cathedral-validator-direct.service; sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${target}; printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${target} >/dev/null" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
+  if remote "$host" "set -eu
+expected='releases/$target'
+current=\"\$(sudo readlink /opt/cathedral-validator/current)\"
+printf 'current=%s\\n' \"\$current\"
+test \"\$current\" = \"\$expected\"
+sudo jq -e --arg target \"\$expected\" '.pending.stage == \"may_have_run\" and .pending.target_current == \$target' /var/lib/cathedral-validator-update/state.json
+unit_state=\"\$(sudo systemctl show '${transient_unit}.service' -p ActiveState -p SubState -p MainPID)\"
+printf '%s\\n' \"\$unit_state\"
+printf '%s\\n' \"\$unit_state\" | grep -Fx 'ActiveState=active' >/dev/null
+printf '%s\\n' \"\$unit_state\" | grep -Fx 'SubState=running' >/dev/null
+printf '%s\\n' \"\$unit_state\" | grep -Eq '^MainPID=[1-9][0-9]*$'
+main_pid=\"\$(printf '%s\\n' \"\$unit_state\" | sed -n 's/^MainPID=//p')\"
+sudo kill -0 \"\$main_pid\"
+sudo systemctl kill --kill-whom=main --signal=KILL '${transient_unit}.service'
+printf 'TRANSIENT_UPDATER_KILL_ISSUED unit=%s pid=%s\\n' '${transient_unit}.service' \"\$main_pid\"
+killed=0
+for attempt in \$(seq 1 30); do
+  if ! sudo kill -0 \"\$main_pid\" 2>/dev/null && ! sudo systemctl is-active --quiet '${transient_unit}.service'; then
+    killed=1
+    break
+  fi
+  sleep 1
+done
+test \"\$killed\" = 1
+test \"\$(sudo readlink /opt/cathedral-validator/current)\" = \"\$expected\"
+sudo jq -e --arg target \"\$expected\" '.pending.stage == \"may_have_run\" and .pending.target_current == \$target' /var/lib/cathedral-validator-update/state.json
+printf 'TRANSIENT_UPDATER_KILL_CONFIRMED unit=%s pid=%s\\n' '${transient_unit}.service' \"\$main_pid\"
+sudo systemctl stop cathedral-validator-direct.service
+sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${target}
+printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${target} >/dev/null" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
     return 0
   else
     failure_status=$?
@@ -2385,17 +2818,19 @@ assert_pending_pre_action stable-reset-pre-action "$STABLE_VM" \
   "$ARCHIVE_A_SHA" "cathedral-live-reset-${RUN_ID}" "$reset_started_at" \
   "$reset_boot_id"
 require_host_proof stable-reset-request "$STABLE_VM" \
-  gc compute instances reset "$STABLE_VM" --zone="$ZONE"
+  request_instance_reset "$STABLE_VM"
 require_host_proof stable-reset-reboot-observed "$STABLE_VM" \
   wait_boot_id_changed stable-reset "$STABLE_VM" "$reset_boot_id"
-require_host_proof stable-reset-direct-restart "$STABLE_VM" \
+require_host_proof stable-reset-delay-clear "$STABLE_VM" \
   remote "$STABLE_VM" \
-  "sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} && sudo systemctl start cathedral-validator-direct.service"
-wait_sequence stable-reset-reconcile "$STABLE_VM" stable 3
-assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" reset-may-have-run
+  "sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA}"
+require_host_proof stable-reset-direct-auto-start "$STABLE_VM" \
+  wait_direct_service_active stable-reset "$STABLE_VM"
 require_host_proof stable-reset-reconcile-proof "$STABLE_VM" \
   remote "$STABLE_VM" \
-  "sudo systemctl is-active cathedral-validator-direct.service && sudo journalctl -u cathedral-validator-boot-reconcile.service -n 80 --no-pager | grep CATHEDRAL_VALIDATOR_UPDATE_RECONCILED"
+  "sudo systemctl is-enabled --quiet cathedral-validator-direct.service && sudo systemctl is-active --quiet cathedral-validator-direct.service && test \"\$(sudo systemctl show cathedral-validator-boot-reconcile.service -p Result --value)\" = success && sudo journalctl -b -u cathedral-validator-boot-reconcile.service -n 80 --no-pager | grep CATHEDRAL_VALIDATOR_UPDATE_RECONCILED"
+wait_sequence stable-reset-reconcile "$STABLE_VM" stable "$STABLE_A3"
+assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" reset-may-have-run
 capture_host_with_retries stable-after-reset "$STABLE_VM"
 
 record_step "leave B crash-uncertain, then rescue with higher signed A sequence"
@@ -2420,7 +2855,7 @@ require_host_proof stable-rescue-marker-clear "$STABLE_VM" \
 require_host_proof higher-sequence-rescue-activation "$STABLE_VM" \
   grep -q 'CATHEDRAL_VALIDATOR_UPDATE_ACTIVATED' \
   "$EVIDENCE_DIR/higher-sequence-rescue-update-command.log"
-wait_sequence stable-higher-sequence-rescue "$STABLE_VM" stable 5
+wait_sequence stable-higher-sequence-rescue "$STABLE_VM" stable "$STABLE_A5"
 assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" higher-sequence-rescue
 require_host_proof higher-sequence-rescue-service "$STABLE_VM" \
   remote "$STABLE_VM" \

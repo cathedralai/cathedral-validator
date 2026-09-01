@@ -45,6 +45,22 @@ composer = _module(
 )
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "cathedral-validator-canary-update.timer",
+        "cathedral-validator-update.timer",
+    ),
+)
+def test_update_timer_schedules_from_activation_and_repeats(name: str) -> None:
+    timer = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
+
+    assert not any(line.startswith("OnBootSec=") for line in timer)
+    assert timer.count("OnActiveSec=15min") == 1
+    assert timer.count("OnUnitActiveSec=6h") == 1
+    assert "Persistent=true" not in timer
+
+
 def test_bootstrap_private_key_loader_supports_encryption_and_hides_passphrases(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

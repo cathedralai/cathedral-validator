@@ -36,6 +36,7 @@ def main() -> int:
                 {
                     "channel": args.snapshot,
                     "current": target,
+                    "record": record,
                     "sequence": sequence,
                     "pending": state.get("pending"),
                 },
