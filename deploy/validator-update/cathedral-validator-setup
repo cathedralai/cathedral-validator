@@ -383,6 +383,20 @@ def _unit_is_active_or_enabled(runner: Runner, unit: str) -> bool:
     return False
 
 
+def _unit_is_active(runner: Runner, unit: str) -> bool:
+    try:
+        result = runner(
+            ["/usr/bin/systemctl", "is-active", "--quiet", unit],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupRefused("cannot inspect direct validator service") from exc
+    return result.returncode == 0
+
+
 def _has_verified_current_release() -> bool:
     current = INSTALL_ROOT / "current"
     if not current.exists() and not current.is_symlink():
@@ -506,6 +520,20 @@ def _requires_first_install() -> bool:
     return False
 
 
+def _setup_completion_body(expected_hotkey: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schema": "cathedral_validator_setup_complete_v1",
+                "expected_hotkey": expected_hotkey,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+
+
 def configure(
     *,
     hotkey_file: Path,
@@ -571,6 +599,21 @@ def configure(
                 "a conflicting validator or canary unit is active or enabled"
             )
     requires_first_install = _requires_first_install()
+    completion = _setup_completion_body(expected_hotkey)
+    setup_complete = _existing_matches(
+        ETC / "setup-complete.json",
+        completion,
+        mode=0o600,
+        gid=ROOT_GID,
+    )
+    if requires_first_install and setup_complete:
+        raise SetupRefused("setup completion contradicts updater state")
+    if (
+        not requires_first_install
+        and setup_complete
+        and not _unit_is_active(runner, DIRECT_UNIT)
+    ):
+        raise SetupRefused("existing direct validator is stopped and needs review")
 
     service_gid = _service_gid()
     identity = f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={expected_hotkey}\n".encode(
@@ -595,23 +638,21 @@ def configure(
     for path, body, mode, gid in destinations:
         _install_once(path, body, mode=mode, gid=gid)
 
-    updater_command = [
-        str(UPDATER),
-        "--channel=stable",
-        f"--metadata-url={stable_url}",
-        f"--public-key={RUNTIME_KEY}",
-        f"--identity-file={ETC / 'identity.env'}",
-        f"--minimum-sequence={stable_sequence}",
-    ]
     if requires_first_install:
-        updater_command.insert(1, "--bootstrap-first-install")
-        updater_label = "first signed install"
-    else:
-        updater_label = "signed release verification"
-    _run_checked(runner, updater_command, updater_label)
-    _run_checked(
-        runner, ["/usr/bin/systemctl", "enable", DIRECT_UNIT], "direct service enable"
-    )
+        updater_command = [
+            str(UPDATER),
+            "--bootstrap-first-install",
+            "--channel=stable",
+            f"--metadata-url={stable_url}",
+            f"--public-key={RUNTIME_KEY}",
+            f"--identity-file={ETC / 'identity.env'}",
+            f"--minimum-sequence={stable_sequence}",
+        ]
+        _run_checked(runner, updater_command, "first signed install")
+    direct_enable = ["/usr/bin/systemctl", "enable", DIRECT_UNIT]
+    if not setup_complete:
+        direct_enable.insert(2, "--now")
+    _run_checked(runner, direct_enable, "direct service enable")
     _run_checked(
         runner,
         ["/usr/bin/systemctl", "enable", "--now", STABLE_TIMER],
@@ -626,6 +667,12 @@ def configure(
         runner,
         ["/usr/bin/systemctl", "is-active", "--quiet", STABLE_TIMER],
         "stable update timer readiness",
+    )
+    _install_once(
+        ETC / "setup-complete.json",
+        completion,
+        mode=0o600,
+        gid=ROOT_GID,
     )
 
 

@@ -122,9 +122,25 @@ def _runner(calls: list[list[str]]):
     return run
 
 
-def _setup_runner(calls: list[list[str]]):
+def _setup_runner(calls: list[list[str]], *, direct_active: bool = True):
+    active = direct_active
+
     def run(command, **_kwargs):
+        nonlocal active
         calls.append(command)
+        if command == [
+            "/usr/bin/systemctl",
+            "enable",
+            "--now",
+            setup.DIRECT_UNIT,
+        ]:
+            active = True
+        if (
+            len(command) > 2
+            and command[1] == "is-active"
+            and command[-1] == setup.DIRECT_UNIT
+        ):
+            return SimpleNamespace(returncode=0 if active else 3)
         if (
             len(command) > 2
             and command[1] in {"is-active", "is-enabled"}
@@ -195,7 +211,7 @@ def test_setup_configures_only_stable_direct_validator(
     assert setup.DIRECT_UNIT in flattened
     assert setup.STABLE_TIMER in flattened
     assert [command for command in calls if command[1] == "enable"] == [
-        ["/usr/bin/systemctl", "enable", setup.DIRECT_UNIT],
+        ["/usr/bin/systemctl", "enable", "--now", setup.DIRECT_UNIT],
         ["/usr/bin/systemctl", "enable", "--now", setup.STABLE_TIMER],
     ]
     assert not any(
@@ -226,7 +242,7 @@ def test_setup_is_idempotent_and_refuses_different_existing_configuration(
         snp_policy=policy,
         runner=_setup_runner(calls),
     )
-    assert not any("--bootstrap-first-install" in command for command in calls)
+    assert not any(command[0] == str(setup.UPDATER) for command in calls)
 
     (setup.ETC / "identity.env").write_text(
         f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={OTHER_HOTKEY}\n"
@@ -239,6 +255,57 @@ def test_setup_is_idempotent_and_refuses_different_existing_configuration(
             runner=_setup_runner([]),
         )
     assert (setup.ETC / "identity.env").read_text().endswith(f"{OTHER_HOTKEY}\n")
+
+
+def test_setup_rerun_refuses_stopped_writer_without_invoking_updater(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    _make_current(setup.INSTALL_ROOT)
+    _write_updater_state(channels={"stable": _release_record()}, pending=None)
+    _write(
+        setup.ETC / "setup-complete.json",
+        setup._setup_completion_body(HOTKEY),
+    )
+    calls: list[list[str]] = []
+
+    with pytest.raises(setup.SetupRefused, match="stopped and needs review"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            runner=_setup_runner(calls, direct_active=False),
+        )
+
+    assert not any(command[0] == str(setup.UPDATER) for command in calls)
+    assert not (setup.ETC / "validator-hotkey").exists()
+
+
+def test_setup_resumes_committed_first_install_before_completion_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    _make_current(setup.INSTALL_ROOT)
+    _write_updater_state(channels={"stable": _release_record()}, pending=None)
+    calls: list[list[str]] = []
+
+    setup.configure(
+        hotkey_file=hotkey,
+        expected_hotkey=HOTKEY,
+        snp_policy=policy,
+        runner=_setup_runner(calls, direct_active=False),
+    )
+
+    assert not any(command[0] == str(setup.UPDATER) for command in calls)
+    assert [
+        "/usr/bin/systemctl",
+        "enable",
+        "--now",
+        setup.DIRECT_UNIT,
+    ] in calls
+    assert (setup.ETC / "setup-complete.json").read_bytes() == (
+        setup._setup_completion_body(HOTKEY)
+    )
 
 
 def test_setup_recovers_interrupted_first_install_despite_current_symlink(
