@@ -95,6 +95,11 @@ def _setup_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path,
     monkeypatch.setattr(setup, "UPDATER", updater)
     monkeypatch.setattr(setup, "RUNTIME_KEY", runtime)
     monkeypatch.setattr(setup, "INSTALL_ROOT", tmp_path / "opt" / "cathedral-validator")
+    monkeypatch.setattr(
+        setup,
+        "UPDATER_STATE",
+        tmp_path / "var" / "lib" / "cathedral-validator-update" / "state.json",
+    )
     monkeypatch.setattr(setup, "BOOTSTRAP_OWNER", os.geteuid())
     monkeypatch.setattr(setup, "ROOT_UID", os.geteuid())
     monkeypatch.setattr(setup, "ROOT_GID", os.getgid())
@@ -138,6 +143,30 @@ def _make_current(root: Path) -> None:
     (root / "current").symlink_to(release)
 
 
+def _release_record() -> dict[str, object]:
+    return {
+        "sequence": 7,
+        "archive_sha256": "b" * 64,
+        "signed_sha256": "c" * 64,
+        "metadata_sha256": "d" * 64,
+    }
+
+
+def _write_updater_state(*, channels: dict, pending: object) -> None:
+    _write(
+        setup.UPDATER_STATE,
+        json.dumps(
+            {
+                "schema": "cathedral_validator_updater_state_v3",
+                "selected_channel": "stable",
+                "channels": channels,
+                "pending": pending,
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+
 def test_setup_configures_only_stable_direct_validator(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -159,6 +188,7 @@ def test_setup_configures_only_stable_direct_validator(
     assert "STABLE_METADATA_URL=https://example.invalid/stable.json" in update
     assert "CANARY" not in update
     flattened = " ".join(" ".join(command) for command in calls)
+    assert "--bootstrap-first-install" in flattened
     assert "--channel=stable" in flattened
     assert "--minimum-sequence=7" in flattened
     assert "--channel=canary" not in flattened
@@ -188,6 +218,7 @@ def test_setup_is_idempotent_and_refuses_different_existing_configuration(
         runner=_setup_runner(calls),
     )
     _make_current(setup.INSTALL_ROOT)
+    _write_updater_state(channels={"stable": _release_record()}, pending=None)
     calls.clear()
     setup.configure(
         hotkey_file=hotkey,
@@ -208,6 +239,57 @@ def test_setup_is_idempotent_and_refuses_different_existing_configuration(
             runner=_setup_runner([]),
         )
     assert (setup.ETC / "identity.env").read_text().endswith(f"{OTHER_HOTKEY}\n")
+
+
+def test_setup_recovers_interrupted_first_install_despite_current_symlink(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    _make_current(setup.INSTALL_ROOT)
+    record = _release_record()
+    _write_updater_state(
+        channels={},
+        pending={
+            "channel": "stable",
+            "record": record,
+            "previous_current": None,
+            "target_current": f"releases/{record['archive_sha256']}",
+            "stage": "may_have_run",
+        },
+    )
+    calls: list[list[str]] = []
+
+    setup.configure(
+        hotkey_file=hotkey,
+        expected_hotkey=HOTKEY,
+        snp_policy=policy,
+        runner=_setup_runner(calls),
+    )
+
+    updater_calls = [command for command in calls if command[0] == str(setup.UPDATER)]
+    assert len(updater_calls) == 1
+    assert "--bootstrap-first-install" in updater_calls[0]
+
+
+def test_setup_refuses_non_stable_updater_state_before_mutation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    _write(
+        setup.UPDATER_STATE,
+        '{"schema":"cathedral_validator_updater_state_v3",'
+        '"selected_channel":"canary","channels":{},"pending":null}',
+    )
+
+    with pytest.raises(setup.SetupRefused, match="stable-only"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            runner=_setup_runner([]),
+        )
+
+    assert not (setup.ETC / "validator-hotkey").exists()
 
 
 def test_setup_refuses_bad_hotkey_or_policy_before_config_mutation(

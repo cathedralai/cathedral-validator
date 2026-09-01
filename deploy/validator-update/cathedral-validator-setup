@@ -31,6 +31,7 @@ UPDATER = Path(
 )
 RUNTIME_KEY = ETC / "runtime-release-public-key.pem"
 INSTALL_ROOT = Path("/opt/cathedral-validator")
+UPDATER_STATE = Path("/var/lib/cathedral-validator-update/state.json")
 SYSTEMD = Path("/etc/systemd/system")
 DIRECT_UNIT = "cathedral-validator-direct.service"
 STABLE_TIMER = "cathedral-validator-update.timer"
@@ -45,12 +46,15 @@ REFUSED_UNITS = (
 )
 MAX_HOTKEY_BYTES = 1024 * 1024
 MAX_POLICY_BYTES = 128 * 1024
+MAX_UPDATER_STATE_BYTES = 1024 * 1024
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
 _MEASUREMENT = re.compile(r"[0-9a-f]{96}")
 _TCB = re.compile(r"0x[0-9a-f]{16}")
 _GENERATIONS = frozenset({"milan", "genoa", "turin"})
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_RELEASE_TARGET = re.compile(r"releases/[0-9a-f]{64}")
+_UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v3"
 BOOTSTRAP_OWNER = 0
 ROOT_UID = 0
 ROOT_GID = 0
@@ -87,6 +91,7 @@ def _read_regular(
     owners: set[int],
     label: str,
     pin_parent: bool = False,
+    required_mode: int | None = None,
 ) -> bytes:
     if not path.is_absolute() or path.is_symlink() or not hasattr(os, "O_NOFOLLOW"):
         raise SetupRefused(f"{label} must be an absolute non-symlink file")
@@ -114,6 +119,10 @@ def _read_regular(
             not stat.S_ISREG(before.st_mode)
             or before.st_uid not in owners
             or stat.S_IMODE(before.st_mode) & 0o022
+            or (
+                required_mode is not None
+                and stat.S_IMODE(before.st_mode) != required_mode
+            )
             or not 1 <= before.st_size <= maximum
         ):
             raise SetupRefused(f"{label} is not an owner-controlled regular file")
@@ -392,6 +401,111 @@ def _has_verified_current_release() -> bool:
     return True
 
 
+def _validate_updater_record(value: object, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "sequence",
+        "archive_sha256",
+        "signed_sha256",
+        "metadata_sha256",
+    }:
+        raise SetupRefused(f"{label} is invalid")
+    sequence = value["sequence"]
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+        raise SetupRefused(f"{label} sequence is invalid")
+    for field in ("archive_sha256", "signed_sha256", "metadata_sha256"):
+        digest = value[field]
+        if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+            raise SetupRefused(f"{label} digest is invalid")
+    return dict(value)
+
+
+def _validate_updater_pending(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "channel",
+        "record",
+        "previous_current",
+        "target_current",
+        "stage",
+    }:
+        raise SetupRefused("updater pending activation is invalid")
+    if value["channel"] != "stable":
+        raise SetupRefused("updater pending activation is not stable")
+    previous = value["previous_current"]
+    target = value["target_current"]
+    if previous is not None and (
+        not isinstance(previous, str) or _RELEASE_TARGET.fullmatch(previous) is None
+    ):
+        raise SetupRefused("updater pending previous release is invalid")
+    if not isinstance(target, str) or _RELEASE_TARGET.fullmatch(target) is None:
+        raise SetupRefused("updater pending target release is invalid")
+    if not isinstance(value["stage"], str) or value["stage"] not in {
+        "prepared",
+        "may_have_run",
+    }:
+        raise SetupRefused("updater pending activation stage is invalid")
+    record = _validate_updater_record(value["record"], label="updater pending record")
+    if target != f"releases/{record['archive_sha256']}":
+        raise SetupRefused("updater pending target does not match its record")
+    return dict(value)
+
+
+def _requires_first_install() -> bool:
+    """Trust only a committed stable record as proof of a completed install."""
+
+    try:
+        UPDATER_STATE.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise SetupRefused("updater state is unavailable") from exc
+    body = _read_regular(
+        UPDATER_STATE,
+        maximum=MAX_UPDATER_STATE_BYTES,
+        owners={BOOTSTRAP_OWNER},
+        label="updater state",
+        pin_parent=True,
+        required_mode=0o600,
+    )
+    try:
+        document = json.loads(body.decode("ascii"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupRefused("updater state is not strict JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "selected_channel", "channels", "pending"}
+        or document["schema"] != _UPDATER_STATE_SCHEMA
+        or not isinstance(document["channels"], dict)
+        or set(document["channels"]) - {"stable"}
+        or (
+            document["selected_channel"] is not None
+            and document["selected_channel"] != "stable"
+        )
+    ):
+        raise SetupRefused("updater state is invalid or not stable-only")
+    channels = document["channels"]
+    committed = None
+    if "stable" in channels:
+        committed = _validate_updater_record(
+            channels["stable"], label="updater stable record"
+        )
+    pending = _validate_updater_pending(document["pending"])
+    selected = document["selected_channel"]
+    if selected is None and (channels or pending is not None):
+        raise SetupRefused("updater state has no selected stable channel")
+    if pending is not None and (
+        (committed is None and pending["previous_current"] is not None)
+        or (committed is not None and pending["previous_current"] is None)
+    ):
+        raise SetupRefused("pending updater state contradicts committed installation")
+    if committed is None:
+        return True
+    if not _has_verified_current_release():
+        raise SetupRefused("committed updater state has no managed current release")
+    return False
+
+
 def configure(
     *,
     hotkey_file: Path,
@@ -456,6 +570,7 @@ def configure(
             raise SetupRefused(
                 "a conflicting validator or canary unit is active or enabled"
             )
+    requires_first_install = _requires_first_install()
 
     service_gid = _service_gid()
     identity = f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={expected_hotkey}\n".encode(
@@ -488,7 +603,7 @@ def configure(
         f"--identity-file={ETC / 'identity.env'}",
         f"--minimum-sequence={stable_sequence}",
     ]
-    if not _has_verified_current_release():
+    if requires_first_install:
         updater_command.insert(1, "--bootstrap-first-install")
         updater_label = "first signed install"
     else:
