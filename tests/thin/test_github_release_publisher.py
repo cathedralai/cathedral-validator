@@ -9,7 +9,6 @@ import runpy
 import subprocess
 import sys
 import tarfile
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +151,12 @@ def _validated(
     channel_branch: str = "validator-release-channel",
 ):
     publisher = _publisher()
+    # The production cache hold is tested with a deterministic clock below.
+    # Other publisher tests must not spend six minutes waiting on wall time.
+    publisher["publish"].__globals__["_MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS"] = (
+        0.0
+    )
+    publisher["publish"].__kwdefaults__["wall_clock"] = lambda: NOW
     private, public_path = _key(tmp_path)
     archive = _archive()
     digest = hashlib.sha256(archive).hexdigest()
@@ -833,12 +838,11 @@ def test_github_channel_content_accepts_github_line_wrapping(monkeypatch) -> Non
     ) == ("a" * 40, expected)
 
 
-def test_anonymous_pointer_verification_retries_stale_cache_busted_bytes(
+def test_anonymous_pointer_verification_retries_stale_fixed_url_bytes(
     monkeypatch,
 ) -> None:
     publisher = _publisher()
     expected = b"exact signed pointer\n"
-    digest = hashlib.sha256(expected).hexdigest()
     responses = iter((b"stale pointer\n", b"stale pointer\n", expected))
     urls: list[str] = []
     now = [100.0]
@@ -861,7 +865,7 @@ def test_anonymous_pointer_verification_retries_stale_cache_busted_bytes(
     publisher["_verify_anonymous_pointer"](
         "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
         expected,
-        metadata_sha256=digest,
+        label="mutable channel pointer",
         attempts=4,
         deadline_seconds=10.0,
         retry_seconds=0.5,
@@ -870,9 +874,13 @@ def test_anonymous_pointer_verification_retries_stale_cache_busted_bytes(
         sleeper=sleep,
     )
     assert len(urls) == 3
-    for attempt, url in enumerate(urls, start=1):
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
-        assert query == {"cathedral_verify": [f"{digest}-{attempt}"]}
+    assert (
+        urls
+        == [
+            "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json"
+        ]
+        * 3
+    )
 
 
 def test_anonymous_pointer_verification_stops_at_its_deadline(monkeypatch) -> None:
@@ -897,11 +905,11 @@ def test_anonymous_pointer_verification_stops_at_its_deadline(monkeypatch) -> No
         "_anonymous_fetch",
         fetch,
     )
-    with pytest.raises(UpdateRefused, match="bounded retry window"):
+    with pytest.raises(UpdateRefused, match="bounded retry window") as refused:
         publisher["_verify_anonymous_pointer"](
             "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
             expected,
-            metadata_sha256=hashlib.sha256(expected).hexdigest(),
+            label="mutable channel pointer",
             attempts=99,
             deadline_seconds=2.0,
             retry_seconds=0.5,
@@ -911,6 +919,199 @@ def test_anonymous_pointer_verification_stops_at_its_deadline(monkeypatch) -> No
         )
     assert calls == 2
     assert now[0] == 2.0
+    stale_digest = hashlib.sha256(b"stale pointer\n").hexdigest()
+    assert f"last_observed_sha256={stale_digest}" in str(refused.value)
+    assert "successful_fetches=2; transport_errors=0" in str(refused.value)
+
+
+def test_anonymous_pointer_requires_a_fresh_match_after_cache_lifetime() -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    now = [0.0]
+    fetch_times: list[float] = []
+
+    def fetch(_url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        assert maximum > 0
+        assert timeout_seconds > 0
+        fetch_times.append(now[0])
+        return expected
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    publisher["_verify_anonymous_pointer"].__globals__["_anonymous_fetch"] = fetch
+    publisher["_verify_anonymous_pointer"](
+        "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+        expected,
+        label="mutable channel pointer",
+        attempts=publisher["_POINTER_VERIFY_ATTEMPTS"],
+        deadline_seconds=publisher["_POINTER_VERIFY_DEADLINE_SECONDS"],
+        retry_seconds=5.0,
+        request_seconds=5.0,
+        minimum_success_elapsed_seconds=360.0,
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+
+    assert fetch_times[0] == 0.0
+    assert fetch_times[-1] == 360.0
+    assert now[0] == 360.0
+
+
+def test_anonymous_pointer_slow_exact_fetch_starts_again_after_cache_lifetime() -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    now = [0.0]
+    fetch_start_times: list[float] = []
+
+    def fetch(_url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        assert maximum > 0
+        assert timeout_seconds > 0
+        fetch_start_times.append(now[0])
+        now[0] += 4.9
+        return expected
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    publisher["_verify_anonymous_pointer"].__globals__["_anonymous_fetch"] = fetch
+    publisher["_verify_anonymous_pointer"](
+        "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+        expected,
+        label="mutable channel pointer",
+        attempts=publisher["_POINTER_VERIFY_ATTEMPTS"],
+        deadline_seconds=publisher["_POINTER_VERIFY_DEADLINE_SECONDS"],
+        retry_seconds=5.0,
+        request_seconds=5.0,
+        minimum_success_elapsed_seconds=360.0,
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+
+    assert fetch_start_times == [0.0, 360.0]
+    assert now[0] == pytest.approx(364.9)
+
+
+def test_anonymous_pointer_slow_stale_fetch_still_gets_post_cache_attempt() -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    now = [0.0]
+    fetch_start_times: list[float] = []
+
+    def fetch(_url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        assert maximum > 0
+        assert timeout_seconds > 0
+        started = now[0]
+        fetch_start_times.append(started)
+        now[0] += 4.9
+        return expected if started >= 360.0 else b"stale pointer\n"
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    publisher["_verify_anonymous_pointer"].__globals__["_anonymous_fetch"] = fetch
+    publisher["_verify_anonymous_pointer"](
+        "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+        expected,
+        label="mutable channel pointer",
+        attempts=publisher["_POINTER_VERIFY_ATTEMPTS"],
+        deadline_seconds=publisher["_POINTER_VERIFY_DEADLINE_SECONDS"],
+        retry_seconds=5.0,
+        request_seconds=5.0,
+        minimum_success_elapsed_seconds=360.0,
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+
+    assert fetch_start_times[-2] == pytest.approx(356.4)
+    assert fetch_start_times[-1] == pytest.approx(361.3)
+    assert now[0] == pytest.approx(366.2)
+
+
+def test_anonymous_pointer_error_reports_last_outcome_without_stale_digest() -> None:
+    publisher = _publisher()
+    expected = b"exact signed pointer\n"
+    responses: list[bytes | UpdateRefused] = [
+        b"stale pointer\n",
+        UpdateRefused("network unavailable"),
+    ]
+    now = [0.0]
+
+    def fetch(_url: str, *, maximum: int, timeout_seconds: float) -> bytes:
+        assert maximum > 0
+        assert timeout_seconds > 0
+        response = responses.pop(0)
+        if isinstance(response, UpdateRefused):
+            raise response
+        return response
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    publisher["_verify_anonymous_pointer"].__globals__["_anonymous_fetch"] = fetch
+    with pytest.raises(UpdateRefused, match="last_result=transport_error") as refused:
+        publisher["_verify_anonymous_pointer"](
+            "https://raw.githubusercontent.com/example/repo/channel/validator/canary.json",
+            expected,
+            label="mutable channel pointer",
+            attempts=2,
+            deadline_seconds=2.0,
+            retry_seconds=1.0,
+            request_seconds=1.0,
+            clock=lambda: now[0],
+            sleeper=sleep,
+        )
+
+    assert "last_observed_sha256" not in str(refused.value)
+    assert "successful_fetches=1; transport_errors=1" in str(refused.value)
+
+
+def test_mutable_pointer_verification_window_covers_raw_cache_ttl() -> None:
+    publisher = _publisher()
+    assert (
+        publisher["_POINTER_VERIFY_DEADLINE_SECONDS"]
+        >= publisher["_RAW_POINTER_CACHE_MAX_AGE_SECONDS"]
+        + publisher["_RAW_POINTER_CACHE_SAFETY_MARGIN_SECONDS"]
+        + publisher["_POINTER_VERIFY_RETRY_SECONDS"]
+        + publisher["_POINTER_VERIFY_REQUEST_SECONDS"]
+    )
+    assert (publisher["_POINTER_VERIFY_ATTEMPTS"] - 2) * publisher[
+        "_POINTER_VERIFY_RETRY_SECONDS"
+    ] >= publisher["_MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS"]
+
+
+def test_pinned_pointer_verification_attempts_cover_its_deadline() -> None:
+    publisher = _publisher()
+    assert (publisher["_PINNED_POINTER_VERIFY_ATTEMPTS"] - 1) * publisher[
+        "_PINNED_POINTER_VERIFY_RETRY_SECONDS"
+    ] >= publisher["_PINNED_POINTER_VERIFY_DEADLINE_SECONDS"]
+
+
+def test_publication_rejects_metadata_too_close_to_expiry(tmp_path: Path) -> None:
+    publisher = _publisher()
+    private, public_path = _key(tmp_path)
+    archive = _archive()
+    digest = hashlib.sha256(archive).hexdigest()
+    archive_path = tmp_path / f"cathedral-validator-{digest}.tar.gz"
+    metadata_path = tmp_path / "canary.json"
+    archive_path.write_bytes(archive)
+    metadata_path.write_bytes(_metadata(private, archive, sequence=1))
+    minimum = publisher["_MIN_PUBLICATION_REMAINING_SECONDS"]
+
+    with pytest.raises(UpdateRefused, match="lacks required publication headroom"):
+        publisher["validate_publication"](
+            metadata_path=metadata_path,
+            archive_path=archive_path,
+            public_key_path=public_path,
+            now_unix=NOW + 3600 - minimum,
+        )
+
+    publisher["validate_publication"](
+        metadata_path=metadata_path,
+        archive_path=archive_path,
+        public_key_path=public_path,
+        now_unix=NOW + 3600 - minimum - 1,
+    )
 
 
 def test_validate_publication_rejects_tamper_and_noncanonical_name(
@@ -1023,13 +1224,17 @@ def _history_object(publication, body: bytes, *, sequence: int) -> dict[str, byt
     }
 
 
-def _anonymous_publication_fetch(publication, github: _FakeGitHub):
+def _anonymous_publication_fetch(
+    publication, github: _FakeGitHub, urls: list[str] | None = None
+):
     def fetch(url: str, *, maximum: int, timeout_seconds: float = 60.0) -> bytes:
+        if urls is not None:
+            urls.append(url)
         assert maximum > 0
         assert timeout_seconds > 0
         if "github.com/" in url:
             return publication.archive
-        assert "validator/canary.json?" in url
+        assert url.endswith("/validator/canary.json")
         return github.pointer or b""
 
     return fetch
@@ -1040,11 +1245,12 @@ def test_publish_orders_archive_then_atomic_channel_commit(
 ) -> None:
     publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
     github = _FakeGitHub()
+    urls: list[str] = []
 
     monkeypatch.setitem(
         publisher["publish"].__globals__,
         "_anonymous_fetch",
-        _anonymous_publication_fetch(publication, github),
+        _anonymous_publication_fetch(publication, github, urls),
     )
     publisher["publish"](
         publication,
@@ -1057,6 +1263,224 @@ def test_publish_orders_archive_then_atomic_channel_commit(
         "history-list",
         "channel-commit",
     ]
+    assert github.pointer == publication.metadata
+    assert urls == [
+        publication.archive_url,
+        (
+            "https://raw.githubusercontent.com/cathedralai/cathedral-validator/"
+            f"{'e' * 40}/validator/canary.json"
+        ),
+        (
+            "https://raw.githubusercontent.com/cathedralai/cathedral-validator/"
+            "validator-release-channel/validator/canary.json"
+        ),
+    ]
+
+
+def test_publish_applies_the_full_cache_hold_to_the_mutable_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub()
+    production_hold = (
+        publisher["_RAW_POINTER_CACHE_MAX_AGE_SECONDS"]
+        + publisher["_RAW_POINTER_CACHE_SAFETY_MARGIN_SECONDS"]
+    )
+    publisher["publish"].__globals__["_MUTABLE_POINTER_MINIMUM_OBSERVATION_SECONDS"] = (
+        production_hold
+    )
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+    verification_calls: list[tuple[str, dict[str, object]]] = []
+
+    def verify(_url: str, _expected: bytes, *, label: str, **kwargs) -> None:
+        verification_calls.append((label, kwargs))
+
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_verify_anonymous_pointer",
+        verify,
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+
+    assert verification_calls[0][0] == "commit-pinned channel pointer"
+    assert verification_calls[0][1] == {
+        "attempts": publisher["_PINNED_POINTER_VERIFY_ATTEMPTS"],
+        "deadline_seconds": publisher["_PINNED_POINTER_VERIFY_DEADLINE_SECONDS"],
+        "retry_seconds": publisher["_PINNED_POINTER_VERIFY_RETRY_SECONDS"],
+    }
+    assert verification_calls[1] == (
+        "mutable channel pointer",
+        {"minimum_success_elapsed_seconds": production_hold},
+    )
+
+
+def test_idempotent_publish_verifies_the_existing_exact_revision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    revision = "d" * 40
+    github = _FakeGitHub(
+        pointer=publication.metadata,
+        branch_created=False,
+        branch_revision=revision,
+        objects={publication.history_path: publication.metadata},
+    )
+    urls: list[str] = []
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github, urls),
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+
+    assert github.events == ["release", "branch"]
+    assert urls == [
+        publication.archive_url,
+        (
+            "https://raw.githubusercontent.com/cathedralai/cathedral-validator/"
+            f"{revision}/validator/canary.json"
+        ),
+        (
+            "https://raw.githubusercontent.com/cathedralai/cathedral-validator/"
+            "validator-release-channel/validator/canary.json"
+        ),
+    ]
+
+
+def test_publish_retry_after_mutable_verification_failure_does_not_recommit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub()
+    anonymous_fetch = _anonymous_publication_fetch(publication, github)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        anonymous_fetch,
+    )
+    verify_calls: list[tuple[str, str]] = []
+    refuse_mutable = [True]
+
+    def verify(url: str, _expected: bytes, *, label: str, **_kwargs) -> None:
+        verify_calls.append((label, url))
+        if label == "mutable channel pointer" and refuse_mutable[0]:
+            raise UpdateRefused("mutable pointer remained stale")
+
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_verify_anonymous_pointer",
+        verify,
+    )
+
+    with pytest.raises(UpdateRefused, match="remained stale"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+        )
+
+    committed_revision = "e" * 40
+    assert github.branch_revision == committed_revision
+    assert github.pointer == publication.metadata
+    assert github.objects[publication.history_path] == publication.metadata
+    assert github.events[-1] == "channel-commit"
+
+    github.events.clear()
+    verify_calls.clear()
+    refuse_mutable[0] = False
+    observed_revision = publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+
+    assert observed_revision == committed_revision
+    assert github.events == ["release", "branch"]
+    assert [label for label, _url in verify_calls] == [
+        "commit-pinned channel pointer",
+        "mutable channel pointer",
+    ]
+    assert committed_revision in verify_calls[0][1]
+
+
+def test_publish_rechecks_expiry_before_channel_update(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    now = [NOW]
+
+    class SlowReleaseGitHub(_FakeGitHub):
+        def ensure_release(self, publication) -> None:
+            super().ensure_release(publication)
+            now[0] = (
+                publication.expires_unix
+                - publisher["_MIN_POINTER_VERIFICATION_REMAINING_SECONDS"]
+            )
+
+    github = SlowReleaseGitHub()
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    with pytest.raises(UpdateRefused, match="before the channel update"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+            wall_clock=lambda: now[0],
+        )
+
+    assert "channel-commit" not in github.events
+    assert github.pointer is None
+
+
+def test_publish_refuses_success_if_metadata_expires_during_verification(
+    tmp_path: Path, monkeypatch
+) -> None:
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub()
+    now = [NOW]
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    def verify(_url: str, _expected: bytes, *, label: str, **_kwargs) -> None:
+        if label == "mutable channel pointer":
+            now[0] = publication.expires_unix
+
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_verify_anonymous_pointer",
+        verify,
+    )
+
+    with pytest.raises(UpdateRefused, match="after pointer verification"):
+        publisher["publish"](
+            publication,
+            public_key_path=public_path,
+            github=github,
+            wall_clock=lambda: now[0],
+        )
+
+    assert github.events[-1] == "channel-commit"
     assert github.pointer == publication.metadata
 
 
