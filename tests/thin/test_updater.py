@@ -1735,9 +1735,11 @@ def test_first_install_accepts_a_strictly_higher_release_than_the_bound_record(
     )
 
 
-def test_first_install_below_the_bound_floor_is_refused_before_any_mutation(
+def test_first_install_below_the_bound_floor_is_refused_without_activation(
     tmp_path: Path,
 ) -> None:
+    """The channel pin and idle journal are written first; nothing is activated."""
+
     private, archive, _, bound_sha256, _, _, _ = _bound_first_install(tmp_path)
     older = _stable_metadata(
         private,
@@ -1767,6 +1769,10 @@ def test_first_install_below_the_bound_floor_is_refused_before_any_mutation(
         )
     assert restarts == []
     assert not (tmp_path / "install" / "current").exists()
+    assert not (tmp_path / "install" / "releases").exists()
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["channels"] == {}
+    assert state["pending"] is None
 
 
 def test_crash_uncertain_first_install_is_rescued_by_a_higher_release(
