@@ -391,6 +391,12 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     for timer in ("$timer", "$other_timer"):
         assert f"systemctl show '{timer}' -p UnitFileState --value" in configure_host
     assert "systemctl show '$timer' -p ActiveState --value" in configure_host
+    assert "'OnBootSec=' 'OnBootSec=20s'" in configure_host
+    assert "'OnUnitActiveSec='" not in configure_host
+    assert "'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s'" in configure_host
+    assert "systemctl show '$timer' -p TimersMonotonic --value" in configure_host
+    assert "grep -F 'OnBootUSec='" in configure_host
+    assert "grep -F 'OnUnitActiveUSec='" in configure_host
     assert configure_host.count("= disabled") == 2
     assert "systemctl cat '$other_timer'" in configure_host
     assert "other_timer_state=" in configure_host
