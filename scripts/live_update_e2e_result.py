@@ -82,6 +82,9 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "canary-instance-metadata-before.json",
         "canary-instance-metadata-final.json",
         "canary-instance.json",
+        "canary-same-boot-reactivation-timer-reactivation-start.log",
+        "canary-same-boot-reactivation-timer-reactivation-state.log",
+        "canary-same-boot-reactivation-timer-reactivation-wait.log",
         "candidate-attestations.log",
         "control.json",
         "controller-api-state.json",
@@ -107,6 +110,12 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "project-metadata-before.json",
         "project-metadata-final.json",
         "runtime-release-public-key.pem",
+        "same-archive-invocation-after-value.txt",
+        "same-archive-invocation-before-value.txt",
+        "same-archive-pid-after-value.txt",
+        "same-archive-pid-before-value.txt",
+        "same-boot-reactivation-invocation-after-value.txt",
+        "same-boot-reactivation-pid-after-value.txt",
         "ssh-firewall.json",
         "source-repository.json",
         "stable-branch.json",
@@ -118,7 +127,14 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "stable-instance-metadata-final.json",
         "stable-instance.json",
         "steps.log",
+        "teardown-canary-disk-result.txt",
+        "teardown-canary-vm-result.txt",
+        "teardown-firewall-result.txt",
+        "teardown-network-result.txt",
+        "teardown-stable-disk-result.txt",
+        "teardown-stable-vm-result.txt",
         "teardown-status.txt",
+        "teardown-subnet-result.txt",
         "test-publication-immutable-releases.json",
         "test-publication-main-before.json",
         "test-publication-repository.json",
@@ -132,6 +148,25 @@ EMPTY_TEARDOWN_LISTS = (
     "post-teardown-labeled-instances.json",
     "post-teardown-network.json",
     "post-teardown-subnet.json",
+)
+DIRECT_SERVICE_PID_PROOFS = (
+    "same-archive-pid-before-value.txt",
+    "same-archive-pid-after-value.txt",
+    "same-boot-reactivation-pid-after-value.txt",
+)
+DIRECT_SERVICE_INVOCATION_PROOFS = (
+    "same-archive-invocation-before-value.txt",
+    "same-archive-invocation-after-value.txt",
+    "same-boot-reactivation-invocation-after-value.txt",
+)
+TEARDOWN_RESOURCE_PROOFS = (
+    ("teardown-canary-vm-result.txt", "instance", "catval-{run_id}-canary"),
+    ("teardown-stable-vm-result.txt", "instance", "catval-{run_id}-stable"),
+    ("teardown-canary-disk-result.txt", "disk", "catval-{run_id}-canary"),
+    ("teardown-stable-disk-result.txt", "disk", "catval-{run_id}-stable"),
+    ("teardown-firewall-result.txt", "firewall", "catval-{run_id}-ssh"),
+    ("teardown-subnet-result.txt", "subnet", "catval-{run_id}-subnet"),
+    ("teardown-network-result.txt", "network", "catval-{run_id}-net"),
 )
 RESULT_EXCLUSIONS = frozenset({RESULT_NAME, SIGNATURE_NAME, DIGEST_NAME})
 
@@ -629,6 +664,17 @@ def verify_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def _single_ascii_line(root: Path, relative: str, *, label: str) -> str:
+    data = _read_regular(root / relative, label=label, require_nonempty=True)
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(f"{label} must be ASCII") from exc
+    if not text.endswith("\n") or not text[:-1] or "\n" in text[:-1]:
+        raise EvidenceError(f"{label} must contain exactly one non-empty line")
+    return text[:-1]
+
+
 def _validate_success_evidence(root: Path) -> dict[str, Any]:
     for relative in REQUIRED_SUCCESS_FILES:
         _read_regular(
@@ -680,6 +726,74 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         )
     ):
         raise EvidenceError("control document has an invalid run or source identity")
+    pid_values = [
+        _single_ascii_line(root, relative, label=f"direct service PID proof {relative}")
+        for relative in DIRECT_SERVICE_PID_PROOFS
+    ]
+    if any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in pid_values) or (
+        len(set(pid_values)) != 1
+    ):
+        raise EvidenceError(
+            "same-archive renewal or same-boot timer reactivation changed the direct "
+            "service PID"
+        )
+    invocation_values = [
+        _single_ascii_line(
+            root,
+            relative,
+            label=f"direct service invocation proof {relative}",
+        )
+        for relative in DIRECT_SERVICE_INVOCATION_PROOFS
+    ]
+    if any(
+        re.fullmatch(r"[0-9A-Fa-f]{32}", value) is None
+        for value in invocation_values
+    ) or len(set(invocation_values)) != 1:
+        raise EvidenceError(
+            "same-archive renewal or same-boot timer reactivation changed the direct "
+            "service invocation"
+        )
+    reactivation_start = _read_regular(
+        root / "canary-same-boot-reactivation-timer-reactivation-start.log",
+        label="same-boot timer reactivation start proof",
+        require_nonempty=True,
+    )
+    if any(
+        marker not in reactivation_start
+        for marker in (
+            b"OnActiveUSec=",
+            b"OnUnitActiveUSec=",
+            b"UnitFileState=enabled",
+            b"ActiveState=active",
+        )
+    ):
+        raise EvidenceError("same-boot timer reactivation start proof is incomplete")
+    reactivation_wait = _read_regular(
+        root / "canary-same-boot-reactivation-timer-reactivation-wait.log",
+        label="same-boot timer reactivation completion proof",
+        require_nonempty=True,
+    )
+    if any(
+        marker not in reactivation_wait
+        for marker in (
+            b"ServiceResult=success",
+            b"ServiceExecMainStatus=0",
+            b"ServiceActiveState=inactive",
+        )
+    ):
+        raise EvidenceError("same-boot timer reactivation completion proof is incomplete")
+    run_id = control["run_id"]
+    for relative, kind, name_template in TEARDOWN_RESOURCE_PROOFS:
+        value = _single_ascii_line(
+            root, relative, label=f"teardown resource proof {relative}"
+        )
+        expected_name = name_template.format(run_id=run_id)
+        if re.fullmatch(
+            rf"TEARDOWN_RESOURCE_ABSENT kind={re.escape(kind)} "
+            rf"name={re.escape(expected_name)} attempt=(?:[1-9][0-9]*|final)",
+            value,
+        ) is None:
+            raise EvidenceError(f"teardown resource proof is invalid: {relative}")
     for label in ("final-canary", "final-stable"):
         manifest_path = root / f"{label}-sections.json"
         artifacts_dir = root / f"{label}.d"

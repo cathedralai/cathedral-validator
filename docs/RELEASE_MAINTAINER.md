@@ -238,6 +238,9 @@ Run the identical environment with `--execute` only after preflight prints
 state, service and timer properties, unit definitions, and timer inventory.
 Status output and journals are explicitly optional diagnostics: their failures
 are recorded but do not hide a missing required section.
+The signed result also requires the same-boot timer-reactivation logs, matching
+direct-service PID and invocation evidence before and after reactivation, and
+an exact absence proof for every disposable cloud resource.
 
 The success grammar is result finalization and signature verification, then
 `TEARDOWN_COMPLETE`, then `LIVE_UPDATE_E2E_RESULT`, followed by

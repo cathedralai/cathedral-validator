@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -303,6 +304,38 @@ def _success_tree(tmp_path):
     evidence.mkdir(mode=0o700)
     for relative in RESULT.REQUIRED_SUCCESS_FILES:
         (evidence / relative).write_bytes(b"recorded\n")
+    for relative in RESULT.DIRECT_SERVICE_PID_PROOFS:
+        (evidence / relative).write_text("42\n", encoding="ascii")
+    for relative in RESULT.DIRECT_SERVICE_INVOCATION_PROOFS:
+        (evidence / relative).write_text("a" * 32 + "\n", encoding="ascii")
+    (
+        evidence / "canary-same-boot-reactivation-timer-reactivation-start.log"
+    ).write_text(
+        "OnActiveUSec=1s\nOnUnitActiveUSec=2s\n"
+        "UnitFileState=enabled\nActiveState=active\n",
+        encoding="ascii",
+    )
+    (
+        evidence / "canary-same-boot-reactivation-timer-reactivation-wait.log"
+    ).write_text(
+        "ServiceResult=success\nServiceExecMainStatus=0\n"
+        "ServiceActiveState=inactive\n",
+        encoding="ascii",
+    )
+    teardown_resources = {
+        "teardown-canary-vm-result.txt": ("instance", "catval-valupd-fixture-canary"),
+        "teardown-stable-vm-result.txt": ("instance", "catval-valupd-fixture-stable"),
+        "teardown-canary-disk-result.txt": ("disk", "catval-valupd-fixture-canary"),
+        "teardown-stable-disk-result.txt": ("disk", "catval-valupd-fixture-stable"),
+        "teardown-firewall-result.txt": ("firewall", "catval-valupd-fixture-ssh"),
+        "teardown-subnet-result.txt": ("subnet", "catval-valupd-fixture-subnet"),
+        "teardown-network-result.txt": ("network", "catval-valupd-fixture-net"),
+    }
+    for relative, (kind, name) in teardown_resources.items():
+        (evidence / relative).write_text(
+            f"TEARDOWN_RESOURCE_ABSENT kind={kind} name={name} attempt=1\n",
+            encoding="ascii",
+        )
     (evidence / RESULT.RESULT_PUBLIC_KEY_NAME).write_bytes(public_path.read_bytes())
     control = {
         "schema": "cathedral_validator_live_update_control_v1",
@@ -462,6 +495,43 @@ def test_canonical_result_refuses_an_unhealthy_final_validator(tmp_path):
     rejected = _finalize(evidence, private_path, public_path, controller)
     assert rejected.returncode != 0
     assert "direct validator service is not healthy" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "canary-same-boot-reactivation-timer-reactivation-start.log",
+        "same-archive-pid-before-value.txt",
+        "teardown-network-result.txt",
+    ),
+)
+def test_canonical_result_requires_new_upstream_scenario_proofs(tmp_path, relative):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    (evidence / relative).unlink()
+    rejected = _finalize(evidence, private_path, public_path, controller)
+    assert rejected.returncode != 0
+    assert relative in rejected.stderr
+
+
+def test_canonical_result_refuses_direct_service_continuity_mismatch(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    (evidence / "same-boot-reactivation-pid-after-value.txt").write_text(
+        "43\n", encoding="ascii"
+    )
+    rejected = _finalize(evidence, private_path, public_path, controller)
+    assert rejected.returncode != 0
+    assert "changed the direct service PID" in rejected.stderr
+
+
+def test_canonical_result_refuses_wrong_teardown_resource_identity(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    (evidence / "teardown-network-result.txt").write_text(
+        "TEARDOWN_RESOURCE_ABSENT kind=network name=wrong attempt=1\n",
+        encoding="ascii",
+    )
+    rejected = _finalize(evidence, private_path, public_path, controller)
+    assert rejected.returncode != 0
+    assert "teardown resource proof is invalid" in rejected.stderr
 
 
 def test_cleanup_refuses_residual_resource_without_success_markers(tmp_path):
