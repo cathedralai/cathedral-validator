@@ -10,6 +10,7 @@
 # GCP resources it created. Public mirror artifacts remain as the test record.
 
 set -Eeuo pipefail
+set +x
 umask 077
 
 readonly EXPECTED_PROJECT="polaris-tdx-attest"
@@ -50,6 +51,54 @@ readonly DIRECT_START_TIMEOUT_SECONDS=300
 readonly READINESS_DELAY_MAX_SECONDS=300
 readonly IMAGE_PROJECT="ubuntu-os-cloud"
 readonly IMAGE_FAMILY="ubuntu-2404-lts-amd64"
+readonly CLOUD_RESOURCE_MANAGER_API="cloudresourcemanager.googleapis.com"
+readonly IAP_API="iap.googleapis.com"
+readonly IAP_TCP_SOURCE_RANGE="35.235.240.0/20"
+readonly IAP_CONTROLLER_TRANSPORT="gcp_iap_tcp_forwarding"
+readonly GOOGLE_API_MAX_ATTEMPTS=3
+readonly GOOGLE_API_TOTAL_TIMEOUT_SECONDS=100
+readonly GOOGLE_AUTH_TIMEOUT_SECONDS=10
+readonly GOOGLE_API_CURL_TIMEOUT_SECONDS=20
+readonly IAP_SCP_MAX_ATTEMPTS=3
+readonly CONTROLLER_PROJECT_PERMISSIONS=(
+  "compute.disks.create"
+  "compute.disks.delete"
+  "compute.disks.get"
+  "compute.disks.list"
+  "compute.firewalls.create"
+  "compute.firewalls.delete"
+  "compute.firewalls.get"
+  "compute.firewalls.list"
+  "compute.globalOperations.get"
+  "compute.instances.get"
+  "compute.instances.list"
+  "compute.instances.create"
+  "compute.instances.delete"
+  "compute.instances.reset"
+  "compute.instances.setLabels"
+  "compute.instances.setMetadata"
+  "compute.instances.setTags"
+  "compute.machineTypes.get"
+  "compute.networks.create"
+  "compute.networks.delete"
+  "compute.networks.get"
+  "compute.networks.list"
+  "compute.networks.updatePolicy"
+  "compute.networks.use"
+  "compute.networks.useExternalIp"
+  "compute.projects.get"
+  "compute.regionOperations.get"
+  "compute.subnetworks.create"
+  "compute.subnetworks.delete"
+  "compute.subnetworks.get"
+  "compute.subnetworks.list"
+  "compute.subnetworks.use"
+  "compute.subnetworks.useExternalIp"
+  "compute.zoneOperations.get"
+  "iap.tunnelInstances.accessViaIAP"
+)
+readonly CONTROLLER_PROJECT_PERMISSION_REQUEST='{"permissions":["compute.disks.create","compute.disks.delete","compute.disks.get","compute.disks.list","compute.firewalls.create","compute.firewalls.delete","compute.firewalls.get","compute.firewalls.list","compute.globalOperations.get","compute.instances.create","compute.instances.delete","compute.instances.get","compute.instances.list","compute.instances.reset","compute.instances.setLabels","compute.instances.setMetadata","compute.instances.setTags","compute.machineTypes.get","compute.networks.create","compute.networks.delete","compute.networks.get","compute.networks.list","compute.networks.updatePolicy","compute.networks.use","compute.networks.useExternalIp","compute.projects.get","compute.regionOperations.get","compute.subnetworks.create","compute.subnetworks.delete","compute.subnetworks.get","compute.subnetworks.list","compute.subnetworks.use","compute.subnetworks.useExternalIp","compute.zoneOperations.get","iap.tunnelInstances.accessViaIAP"]}'
+readonly IAP_INSTANCE_PERMISSION_REQUEST='{"permissions":["iap.tunnelInstances.accessViaIAP"]}'
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly REPOSITORY_ROOT
 readonly HARNESS_SOURCE="$REPOSITORY_ROOT/tests/live/cathedral_no_chain_readiness.py"
@@ -92,7 +141,7 @@ fi
 MODE="${1:-}"
 if [[ "$MODE" != "--preflight" && "$MODE" != "--execute" ]]; then
   printf 'usage: %s --preflight|--execute\n' "$0" >&2
-  printf 'required: TEST_GITHUB_REPOSITORY=public-owner/test-mirror plus run, candidate, revision, CIDR, and evidence variables\n' >&2
+  printf 'required: TEST_GITHUB_REPOSITORY=public-owner/test-mirror plus run, candidate, revision, and evidence variables\n' >&2
   exit 2
 fi
 
@@ -105,7 +154,7 @@ required_env() {
 }
 
 for variable in \
-  RUN_ID CONTROLLER_CIDR CANDIDATE_A_DIR CANDIDATE_B_DIR \
+  RUN_ID CANDIDATE_A_DIR CANDIDATE_B_DIR \
   SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY; do
   required_env "$variable"
 done
@@ -121,6 +170,10 @@ if [[ "$GCP_PROJECT" != "$EXPECTED_PROJECT" ]]; then
 fi
 if [[ -n "${GITHUB_REPOSITORY+x}" ]]; then
   printf 'REFUSED: GITHUB_REPOSITORY is obsolete; set only TEST_GITHUB_REPOSITORY\n' >&2
+  exit 2
+fi
+if [[ -n "${CONTROLLER_CIDR+x}" ]]; then
+  printf 'REFUSED: CONTROLLER_CIDR is obsolete; the live controller requires authenticated IAP\n' >&2
   exit 2
 fi
 python3 - "$TEST_GITHUB_REPOSITORY" "$SOURCE_GITHUB_REPOSITORY" <<'PY'
@@ -221,18 +274,7 @@ if total > requested:
     raise SystemExit(f"REFUSED: planning total ${total} exceeds requested budget ${requested}")
 PY
 
-python3 - "$CONTROLLER_CIDR" <<'PY'
-import ipaddress
-import sys
-
-network = ipaddress.ip_network(sys.argv[1], strict=True)
-if network.version != 4 or network.prefixlen != 32:
-    raise SystemExit("REFUSED: CONTROLLER_CIDR must be one exact public IPv4 /32")
-if not network.network_address.is_global:
-    raise SystemExit("REFUSED: CONTROLLER_CIDR must be globally routable")
-PY
-
-for command in awk basename cmp cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
+for command in awk basename cmp curl cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
   command -v "$command" >/dev/null || {
     printf 'REFUSED: required command is missing: %s\n' "$command" >&2
     exit 2
@@ -253,6 +295,187 @@ done
 
 gc() {
   gcloud --quiet --project="$GCP_PROJECT" "$@"
+}
+
+fresh_access_token() {
+  local timeout_seconds="$1"
+  python3 - "$GCP_PROJECT" "$timeout_seconds" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+project = sys.argv[1]
+timeout = int(sys.argv[2])
+if timeout < 1:
+    raise SystemExit(75)
+try:
+    process = subprocess.Popen(
+        ["gcloud", "--quiet", f"--project={project}", "auth", "print-access-token"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+except OSError:
+    raise SystemExit(76)
+try:
+    stdout, _stderr = process.communicate(timeout=timeout)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate()
+    raise SystemExit(75)
+if process.returncode != 0:
+    raise SystemExit(75)
+lines = stdout.splitlines()
+if len(lines) != 1:
+    raise SystemExit(76)
+token = lines[0]
+if (
+    not token.isascii()
+    or not 20 <= len(token) <= 4096
+    or any(character.isspace() for character in token)
+):
+    raise SystemExit(76)
+sys.stdout.write(token)
+PY
+}
+
+google_api_post() {
+  local url="$1"
+  local body="$2"
+  local label="$3"
+  local access_token
+  local attempt
+  local curl_status
+  local deadline=$((SECONDS + GOOGLE_API_TOTAL_TIMEOUT_SECONDS))
+  local http_status
+  local phase_timeout
+  local remaining
+  local response
+  local response_body
+  local retryable
+  local sleep_seconds
+  local token_status
+  for attempt in $(seq 1 "$GOOGLE_API_MAX_ATTEMPTS"); do
+    remaining=$((deadline - SECONDS))
+    if (( remaining < 1 )); then
+      printf 'REFUSED: Google API total deadline expired label=%s attempts=%s\n' \
+        "$label" "$((attempt - 1))" >&2
+      return 1
+    fi
+    phase_timeout="$GOOGLE_AUTH_TIMEOUT_SECONDS"
+    if (( remaining < phase_timeout )); then
+      phase_timeout="$remaining"
+    fi
+    access_token=""
+    response=""
+    set +e
+    access_token="$(fresh_access_token "$phase_timeout")"
+    token_status=$?
+    set -e
+    curl_status=0
+    http_status="000"
+    response_body=""
+    if (( token_status == 0 )); then
+      remaining=$((deadline - SECONDS))
+      if (( remaining < 1 )); then
+        unset access_token
+        printf 'REFUSED: Google API total deadline expired label=%s attempts=%s\n' \
+          "$label" "$((attempt - 1))" >&2
+        return 1
+      fi
+      phase_timeout="$GOOGLE_API_CURL_TIMEOUT_SECONDS"
+      if (( remaining < phase_timeout )); then
+        phase_timeout="$remaining"
+      fi
+      set +e
+      response="$(
+        printf 'Authorization: Bearer %s\n' "$access_token" | curl --disable \
+          --silent \
+          --show-error \
+          --connect-timeout 10 \
+          --max-time "$phase_timeout" \
+          --proto '=https' \
+          --tlsv1.2 \
+          --request POST \
+          --header @- \
+          --header 'Content-Type: application/json' \
+          --data "$body" \
+          --write-out $'\n%{http_code}' \
+          "$url"
+      )"
+      curl_status=$?
+      set -e
+      unset access_token
+    fi
+    if [[ "$response" == *$'\n'* ]]; then
+      http_status="${response##*$'\n'}"
+      response_body="${response%$'\n'*}"
+    fi
+    if (( token_status == 0 && curl_status == 0 )) && [[ "$http_status" =~ ^2[0-9]{2}$ ]]; then
+      printf '%s' "$response_body"
+      return 0
+    fi
+    retryable=0
+    if (( token_status == 75 )); then
+      retryable=1
+    elif (( token_status != 0 )); then
+      retryable=0
+    elif (( curl_status != 0 )); then
+      case "$curl_status" in
+        5 | 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56 | 92)
+          retryable=1
+          ;;
+      esac
+    elif [[ "$http_status" == "408" || "$http_status" == "429" || "$http_status" =~ ^5[0-9]{2}$ ]]; then
+      retryable=1
+    fi
+    if (( retryable == 0 || attempt == GOOGLE_API_MAX_ATTEMPTS )); then
+      printf 'REFUSED: Google API request failed label=%s attempt=%s token_status=%s curl_status=%s http_status=%s\n' \
+        "$label" "$attempt" "$token_status" "$curl_status" "$http_status" >&2
+      return 1
+    fi
+    printf 'RETRY: transient Google API failure label=%s attempt=%s token_status=%s curl_status=%s http_status=%s\n' \
+      "$label" "$attempt" "$token_status" "$curl_status" "$http_status" >&2
+    sleep_seconds="$attempt"
+    remaining=$((deadline - SECONDS))
+    if (( remaining <= sleep_seconds )); then
+      printf 'REFUSED: Google API total deadline expired label=%s attempts=%s\n' \
+        "$label" "$attempt" >&2
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+  return 1
+}
+
+require_exact_permissions() {
+  local response="$1"
+  shift
+  python3 - "$response" "$@" <<'PY'
+import json
+import sys
+
+try:
+    document = json.loads(sys.argv[1])
+except (json.JSONDecodeError, TypeError) as error:
+    raise SystemExit("REFUSED: malformed IAM permission response") from error
+if not isinstance(document, dict):
+    raise SystemExit("REFUSED: malformed IAM permission response")
+permissions = document.get("permissions")
+expected = sys.argv[2:]
+if (
+    not isinstance(permissions, list)
+    or any(not isinstance(item, str) for item in permissions)
+    or len(set(permissions)) != len(permissions)
+    or sorted(permissions) != sorted(expected)
+):
+    raise SystemExit("REFUSED: required controller permissions are unavailable")
+PY
 }
 
 verify_candidate() {
@@ -339,6 +562,30 @@ if [[ "$(gh api "repos/${TEST_GITHUB_REPOSITORY}/immutable-releases" --jq .enabl
   exit 2
 fi
 gc auth list --filter=status:ACTIVE --format='value(account)' | grep -q .
+if ! ENABLED_CONTROLLER_APIS="$(
+  gc services list --enabled --format='value(config.name)'
+)"; then
+  printf 'REFUSED: serviceusage.services.list is required to verify enabled APIs\n' >&2
+  exit 2
+fi
+readonly ENABLED_CONTROLLER_APIS
+for required_api in "$CLOUD_RESOURCE_MANAGER_API" "$IAP_API"; do
+  if ! grep -Fx "$required_api" <<<"$ENABLED_CONTROLLER_APIS" >/dev/null; then
+    printf 'REFUSED: %s must be enabled before the live test\n' \
+      "$required_api" >&2
+    exit 2
+  fi
+done
+CONTROLLER_PROJECT_PERMISSIONS_JSON="$(
+  google_api_post \
+    "https://cloudresourcemanager.googleapis.com/v1/projects/${GCP_PROJECT}:testIamPermissions" \
+    "$CONTROLLER_PROJECT_PERMISSION_REQUEST" \
+    project-permissions
+)"
+readonly CONTROLLER_PROJECT_PERMISSIONS_JSON
+require_exact_permissions \
+  "$CONTROLLER_PROJECT_PERMISSIONS_JSON" \
+  "${CONTROLLER_PROJECT_PERMISSIONS[@]}"
 gc compute machine-types describe "$MACHINE_TYPE" --zone="$ZONE" >/dev/null
 gcloud --quiet compute images describe-from-family "$IMAGE_FAMILY" --project="$IMAGE_PROJECT" >/dev/null
 
@@ -429,6 +676,8 @@ if [[ "$MODE" == "--preflight" ]]; then
     "$CANARY_BRANCH" "$STABLE_BRANCH" "$FAULT_BRANCH"
   printf 'REPOSITORY_SPLIT source=%s test_publication=%s mirror_main=%s\n' \
     "$SOURCE_GITHUB_REPOSITORY" "$TEST_GITHUB_REPOSITORY" "$TEST_MIRROR_MAIN_SHA"
+  printf 'CONTROLLER_TRANSPORT type=%s source_range=%s vm_service_account_attached=false\n' \
+    "$IAP_CONTROLLER_TRANSPORT" "$IAP_TCP_SOURCE_RANGE"
   exit 0
 fi
 
@@ -438,6 +687,25 @@ if [[ -n "$(find "$EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   exit 2
 fi
 chmod 0700 "$EVIDENCE_DIR"
+jq -n \
+  --arg cloud_resource_manager "$CLOUD_RESOURCE_MANAGER_API" \
+  --arg iap "$IAP_API" \
+  --arg enabled "$ENABLED_CONTROLLER_APIS" \
+  '{
+    source: "gcloud services list --enabled",
+    required: ([$cloud_resource_manager, $iap] | sort),
+    observed: (
+      $enabled
+      | split("\n")
+      | map(select(. == $cloud_resource_manager or . == $iap))
+      | sort
+    )
+  }' \
+  >"$EVIDENCE_DIR/controller-api-state.json"
+jq -e '.required == .observed' \
+  "$EVIDENCE_DIR/controller-api-state.json" >/dev/null
+printf '%s\n' "$CONTROLLER_PROJECT_PERMISSIONS_JSON" \
+  | jq -S . >"$EVIDENCE_DIR/controller-project-permissions.json"
 
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cathedral-validator-live-${RUN_ID}.XXXXXX")"
 readonly RUN_ROOT
@@ -869,6 +1137,7 @@ PY
 
 python3 - \
   "$EVIDENCE_DIR/control.json" "$RUN_ID" "$GCP_PROJECT" "$ZONE" \
+  "$IAP_CONTROLLER_TRANSPORT" "$IAP_TCP_SOURCE_RANGE" \
   "$MACHINE_TYPE" "$VM_COUNT" "$MAX_RUN_SECONDS" "$ESTIMATED_COST_USD" \
   "$NETWORK_ALLOWANCE_USD" "$PLANNING_TOTAL_USD" \
   "$SOURCE_GITHUB_REPOSITORY" "$TEST_GITHUB_REPOSITORY" "$TEST_MIRROR_MAIN_SHA" \
@@ -887,6 +1156,8 @@ import sys
     run_id,
     project,
     zone,
+    controller_transport,
+    iap_source_range,
     machine_type,
     vm_count,
     max_run_seconds,
@@ -919,6 +1190,9 @@ document = {
     "run_id": run_id,
     "gcp_project": project,
     "zone": zone,
+    "controller_transport": controller_transport,
+    "iap_source_range": iap_source_range,
+    "vm_service_account_attached": False,
     "machine_type": machine_type,
     "vm_count": int(vm_count),
     "max_run_seconds": int(max_run_seconds),
@@ -1119,9 +1393,9 @@ fi
 CREATED_FIREWALL=1
 if ! gc compute firewall-rules create "$FIREWALL" \
   --network="$NETWORK" --direction=INGRESS --priority=1000 \
-  --action=ALLOW --rules=tcp:22 --source-ranges="$CONTROLLER_CIDR" \
+  --action=ALLOW --rules=tcp:22 --source-ranges="$IAP_TCP_SOURCE_RANGE" \
   --target-tags="$INSTANCE_TAG" \
-  --description="Cathedral updater live test ${RUN_ID}; exact controller SSH only"; then
+  --description="Cathedral updater live test ${RUN_ID}; IAP TCP forwarding only"; then
   exit 1
 fi
 
@@ -1244,7 +1518,7 @@ for source, expected_name in ((canary, canary_name), (stable, stable_name)):
 PY
 
 jq -e \
-  --arg cidr "$CONTROLLER_CIDR" \
+  --arg cidr "$IAP_TCP_SOURCE_RANGE" \
   --arg network "$NETWORK" \
   --arg tag "$INSTANCE_TAG" \
   '.direction == "INGRESS"
@@ -1264,6 +1538,28 @@ jq -S '(.metadata.items // []) | sort_by(.key)' \
   "$EVIDENCE_DIR/canary-instance.json" >"$EVIDENCE_DIR/canary-instance-metadata-before.json"
 jq -S '(.metadata.items // []) | sort_by(.key)' \
   "$EVIDENCE_DIR/stable-instance.json" >"$EVIDENCE_DIR/stable-instance-metadata-before.json"
+
+require_instance_iap_permission() {
+  local host="$1"
+  local role="$2"
+  local response
+  response="$(
+    google_api_post \
+      "https://iap.googleapis.com/v1/projects/${GCP_PROJECT}/iap_tunnel/zones/${ZONE}/instances/${host}:testIamPermissions" \
+      "$IAP_INSTANCE_PERMISSION_REQUEST" \
+      "${role}-instance-permissions"
+  )"
+  require_exact_permissions \
+    "$response" \
+    "iap.tunnelInstances.accessViaIAP"
+  printf '%s\n' "$response" \
+    | jq -S . >"$EVIDENCE_DIR/${role}-iap-instance-permissions.json"
+}
+
+require_instance_iap_permission \
+  "$CANARY_VM" canary
+require_instance_iap_permission \
+  "$STABLE_VM" stable
 
 assert_instance_metadata_unchanged() {
   local host="$1"
@@ -1307,6 +1603,7 @@ remote() {
   local host="$1"
   shift
   gc compute ssh "${SSH_USER}@${host}" --zone="$ZONE" \
+    --tunnel-through-iap \
     --plain \
     --ssh-key-file="$SSH_PRIVATE_KEY" \
     --ssh-flag="-i${SSH_PRIVATE_KEY}" \
@@ -1317,6 +1614,35 @@ remote() {
     --ssh-flag='-o StrictHostKeyChecking=accept-new' \
     --ssh-flag="-o UserKnownHostsFile=${SSH_KNOWN_HOSTS}" \
     --command="$*"
+}
+
+record_iap_ssh_dry_run() {
+  local host="$1"
+  local role="$2"
+  local evidence="$EVIDENCE_DIR/${role}-iap-ssh-dry-run.txt"
+  gc compute ssh "${SSH_USER}@${host}" --zone="$ZONE" \
+    --tunnel-through-iap \
+    --plain \
+    --ssh-key-file="$SSH_PRIVATE_KEY" \
+    --ssh-flag="-i${SSH_PRIVATE_KEY}" \
+    --ssh-flag='-o IdentitiesOnly=yes' \
+    --ssh-flag='-o ConnectTimeout=10' \
+    --ssh-flag='-o StrictHostKeyChecking=accept-new' \
+    --ssh-flag="-o UserKnownHostsFile=${SSH_KNOWN_HOSTS}" \
+    --command=true \
+    --dry-run 2>&1 \
+    | sed "s#${RUN_ROOT}#<ephemeral-run-root>#g" >"$evidence"
+  grep -F -- 'start-iap-tunnel' "$evidence" >/dev/null
+}
+
+prove_iap_transport() {
+  local host="$1"
+  local role="$2"
+  local expected="IAP_TRANSPORT_READY host=${host} transport=${IAP_CONTROLLER_TRANSPORT}"
+  remote "$host" \
+    "test \"\$(hostname)\" = '${host}' && printf '%s\\n' '${expected}'" \
+    2>&1 | tee "$EVIDENCE_DIR/${role}-iap-ssh-marker.log"
+  grep -Fx "$expected" "$EVIDENCE_DIR/${role}-iap-ssh-marker.log" >/dev/null
 }
 
 canonical_boot_id() {
@@ -1376,29 +1702,59 @@ wait_boot_id_changed() {
   return 1
 }
 
+record_iap_ssh_dry_run "$CANARY_VM" canary
+record_iap_ssh_dry_run "$STABLE_VM" stable
 wait_ssh "$CANARY_VM"
 wait_ssh "$STABLE_VM"
+prove_iap_transport "$CANARY_VM" canary
+prove_iap_transport "$STABLE_VM" stable
 assert_project_metadata_unchanged after-first-ssh
 assert_instance_metadata_unchanged "$CANARY_VM" canary after-first-ssh
 assert_instance_metadata_unchanged "$STABLE_VM" stable after-first-ssh
 
 stage_host_files() {
   local host="$1"
-  gc compute scp --zone="$ZONE" \
-    --plain \
-    --ssh-key-file="$SSH_PRIVATE_KEY" \
-    --scp-flag="-i${SSH_PRIVATE_KEY}" \
-    --scp-flag='-o IdentitiesOnly=yes' \
-    --scp-flag="-o UserKnownHostsFile=${SSH_KNOWN_HOSTS}" \
-    --scp-flag='-o StrictHostKeyChecking=accept-new' \
-    "$HARNESS_SOURCE" \
-    "$FAULT_ORIGIN_SOURCE" \
-    "$STATE_WAITER_SOURCE" \
-    "${SSH_USER}@${host}:/tmp/"
+  local role="$2"
+  local attempt
+  local status=1
+  local attempt_evidence
+  for attempt in $(seq 1 "$IAP_SCP_MAX_ATTEMPTS"); do
+    attempt_evidence="$EVIDENCE_DIR/${role}-iap-scp-attempt-${attempt}.log"
+    if gc compute scp --zone="$ZONE" \
+      --tunnel-through-iap \
+      --plain \
+      --ssh-key-file="$SSH_PRIVATE_KEY" \
+      --scp-flag="-i${SSH_PRIVATE_KEY}" \
+      --scp-flag='-o IdentitiesOnly=yes' \
+      --scp-flag='-o ConnectTimeout=10' \
+      --scp-flag='-o ServerAliveInterval=15' \
+      --scp-flag='-o ServerAliveCountMax=2' \
+      --scp-flag="-o UserKnownHostsFile=${SSH_KNOWN_HOSTS}" \
+      --scp-flag='-o StrictHostKeyChecking=accept-new' \
+      "$HARNESS_SOURCE" \
+      "$FAULT_ORIGIN_SOURCE" \
+      "$STATE_WAITER_SOURCE" \
+      "${SSH_USER}@${host}:/tmp/" \
+      2>&1 | tee "$attempt_evidence"; then
+      printf 'IAP_SCP_PASS host=%s attempt=%s\n' "$host" "$attempt" \
+        >"$EVIDENCE_DIR/${role}-iap-scp.log"
+      return 0
+    else
+      status=$?
+    fi
+    if (( attempt < IAP_SCP_MAX_ATTEMPTS )); then
+      printf 'RETRY: transient IAP SCP failure host=%s attempt=%s status=%s\n' \
+        "$host" "$attempt" "$status" >&2
+      sleep "$attempt"
+    fi
+  done
+  printf 'REFUSED: IAP SCP failed host=%s attempts=%s status=%s\n' \
+    "$host" "$IAP_SCP_MAX_ATTEMPTS" "$status" >&2
+  return "$status"
 }
 
-stage_host_files "$CANARY_VM"
-stage_host_files "$STABLE_VM"
+stage_host_files "$CANARY_VM" canary
+stage_host_files "$STABLE_VM" stable
 assert_project_metadata_unchanged after-scp
 assert_instance_metadata_unchanged "$CANARY_VM" canary after-scp
 assert_instance_metadata_unchanged "$STABLE_VM" stable after-scp

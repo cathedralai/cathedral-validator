@@ -154,12 +154,17 @@ writes go to a separate public test mirror with immutable releases enabled.
 
 Mirror both reviewed commits first and make the mirror's `main` point to release
 B. Download and unpack both attested candidate artifacts, then run the read-only
-preflight from a clean checkout at release B:
+preflight from a clean checkout at release B. The authenticated `gcloud`
+identity must have `serviceusage.services.list`, IAP tunnel access, the required
+Compute permissions to read, provision, reset, and tear down the disposable
+resources, and both `iap.googleapis.com` and
+`cloudresourcemanager.googleapis.com` enabled in the test project. The
+controller always uses authenticated IAP. It refuses a direct-IP transport and
+does not attach a service account to either test host.
 
 ```bash
 env \
   RUN_ID=REPLACE_WITH_UNIQUE_RUN_ID \
-  CONTROLLER_CIDR=REPLACE_WITH_ONE_PUBLIC_IPV4/32 \
   CANDIDATE_A_DIR=/secure/candidate-a \
   CANDIDATE_B_DIR=/secure/candidate-b \
   SOURCE_REVISION_A=REPLACE_WITH_MERGED_RELEASE_A_SHA \

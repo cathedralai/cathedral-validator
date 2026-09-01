@@ -5,6 +5,7 @@ import copy
 import hashlib
 import zlib
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,34 @@ MAPPING_BLOCK = validator.SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK + 200
 FINALIZED_HASH = "0x" + "f" * 64
 SUCCESSOR_EXTRINSIC_HASH = "0x" + "d" * 64
 SUCCESSOR_BLOCK_HASH = "0x" + "c" * 64
+REVIEWED_FIXTURE_TIME = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+REVIEWED_FIXTURE_EXPIRY = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def _set_validator_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    *moments: datetime,
+) -> None:
+    clock = iter(moments)
+    last = moments[-1]
+
+    class _ReviewedFixtureDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            nonlocal last
+            last = next(clock, last)
+            if tz is None:
+                return last.replace(tzinfo=None)
+            return last.astimezone(tz)
+
+    monkeypatch.setattr(validator, "datetime", _ReviewedFixtureDatetime)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_reviewed_fixture_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the reviewed launch fixture inside its recorded evidence window."""
+
+    _set_validator_clock(monkeypatch, REVIEWED_FIXTURE_TIME)
 
 
 def _inclusion_policy(*, block: int = MAPPING_BLOCK) -> dict[str, object]:
@@ -1024,6 +1053,20 @@ def _authorization_substrate(*, current_rows: object | None = None) -> object:
     )
 
 
+def test_reviewed_successor_refuses_at_time_window_expiry() -> None:
+    policy = validator._policy_from_submission_identity(_successor_identity())
+
+    with pytest.raises(
+        validator.wire.VectorError,
+        match="submission time is outside the evidence inclusion window",
+    ):
+        validator._require_inclusion_policy_ready(
+            policy,
+            _preflight(_authorization_substrate()),
+            now=REVIEWED_FIXTURE_EXPIRY,
+        )
+
+
 def _descendant_preflight(
     *,
     second_uid: int = 8,
@@ -1266,6 +1309,126 @@ def _descendant_preflight(
         finalized_hash=FINALIZED_HASH,
     )
     return preflight, calls
+
+
+def _reserved_descendant_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[object, str, validator.ChainPreflight, dict[str, object]]:
+    _state_path, runtime = _write_predecessor_journal(tmp_path, monkeypatch)
+    identity = _successor_identity()
+    attempt_id = validator._reviewed_uid30_attempt_id(identity)
+    validator._reserve_common_submission(
+        runtime,
+        lane="authority",
+        attempt_id=attempt_id,
+        identity=identity,
+    )
+    preflight, calls = _descendant_preflight()
+    monkeypatch.setattr(
+        validator,
+        "_require_uid_mapping_stability",
+        lambda *_args, **_kwargs: identity["uid_safety"],
+    )
+    monkeypatch.setattr(
+        validator,
+        "_classify_finalized_receipt",
+        lambda *_args, **_kwargs: validator.PASS,
+    )
+    return runtime, attempt_id, preflight, calls
+
+
+def _refuse_irreversible_signing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "bittensor.core.types.ExtrinsicResponse.unlock_wallet",
+        lambda *_args, **_kwargs: pytest.fail("refusal must precede wallet unlock"),
+    )
+    monkeypatch.setattr(
+        "bittensor.core.extrinsics.pallets.SubtensorModule",
+        lambda _subtensor: pytest.fail("refusal must precede call composition"),
+    )
+    monkeypatch.setattr(
+        validator,
+        "_record_pending_broadcast_intent",
+        lambda *_args, **_kwargs: pytest.fail(
+            "refusal must precede signed-intent journaling"
+        ),
+    )
+
+
+def test_exact_successor_descendant_refuses_at_time_window_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, attempt_id, preflight, calls = _reserved_descendant_submission(
+        tmp_path,
+        monkeypatch,
+    )
+    _set_validator_clock(monkeypatch, REVIEWED_FIXTURE_EXPIRY)
+    _refuse_irreversible_signing(monkeypatch)
+
+    with pytest.raises(
+        validator.wire.VectorError,
+        match="UID30 successor descendant lacks reviewed time, block, or epoch room",
+    ):
+        validator._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime,
+            attempt_id=attempt_id,
+            netuid=39,
+            version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
+            wire_uids=[8, 124],
+            wire_weights=[65535, 65535],
+            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+    assert calls == {
+        "nonce": 0,
+        "sign": 0,
+        "submit": 0,
+        "era_current": None,
+    }
+
+
+def test_exact_successor_descendant_refuses_if_window_expires_before_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, attempt_id, preflight, calls = _reserved_descendant_submission(
+        tmp_path,
+        monkeypatch,
+    )
+    _set_validator_clock(
+        monkeypatch,
+        REVIEWED_FIXTURE_TIME,
+        REVIEWED_FIXTURE_TIME,
+        REVIEWED_FIXTURE_EXPIRY,
+    )
+    _refuse_irreversible_signing(monkeypatch)
+
+    with pytest.raises(
+        validator.wire.VectorError,
+        match="UID30 descendant signing evidence time window expired before signature",
+    ):
+        validator._submit_exact_sn39_extrinsic(
+            preflight,
+            runtime_contract=runtime,
+            attempt_id=attempt_id,
+            netuid=39,
+            version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
+            wire_uids=[8, 124],
+            wire_weights=[65535, 65535],
+            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            allow_reviewed_uid30_finalized_descendant=True,
+        )
+
+    assert calls == {
+        "nonce": 0,
+        "sign": 0,
+        "submit": 0,
+        "era_current": None,
+    }
 
 
 @pytest.mark.parametrize(

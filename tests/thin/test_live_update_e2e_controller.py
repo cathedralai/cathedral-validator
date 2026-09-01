@@ -1,5 +1,6 @@
 import importlib.abc
 import importlib.util
+import json
 import re
 import runpy
 import subprocess
@@ -24,6 +25,353 @@ def _live_readiness_namespace(monkeypatch):
 
 def _live_readiness_guard(monkeypatch):
     return _live_readiness_namespace(monkeypatch)["require_pex_origin"]
+
+
+def test_live_controller_uses_one_forced_iap_transport():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    maintainer_doc = (root / "docs" / "RELEASE_MAINTAINER.md").read_text()
+    before_preflight = script.split('if [[ "$MODE" == "--preflight" ]]', 1)[0]
+    remote = script.split("remote() {", 1)[1].split("canonical_boot_id() {", 1)[0]
+    dry_run = script.split("record_iap_ssh_dry_run() {", 1)[1].split(
+        "prove_iap_transport() {", 1
+    )[0]
+    scp = script.split("stage_host_files() {", 1)[1].split(
+        'stage_host_files "$CANARY_VM"', 1
+    )[0]
+    firewall = script.split('gc compute firewall-rules create "$FIREWALL"', 1)[1].split(
+        "AUTO_DELETE_AT=", 1
+    )[0]
+    instance_permission = script.split("require_instance_iap_permission() {", 1)[
+        1
+    ].split("require_instance_iap_permission \\\n", 1)[0]
+
+    assert (
+        'readonly CLOUD_RESOURCE_MANAGER_API="cloudresourcemanager.googleapis.com"'
+        in script
+    )
+    assert 'readonly IAP_API="iap.googleapis.com"' in script
+    assert 'readonly IAP_TCP_SOURCE_RANGE="35.235.240.0/20"' in script
+    assert 'readonly IAP_CONTROLLER_TRANSPORT="gcp_iap_tcp_forwarding"' in script
+    assert "readonly GOOGLE_API_MAX_ATTEMPTS=3" in script
+    assert "readonly GOOGLE_API_TOTAL_TIMEOUT_SECONDS=100" in script
+    assert "readonly GOOGLE_AUTH_TIMEOUT_SECONDS=10" in script
+    assert "readonly GOOGLE_API_CURL_TIMEOUT_SECONDS=20" in script
+    assert "readonly IAP_SCP_MAX_ATTEMPTS=3" in script
+    assert "set +x" in script.split("umask 077", 1)[0]
+    assert script.count("CONTROLLER_CIDR") == 2
+    assert "${CONTROLLER_CIDR+x}" in script
+    assert "CONTROLLER_CIDR is obsolete" in script
+    assert 'python3 - "$CONTROLLER_CIDR"' not in script
+    assert "CONTROLLER_CIDR=" not in maintainer_doc
+    assert "iap.googleapis.com" in maintainer_doc
+    assert "cloudresourcemanager.googleapis.com" in maintainer_doc
+    assert "authenticated IAP" in maintainer_doc
+    assert "services list --enabled" in before_preflight
+    assert 'if ! ENABLED_CONTROLLER_APIS="$(' in before_preflight
+    assert "serviceusage.services.list is required" in before_preflight
+    assert "serviceusage.services.list" in maintainer_doc
+    assert '"$CLOUD_RESOURCE_MANAGER_API" "$IAP_API"' in before_preflight
+    assert "cloudresourcemanager.googleapis.com" in before_preflight
+    for permission in (
+        "compute.disks.create",
+        "compute.disks.delete",
+        "compute.firewalls.create",
+        "compute.firewalls.delete",
+        "compute.instances.create",
+        "compute.instances.delete",
+        "compute.instances.reset",
+        "compute.networks.create",
+        "compute.networks.delete",
+        "compute.networks.use",
+        "compute.networks.useExternalIp",
+        "compute.subnetworks.create",
+        "compute.subnetworks.delete",
+        "iap.tunnelInstances.accessViaIAP",
+    ):
+        assert permission in before_preflight
+    assert '"auth", "print-access-token"' in before_preflight
+    assert "--header @-" in before_preflight
+    assert "curl --disable" in before_preflight
+    assert "--write-out $'\\n%{http_code}'" in before_preflight
+    assert "process.communicate(timeout=timeout)" in before_preflight
+    assert "os.killpg(process.pid, signal.SIGKILL)" in before_preflight
+    assert "Google API total deadline expired" in before_preflight
+    assert "transient Google API failure" in before_preflight
+    assert script.index("ENABLED_CONTROLLER_APIS=") < script.index(
+        'if [[ "$MODE" == "--preflight" ]]'
+    )
+    assert script.index("ENABLED_CONTROLLER_APIS=") < script.index(
+        'record_step "publish first exact A release'
+    )
+
+    assert script.count("gc compute ssh") == 2
+    assert "--tunnel-through-iap" in remote
+    assert "--plain" in remote
+    assert "--tunnel-through-iap" in dry_run
+    assert "--plain" in dry_run
+    assert "start-iap-tunnel" in dry_run
+    assert script.count("gc compute scp") == 1
+    assert "--tunnel-through-iap" in scp
+    assert "--plain" in scp
+    assert "ConnectTimeout=10" in scp
+    assert "ServerAliveInterval=15" in scp
+    assert "ServerAliveCountMax=2" in scp
+    assert "iap-scp-attempt-${attempt}.log" in scp
+    assert "IAP_SCP_PASS" in scp
+    assert "--internal-ip" not in script
+    assert script.count("--tunnel-through-iap") == 3
+
+    assert '--source-ranges="$IAP_TCP_SOURCE_RANGE"' in firewall
+    assert "IAP TCP forwarding only" in firewall
+    assert '--arg cidr "$IAP_TCP_SOURCE_RANGE"' in script
+    assert "sourceRanges == [$cidr]" in script
+    assert "--no-service-account" in script
+    assert "--no-scopes" in script
+    assert '"vm_service_account_attached": False' in script
+    assert '"controller_transport": controller_transport' in script
+    assert '"iap_source_range": iap_source_range' in script
+
+    permission_call = script.index("require_instance_iap_permission \\\n")
+    dry_run_call = script.index('record_iap_ssh_dry_run "$CANARY_VM" canary')
+    first_ssh = script.index('wait_ssh "$CANARY_VM"')
+    first_stage = script.index('stage_host_files "$CANARY_VM" canary')
+    assert permission_call < dry_run_call < first_ssh < first_stage
+    assert "iap.tunnelInstances.accessViaIAP" in instance_permission
+    assert (
+        "projects/${GCP_PROJECT}/iap_tunnel/zones/${ZONE}/instances/${host}"
+        in instance_permission
+    )
+    assert "GCP_PROJECT_NUMBER" not in script
+    assert "instance_id" not in instance_permission
+    assert 'prove_iap_transport "$CANARY_VM" canary' in script
+    assert 'prove_iap_transport "$STABLE_VM" stable' in script
+    assert r"""test \"\$(hostname)\" = '${host}' && printf""" in script
+    assert "IAP_TRANSPORT_READY host=${host}" in script
+    assert "controller-api-state.json" in script
+    assert 'source: "gcloud services list --enabled"' in script
+    assert "'.required == .observed'" in script
+    assert "controller-project-permissions.json" in script
+    assert "iap-instance-permissions.json" in script
+    assert "iap-ssh-marker.log" in script
+    assert "iap-scp.log" in script
+
+
+def test_live_controller_permission_parser_fails_closed():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    permission_parser = (
+        "require_exact_permissions() {"
+        + script.split("require_exact_permissions() {", 1)[1].split(
+            "verify_candidate() {", 1
+        )[0]
+    )
+    permission_array = script.split("readonly CONTROLLER_PROJECT_PERMISSIONS=(", 1)[
+        1
+    ].split("\n)", 1)[0]
+    expected = re.findall(r'^\s+"([a-zA-Z0-9.]+)"$', permission_array, re.MULTILINE)
+    assert len(expected) == 35
+    assert "compute.instances.setScheduling" not in expected
+    request_match = re.search(
+        r"readonly CONTROLLER_PROJECT_PERMISSION_REQUEST='([^']+)'", script
+    )
+    assert request_match is not None
+    assert sorted(json.loads(request_match.group(1))["permissions"]) == sorted(expected)
+
+    def check(response):
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                "set -Eeuo pipefail\n"
+                + permission_parser
+                + '\nrequire_exact_permissions "$1" "${@:2}"',
+                "permission-parser-test",
+                response,
+                *expected,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    valid = check(json.dumps({"permissions": expected}))
+    assert valid.returncode == 0, valid.stderr
+
+    for invalid in (
+        "not-json",
+        "[]",
+        '{"permissions":"iap.tunnelInstances.accessViaIAP"}',
+        '{"permissions":["compute.instances.get"]}',
+        json.dumps({"permissions": expected + [expected[0]]}),
+        json.dumps(
+            {"permissions": expected + ["resourcemanager.projects.setIamPolicy"]}
+        ),
+    ):
+        result = check(invalid)
+        assert result.returncode != 0
+        assert "REFUSED:" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "returncode", "token_attempts", "curl_attempts", "stderr_marker"),
+    [
+        ("token-transient", 0, 2, 1, "RETRY: transient Google API failure"),
+        ("token-malformed", 1, 1, 0, "REFUSED: Google API request failed"),
+        ("http-transient", 0, 2, 2, "RETRY: transient Google API failure"),
+        ("transport-transient", 0, 2, 2, "RETRY: transient Google API failure"),
+        ("always-transient", 1, 3, 3, "REFUSED: Google API request failed"),
+        ("forbidden", 1, 1, 1, "REFUSED: Google API request failed"),
+    ],
+)
+def test_live_controller_google_api_retry_is_selective_and_refreshes_token(
+    tmp_path, mode, returncode, token_attempts, curl_attempts, stderr_marker
+):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    api_helper = (
+        "google_api_post() {"
+        + script.split("google_api_post() {", 1)[1].split(
+            "require_exact_permissions() {", 1
+        )[0]
+    )
+    token_calls = tmp_path / f"{mode}-token-calls"
+    curl_calls = tmp_path / f"{mode}-curl-calls"
+    shell = (
+        "set -Eeuo pipefail\n"
+        "readonly GOOGLE_API_MAX_ATTEMPTS=3\n"
+        "readonly GOOGLE_API_TOTAL_TIMEOUT_SECONDS=100\n"
+        "readonly GOOGLE_AUTH_TIMEOUT_SECONDS=10\n"
+        "readonly GOOGLE_API_CURL_TIMEOUT_SECONDS=20\n"
+        'TOKEN_CALLS="$1"\n'
+        'CURL_CALLS="$2"\n'
+        'MODE="$3"\n'
+        "fresh_access_token() {\n"
+        "  printf 'token\\n' >>\"$TOKEN_CALLS\"\n"
+        "  local count\n"
+        '  count="$(wc -l <"$TOKEN_CALLS")"\n'
+        '  if [[ "$MODE" == token-transient && "$count" -eq 1 ]]; then\n'
+        "    return 75\n"
+        '  elif [[ "$MODE" == token-malformed ]]; then\n'
+        "    return 76\n"
+        "  fi\n"
+        "  printf 'fresh-token-%s\\n' \"$count\"\n"
+        "}\n"
+        "curl() {\n"
+        "  local authorization count token_count\n"
+        '  [[ "$1" == --disable ]] || return 97\n'
+        "  IFS= read -r authorization\n"
+        "  printf 'curl\\n' >>\"$CURL_CALLS\"\n"
+        '  count="$(wc -l <"$CURL_CALLS")"\n'
+        '  token_count="$(wc -l <"$TOKEN_CALLS")"\n'
+        '  [[ "$authorization" == "Authorization: Bearer fresh-token-${token_count}" ]] || return 9\n'
+        '  if [[ "$MODE" == transport-transient && "$count" -eq 1 ]]; then\n'
+        "    return 28\n"
+        '  elif [[ "$MODE" == http-transient && "$count" -eq 1 ]]; then\n'
+        '    printf \'{"error":"busy"}\\n500\'\n'
+        '  elif [[ "$MODE" == always-transient ]]; then\n'
+        '    printf \'{"error":"busy"}\\n500\'\n'
+        '  elif [[ "$MODE" == forbidden ]]; then\n'
+        '    printf \'{"error":"forbidden"}\\n403\'\n'
+        "  else\n"
+        '    printf \'{"permissions":["ok"]}\\n200\'\n'
+        "  fi\n"
+        "}\n"
+        "sleep() { :; }\n"
+        + api_helper
+        + "\ngoogle_api_post 'https://example.invalid' '{}' test-request"
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            shell,
+            "google-api-retry-test",
+            str(token_calls),
+            str(curl_calls),
+            mode,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == returncode, result.stderr
+    assert token_calls.read_text().splitlines() == ["token"] * token_attempts
+    observed_curl_calls = (
+        curl_calls.read_text().splitlines() if curl_calls.exists() else []
+    )
+    assert observed_curl_calls == ["curl"] * curl_attempts
+    assert stderr_marker in result.stderr
+    if mode in {"http-transient", "transport-transient"}:
+        assert result.stdout == '{"permissions":["ok"]}'
+
+
+@pytest.mark.parametrize(
+    ("succeed_at", "returncode", "attempts"), [(3, 0, 3), (99, 1, 3)]
+)
+def test_live_controller_scp_retry_is_bounded_and_evidenced(
+    tmp_path, succeed_at, returncode, attempts
+):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    stage_helper = (
+        "stage_host_files() {"
+        + script.split("stage_host_files() {", 1)[1].split(
+            'stage_host_files "$CANARY_VM"', 1
+        )[0]
+    )
+    evidence = tmp_path / f"scp-{succeed_at}"
+    evidence.mkdir()
+    calls = tmp_path / f"scp-{succeed_at}-calls"
+    shell = (
+        "set -Eeuo pipefail\n"
+        "readonly IAP_SCP_MAX_ATTEMPTS=3\n"
+        'EVIDENCE_DIR="$1"\n'
+        'CALLS="$2"\n'
+        'SUCCEED_AT="$3"\n'
+        "ZONE=test-zone\n"
+        "SSH_PRIVATE_KEY=/tmp/test-key\n"
+        "SSH_KNOWN_HOSTS=/tmp/test-known-hosts\n"
+        "SSH_USER=test-user\n"
+        "HARNESS_SOURCE=/tmp/test-harness\n"
+        "FAULT_ORIGIN_SOURCE=/tmp/test-origin\n"
+        "STATE_WAITER_SOURCE=/tmp/test-waiter\n"
+        "gc() {\n"
+        "  printf 'call\\n' >>\"$CALLS\"\n"
+        "  local count\n"
+        '  count="$(wc -l <"$CALLS")"\n'
+        "  printf 'gcloud-attempt=%s\\n' \"$count\"\n"
+        "  (( count >= SUCCEED_AT ))\n"
+        "}\n"
+        "sleep() { :; }\n" + stage_helper + "\nstage_host_files test-host canary"
+    )
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            shell,
+            "scp-retry-test",
+            str(evidence),
+            str(calls),
+            str(succeed_at),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == returncode, result.stderr
+    assert calls.read_text().splitlines() == ["call"] * attempts
+    assert sorted(path.name for path in evidence.glob("*-iap-scp-attempt-*.log")) == [
+        f"canary-iap-scp-attempt-{attempt}.log" for attempt in range(1, attempts + 1)
+    ]
+    summary = evidence / "canary-iap-scp.log"
+    if succeed_at <= attempts:
+        assert summary.read_text() == "IAP_SCP_PASS host=test-host attempt=3\n"
+    else:
+        assert not summary.exists()
+        assert "REFUSED: IAP SCP failed" in result.stderr
 
 
 def test_live_controller_isolates_the_unselected_timer_without_masking_units():
@@ -581,7 +929,7 @@ def test_live_controller_revalidates_crash_boundary_after_capture(
     boot_wait = (
         "wait_boot_id_changed() {"
         + script.split("wait_boot_id_changed() {", 1)[1].split(
-            'wait_ssh "$CANARY_VM"', 1
+            'record_iap_ssh_dry_run "$CANARY_VM"', 1
         )[0]
     )
     boot_read = (
