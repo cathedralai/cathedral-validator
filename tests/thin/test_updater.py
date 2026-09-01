@@ -455,7 +455,16 @@ def _bootstrap(
     *,
     channel: str,
     sequence: int,
+    bound_metadata_sha256: str | None = None,
 ) -> str:
+    if bound_metadata_sha256 is None:
+        # The signed bootstrap binds the exact stable record it was built
+        # from. Unless a test binds something else, bind what the fixture
+        # fetcher serves so the first install is the exact bound record.
+        assert updater.fetcher is not None
+        bound_metadata_sha256 = hashlib.sha256(
+            updater.fetcher(f"https://releases.example/{channel}.json", 0)
+        ).hexdigest()
     return updater.bootstrap(
         metadata_url=f"https://releases.example/{channel}.json",
         channel=channel,
@@ -464,6 +473,7 @@ def _bootstrap(
         minimum_sequence=sequence,
         validator_uid=os.geteuid(),
         validator_gid=os.getegid(),
+        first_install_metadata_sha256=bound_metadata_sha256,
         cycle_wait_seconds=0.1,
     )
 
@@ -1590,6 +1600,423 @@ def test_expired_and_below_bootstrap_release_are_refused(tmp_path: Path) -> None
             minimum_sequence=5,
             cycle_wait_seconds=0.1,
         )
+
+
+def _bound_first_install(
+    tmp_path: Path,
+) -> tuple[Ed25519PrivateKey, bytes, bytes, str, bytes, bytes, str]:
+    """Return a signed bound record and one strictly higher signed successor."""
+
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    tree = _tree_digest(tmp_path, archive)
+    bound = _stable_metadata(
+        private, sequence=7, archive=archive, tree=tree, version="1.2.3"
+    )
+    second_archive = _archive(marker_path=tmp_path / "second-marker")
+    second_tree = _tree_digest(tmp_path, second_archive, name="second-tree")
+    higher = _stable_metadata(
+        private, sequence=8, archive=second_archive, tree=second_tree, version="1.3.0"
+    )
+    return (
+        private,
+        archive,
+        bound,
+        hashlib.sha256(bound).hexdigest(),
+        second_archive,
+        higher,
+        f"releases/{hashlib.sha256(second_archive).hexdigest()}",
+    )
+
+
+def test_first_install_refuses_equivocation_against_the_bootstrap_bound_record(
+    tmp_path: Path,
+) -> None:
+    """An empty host has no committed record, so the bound record stands in.
+
+    A different validly signed record at the bound sequence is refused exactly
+    as a committed host refuses equivocation at its committed sequence. Nothing
+    is activated and no record is written by the refused attempt.
+    """
+
+    private, archive, bound, bound_sha256, _, _, _ = _bound_first_install(tmp_path)
+    tree = _tree_digest(tmp_path, archive, name="same-sequence-tree")
+    same_sequence = _stable_metadata(
+        private, sequence=7, archive=archive, tree=tree, version="1.2.4"
+    )
+    journal = tmp_path / "journal" / "state.json"
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=same_sequence,
+        archive=archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+
+    with pytest.raises(UpdateRefused, match="equivocates with the record bound"):
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+    assert restarts == []
+    assert not (tmp_path / "install" / "current").exists()
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["channels"] == {}
+    assert state["pending"] is None
+
+    updater.fetcher = lambda url, _maximum: bound if url.endswith(".json") else archive
+    assert (
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+        == "ACTIVATED"
+    )
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    committed = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert committed["channels"]["stable"]["metadata_sha256"] == bound_sha256
+
+    # Once committed, the same equivocation is refused by the committed record.
+    updater.fetcher = lambda url, _maximum: (
+        same_sequence if url.endswith(".json") else archive
+    )
+    with pytest.raises(UpdateRefused, match="equivocates at an existing sequence"):
+        _update(updater, private, channel="stable", sequence=7)
+
+
+def test_first_install_accepts_a_strictly_higher_release_than_the_bound_record(
+    tmp_path: Path,
+) -> None:
+    """A bootstrap stays usable after later stable publications.
+
+    The bound record is the anchor, not a shelf life: a strictly higher signed
+    stable release is its monotonic successor and is installed directly.
+    """
+
+    private, _, _, bound_sha256, second_archive, higher, target = _bound_first_install(
+        tmp_path
+    )
+    journal = tmp_path / "journal" / "state.json"
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=higher,
+        archive=second_archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+
+    assert (
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+        == "ACTIVATED"
+    )
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    assert os.readlink(tmp_path / "install" / "current") == target
+    committed = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert committed["channels"]["stable"]["sequence"] == 8
+    assert (
+        committed["channels"]["stable"]["metadata_sha256"]
+        == hashlib.sha256(higher).hexdigest()
+    )
+
+
+def test_first_install_below_the_bound_floor_is_refused_before_any_mutation(
+    tmp_path: Path,
+) -> None:
+    private, archive, _, bound_sha256, _, _, _ = _bound_first_install(tmp_path)
+    older = _stable_metadata(
+        private,
+        sequence=6,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive, name="older-tree"),
+        version="1.1.0",
+    )
+    journal = tmp_path / "journal" / "state.json"
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=older,
+        archive=archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+
+    with pytest.raises(UpdateRefused, match="below the trusted bootstrap"):
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+    assert restarts == []
+    assert not (tmp_path / "install" / "current").exists()
+
+
+def test_crash_uncertain_first_install_is_rescued_by_a_higher_release(
+    tmp_path: Path,
+) -> None:
+    """The bound anchor must not deadlock the existing crash-rescue contract."""
+
+    private, archive, bound, bound_sha256, second_archive, higher, target = (
+        _bound_first_install(tmp_path)
+    )
+    journal = tmp_path / "journal" / "state.json"
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=bound,
+        archive=archive,
+        restarts=[],
+        seed_current=False,
+    )
+
+    def crash_during_nested_restart(_command) -> None:
+        raise KeyboardInterrupt("simulated crash after systemctl authorization")
+
+    updater.service_restarter = crash_during_nested_restart
+    with pytest.raises(KeyboardInterrupt):
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+    crashed = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert crashed["channels"] == {}
+    assert crashed["pending"]["stage"] == "may_have_run"
+    assert crashed["pending"]["record"]["metadata_sha256"] == bound_sha256
+
+    recovery_targets: list[str] = []
+
+    def fail_uncertain_then_start_rescue(_command) -> None:
+        recovery_targets.append(os.readlink(tmp_path / "install" / "current"))
+        if len(recovery_targets) == 1:
+            raise OSError("uncertain first release never reached readiness")
+
+    rescued = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=higher,
+        archive=second_archive,
+        service_restarter=fail_uncertain_then_start_rescue,
+        seed_current=False,
+    )
+    assert (
+        _bootstrap(
+            rescued,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+        == "ACTIVATED"
+    )
+    assert recovery_targets[-1] == target
+    state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert state["pending"] is None
+    assert state["channels"]["stable"]["sequence"] == 8
+
+
+def test_first_install_crash_recovery_commits_the_bound_record_first(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    tree = _tree_digest(tmp_path, archive)
+    bound = _stable_metadata(
+        private, sequence=7, archive=archive, tree=tree, version="1.2.3"
+    )
+    bound_sha256 = hashlib.sha256(bound).hexdigest()
+    journal = tmp_path / "journal" / "state.json"
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=bound,
+        archive=archive,
+        restarts=[],
+        seed_current=False,
+    )
+
+    def crash_during_nested_restart(command) -> None:
+        assert tuple(command) == (SYSTEMCTL, "restart", VALIDATOR_SERVICE)
+        raise RuntimeError("power loss after the durable may_have_run record")
+
+    updater.service_restarter = crash_during_nested_restart
+    with pytest.raises(RuntimeError, match="power loss"):
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+    crashed = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert crashed["channels"] == {}
+    assert crashed["pending"]["stage"] == "may_have_run"
+    assert crashed["pending"]["record"]["metadata_sha256"] == bound_sha256
+
+    # The rerun recovers the crash-uncertain bound activation, commits that
+    # exact record, and only then consults the remote metadata.
+    restarts: list[tuple[str, ...]] = []
+    updater.service_restarter = lambda command: restarts.append(tuple(command))
+    assert (
+        _bootstrap(
+            updater,
+            private,
+            channel="stable",
+            sequence=7,
+            bound_metadata_sha256=bound_sha256,
+        )
+        == "CURRENT"
+    )
+    assert restarts == [(SYSTEMCTL, "restart", VALIDATOR_SERVICE)]
+    recovered = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert recovered["pending"] is None
+    assert recovered["channels"]["stable"]["metadata_sha256"] == bound_sha256
+
+    # The committed record is now the anchor: a different validly signed
+    # record at the same sequence is equivocation, not a first install.
+    altered = _stable_metadata(
+        private, sequence=7, archive=archive, tree=tree, version="1.2.4"
+    )
+    updater.fetcher = lambda url, _maximum: (
+        altered if url.endswith(".json") else archive
+    )
+    with pytest.raises(UpdateRefused, match="equivocates"):
+        _update(updater, private, channel="stable", sequence=7)
+
+
+def test_first_install_metadata_digest_is_required_and_bootstrap_only(
+    tmp_path: Path,
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private, sequence=1, archive=archive, tree=_tree_digest(tmp_path, archive)
+    )
+    journal = tmp_path / "journal" / "state.json"
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        restarts=restarts,
+        seed_current=False,
+    )
+    common = {
+        "metadata_url": "https://releases.example/canary.json",
+        "channel": "canary",
+        "public_key": private.public_key(),
+        "pause_file": tmp_path / "pause",
+        "minimum_sequence": 1,
+        "cycle_wait_seconds": 0.1,
+        "operation_timeout_seconds": 5.0,
+    }
+
+    with pytest.raises(UpdateRefused, match="requires the exact stable metadata"):
+        updater._update_release(
+            **common,
+            bootstrap_owner=(os.geteuid(), os.getegid()),
+            first_install_metadata_sha256=None,
+        )
+    with pytest.raises(UpdateRefused, match="not a lower-case SHA-256 digest"):
+        _bootstrap(
+            updater,
+            private,
+            channel="canary",
+            sequence=1,
+            bound_metadata_sha256="A" * 64,
+        )
+    with pytest.raises(UpdateRefused, match="applies only to the bootstrap"):
+        updater._update_release(
+            **common,
+            bootstrap_owner=None,
+            first_install_metadata_sha256="a" * 64,
+        )
+    assert restarts == []
+    assert not (tmp_path / "state").exists()
+    assert not (tmp_path / "install").exists()
+
+
+def test_first_install_cli_requires_the_bootstrap_bound_metadata_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bootstraps: list[dict[str, object]] = []
+    updates: list[dict[str, object]] = []
+
+    class FakeUpdater:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def bootstrap(self, **kwargs) -> str:
+            bootstraps.append(kwargs)
+            return "ACTIVATED"
+
+        def update(self, **kwargs) -> str:
+            updates.append(kwargs)
+            return "CURRENT"
+
+    class ServiceAccount:
+        pw_uid = 1234
+        pw_gid = 1234
+
+    monkeypatch.setattr(updater_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        updater_module,
+        "load_expected_hotkey_identity",
+        lambda _path: "5ExpectedValidator",
+    )
+    monkeypatch.setattr(updater_module, "load_pinned_public_key", lambda _path: "key")
+    monkeypatch.setattr(updater_module, "SignedReleaseUpdater", FakeUpdater)
+    monkeypatch.setattr(updater_module.pwd, "getpwnam", lambda _name: ServiceAccount())
+    base = [
+        "--channel=stable",
+        "--metadata-url=https://releases.example/stable.json",
+        "--public-key=/ignored.pem",
+        "--identity-file=/ignored",
+        "--minimum-sequence=7",
+    ]
+    digest = "--first-install-metadata-sha256=" + "a" * 64
+
+    assert updater_module.main([*base, "--bootstrap-first-install"]) == 2
+    assert "requires the exact stable metadata digest" in capsys.readouterr().err
+    assert updater_module.main([*base, digest]) == 2
+    assert "applies only to --bootstrap-first-install" in capsys.readouterr().err
+    assert (
+        updater_module.main(["--reconcile-boot", "--identity-file=/ignored", digest])
+        == 2
+    )
+    assert "does not accept a caller-selected channel" in capsys.readouterr().err
+    assert bootstraps == [] and updates == []
+
+    assert updater_module.main([*base, "--bootstrap-first-install", digest]) == 0
+    assert "CATHEDRAL_VALIDATOR_UPDATE_ACTIVATED" in capsys.readouterr().out
+    assert len(bootstraps) == 1
+    assert bootstraps[0]["first_install_metadata_sha256"] == "a" * 64
+    assert bootstraps[0]["minimum_sequence"] == 7
+    assert updater_module.main(base) == 0
+    assert len(updates) == 1
+    assert "first_install_metadata_sha256" not in updates[0]
 
 
 def test_bad_signature_is_refused(tmp_path: Path) -> None:

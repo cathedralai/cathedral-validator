@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -20,6 +21,8 @@ from types import ModuleType
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from cathedral_thin.independent_runtime import updater as runtime_updater
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy" / "validator-update"
@@ -167,6 +170,26 @@ def _stable_metadata(
     path.write_bytes(body)
     path.chmod(0o644)
     return path
+
+
+def _resign_stable_metadata(
+    values: dict[str, object],
+    field_path: tuple[str, ...],
+    value: object,
+) -> bytes:
+    path = values["stable_metadata"]
+    document = json.loads(path.read_bytes())
+    target = document["signed"]
+    for field in field_path[:-1]:
+        target = target[field]
+    target[field_path[-1]] = value
+    payload = builder.canonical_json(document["signed"])
+    document["signature"] = base64.b64encode(
+        values["runtime_private"].sign(payload)
+    ).decode("ascii")
+    raw = builder.canonical_json(document)
+    path.write_bytes(raw)
+    return raw
 
 
 def _wheel(root: Path, *, private_marker: bool = False) -> tuple[Path, str]:
@@ -346,6 +369,7 @@ def _inputs(tmp_path: Path) -> dict[str, object]:
         "bootstrap_public_path": bootstrap_public_path,
         "bootstrap_fingerprint": bootstrap_fingerprint,
         "runtime_public_path": runtime_public_path,
+        "runtime_private": runtime_private,
         "runtime_fingerprint": runtime_fingerprint,
         "stable_sequence": stable_sequence,
         "stable_metadata": _stable_metadata(
@@ -545,6 +569,16 @@ def test_builder_is_reproducible_and_contains_no_private_key(tmp_path):
             in update_body
         )
         assert builder.STABLE_SEQUENCE_PLACEHOLDER not in update_body
+        stable_digest = document["stable_release_floor"]["metadata_sha256"]
+        assert (
+            f"CATHEDRAL_VALIDATOR_STABLE_METADATA_SHA256={stable_digest}\n".encode()
+            in update_body
+        )
+        assert builder.STABLE_METADATA_SHA256_PLACEHOLDER not in update_body
+        assert installer._stable_floor_from_example(update_body) == (
+            values["stable_sequence"],
+            stable_digest,
+        )
 
 
 def test_builder_requires_matching_bootstrap_pair_and_distinct_runtime_key(tmp_path):
@@ -567,6 +601,115 @@ def test_builder_binds_floor_to_verified_stable_metadata(tmp_path):
     values["runtime_public_path"] = values["bootstrap_public_path"]
     with pytest.raises(builder.BundleRefused, match="must be distinct"):
         _build(values)
+
+
+def test_builder_stable_contract_matches_runtime_parser(tmp_path):
+    values = _inputs(tmp_path)
+    raw = values["stable_metadata"].read_bytes()
+    public_key = values["runtime_private"].public_key()
+    now_unix = values["issued_unix"] + 60
+
+    release = runtime_updater.parse_release_metadata(
+        raw,
+        channel="stable",
+        public_key=public_key,
+        now_unix=now_unix,
+    )
+    sequence, metadata_sha256 = builder._stable_release_sequence(
+        values["stable_metadata"],
+        public_key=public_key,
+        now_unix=now_unix,
+    )
+
+    assert sequence == release.sequence
+    assert metadata_sha256 == release.metadata_sha256
+
+
+@pytest.mark.parametrize(
+    ("field_path", "value", "builder_error"),
+    (
+        (("release", "version"), "", "release version is invalid"),
+        (
+            ("release", "archive_url"),
+            "http://example.invalid/release.tar.gz",
+            "archive URL must be HTTPS",
+        ),
+        (
+            ("release", "archive_sha256"),
+            "A" * 64,
+            "archive digest is not a lower-case SHA-256 digest",
+        ),
+        (
+            ("release", "tree_sha256"),
+            "b" * 63,
+            "tree digest is not a lower-case SHA-256 digest",
+        ),
+        (
+            ("release", "entrypoint"),
+            "../bin/cathedral-validator",
+            "release entrypoint escapes its release",
+        ),
+        (
+            ("release", "promoted_canary", "sequence"),
+            True,
+            "promoted canary sequence is invalid",
+        ),
+        (
+            ("release", "promoted_canary", "signed_sha256"),
+            "C" * 64,
+            "promoted canary signed digest is not a lower-case SHA-256 digest",
+        ),
+        (
+            ("release", "promoted_canary", "metadata_sha256"),
+            "d" * 63,
+            "promoted canary metadata digest is not a lower-case SHA-256 digest",
+        ),
+        (
+            ("release", "promoted_canary", "archive_sha256"),
+            "e" * 64,
+            "stable release is not the exact promoted canary archive",
+        ),
+    ),
+)
+def test_builder_rejects_every_runtime_stable_release_contract_violation(
+    tmp_path, field_path, value, builder_error
+):
+    values = _inputs(tmp_path)
+    raw = _resign_stable_metadata(values, field_path, value)
+    public_key = values["runtime_private"].public_key()
+    now_unix = values["issued_unix"] + 60
+
+    with pytest.raises(runtime_updater.UpdateRefused):
+        runtime_updater.parse_release_metadata(
+            raw,
+            channel="stable",
+            public_key=public_key,
+            now_unix=now_unix,
+        )
+    with pytest.raises(builder.BundleRefused, match=builder_error):
+        builder._stable_release_sequence(
+            values["stable_metadata"],
+            public_key=public_key,
+            now_unix=now_unix,
+        )
+
+
+def test_bootstrap_builder_keeps_the_offline_signer_import_boundary() -> None:
+    source = (DEPLOY / "build_updater_bundle.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not any(name.startswith("cathedral_thin") for name in imported_modules)
+    assert "build_signed_release" not in imported_modules
 
 
 def test_builder_cli_names_bootstrap_and_runtime_key_roles() -> None:
@@ -810,6 +953,61 @@ def test_verifier_binds_runtime_key_and_rejects_old_one_key_schema(tmp_path):
             expected_owner=os.geteuid(),
             signature_verifier=_verifier,
         )
+
+
+def test_verifier_binds_update_example_to_the_stable_metadata_digest(tmp_path):
+    values = _inputs(tmp_path)
+    archive, manifest, _, _, _ = _build(values)
+    document = json.loads(manifest)
+    stable_digest = hashlib.sha256(values["stable_metadata"].read_bytes()).hexdigest()
+    assert document["stable_release_floor"]["metadata_sha256"] == stable_digest
+
+    document["stable_release_floor"]["metadata_sha256"] = "0" * 64
+    mismatched_manifest = builder.canonical_json(document)
+    mismatched_signature = values["bootstrap_private"].sign(mismatched_manifest)
+    artifacts = _artifacts(
+        tmp_path / "digest-mismatch",
+        archive,
+        mismatched_manifest,
+        mismatched_signature,
+        values["bootstrap_public_path"],
+    )
+    with pytest.raises(
+        installer.InstallRefused,
+        match="differs from the authenticated stable floor",
+    ):
+        installer.verify_bundle(
+            bundle_path=artifacts[0],
+            manifest_path=artifacts[1],
+            signature_path=artifacts[2],
+            bootstrap_public_key_path=artifacts[3],
+            expected_bootstrap_fingerprint=values["bootstrap_fingerprint"],
+            minimum_bootstrap_sequence=1,
+            expected_owner=os.geteuid(),
+            signature_verifier=_verifier,
+        )
+
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+        member = bundle.extractfile("payload/examples/update.env.example")
+        assert member is not None
+        body = member.read()
+    digest_line = (
+        f"CATHEDRAL_VALIDATOR_STABLE_METADATA_SHA256={stable_digest}\n".encode()
+    )
+    assert body.count(digest_line) == 1
+    with pytest.raises(installer.InstallRefused, match="no exact stable metadata"):
+        installer._stable_floor_from_example(body.replace(digest_line, b""))
+    with pytest.raises(installer.InstallRefused, match="no exact stable metadata"):
+        installer._stable_floor_from_example(body + digest_line)
+
+    example_asset = values["assets"] / "update.env.example"
+    example_asset.write_bytes(
+        example_asset.read_bytes().replace(
+            builder.STABLE_METADATA_SHA256_PLACEHOLDER, b"0" * 64
+        )
+    )
+    with pytest.raises(builder.BundleRefused, match="metadata digest placeholder"):
+        _build(values)
 
 
 def test_bootstrap_sequence_checkpoint_and_validity_window_are_enforced(tmp_path):
@@ -1528,6 +1726,207 @@ def test_same_bootstrap_sequence_with_different_manifest_is_refused(tmp_path):
             python_executable=Path("/usr/bin/python3.12"),
             runner=_fake_runner([]),
         )
+
+
+def _rebind_stable_floor(
+    values: dict[str, object], root: Path, *, sequence: int
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    values["stable_sequence"] = sequence
+    values["stable_metadata"] = _stable_metadata(
+        root,
+        private=values["runtime_private"],
+        sequence=sequence,
+        issued_unix=values["issued_unix"],
+    )
+
+
+def _install(verified: object, root: Path, **runner_options: bool) -> str:
+    return installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([], **runner_options),
+    )
+
+
+def test_bootstrap_state_persists_stable_floor_and_refuses_lowering_it(tmp_path):
+    """The bootstrap sequence and the stable floor are independent monotones.
+
+    A bootstrap built later from an older still-valid stable record carries a
+    higher bootstrap sequence and a lower stable floor. Installing it would
+    hand a not-yet-set-up host a lower authenticated minimum, so the floor is
+    persisted and enforced regardless of the bootstrap sequence.
+    """
+
+    values = _inputs(tmp_path / "inputs")
+    first, _ = _verify_values(tmp_path / "first-artifacts", values)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    _install(first, root)
+    state_path = root / "var/lib/cathedral-validator-update/bootstrap-state.json"
+    example = (
+        root / "usr/local/share/cathedral-validator-updater/examples/update.env.example"
+    )
+    fixed = root / "usr/local/lib/cathedral-validator-updater"
+    committed = json.loads(state_path.read_bytes())
+    assert committed["schema"] == installer.BOOTSTRAP_STATE_SCHEMA
+    assert committed["sequence"] == 1
+    assert committed["stable_release_minimum_sequence"] == 7
+    assert b"CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=7\n" in example.read_bytes()
+
+    values["sequence"] = 2
+    _rebind_stable_floor(values, tmp_path / "older-stable", sequence=5)
+    lowered, _ = _verify_values(tmp_path / "lowered-artifacts", values)
+    assert lowered.bootstrap_sequence == 2
+    assert lowered.stable_release_minimum_sequence == 5
+    with pytest.raises(
+        installer.InstallRefused, match="lowers the committed stable release floor"
+    ):
+        _install(lowered, root)
+    assert json.loads(state_path.read_bytes()) == committed
+    assert b"CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=7\n" in example.read_bytes()
+    assert fixed.readlink().name == first.manifest_sha256
+    assert not (
+        root / "var/lib/cathedral-validator-update/bootstrap-pending.json"
+    ).exists()
+
+    _rebind_stable_floor(values, tmp_path / "equal-stable", sequence=7)
+    equal, _ = _verify_values(tmp_path / "equal-artifacts", values)
+    _install(equal, root)
+    after_equal = json.loads(state_path.read_bytes())
+    assert after_equal["sequence"] == 2
+    assert after_equal["stable_release_minimum_sequence"] == 7
+
+    values["sequence"] = 3
+    _rebind_stable_floor(values, tmp_path / "newer-stable", sequence=9)
+    raised, _ = _verify_values(tmp_path / "raised-artifacts", values)
+    _install(raised, root)
+    after_raise = json.loads(state_path.read_bytes())
+    assert after_raise["sequence"] == 3
+    assert after_raise["stable_release_minimum_sequence"] == 9
+    assert b"CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=9\n" in example.read_bytes()
+    assert fixed.readlink().name == raised.manifest_sha256
+
+    with pytest.raises(installer.InstallRefused, match="bootstrap replay"):
+        _install(lowered, root)
+
+
+def test_pending_stable_floor_blocks_a_lower_floor_until_recovery_completes(
+    tmp_path,
+):
+    values = _inputs(tmp_path / "inputs")
+    first, _ = _verify_values(tmp_path / "first-artifacts", values)
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    _install(first, root)
+    state_root = root / "var/lib/cathedral-validator-update"
+
+    values["sequence"] = 2
+    _rebind_stable_floor(values, tmp_path / "floor-nine", sequence=9)
+    interrupted, _ = _verify_values(tmp_path / "interrupted-artifacts", values)
+    with pytest.raises(subprocess.CalledProcessError):
+        _install(interrupted, root, fail_daemon_reload=True)
+    committed = json.loads((state_root / "bootstrap-state.json").read_bytes())
+    pending = json.loads((state_root / "bootstrap-pending.json").read_bytes())
+    assert committed["stable_release_minimum_sequence"] == 7
+    assert pending["schema"] == installer.BOOTSTRAP_PENDING_SCHEMA
+    assert pending["stable_release_minimum_sequence"] == 9
+
+    values["sequence"] = 3
+    _rebind_stable_floor(values, tmp_path / "floor-eight", sequence=8)
+    between, _ = _verify_values(tmp_path / "between-artifacts", values)
+    with pytest.raises(
+        installer.InstallRefused, match="lowers the pending stable release floor"
+    ):
+        _install(between, root)
+    assert json.loads((state_root / "bootstrap-state.json").read_bytes()) == committed
+    assert json.loads((state_root / "bootstrap-pending.json").read_bytes()) == pending
+
+    _install(interrupted, root)
+    recovered = json.loads((state_root / "bootstrap-state.json").read_bytes())
+    assert recovered["sequence"] == 2
+    assert recovered["stable_release_minimum_sequence"] == 9
+    assert not (state_root / "bootstrap-pending.json").exists()
+    with pytest.raises(
+        installer.InstallRefused, match="lowers the committed stable release floor"
+    ):
+        _install(between, root)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda record: {
+                **{
+                    key: value
+                    for key, value in record.items()
+                    if key != "stable_release_minimum_sequence"
+                },
+                "schema": "cathedral_validator_bootstrap_state_v1",
+            },
+            "schema is unsupported",
+        ),
+        (
+            lambda record: {
+                key: value
+                for key, value in record.items()
+                if key != "stable_release_minimum_sequence"
+            },
+            "unsupported fields",
+        ),
+        (
+            lambda record: {**record, "stable_release_minimum_sequence": 0},
+            "fields are invalid",
+        ),
+        (
+            lambda record: {**record, "stable_release_minimum_sequence": True},
+            "fields are invalid",
+        ),
+        (
+            lambda record: {**record, "stable_release_minimum_sequence": "7"},
+            "fields are invalid",
+        ),
+        (
+            lambda record: {**record, "stable_release_minimum_sequence": 2**63},
+            "fields are invalid",
+        ),
+    ],
+    ids=[
+        "legacy-v1-schema",
+        "missing-floor",
+        "zero-floor",
+        "bool-floor",
+        "string-floor",
+        "oversized-floor",
+    ],
+)
+def test_bootstrap_state_without_a_valid_stable_floor_is_refused(
+    tmp_path, mutation, message
+):
+    verified, _, _ = _verified(tmp_path / "source")
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    state_root = root / "var/lib/cathedral-validator-update"
+    state_root.mkdir(parents=True, mode=0o700)
+    state_root.chmod(0o700)
+    record = json.loads(
+        installer._bootstrap_record(verified, installer.BOOTSTRAP_STATE_SCHEMA)
+    )
+    state_path = state_root / "bootstrap-state.json"
+    state_path.write_bytes(installer.canonical_json(mutation(record)))
+    state_path.chmod(0o600)
+    before = state_path.read_bytes()
+
+    with pytest.raises(installer.InstallRefused, match=message):
+        _install(verified, root)
+
+    assert state_path.read_bytes() == before
+    assert not (root / "usr/local/lib/cathedral-validator-updater").exists()
+    assert not (root / "usr/local/lib" / installer.UPDATER_RELEASES_DIRECTORY).exists()
+    assert not (state_root / "bootstrap-pending.json").exists()
 
 
 def test_install_refuses_destination_symlink_before_persistent_mutation(tmp_path):

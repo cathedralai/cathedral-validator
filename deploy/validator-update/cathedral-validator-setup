@@ -53,6 +53,30 @@ _MEASUREMENT = re.compile(r"[0-9a-f]{96}")
 _TCB = re.compile(r"0x[0-9a-f]{16}")
 _GENERATIONS = frozenset({"milan", "genoa", "turin"})
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+# The unencrypted bittensor-wallet keyfile is a JSON object drawn from exactly
+# these fields. The pinned bittensor-wallet 4.1.0 reader derives the signing key
+# from secretPhrase, then secretSeed, then privateKey, only fails at signing
+# time when none is present, treats a missing cryptoType as sr25519, and
+# tolerates unknown fields. Setup is stricter than the reader on purpose: it
+# accepts only the fields btcli writes and only the sr25519 crypto type the
+# validator signs with. Encrypted keyfiles carry one of the listed prefixes and
+# need a password the unattended service never has.
+_HOTKEY_FIELDS = frozenset(
+    {
+        "accountId",
+        "cryptoType",
+        "privateKey",
+        "publicKey",
+        "secretPhrase",
+        "secretSeed",
+        "ss58Address",
+    }
+)
+_SR25519_CRYPTO_TYPE = 1
+_ENCRYPTED_KEYFILE_PREFIXES = (b"$NACL", b"$ANSIBLE_VAULT", b"gAAAAA")
+_HEX_PUBLIC_KEY = re.compile(r"0x[0-9a-fA-F]{64}")
+_HEX_SEED = re.compile(r"0x[0-9a-fA-F]{64}")
+_HEX_PRIVATE_KEY = re.compile(r"0x[0-9a-fA-F]{128}")
 _RELEASE_TARGET = re.compile(r"releases/[0-9a-f]{64}")
 _UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v3"
 BOOTSTRAP_OWNER = 0
@@ -92,6 +116,7 @@ def _read_regular(
     label: str,
     pin_parent: bool = False,
     required_mode: int | None = None,
+    owner_only: bool = False,
 ) -> bytes:
     if not path.is_absolute() or path.is_symlink() or not hasattr(os, "O_NOFOLLOW"):
         raise SetupRefused(f"{label} must be an absolute non-symlink file")
@@ -126,6 +151,10 @@ def _read_regular(
             or not 1 <= before.st_size <= maximum
         ):
             raise SetupRefused(f"{label} is not an owner-controlled regular file")
+        if owner_only and stat.S_IMODE(before.st_mode) & 0o077:
+            raise SetupRefused(
+                f"{label} must be readable only by its owner (mode 0600)"
+            )
         body = b""
         while len(body) <= maximum:
             chunk = os.read(descriptor, min(65536, maximum + 1 - len(body)))
@@ -146,37 +175,102 @@ def _read_regular(
 
 
 def _parse_hotkey(body: bytes, expected: str) -> None:
+    """Require the unencrypted bittensor-wallet hotkey shape the service can use.
+
+    Setup cannot derive sr25519 keys with the standard library, so it proves
+    the shape here and the running validator proves the loaded signing key
+    matches ``--expected-hotkey`` before its first chain access. A public-only
+    document would pass every check the old parser made and then fail at the
+    first signature, after the credential had already been installed.
+    """
+
+    if body.startswith(_ENCRYPTED_KEYFILE_PREFIXES):
+        raise SetupRefused(
+            "hotkey file is encrypted; the unattended validator service "
+            "cannot decrypt it"
+        )
     try:
         document = json.loads(body.decode("utf-8"), object_pairs_hook=_strict_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SetupRefused("hotkey file is not strict JSON") from exc
-    address = document.get("ss58Address") if isinstance(document, dict) else None
-    if not isinstance(address, str) or not _is_bittensor_ss58(address):
+        raise SetupRefused(
+            "hotkey file is not an unencrypted Bittensor keyfile"
+        ) from exc
+    if not isinstance(document, dict) or not set(document) <= _HOTKEY_FIELDS:
+        raise SetupRefused("hotkey file is not an unencrypted Bittensor keyfile")
+    address = document.get("ss58Address")
+    public_key = _decode_bittensor_ss58(address)
+    if public_key is None:
         raise SetupRefused("hotkey file has no valid public SS58 address")
     if address != expected:
         raise SetupRefused("hotkey public address does not match --expected-hotkey")
+    crypto_type = document.get("cryptoType")
+    if crypto_type is not None and (
+        isinstance(crypto_type, bool)
+        or not isinstance(crypto_type, int)
+        or crypto_type != _SR25519_CRYPTO_TYPE
+    ):
+        raise SetupRefused("hotkey file cryptoType is not sr25519")
+    for field in ("publicKey", "accountId"):
+        value = document.get(field)
+        if value is None:
+            continue
+        if (
+            not isinstance(value, str)
+            or _HEX_PUBLIC_KEY.fullmatch(value) is None
+            or bytes.fromhex(value[2:]) != public_key
+        ):
+            raise SetupRefused(f"hotkey file {field} does not match its SS58 address")
+    seed = document.get("secretSeed")
+    phrase = document.get("secretPhrase")
+    private_key = document.get("privateKey")
+    if seed is not None and (
+        not isinstance(seed, str) or _HEX_SEED.fullmatch(seed) is None
+    ):
+        raise SetupRefused("hotkey file secretSeed is malformed")
+    if phrase is not None and (
+        not isinstance(phrase, str) or not phrase.strip() or not phrase.isascii()
+    ):
+        raise SetupRefused("hotkey file secretPhrase is malformed")
+    if private_key is not None and (
+        not isinstance(private_key, str)
+        or _HEX_PRIVATE_KEY.fullmatch(private_key) is None
+    ):
+        raise SetupRefused("hotkey file privateKey is malformed")
+    if seed is None and phrase is None and private_key is None:
+        raise SetupRefused(
+            "hotkey file has no signing secret; a public-only keyfile cannot "
+            "sign weights"
+        )
 
 
-def _is_bittensor_ss58(value: object) -> bool:
-    """Validate one 32-byte public key using Bittensor's SS58 format 42."""
+def _decode_bittensor_ss58(value: object) -> bytes | None:
+    """Return the 32-byte public key of one Bittensor SS58 format-42 address."""
 
     if not isinstance(value, str) or not value:
-        return False
+        return None
     number = 0
     try:
         for character in value:
             number = number * 58 + _BASE58_VALUES[character]
     except KeyError:
-        return False
+        return None
     leading_zeroes = len(value) - len(value.lstrip("1"))
     decoded_length = max(1, (number.bit_length() + 7) // 8)
     decoded = b"\x00" * leading_zeroes + number.to_bytes(decoded_length, "big")
     if len(decoded) != 35 or decoded[0] != 42:
-        return False
+        return None
     expected_checksum = hashlib.blake2b(
         b"SS58PRE" + decoded[:-2], digest_size=64
     ).digest()[:2]
-    return decoded[-2:] == expected_checksum
+    if decoded[-2:] != expected_checksum:
+        return None
+    return decoded[1:-2]
+
+
+def _is_bittensor_ss58(value: object) -> bool:
+    """Validate one 32-byte public key using Bittensor's SS58 format 42."""
+
+    return _decode_bittensor_ss58(value) is not None
 
 
 def _validate_policy(body: bytes) -> None:
@@ -227,7 +321,7 @@ def _validate_policy(body: bytes) -> None:
             raise SetupRefused("SNP policy TCB sets reserved bytes")
 
 
-def _parse_signed_update_example(body: bytes) -> tuple[str, int]:
+def _parse_signed_update_example(body: bytes) -> tuple[str, int, str]:
     try:
         lines = body.decode("ascii").splitlines()
     except UnicodeDecodeError as exc:
@@ -244,11 +338,17 @@ def _parse_signed_update_example(body: bytes) -> tuple[str, int]:
         values[key] = value
     url = values.get("CATHEDRAL_VALIDATOR_STABLE_METADATA_URL")
     sequence = values.get("CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE")
+    metadata_sha256 = values.get("CATHEDRAL_VALIDATOR_STABLE_METADATA_SHA256")
     if not isinstance(url, str) or not url.startswith("https://") or not url[8:]:
         raise SetupRefused("signed stable metadata URL is invalid")
     if not isinstance(sequence, str) or not sequence.isdecimal() or int(sequence) < 1:
         raise SetupRefused("signed stable minimum sequence is invalid")
-    return url, int(sequence)
+    if (
+        not isinstance(metadata_sha256, str)
+        or _DIGEST.fullmatch(metadata_sha256) is None
+    ):
+        raise SetupRefused("signed stable metadata digest is invalid")
+    return url, int(sequence), metadata_sha256
 
 
 def _service_gid() -> int:
@@ -554,6 +654,7 @@ def configure(
         owners=owners,
         label="hotkey file",
         pin_parent=True,
+        owner_only=True,
     )
     policy = _read_regular(
         snp_policy, maximum=MAX_POLICY_BYTES, owners=owners, label="SNP policy"
@@ -572,7 +673,9 @@ def configure(
         owners={BOOTSTRAP_OWNER},
         label="signed update example",
     )
-    stable_url, stable_sequence = _parse_signed_update_example(update_example)
+    stable_url, stable_sequence, stable_metadata_sha256 = _parse_signed_update_example(
+        update_example
+    )
     _read_regular(
         RUNTIME_KEY,
         maximum=8192,
@@ -608,11 +711,13 @@ def configure(
     )
     if requires_first_install and setup_complete:
         raise SetupRefused("setup completion contradicts updater state")
-    if (
-        not requires_first_install
-        and setup_complete
-        and not _unit_is_active(runner, DIRECT_UNIT)
-    ):
+    if not requires_first_install and not _unit_is_active(runner, DIRECT_UNIT):
+        # A committed installation whose writer is not running is refused
+        # whether or not the completion marker exists. The first-install
+        # updater starts the writer before it returns, so an absent marker
+        # only proves that setup was interrupted afterwards; it cannot prove
+        # the writer was not later stopped on purpose, including by a
+        # contradiction stop that RestartPreventExitStatus=2 keeps stopped.
         raise SetupRefused("existing direct validator is stopped and needs review")
 
     service_gid = _service_gid()
@@ -647,12 +752,17 @@ def configure(
             f"--public-key={RUNTIME_KEY}",
             f"--identity-file={ETC / 'identity.env'}",
             f"--minimum-sequence={stable_sequence}",
+            f"--first-install-metadata-sha256={stable_metadata_sha256}",
         ]
         _run_checked(runner, updater_command, "first signed install")
-    direct_enable = ["/usr/bin/systemctl", "enable", DIRECT_UNIT]
-    if not setup_complete:
-        direct_enable.insert(2, "--now")
-    _run_checked(runner, direct_enable, "direct service enable")
+    # The first-install updater has already started the writer, and a
+    # committed rerun proved it active before any mutation. Enabling only
+    # records the boot dependency; setup never starts or restarts the writer.
+    _run_checked(
+        runner,
+        ["/usr/bin/systemctl", "enable", DIRECT_UNIT],
+        "direct service enable",
+    )
     _run_checked(
         runner,
         ["/usr/bin/systemctl", "enable", "--now", STABLE_TIMER],

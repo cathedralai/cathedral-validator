@@ -50,8 +50,23 @@ MAX_PAYLOAD_FILES = 2_000
 MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 900
 MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
-BOOTSTRAP_STATE_SCHEMA = "cathedral_validator_bootstrap_state_v1"
-BOOTSTRAP_PENDING_SCHEMA = "cathedral_validator_bootstrap_pending_v1"
+# v2 persists the authenticated stable-release floor. A v1 record from a
+# pre-publication test host is refused rather than reinterpreted: it cannot
+# prove which stable floor that host was bootstrapped with.
+BOOTSTRAP_STATE_SCHEMA = "cathedral_validator_bootstrap_state_v2"
+BOOTSTRAP_PENDING_SCHEMA = "cathedral_validator_bootstrap_pending_v2"
+BOOTSTRAP_STATE_FIELDS = frozenset(
+    {
+        "bootstrap_signing_key_fingerprint",
+        "manifest_sha256",
+        "runtime_release_key_fingerprint",
+        "schema",
+        "sequence",
+        "stable_release_minimum_sequence",
+    }
+)
+STABLE_SEQUENCE_EXAMPLE_PREFIX = "CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE="
+STABLE_METADATA_EXAMPLE_PREFIX = "CATHEDRAL_VALIDATOR_STABLE_METADATA_SHA256="
 VENV_INTERPRETER_NAME = "python3.12"
 UPDATER_RELEASES_DIRECTORY = "cathedral-updater-r"
 UPDATER_RELEASES_RELATIVE_PATH = f"usr/local/lib/{UPDATER_RELEASES_DIRECTORY}"
@@ -118,6 +133,7 @@ class VerifiedBundle:
     bootstrap_signing_key_fingerprint: str
     runtime_release_key_fingerprint: str
     stable_release_minimum_sequence: int
+    stable_release_metadata_sha256: str
     bootstrap_sequence: int
     issued_unix: int
     expires_unix: int
@@ -130,6 +146,7 @@ class BootstrapState:
     manifest_sha256: str
     bootstrap_signing_key_fingerprint: str
     runtime_release_key_fingerprint: str
+    stable_release_minimum_sequence: int
 
 
 def canonical_json(document: Any) -> bytes:
@@ -492,19 +509,33 @@ def _archive_files(
     return extracted
 
 
-def _stable_sequence_from_example(body: bytes) -> int:
+def _stable_floor_from_example(body: bytes) -> tuple[int, str]:
+    """Return the exact stable sequence and metadata digest the example binds."""
+
     try:
         lines = body.decode("ascii").splitlines()
     except UnicodeDecodeError as exc:
         raise InstallRefused("signed update example is not ASCII") from exc
-    prefix = "CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE="
-    values = [line[len(prefix) :] for line in lines if line.startswith(prefix)]
-    if len(values) != 1 or not values[0].isdecimal():
+    sequences = [
+        line[len(STABLE_SEQUENCE_EXAMPLE_PREFIX) :]
+        for line in lines
+        if line.startswith(STABLE_SEQUENCE_EXAMPLE_PREFIX)
+    ]
+    if len(sequences) != 1 or not sequences[0].isdecimal():
         raise InstallRefused("signed update example has no exact stable sequence")
-    sequence = int(values[0])
+    sequence = int(sequences[0])
     if not 1 <= sequence <= 2**63 - 1:
         raise InstallRefused("signed update example stable sequence is invalid")
-    return sequence
+    digests = [
+        line[len(STABLE_METADATA_EXAMPLE_PREFIX) :]
+        for line in lines
+        if line.startswith(STABLE_METADATA_EXAMPLE_PREFIX)
+    ]
+    if len(digests) != 1 or DIGEST.fullmatch(digests[0]) is None:
+        raise InstallRefused(
+            "signed update example has no exact stable metadata digest"
+        )
+    return sequence, digests[0]
 
 
 def verify_bundle(
@@ -590,9 +621,11 @@ def verify_bundle(
     records = _manifest_records(record_list)
     files = _archive_files(archive, records)
     stable_release_floor = document["stable_release_floor"]
-    if (
-        _stable_sequence_from_example(files["payload/examples/update.env.example"].body)
-        != stable_release_floor["sequence"]
+    if _stable_floor_from_example(
+        files["payload/examples/update.env.example"].body
+    ) != (
+        stable_release_floor["sequence"],
+        stable_release_floor["metadata_sha256"],
     ):
         raise InstallRefused(
             "signed update example differs from the authenticated stable floor"
@@ -613,6 +646,7 @@ def verify_bundle(
         bootstrap_signing_key_fingerprint=bootstrap_fingerprint,
         runtime_release_key_fingerprint=runtime_fingerprint,
         stable_release_minimum_sequence=stable_release_floor["sequence"],
+        stable_release_metadata_sha256=stable_release_floor["metadata_sha256"],
         bootstrap_sequence=bootstrap_metadata["sequence"],
         issued_unix=bootstrap_metadata["issued_unix"],
         expires_unix=bootstrap_metadata["expires_unix"],
@@ -855,6 +889,7 @@ def _bootstrap_record(bundle: VerifiedBundle, schema: str) -> bytes:
         "runtime_release_key_fingerprint": bundle.runtime_release_key_fingerprint,
         "schema": schema,
         "sequence": bundle.bootstrap_sequence,
+        "stable_release_minimum_sequence": bundle.stable_release_minimum_sequence,
     }
     return canonical_json(document)
 
@@ -883,24 +918,21 @@ def _read_bootstrap_record(
         raise InstallRefused("bootstrap state is not canonical JSON") from exc
     if canonical_json(document) != raw:
         raise InstallRefused("bootstrap state is not canonical JSON")
-    document = _object(
-        document,
-        {
-            "bootstrap_signing_key_fingerprint",
-            "manifest_sha256",
-            "runtime_release_key_fingerprint",
-            "schema",
-            "sequence",
-        },
-        "bootstrap state",
-    )
-    if document["schema"] != schema:
-        raise InstallRefused("bootstrap state schema is unsupported")
+    if not isinstance(document, dict) or document.get("schema") != schema:
+        raise InstallRefused(
+            "bootstrap state schema is unsupported; a pre-publication bootstrap "
+            "without a recorded stable floor cannot be upgraded in place"
+        )
+    document = _object(document, set(BOOTSTRAP_STATE_FIELDS), "bootstrap state")
     sequence = document["sequence"]
+    stable_floor = document["stable_release_minimum_sequence"]
     if (
         isinstance(sequence, bool)
         or not isinstance(sequence, int)
         or not 1 <= sequence <= 2**63 - 1
+        or isinstance(stable_floor, bool)
+        or not isinstance(stable_floor, int)
+        or not 1 <= stable_floor <= 2**63 - 1
         or not isinstance(document["manifest_sha256"], str)
         or DIGEST.fullmatch(document["manifest_sha256"]) is None
         or not isinstance(document["bootstrap_signing_key_fingerprint"], str)
@@ -914,6 +946,7 @@ def _read_bootstrap_record(
         manifest_sha256=document["manifest_sha256"],
         bootstrap_signing_key_fingerprint=document["bootstrap_signing_key_fingerprint"],
         runtime_release_key_fingerprint=document["runtime_release_key_fingerprint"],
+        stable_release_minimum_sequence=stable_floor,
     )
 
 
@@ -923,6 +956,15 @@ def _check_bootstrap_transition(
     committed: BootstrapState | None,
     pending: BootstrapState | None,
 ) -> None:
+    """Refuse any bundle that replays, equivocates, or lowers the stable floor.
+
+    The bootstrap sequence and the stable-release floor are independent
+    monotonic values. A newer bootstrap built while an older stable record was
+    still valid must never replace the installed ``update.env.example`` with a
+    lower authenticated stable minimum, so both the committed and the pending
+    floor are enforced regardless of the bootstrap sequence.
+    """
+
     for label, state in (("committed", committed), ("pending", pending)):
         if state is None:
             continue
@@ -933,6 +975,11 @@ def _check_bootstrap_transition(
             and bundle.manifest_sha256 != state.manifest_sha256
         ):
             raise InstallRefused(f"bootstrap {label} sequence is equivocal")
+        if (
+            bundle.stable_release_minimum_sequence
+            < state.stable_release_minimum_sequence
+        ):
+            raise InstallRefused(f"bootstrap lowers the {label} stable release floor")
 
 
 @contextmanager
@@ -1798,6 +1845,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "runtime_release_key_fingerprint": (
                     bundle.runtime_release_key_fingerprint
+                ),
+                "stable_release_minimum_sequence": (
+                    bundle.stable_release_minimum_sequence
                 ),
                 "status": "installed",
             }

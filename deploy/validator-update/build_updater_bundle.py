@@ -22,6 +22,7 @@ import re
 import stat
 import tarfile
 import time
+import urllib.parse
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -47,6 +48,10 @@ MAX_BOOTSTRAP_LIFETIME_SECONDS = 90 * 24 * 60 * 60
 MAX_RELEASE_METADATA_BYTES = 131_072
 MAX_RELEASE_METADATA_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 STABLE_SEQUENCE_PLACEHOLDER = b"REPLACE_WITH_AUTHENTICATED_STABLE_SEQUENCE"
+STABLE_METADATA_SHA256_PLACEHOLDER = (
+    b"REPLACE_WITH_AUTHENTICATED_STABLE_METADATA_SHA256"
+)
+_HEX = frozenset("0123456789abcdef")
 
 SYSTEMD_ASSETS = frozenset(
     {
@@ -426,6 +431,43 @@ def _requirements(path: Path, wheel_digests: set[str]) -> bytes:
     return normalized
 
 
+# Keep these release-field checks in lockstep with the installed updater's
+# parse_release_metadata contract. This signer remains self-contained because
+# importing checkout code while the bootstrap private key is loaded would
+# widen the offline signing boundary.
+def _release_digest(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(item not in _HEX for item in value)
+    ):
+        raise BundleRefused(f"{label} is not a lower-case SHA-256 digest")
+    return value
+
+
+def _release_url(value: object) -> str:
+    if not isinstance(value, str) or len(value) > 4096:
+        raise BundleRefused("archive URL is invalid")
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+    ):
+        raise BundleRefused("archive URL must be HTTPS without credentials")
+    return value
+
+
+def _release_entrypoint(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise BundleRefused("release entrypoint is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
+        raise BundleRefused("release entrypoint escapes its release")
+    return str(path)
+
+
 def _stable_release_sequence(
     path: Path,
     *,
@@ -518,26 +560,74 @@ def _stable_release_sequence(
         "promoted_canary",
     }:
         raise BundleRefused("signed stable release record is invalid")
-    promoted = release.get("promoted_canary")
+    version = release.get("version")
     if (
-        not isinstance(promoted, dict)
-        or set(promoted)
-        != {"sequence", "signed_sha256", "metadata_sha256", "archive_sha256"}
-        or promoted.get("archive_sha256") != release.get("archive_sha256")
+        not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        or not version.isascii()
     ):
+        raise BundleRefused("signed stable release version is invalid")
+    archive_sha256 = _release_digest(
+        release.get("archive_sha256"), label="archive digest"
+    )
+    promoted = release.get("promoted_canary")
+    if not isinstance(promoted, dict) or set(promoted) != {
+        "sequence",
+        "signed_sha256",
+        "metadata_sha256",
+        "archive_sha256",
+    }:
         raise BundleRefused("signed stable release has no exact canary promotion")
+    promoted_sequence = promoted.get("sequence")
+    if (
+        isinstance(promoted_sequence, bool)
+        or not isinstance(promoted_sequence, int)
+        or not 1 <= promoted_sequence <= 2**63 - 1
+    ):
+        raise BundleRefused("promoted canary sequence is invalid")
+    _release_digest(
+        promoted.get("signed_sha256"), label="promoted canary signed digest"
+    )
+    _release_digest(
+        promoted.get("metadata_sha256"), label="promoted canary metadata digest"
+    )
+    if promoted.get("archive_sha256") != archive_sha256:
+        raise BundleRefused("stable release is not the exact promoted canary archive")
+    _release_url(release.get("archive_url"))
+    _release_digest(release.get("tree_sha256"), label="tree digest")
+    _release_entrypoint(release.get("entrypoint"))
     return sequence, hashlib.sha256(raw).hexdigest()
 
 
-def _render_stable_sequence(body: bytes, sequence: int) -> bytes:
+def _render_stable_floor(body: bytes, sequence: int, metadata_sha256: str) -> bytes:
+    """Bind the signed example to the exact verified stable record.
+
+    The sequence is the authenticated floor every later update must meet. The
+    metadata digest lets the first install treat the stable record this
+    bootstrap was built from as its committed anchor, so a different validly
+    signed record at the same sequence cannot be served to an empty host.
+    """
+
     if body.count(STABLE_SEQUENCE_PLACEHOLDER) != 1:
         raise BundleRefused(
             "stable release sequence placeholder is missing or repeated"
         )
-    return body.replace(STABLE_SEQUENCE_PLACEHOLDER, str(sequence).encode("ascii"))
+    if body.count(STABLE_METADATA_SHA256_PLACEHOLDER) != 1:
+        raise BundleRefused(
+            "stable release metadata digest placeholder is missing or repeated"
+        )
+    return body.replace(
+        STABLE_SEQUENCE_PLACEHOLDER, str(sequence).encode("ascii")
+    ).replace(STABLE_METADATA_SHA256_PLACEHOLDER, metadata_sha256.encode("ascii"))
 
 
-def _assets(path: Path, *, stable_minimum_sequence: int) -> list[PayloadFile]:
+def _assets(
+    path: Path,
+    *,
+    stable_minimum_sequence: int,
+    stable_metadata_sha256: str,
+) -> list[PayloadFile]:
     _controlled_directory(path, "reviewed asset directory")
     actual = {item.name for item in path.iterdir() if item.name in REQUIRED_ASSETS}
     if actual != REQUIRED_ASSETS:
@@ -551,7 +641,9 @@ def _assets(path: Path, *, stable_minimum_sequence: int) -> list[PayloadFile]:
             maximum=MAX_CONTROL_FILE_BYTES,
         )
         if name == "update.env.example":
-            body = _render_stable_sequence(body, stable_minimum_sequence)
+            body = _render_stable_floor(
+                body, stable_minimum_sequence, stable_metadata_sha256
+            )
         _refuse_private_key(body, f"reviewed asset {name}")
         if name in SYSTEMD_ASSETS:
             archive_path = f"payload/systemd/{name}"
@@ -687,7 +779,11 @@ def build_bundle(
             runtime_public_pem,
         ),
         PayloadFile(REQUIREMENTS_ARCHIVE_PATH, requirements_body),
-        *_assets(assets_dir, stable_minimum_sequence=stable_minimum_sequence),
+        *_assets(
+            assets_dir,
+            stable_minimum_sequence=stable_minimum_sequence,
+            stable_metadata_sha256=stable_metadata_sha256,
+        ),
         *wheels,
     ]
     archive = deterministic_archive(files)

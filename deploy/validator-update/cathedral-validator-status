@@ -29,6 +29,10 @@ MAX_CONFIRMED_AGE_SECONDS = 60 * 60
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_CHAIN_HASH = re.compile(r"0x[0-9a-f]{64}")
+_ATTEMPT_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_FINALIZED_RESULTS = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
+_TERMINAL_RESULTS = _FINALIZED_RESULTS | {"EXPIRED_WITHOUT_INCLUSION"}
 ROOT_UID = 0
 
 
@@ -228,6 +232,146 @@ def _updater_summary() -> dict[str, Any]:
     }
 
 
+def _nonnegative_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _attempt_id(identity: dict[str, Any], intent: dict[str, Any]) -> str:
+    try:
+        body = (
+            json.dumps(
+                {"identity": identity, "intent": intent},
+                sort_keys=True,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise StatusUnavailable("direct journal last attempt is invalid") from exc
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def _last_attempt_summary(
+    last: object, *, expected_identity: str
+) -> tuple[str | None, int | None]:
+    if last is None:
+        return None, None
+    if not isinstance(last, dict) or set(last) != {
+        "attempt_id",
+        "status",
+        "identity",
+        "intent",
+        "receipt",
+    }:
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    attempt_id = last["attempt_id"]
+    result = last["status"]
+    identity = last["identity"]
+    intent = last["intent"]
+    receipt = last["receipt"]
+    if (
+        not isinstance(attempt_id, str)
+        or _ATTEMPT_ID.fullmatch(attempt_id) is None
+        or not isinstance(result, str)
+        or result not in _TERMINAL_RESULTS
+        or not isinstance(identity, dict)
+        or identity.get("schema") != "cathedral_direct_validator_plan_v1"
+        or not isinstance(intent, dict)
+        or set(intent)
+        != {
+            "extrinsic_hash",
+            "validator_hotkey",
+            "nonce",
+            "era_reference_block",
+            "mortal_period_blocks",
+            "kwargs",
+            "eligibility",
+        }
+        or intent.get("validator_hotkey") != expected_identity
+        or not _nonnegative_int(intent.get("nonce"))
+        or not _nonnegative_int(intent.get("era_reference_block"))
+        or isinstance(intent.get("mortal_period_blocks"), bool)
+        or not isinstance(intent.get("mortal_period_blocks"), int)
+        or intent["mortal_period_blocks"] <= 0
+        or not isinstance(intent.get("kwargs"), dict)
+        or not isinstance(intent.get("eligibility"), dict)
+        or _attempt_id(identity, intent) != attempt_id
+    ):
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    anchor = identity.get("anchor")
+    validator = anchor.get("validator") if isinstance(anchor, dict) else None
+    if (
+        not isinstance(validator, dict)
+        or validator.get("hotkey") != expected_identity
+        or identity.get("kwargs") != intent["kwargs"]
+    ):
+        raise StatusUnavailable("direct journal last attempt is invalid")
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "status",
+        "attempt_id",
+        "extrinsic_hash",
+        "block_hash",
+        "block_number",
+        "recovered",
+        "confirmation_heads",
+    }:
+        raise StatusUnavailable("direct journal receipt is invalid")
+    extrinsic_hash = receipt["extrinsic_hash"]
+    if (
+        receipt["status"] != result
+        or receipt["attempt_id"] != attempt_id
+        or not isinstance(extrinsic_hash, str)
+        or _CHAIN_HASH.fullmatch(extrinsic_hash) is None
+        or intent["extrinsic_hash"] != extrinsic_hash
+        or type(receipt["recovered"]) is not bool
+        or not isinstance(receipt["confirmation_heads"], list)
+    ):
+        raise StatusUnavailable("direct journal receipt is invalid")
+
+    if result == "EXPIRED_WITHOUT_INCLUSION":
+        if (
+            receipt["block_hash"] is not None
+            or receipt["block_number"] is not None
+            or receipt["recovered"] is not True
+            or receipt["confirmation_heads"] != []
+        ):
+            raise StatusUnavailable("direct journal receipt is invalid")
+        return result, None
+
+    block_number = receipt["block_number"]
+    block_hash = receipt["block_hash"]
+    expected_recovered = result == "RECOVERED_CONFIRMED"
+    heads = receipt["confirmation_heads"]
+    if (
+        not _nonnegative_int(block_number)
+        or not isinstance(block_hash, str)
+        or _CHAIN_HASH.fullmatch(block_hash) is None
+        or receipt["recovered"] is not expected_recovered
+        or not (
+            intent["era_reference_block"]
+            <= block_number
+            < intent["era_reference_block"] + intent["mortal_period_blocks"]
+        )
+        or len(heads) != 3
+    ):
+        raise StatusUnavailable("direct journal receipt is invalid")
+    for offset, row in enumerate(heads):
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not _nonnegative_int(row[0])
+            or row[0] != block_number + offset
+            or not isinstance(row[1], str)
+            or _CHAIN_HASH.fullmatch(row[1]) is None
+        ):
+            raise StatusUnavailable("direct journal receipt is invalid")
+    if heads[0][1] != block_hash:
+        raise StatusUnavailable("direct journal receipt is invalid")
+    return result, block_number
+
+
 def _direct_summary(identity: str) -> dict[str, Any]:
     path = DIRECT_SCOPE / identity / "state.json"
     try:
@@ -262,24 +406,7 @@ def _direct_summary(identity: str) -> dict[str, Any]:
     last = document["last_attempt"]
     if pending is not None and not isinstance(pending, dict):
         raise StatusUnavailable("direct journal pending state is invalid")
-    status = None
-    block_number = None
-    if last is not None:
-        if not isinstance(last, dict) or last.get("status") not in {
-            "CONFIRMED",
-            "RECOVERED_CONFIRMED",
-            "EXPIRED_WITHOUT_INCLUSION",
-        }:
-            raise StatusUnavailable("direct journal last result is invalid")
-        status = last["status"]
-        receipt = last.get("receipt")
-        if (
-            isinstance(receipt, dict)
-            and not isinstance(receipt.get("block_number"), bool)
-            and isinstance(receipt.get("block_number"), int)
-            and receipt["block_number"] >= 0
-        ):
-            block_number = receipt["block_number"]
+    status, block_number = _last_attempt_summary(last, expected_identity=identity)
     return {
         "pending": pending is not None,
         "last_result": status,

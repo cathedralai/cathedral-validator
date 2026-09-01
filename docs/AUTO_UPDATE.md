@@ -65,7 +65,12 @@ sudo apt-get install -y python3.12 python3.12-venv openssl
 Prepare these operator-owned inputs:
 
 1. The hotkey file from
-   `~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY`.
+   `~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY`. It must be the
+   unencrypted keyfile `btcli` writes for hotkeys by default, readable only by
+   its owner (mode `0600`, as `btcli` writes it), and it must contain a signing
+   secret. An encrypted
+   hotkey is refused because the unattended service has no password to decrypt
+   it. A public-only file is refused because it cannot sign weights.
 2. The public SS58 address belonging to that hotkey.
 3. An owner-controlled AMD SEV-SNP policy file containing only measurements
    and TCB floors you reviewed.
@@ -101,6 +106,16 @@ replacement for the runtime key. It checks the signature, both fingerprints,
 manifest, file set, and wheel hashes before installing anything. It installs no
 release and enables no service by itself.
 
+The signed manifest also records the authenticated stable-release floor: the
+minimum stable sequence and the digest of the exact signed stable record the
+bootstrap was built from. The installer persists that floor and refuses any
+later bootstrap that would lower it, whatever its bootstrap sequence. Until the
+host commits its first stable record, that bound record stands in for it: a
+different signed record at the same sequence is refused as equivocation, and a
+strictly higher signed stable release is accepted as its successor. A bootstrap
+therefore stays usable for new hosts after later stable publications, and
+routine updates follow the monotonic signed release contract from the start.
+
 <!-- BEGIN GENERATED UPDATER BOOTSTRAP -->
 Publication pending. The exact copy and paste install commands will be added to
 `README.md` only after live testing with:
@@ -132,12 +147,22 @@ sudo cathedral-validator-setup \
   --confirm-direct-write
 ```
 
-The command verifies the inputs, checks that the hotkey file names the public
-address you supplied, installs the signed stable release, starts the direct
-validator on first installation, and enables only the stable update timer. It
-refuses files outside a Bittensor `hotkeys` directory, unsafe existing files,
-or unresolved updater state. It never prints the hotkey. Re-running setup never
-restarts a stopped validator because a stopped writer might need review.
+The command verifies the inputs, checks that the hotkey file is an unencrypted
+owner-only keyfile naming the public address you supplied, installs the signed
+stable release the bootstrap was built from or a later signed stable release,
+and enables only the stable update timer. It refuses files outside a Bittensor `hotkeys` directory, unsafe
+existing files, or unresolved updater state. It never prints the hotkey.
+
+Setup never starts or restarts the direct validator itself. The first signed
+install starts it, and setup only records the boot dependency afterwards. If
+setup is interrupted after that first start, re-run it while the validator is
+still running. Once the installation is committed, a stopped validator, whether
+stopped by a reboot, an operator, or a contradiction stop, makes every setup
+rerun refuse. Review `sudo cathedral-validator-status`, the journal, and
+finalized chain state before starting anything. The one exception is a first
+install the updater never committed: re-running setup resumes the updater's own
+durable recovery, which starts the writer only while the journal is idle and
+never after a contradiction.
 
 ## Check it
 
@@ -199,6 +224,9 @@ sudo rm /etc/cathedral-validator/update.pause
 - Do not delete the validator journal or updater state.
 - Do not replace the `current` link by hand.
 - Do not run both channel timers.
+- A first release that never reaches readiness after an updater crash is
+  rescued only by a strictly higher signed stable release, never by a
+  re-signed record at the same sequence.
 - Do not retry a chain write whose outcome is unresolved.
 - Keep the pause file in place while investigating repeated update refusal.
 - A `CONTRADICTION_STOPPED` validator needs journal and finalized-chain review.

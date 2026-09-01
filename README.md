@@ -24,7 +24,9 @@ pinned TDX and SNP verifier programs.
 ## What you need
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
-- Your Bittensor validator hotkey file and its public SS58 address.
+- Your Bittensor validator hotkey file and its public SS58 address. The file
+  must be unencrypted (the `btcli` default for hotkeys) and readable only by
+  its owner.
 - A reviewed AMD SEV-SNP policy containing only measurements and TCB floors you
   trust.
 
