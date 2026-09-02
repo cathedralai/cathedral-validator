@@ -34,17 +34,152 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 CAPTURE_SCHEMA = "cathedral_validator_live_update_host_capture_v1"
 CAPTURE_MARKER = "CATHEDRAL_EVIDENCE_SECTION_V1"
 RESULT_SCHEMA = "cathedral_validator_live_update_e2e_result_v1"
+SCENARIO_MATRIX_SCHEMA = "cathedral_validator_live_update_scenario_matrix_v1"
 EVIDENCE_INDEX_SCHEMA = "cathedral_validator_live_update_evidence_index_v1"
 EVIDENCE_DIGEST_DOMAIN = b"cathedral-validator-live-update-evidence-v1\x00"
 RESULT_NAME = "live_update_e2e_result_v1.json"
 SIGNATURE_NAME = f"{RESULT_NAME}.sig"
 DIGEST_NAME = f"{RESULT_NAME}.sha256"
 RESULT_PUBLIC_KEY_NAME = "live-update-e2e-result-public-key.pem"
+RESULT_TOOL_PATH = "scripts/live_update_e2e_result.py"
+CONTROLLER_PATH = "scripts/live_validator_update_e2e.sh"
+EVIDENCE_TREE_ALGORITHM = "sha256-domain-separated-canonical-json-file-list-v1"
+SIGNER_PURPOSE = "live_e2e_test_evidence_only"
+SIGNER_ALGORITHM = "ed25519"
+AUTHORITY_NOTE = (
+    "The detached signature authenticates the configured test-evidence "
+    "key only; operator identity and immutable publication remain separate "
+    "owner/operator actions."
+)
+TERMINAL_PASS = {
+    "state": "pass",
+    "original_exit_status": 0,
+    "scenarios_complete": True,
+    "required_evidence_complete": True,
+    "teardown_verified": True,
+}
+NO_CHAIN_SCOPE = {
+    "kind": "no_chain_updater_live_acceptance",
+    "chain_write": False,
+    "validator_cycle": False,
+    "wallet_loaded": False,
+    "production_release_key_loaded": False,
+    "disposable_test_release_keys_generated": True,
+}
+UNATTESTED_AUTHORITY = {
+    "operator_identity_attested": False,
+    "immutable_publication_present": False,
+    "note": AUTHORITY_NOTE,
+}
+RESULT_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "schema",
+        "run",
+        "terminal",
+        "scope",
+        "controller",
+        "signer",
+        "scenario_matrix",
+        "evidence_tree",
+        "authority",
+    }
+)
+RUN_FIELDS = frozenset(
+    {
+        "id",
+        "finished_at",
+        "source_revision_a",
+        "source_revision_b",
+        "archive_a_sha256",
+        "archive_b_sha256",
+    }
+)
+SIGNER_FIELDS = frozenset(
+    {
+        "purpose",
+        "key_id",
+        "algorithm",
+        "public_key_path",
+        "public_key_fingerprint",
+        "authorizes_chain_or_weight_changes",
+    }
+)
+EVIDENCE_TREE_FIELDS = frozenset({"algorithm", "root_sha256", "file_count", "files"})
+RUNTIME_METADATA_SCHEMA = "cathedral_validator_release_v1"
+BOOTSTRAP_MANIFEST_SCHEMA = "cathedral_validator_updater_bootstrap_v3"
+BOOTSTRAP_PUBLICATION_SCHEMA = "cathedral_validator_live_bootstrap_publication_v1"
+RUNTIME_METADATA_LIFETIME_SECONDS = 43_200
+BOOTSTRAP_LIFETIME_SECONDS = 43_200
+RUNTIME_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
+RUNTIME_KEY_BUNDLE_PATH = "payload/runtime-release-public-key.pem"
+RUNTIME_METADATA_SPECS: tuple[tuple[str, str, int, str, str | None], ...] = (
+    ("canary-a-seq1.json", "canary", 1, "archive_a_sha256", None),
+    ("canary-b-seq2.json", "canary", 2, "archive_b_sha256", None),
+    ("canary-b-renewal-seq3.json", "canary", 3, "archive_b_sha256", None),
+    ("canary-a-equivocation-seq3.json", "canary", 3, "archive_a_sha256", None),
+    ("canary-a-seq4.json", "canary", 4, "archive_a_sha256", None),
+    (
+        "stable-a-seq1.json",
+        "stable",
+        1,
+        "archive_a_sha256",
+        "canary-a-seq1.json",
+    ),
+    (
+        "stable-b-seq2.json",
+        "stable",
+        2,
+        "archive_b_sha256",
+        "canary-b-seq2.json",
+    ),
+    (
+        "stable-a-seq3.json",
+        "stable",
+        3,
+        "archive_a_sha256",
+        "canary-a-seq4.json",
+    ),
+    (
+        "stable-b-seq4.json",
+        "stable",
+        4,
+        "archive_b_sha256",
+        "canary-b-renewal-seq3.json",
+    ),
+    (
+        "stable-a-rescue-seq5.json",
+        "stable",
+        5,
+        "archive_a_sha256",
+        "canary-a-seq4.json",
+    ),
+)
+INVALID_RUNTIME_METADATA_NAME = "canary-b-invalid-signature.json"
+RUNTIME_METADATA_NAMES = frozenset(
+    {name for name, _channel, _sequence, _archive, _promotion in RUNTIME_METADATA_SPECS}
+    | {INVALID_RUNTIME_METADATA_NAME}
+)
+BOOTSTRAP_PROOF_FILES = frozenset(
+    {
+        "bootstrap-build.json",
+        "updater-bootstrap.manifest.json",
+        "updater-bootstrap.manifest.sig",
+    }
+)
 HEX_64 = re.compile(r"[0-9a-f]{64}")
 SAFE_SECTION = re.compile(r"[a-z][a-z0-9_]{0,63}")
 SAFE_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}")
 SAFE_CAPTURE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}")
 REVISION = re.compile(r"[0-9a-f]{40}")
+SAFE_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{5,20}")
+SAFE_REPOSITORY_COMPONENT = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?"
+)
+SAFE_ZONE = re.compile(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?-[a-z]\b")
+RFC3339_UTC_SECONDS = re.compile(
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z"
+)
 
 GENERIC_SECTIONS: tuple[tuple[str, bool], ...] = (
     ("current_release", True),
@@ -72,6 +207,7 @@ TRANSIENT_SECTIONS: tuple[tuple[str, bool], ...] = (
 REQUIRED_SUCCESS_FILES = frozenset(
     {
         "bootstrap-publication.json",
+        "bootstrap-build.json",
         "bootstrap-release-record.json",
         "bootstrap-tag-record.json",
         "canary-branch.json",
@@ -82,6 +218,7 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "canary-instance-metadata-before.json",
         "canary-instance-metadata-final.json",
         "canary-instance.json",
+        "canary-first-install-sequence-state.json",
         "canary-same-boot-reactivation-timer-reactivation-start.log",
         "canary-same-boot-reactivation-timer-reactivation-state.log",
         "canary-same-boot-reactivation-timer-reactivation-wait.log",
@@ -126,6 +263,7 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "stable-instance-metadata-before.json",
         "stable-instance-metadata-final.json",
         "stable-instance.json",
+        "stable-first-install-sequence-state.json",
         "steps.log",
         "teardown-canary-disk-result.txt",
         "teardown-canary-vm-result.txt",
@@ -139,6 +277,9 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "test-publication-main-before.json",
         "test-publication-repository.json",
         "bootstrap-release-public-key.pem",
+        "updater-bootstrap.manifest.json",
+        "updater-bootstrap.manifest.sig",
+        *{f"signed-runtime-metadata/{name}" for name in RUNTIME_METADATA_NAMES},
     }
 )
 EMPTY_TEARDOWN_LISTS = (
@@ -167,6 +308,323 @@ TEARDOWN_RESOURCE_PROOFS = (
     ("teardown-firewall-result.txt", "firewall", "catval-{run_id}-ssh"),
     ("teardown-subnet-result.txt", "subnet", "catval-{run_id}-subnet"),
     ("teardown-network-result.txt", "network", "catval-{run_id}-net"),
+)
+
+CONTROL_FIELDS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "gcp_project",
+        "zone",
+        "controller_transport",
+        "iap_source_range",
+        "vm_service_account_attached",
+        "machine_type",
+        "vm_count",
+        "max_run_seconds",
+        "vm_and_disk_estimate_usd",
+        "network_ipv4_and_egress_allowance_usd",
+        "planning_total_usd",
+        "cost_scope",
+        "source_repository",
+        "test_publication_repository",
+        "test_mirror_main_sha",
+        "canonical_source_write_allowed",
+        "source_revision_a",
+        "source_revision_b",
+        "archive_a_sha256",
+        "archive_b_sha256",
+        "bootstrap_key_fingerprint",
+        "runtime_key_fingerprint",
+        "canary_branch",
+        "stable_branch",
+        "fault_branch",
+        "no_chain_harness_sha256",
+        "fault_origin_sha256",
+        "state_waiter_sha256",
+        "result_signer",
+        "bootstrap_track",
+        "bootstrap_tag",
+        "bootstrap_transport",
+        "anonymous_bootstrap_download_required",
+        "fixed_channel_cache_max_seconds",
+        "update_timer_interval_seconds",
+        "fixed_channel_wait_seconds",
+    }
+)
+CONTROL_COST_SCOPE = (
+    "conservative VM and disk estimate plus a 0.20 USD planning allowance "
+    "for two external IPv4 addresses and bounded network traffic; this is "
+    "not a cloud billing cap"
+)
+
+RECORDED_STEPS = (
+    "publish first exact A release to isolated canary and stable channels",
+    "create bounded two-host GCP network",
+    "first install A through signed bootstrap and no-chain systemd readiness",
+    "prove both first installs committed exact release A",
+    "invalid signature refuses without changing A",
+    "tampered archive bytes refuse before activation",
+    "publish B and observe canary timer activate A to B",
+    "promote exact B archive and observe stable timer activate it",
+    "same B archive renewal advances signed sequence without restart",
+    "replay, equivocation, and metadata outage fail closed",
+    "pause blocks a valid newer release without changing B",
+    "held cycle lock times out without activation",
+    "unresolved writer journal blocks activation",
+    "target-specific readiness failure rolls A back to B",
+    "reset at durable may_have_run and reconcile exact A on boot",
+    "leave B crash-uncertain, then rescue with higher signed A sequence",
+    "SCENARIOS_PASS_PENDING_TEARDOWN all bounded no-chain updater scenarios",
+)
+
+# Each artifact path is stable protocol evidence. ``{run_id}`` is the only
+# substitution, and ``empty_allowed`` is explicit so an empty command log can
+# never silently stand in for a proof artifact.
+SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
+    (
+        "initial_release_publication",
+        RECORDED_STEPS[0],
+        (("canary-a1-publish.log", False), ("stable-a1-publish.log", False)),
+    ),
+    (
+        "bounded_two_host_network",
+        RECORDED_STEPS[1],
+        (("created-run-instances.json", False),),
+    ),
+    (
+        "signed_first_install",
+        RECORDED_STEPS[2],
+        (
+            ("bootstrap-build.json", False),
+            ("updater-bootstrap.manifest.json", False),
+            ("updater-bootstrap.manifest.sig", False),
+            ("bootstrap-release-public-key.pem", False),
+            ("runtime-release-public-key.pem", False),
+            ("first-install-command-catval-{run_id}-canary.log", False),
+            ("first-install-command-catval-{run_id}-stable.log", False),
+            ("first-readiness-command-catval-{run_id}-canary.log", False),
+            ("first-readiness-command-catval-{run_id}-stable.log", False),
+        ),
+    ),
+    (
+        "exact_first_install_commit",
+        RECORDED_STEPS[3],
+        (
+            ("canary-first-install-a-current-proof.txt", False),
+            ("stable-first-install-a-current-proof.txt", False),
+            ("canary-first-install-sequence-state.json", False),
+            ("stable-first-install-sequence-state.json", False),
+            ("signed-runtime-metadata/canary-a-seq1.json", False),
+            ("signed-runtime-metadata/stable-a-seq1.json", False),
+        ),
+    ),
+    (
+        "invalid_signature_refusal",
+        RECORDED_STEPS[4],
+        (
+            ("signed-runtime-metadata/canary-b-invalid-signature.json", False),
+            ("invalid-signature.log", False),
+            ("invalid-signature-before.json", False),
+            ("invalid-signature-after.json", False),
+            ("invalid-signature-service-before.txt", False),
+            ("invalid-signature-service-after.txt", False),
+            ("invalid-signature-current-proof.txt", False),
+        ),
+    ),
+    (
+        "tampered_archive_refusal",
+        RECORDED_STEPS[5],
+        (
+            ("signed-runtime-metadata/canary-b-seq2.json", False),
+            ("tampered-archive.log", False),
+            ("tampered-archive-before.json", False),
+            ("tampered-archive-after.json", False),
+            ("tampered-archive-service-before.txt", False),
+            ("tampered-archive-service-after.txt", False),
+            ("tampered-archive-current-proof.txt", False),
+        ),
+    ),
+    (
+        "canary_timer_promotion",
+        RECORDED_STEPS[6],
+        (
+            ("signed-runtime-metadata/canary-b-seq2.json", False),
+            ("canary-timer-a-to-b-timer-start-command.log", False),
+            ("canary-timer-a-to-b-timer-wait-command.log", False),
+            ("canary-timer-a-to-b-timer-rearm-command.log", False),
+            ("canary-timer-a-to-b-current-proof.txt", False),
+        ),
+    ),
+    (
+        "stable_timer_promotion",
+        RECORDED_STEPS[7],
+        (
+            ("signed-runtime-metadata/stable-b-seq2.json", False),
+            ("stable-exact-promotion-timer-start-command.log", False),
+            ("stable-exact-promotion-timer-wait-command.log", False),
+            ("stable-exact-promotion-timer-rearm-command.log", False),
+            ("stable-exact-promotion-current-proof.txt", False),
+        ),
+    ),
+    (
+        "same_archive_renewal_and_reactivation",
+        RECORDED_STEPS[8],
+        (
+            ("signed-runtime-metadata/canary-b-renewal-seq3.json", False),
+            ("canary-same-archive-renewal-current-proof.txt", False),
+            (
+                "canary-same-boot-reactivation-timer-reactivation-start.log",
+                False,
+            ),
+            (
+                "canary-same-boot-reactivation-timer-reactivation-wait.log",
+                False,
+            ),
+            (
+                "canary-same-boot-reactivation-timer-reactivation-state.log",
+                False,
+            ),
+            ("same-archive-pid-before-value-command.stderr", True),
+        ),
+    ),
+    (
+        "signed_metadata_faults",
+        RECORDED_STEPS[9],
+        (
+            ("signed-runtime-metadata/canary-a-equivocation-seq3.json", False),
+            ("replay.log", False),
+            ("replay-before.json", False),
+            ("replay-after.json", False),
+            ("replay-service-before.txt", False),
+            ("replay-service-after.txt", False),
+            ("equivocation.log", False),
+            ("equivocation-before.json", False),
+            ("equivocation-after.json", False),
+            ("equivocation-service-before.txt", False),
+            ("equivocation-service-after.txt", False),
+            ("metadata-outage.log", False),
+            ("metadata-outage-before.json", False),
+            ("metadata-outage-after.json", False),
+            ("metadata-outage-service-before.txt", False),
+            ("metadata-outage-service-after.txt", False),
+            ("signed-metadata-faults-current-proof.txt", False),
+        ),
+    ),
+    (
+        "pause",
+        RECORDED_STEPS[10],
+        (
+            ("signed-runtime-metadata/canary-a-seq4.json", False),
+            ("pause.log", False),
+            ("pause-before.json", False),
+            ("pause-after.json", False),
+            ("pause-service-before.txt", False),
+            ("pause-service-after.txt", False),
+            ("pause-current-proof.txt", False),
+        ),
+    ),
+    (
+        "held_cycle",
+        RECORDED_STEPS[11],
+        (
+            ("held-cycle.log", False),
+            ("held-cycle-before.json", False),
+            ("held-cycle-after.json", False),
+            ("held-cycle-service-before.txt", False),
+            ("held-cycle-service-after.txt", False),
+            ("held-cycle-current-proof.txt", False),
+        ),
+    ),
+    (
+        "unresolved_journal",
+        RECORDED_STEPS[12],
+        (
+            ("unresolved-journal.log", False),
+            ("unresolved-journal-before.json", False),
+            ("unresolved-journal-after.json", False),
+            ("unresolved-journal-service-before.txt", False),
+            ("unresolved-journal-service-after.txt", False),
+            ("unresolved-journal-current-proof.txt", False),
+        ),
+    ),
+    (
+        "readiness_rollback",
+        RECORDED_STEPS[13],
+        (
+            ("readiness-rollback.log", False),
+            ("readiness-rollback-before.json", False),
+            ("readiness-rollback-after.json", False),
+            ("readiness-rollback-service-before.txt", False),
+            ("readiness-rollback-service-after.txt", False),
+            ("readiness-rollback-current-proof.txt", False),
+        ),
+    ),
+    (
+        "durable_reset_reconciliation",
+        RECORDED_STEPS[14],
+        (
+            ("signed-runtime-metadata/stable-a-seq3.json", False),
+            ("stable-reset-pre-action-state.json", False),
+            ("stable-reset-request-command.log", False),
+            ("stable-reset-reconcile-proof-command.log", False),
+            ("reset-may-have-run-current-proof.txt", False),
+        ),
+    ),
+    (
+        "higher_sequence_rescue",
+        RECORDED_STEPS[15],
+        (
+            ("signed-runtime-metadata/stable-b-seq4.json", False),
+            ("signed-runtime-metadata/stable-a-rescue-seq5.json", False),
+            ("stable-rescue-pre-action-state.json", False),
+            ("stable-rescue-crash-command.log", False),
+            ("higher-sequence-rescue-update-command.log", False),
+            ("higher-sequence-rescue-current-proof.txt", False),
+        ),
+    ),
+    (
+        "final_capture",
+        RECORDED_STEPS[16],
+        (
+            ("final-canary-sections.json", False),
+            ("final-canary-capture-retries.log", False),
+            ("final-canary.d/direct_unit_show.txt", False),
+            ("final-canary.d/updater_state.txt", False),
+            ("final-stable-sections.json", False),
+            ("final-stable-capture-retries.log", False),
+            ("final-stable.d/direct_unit_show.txt", False),
+            ("final-stable.d/updater_state.txt", False),
+        ),
+    ),
+)
+
+# Every negative scenario snapshots the updater and direct service on both sides
+# of the refused update.  These policies are kept separate from the shell's
+# assertions so the signed result verifier independently checks the claimed
+# non-mutation boundary.  ``restarted`` is used only for the intentional
+# readiness rollback, where state/current must remain unchanged but systemd
+# must expose a fresh service invocation.
+NEGATIVE_SCENARIO_INVARIANTS = (
+    ("invalid-signature", "archive_a_sha256", 1, "unchanged"),
+    ("tampered-archive", "archive_a_sha256", 1, "unchanged"),
+    ("replay", "archive_b_sha256", 3, "unchanged"),
+    ("equivocation", "archive_b_sha256", 3, "unchanged"),
+    ("metadata-outage", "archive_b_sha256", 3, "unchanged"),
+    ("pause", "archive_b_sha256", 3, "unchanged"),
+    ("held-cycle", "archive_b_sha256", 3, "unchanged"),
+    ("unresolved-journal", "archive_b_sha256", 3, "unchanged"),
+    ("readiness-rollback", "archive_b_sha256", 3, "restarted"),
+)
+
+CURRENT_RELEASE_PROOFS = (
+    ("invalid-signature-current-proof.txt", "archive_a_sha256"),
+    ("tampered-archive-current-proof.txt", "archive_a_sha256"),
+    ("signed-metadata-faults-current-proof.txt", "archive_b_sha256"),
+    ("pause-current-proof.txt", "archive_b_sha256"),
+    ("held-cycle-current-proof.txt", "archive_b_sha256"),
+    ("unresolved-journal-current-proof.txt", "archive_b_sha256"),
+    ("readiness-rollback-current-proof.txt", "archive_b_sha256"),
 )
 RESULT_EXCLUSIONS = frozenset({RESULT_NAME, SIGNATURE_NAME, DIGEST_NAME})
 
@@ -236,6 +694,66 @@ def _read_regular(path: Path, *, label: str, require_nonempty: bool = False) -> 
     return data
 
 
+def _resolve_evidence_root(path: Path) -> Path:
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise EvidenceError(f"missing EVIDENCE_DIR: {path}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise EvidenceError("EVIDENCE_DIR must be a regular directory")
+    return path.resolve(strict=True)
+
+
+def _require_exact_object(
+    value: Any, expected: dict[str, Any], *, label: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    for key, expected_value in expected.items():
+        observed = value[key]
+        if type(observed) is not type(expected_value) or observed != expected_value:
+            raise EvidenceError(f"{label} has an invalid {key}")
+    return value
+
+
+def _validate_utc_seconds(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or RFC3339_UTC_SECONDS.fullmatch(value) is None:
+        raise EvidenceError(
+            f"{label} must be an RFC3339 UTC timestamp at whole seconds"
+        )
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise EvidenceError(
+            f"{label} must be an RFC3339 UTC timestamp at whole seconds"
+        ) from exc
+    return value
+
+
+def _reviewed_source_identity(
+    controller_input: Path | None = None,
+) -> tuple[Path, bytes, bytes]:
+    tool_input = Path(__file__)
+    tool_bytes = _read_regular(
+        tool_input, label="current result verifier source", require_nonempty=True
+    )
+    tool_path = tool_input.resolve(strict=True)
+    if tool_path.name != PurePosixPath(RESULT_TOOL_PATH).name:
+        raise EvidenceError("current result verifier does not use its canonical path")
+    controller_path = tool_path.with_name(PurePosixPath(CONTROLLER_PATH).name)
+    selected_controller = (
+        controller_input if controller_input is not None else controller_path
+    )
+    controller_bytes = _read_regular(
+        selected_controller, label="live controller source", require_nonempty=True
+    )
+    if selected_controller.resolve(strict=True) != controller_path:
+        raise EvidenceError(
+            "live controller source does not use its reviewed canonical path"
+        )
+    return controller_path, controller_bytes, tool_bytes
+
+
 def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
     if path.exists() or path.is_symlink():
         raise EvidenceError(f"refusing to replace existing output: {path}")
@@ -266,20 +784,30 @@ def _load_key_pair(
     private_info = private_path.lstat()
     public_info = public_path.lstat()
     if stat.S_ISLNK(private_info.st_mode) or not stat.S_ISREG(private_info.st_mode):
-        raise EvidenceError("result signing private key must be a regular non-symlink file")
+        raise EvidenceError(
+            "result signing private key must be a regular non-symlink file"
+        )
     if stat.S_ISLNK(public_info.st_mode) or not stat.S_ISREG(public_info.st_mode):
-        raise EvidenceError("result signing public key must be a regular non-symlink file")
+        raise EvidenceError(
+            "result signing public key must be a regular non-symlink file"
+        )
     if private_info.st_uid != os.getuid():
-        raise EvidenceError("result signing private key must be owned by the controller user")
+        raise EvidenceError(
+            "result signing private key must be owned by the controller user"
+        )
     if stat.S_IMODE(private_info.st_mode) & 0o077:
-        raise EvidenceError("result signing private key must not grant group/other access")
+        raise EvidenceError(
+            "result signing private key must not grant group/other access"
+        )
     try:
         private = serialization.load_pem_private_key(
             private_path.read_bytes(), password=None
         )
         public = serialization.load_pem_public_key(public_path.read_bytes())
     except (TypeError, ValueError) as exc:
-        raise EvidenceError("result signing keys are not valid unencrypted PEM") from exc
+        raise EvidenceError(
+            "result signing keys are not valid unencrypted PEM"
+        ) from exc
     if not isinstance(private, Ed25519PrivateKey) or not isinstance(
         public, Ed25519PublicKey
     ):
@@ -409,7 +937,9 @@ def _capture_manifest_complete(
             errors.append(f"required section failed or is empty: {section_id}")
         if section_id == "current_release" and status_value == 0:
             if re.fullmatch(rb"releases/[0-9a-f]{64}\n?", data) is None:
-                errors.append("current_release is not one exact content-addressed release")
+                errors.append(
+                    "current_release is not one exact content-addressed release"
+                )
         if section_id == "updater_state" and status_value == 0:
             try:
                 state = strict_json(data, label="captured updater_state")
@@ -458,9 +988,10 @@ def decode_capture(args: argparse.Namespace) -> int:
             errors.append(f"line {line_number} duplicates section {section_id}")
             continue
         required = requirement == "required"
-        if requirement not in {"required", "optional"} or required is not expected_map[
-            section_id
-        ]:
+        if (
+            requirement not in {"required", "optional"}
+            or required is not expected_map[section_id]
+        ):
             errors.append(f"line {line_number} misclassifies section {section_id}")
             continue
         try:
@@ -500,7 +1031,9 @@ def decode_capture(args: argparse.Namespace) -> int:
     if missing:
         errors.append(f"missing sections: {','.join(sorted(missing))}")
     if args.artifacts_dir.exists() or args.artifacts_dir.is_symlink():
-        raise EvidenceError(f"capture artifacts directory already exists: {args.artifacts_dir}")
+        raise EvidenceError(
+            f"capture artifacts directory already exists: {args.artifacts_dir}"
+        )
     args.artifacts_dir.mkdir(mode=0o700, parents=True)
     for section_id, _required in expected:
         if section_id in payloads:
@@ -510,7 +1043,9 @@ def decode_capture(args: argparse.Namespace) -> int:
                 mode=0o600,
             )
 
-    ordered_rows = [rows[section_id] for section_id, _ in expected if section_id in rows]
+    ordered_rows = [
+        rows[section_id] for section_id, _ in expected if section_id in rows
+    ]
     provisional: dict[str, Any] = {
         "schema": CAPTURE_SCHEMA,
         "label": args.label,
@@ -593,7 +1128,9 @@ def _systemd_show_blocks(data: bytes, *, label: str) -> list[dict[str, str]]:
     return blocks
 
 
-def _validate_final_systemd_state(artifacts_dir: Path, *, label: str) -> None:
+def _validate_final_systemd_state(
+    artifacts_dir: Path, *, label: str
+) -> dict[str, str | int]:
     direct_blocks = _systemd_show_blocks(
         _read_regular(
             artifacts_dir / "direct_unit_show.txt", label=f"{label} direct unit state"
@@ -616,6 +1153,33 @@ def _validate_final_systemd_state(artifacts_dir: Path, *, label: str) -> None:
         or main_pid <= 0
     ):
         raise EvidenceError(f"{label} direct validator service is not healthy")
+    invocation_id = direct.get("InvocationID", "")
+    if re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None:
+        raise EvidenceError(
+            f"{label} direct validator service has no valid InvocationID"
+        )
+
+    boot_blocks = _systemd_show_blocks(
+        _read_regular(
+            artifacts_dir / "boot_reconcile_show.txt",
+            label=f"{label} boot reconcile state",
+        ),
+        label=f"{label} boot reconcile state",
+    )
+    if len(boot_blocks) != 1:
+        raise EvidenceError(
+            f"{label} boot reconcile state has multiple property blocks"
+        )
+    boot = boot_blocks[0]
+    if (
+        boot.get("Result") != "success"
+        or boot.get("ExecMainCode") not in {"0", "1"}
+        or boot.get("ExecMainStatus") != "0"
+        or boot.get("ActiveState") != "inactive"
+        or boot.get("SubState") != "dead"
+        or boot.get("MainPID") != "0"
+    ):
+        raise EvidenceError(f"{label} boot reconcile service is not settled")
 
     updater_blocks = _systemd_show_blocks(
         _read_regular(
@@ -629,16 +1193,23 @@ def _validate_final_systemd_state(artifacts_dir: Path, *, label: str) -> None:
         "cathedral-validator-canary-update.service",
         "cathedral-validator-update.service",
     }
-    if set(updater_by_id) != expected_updaters or any(
-        block.get("ActiveState") != "inactive" or block.get("SubState") != "dead"
-        for block in updater_by_id.values()
+    if (
+        len(updater_blocks) != len(expected_updaters)
+        or set(updater_by_id) != expected_updaters
+        or any(
+            block.get("Result") != "success"
+            or block.get("ExecMainCode") not in {"0", "1"}
+            or block.get("ExecMainStatus") != "0"
+            or block.get("ActiveState") != "inactive"
+            or block.get("SubState") != "dead"
+            or block.get("MainPID") != "0"
+            for block in updater_by_id.values()
+        )
     ):
-        raise EvidenceError(f"{label} updater services are not settled")
+        raise EvidenceError(f"{label} updater services are not successful and settled")
 
     timer_blocks = _systemd_show_blocks(
-        _read_regular(
-            artifacts_dir / "timers_show.txt", label=f"{label} timer states"
-        ),
+        _read_regular(artifacts_dir / "timers_show.txt", label=f"{label} timer states"),
         label=f"{label} timer states",
     )
     timers_by_id = {block.get("Id"): block for block in timer_blocks}
@@ -646,13 +1217,43 @@ def _validate_final_systemd_state(artifacts_dir: Path, *, label: str) -> None:
         "cathedral-validator-canary-update.timer",
         "cathedral-validator-update.timer",
     }
-    if set(timers_by_id) != expected_timers or any(
-        block.get("UnitFileState") != "disabled"
-        or block.get("ActiveState") != "inactive"
-        or block.get("SubState") != "dead"
-        for block in timers_by_id.values()
+    if (
+        len(timer_blocks) != len(expected_timers)
+        or set(timers_by_id) != expected_timers
+        or any(
+            block.get("UnitFileState") != "disabled"
+            or block.get("ActiveState") != "inactive"
+            or block.get("SubState") != "dead"
+            for block in timers_by_id.values()
+        )
     ):
         raise EvidenceError(f"{label} updater timers are not disabled and settled")
+    return {"main_pid": main_pid, "invocation_id": invocation_id}
+
+
+def _validate_final_updater_state(
+    value: Any, *, label: str, channel: str, expected_record: dict[str, Any]
+) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "selected_channel",
+        "channels",
+        "pending",
+    }:
+        raise EvidenceError(f"{label} updater state has unexpected or missing fields")
+    channels = value.get("channels")
+    if (
+        value.get("schema") != "cathedral_validator_updater_state_v3"
+        or value.get("selected_channel") != channel
+        or value.get("pending") is not None
+        or not isinstance(channels, dict)
+        or set(channels) != {channel}
+    ):
+        raise EvidenceError(f"{label} updater state is not settled for {channel}")
+    if channels[channel] != expected_record:
+        raise EvidenceError(
+            f"{label} updater channel record does not match retained signed metadata"
+        )
 
 
 def verify_capture(args: argparse.Namespace) -> int:
@@ -675,6 +1276,1064 @@ def _single_ascii_line(root: Path, relative: str, *, label: str) -> str:
     return text[:-1]
 
 
+def _validate_recorded_steps(root: Path) -> list[dict[str, str | int]]:
+    data = _read_regular(
+        root / "steps.log", label="scenario steps", require_nonempty=True
+    )
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError("scenario steps must be ASCII") from exc
+    if not text.endswith("\n"):
+        raise EvidenceError("scenario steps must end with a newline")
+    lines = text.splitlines()
+    if len(lines) != len(RECORDED_STEPS):
+        raise EvidenceError(
+            f"scenario steps must contain exactly {len(RECORDED_STEPS)} records"
+        )
+    rows: list[dict[str, str | int]] = []
+    for index, (line, expected_message) in enumerate(
+        zip(lines, RECORDED_STEPS, strict=True), start=1
+    ):
+        timestamp, separator, message = line.partition(" ")
+        if separator != " " or message != expected_message:
+            raise EvidenceError(
+                f"scenario step {index} is missing, reordered, or unexpected"
+            )
+        _validate_utc_seconds(timestamp, label=f"scenario step {index} timestamp")
+        rows.append({"index": index, "recorded_at": timestamp, "record_step": message})
+    return rows
+
+
+def _scenario_artifact_path(template: str, *, run_id: str) -> str:
+    relative = template.format(run_id=run_id)
+    path = PurePosixPath(relative)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise EvidenceError(f"scenario artifact path is unsafe: {relative}")
+    return path.as_posix()
+
+
+def _validate_negative_updater_state(
+    value: Any,
+    *,
+    label: str,
+    archive_sha256: str,
+    sequence: int,
+) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "channel",
+        "current",
+        "record",
+        "sequence",
+        "pending",
+    }:
+        raise EvidenceError(f"{label} has an invalid updater-state shape")
+    record = value.get("record")
+    if not isinstance(record, dict) or set(record) != {
+        "sequence",
+        "archive_sha256",
+        "signed_sha256",
+        "metadata_sha256",
+    }:
+        raise EvidenceError(f"{label} has an invalid channel record")
+    if (
+        value.get("channel") != "canary"
+        or value.get("current") != f"releases/{archive_sha256}"
+        or type(value.get("sequence")) is not int
+        or value.get("sequence") != sequence
+        or value.get("pending") is not None
+        or type(record.get("sequence")) is not int
+        or record.get("sequence") != sequence
+        or record.get("archive_sha256") != archive_sha256
+        or any(
+            type(record.get(field)) is not str
+            or HEX_64.fullmatch(record[field]) is None
+            for field in ("signed_sha256", "metadata_sha256")
+        )
+    ):
+        raise EvidenceError(f"{label} does not prove the expected settled release")
+
+
+def _validate_negative_service_identity(data: bytes, *, label: str) -> dict[str, str]:
+    blocks = _systemd_show_blocks(data, label=label)
+    if len(blocks) != 1 or set(blocks[0]) != {
+        "ActiveState",
+        "SubState",
+        "MainPID",
+        "InvocationID",
+    }:
+        raise EvidenceError(f"{label} has an invalid direct-service identity")
+    identity = blocks[0]
+    if (
+        identity.get("ActiveState") != "active"
+        or identity.get("SubState") != "running"
+        or re.fullmatch(r"[1-9][0-9]*", identity.get("MainPID", "")) is None
+        or re.fullmatch(r"[0-9A-Fa-f]{32}", identity.get("InvocationID", "")) is None
+    ):
+        raise EvidenceError(f"{label} does not prove a healthy direct service")
+    return identity
+
+
+def _validate_current_release_proof(
+    data: bytes, *, label: str, archive_sha256: str
+) -> None:
+    expected = f"expected={archive_sha256} observed={archive_sha256}\n".encode("ascii")
+    if data != expected:
+        raise EvidenceError(f"{label} does not prove the expected current release")
+
+
+def _validate_negative_scenario_invariants(root: Path, control: dict[str, Any]) -> None:
+    for label, archive_field, sequence, service_policy in NEGATIVE_SCENARIO_INVARIANTS:
+        archive_sha256 = control[archive_field]
+        before_state_data = _read_regular(
+            root / f"{label}-before.json",
+            label=f"negative scenario {label} before state",
+            require_nonempty=True,
+        )
+        after_state_data = _read_regular(
+            root / f"{label}-after.json",
+            label=f"negative scenario {label} after state",
+            require_nonempty=True,
+        )
+        before_state = strict_json(
+            before_state_data,
+            label=f"negative scenario {label} before state",
+            canonical=True,
+        )
+        after_state = strict_json(
+            after_state_data,
+            label=f"negative scenario {label} after state",
+            canonical=True,
+        )
+        _validate_negative_updater_state(
+            before_state,
+            label=f"negative scenario {label} before state",
+            archive_sha256=archive_sha256,
+            sequence=sequence,
+        )
+        _validate_negative_updater_state(
+            after_state,
+            label=f"negative scenario {label} after state",
+            archive_sha256=archive_sha256,
+            sequence=sequence,
+        )
+        if before_state_data != after_state_data:
+            raise EvidenceError(f"negative scenario {label} changed updater state")
+
+        before_service_data = _read_regular(
+            root / f"{label}-service-before.txt",
+            label=f"negative scenario {label} before service identity",
+            require_nonempty=True,
+        )
+        after_service_data = _read_regular(
+            root / f"{label}-service-after.txt",
+            label=f"negative scenario {label} after service identity",
+            require_nonempty=True,
+        )
+        before_service = _validate_negative_service_identity(
+            before_service_data,
+            label=f"negative scenario {label} before service identity",
+        )
+        after_service = _validate_negative_service_identity(
+            after_service_data,
+            label=f"negative scenario {label} after service identity",
+        )
+        if service_policy == "unchanged":
+            if before_service_data != after_service_data:
+                raise EvidenceError(
+                    f"negative scenario {label} changed direct-service identity"
+                )
+        elif (
+            before_service["InvocationID"].lower()
+            == after_service["InvocationID"].lower()
+        ):
+            raise EvidenceError(
+                f"negative scenario {label} lacks a fresh rollback service invocation"
+            )
+
+    for relative, archive_field in CURRENT_RELEASE_PROOFS:
+        _validate_current_release_proof(
+            _read_regular(
+                root / relative,
+                label=f"negative scenario current proof {relative}",
+                require_nonempty=True,
+            ),
+            label=f"negative scenario current proof {relative}",
+            archive_sha256=control[archive_field],
+        )
+
+
+def _scenario_matrix(root: Path, control: dict[str, Any]) -> dict[str, Any]:
+    run_id = control["run_id"]
+    steps = _validate_recorded_steps(root)
+    scenarios: list[dict[str, Any]] = []
+    if len(SCENARIO_SPECS) != len(steps):
+        raise EvidenceError("internal scenario matrix does not match the step contract")
+    for step, (scenario_id, expected_step, artifacts) in zip(
+        steps, SCENARIO_SPECS, strict=True
+    ):
+        if step["record_step"] != expected_step:
+            raise EvidenceError("internal scenario matrix step mismatch")
+        artifact_rows: list[dict[str, Any]] = []
+        for template, empty_allowed in artifacts:
+            relative = _scenario_artifact_path(template, run_id=run_id)
+            data = _read_regular(
+                root / relative,
+                label=f"scenario artifact {scenario_id}:{relative}",
+                require_nonempty=not empty_allowed,
+            )
+            artifact_rows.append(
+                {
+                    "path": relative,
+                    "empty_allowed": empty_allowed,
+                    "bytes": len(data),
+                    "sha256": _sha256(data),
+                }
+            )
+        scenarios.append(
+            {
+                "id": scenario_id,
+                "step": step,
+                "artifacts": artifact_rows,
+            }
+        )
+    _validate_negative_scenario_invariants(root, control)
+    return {"schema": SCENARIO_MATRIX_SCHEMA, "scenarios": scenarios}
+
+
+def _property_values(data: bytes, *, label: str) -> dict[str, list[str]]:
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(f"{label} is not UTF-8") from exc
+    values: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)=(.*)", line)
+        if match is not None:
+            values.setdefault(match.group(1), []).append(match.group(2))
+    return values
+
+
+def _one_property(values: dict[str, list[str]], key: str, *, label: str) -> str:
+    observed = values.get(key, [])
+    if len(observed) != 1:
+        raise EvidenceError(f"{label} must contain exactly one {key}")
+    return observed[0]
+
+
+def _one_timer_schedule_value(data: bytes, key: str) -> str:
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError("reactivation timer schedule is not UTF-8") from exc
+    observed = re.findall(
+        rf"(?:^|[ {{;]){re.escape(key)}=([^ ;}}\n]+)", text, flags=re.MULTILINE
+    )
+    if len(observed) != 1:
+        raise EvidenceError(f"reactivation start must contain exactly one {key}")
+    return observed[0]
+
+
+def _timer_is_rearmed(*, active: str, substate: str, next_elapse: str) -> bool:
+    return (
+        active == "active"
+        and substate == "waiting"
+        and next_elapse not in {"", "0", "infinity", "n/a"}
+    )
+
+
+def _last_reactivation_snapshot(data: bytes) -> dict[str, str]:
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(
+            "same-boot timer reactivation wait proof is not UTF-8"
+        ) from exc
+    snapshots: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)=(.*)", line)
+        if match is None:
+            continue
+        key, value = match.groups()
+        if key == "ActiveState" and current:
+            snapshots.append(current)
+            current = {}
+        if key in current:
+            raise EvidenceError(
+                "same-boot timer reactivation wait proof has duplicate properties"
+            )
+        current[key] = value
+    if current:
+        snapshots.append(current)
+    if not snapshots:
+        raise EvidenceError("same-boot timer reactivation wait proof has no snapshots")
+    return snapshots[-1]
+
+
+def _last_json_line(data: bytes, *, label: str) -> dict[str, Any]:
+    lines = [line for line in data.splitlines() if line]
+    if not lines:
+        raise EvidenceError(f"{label} contains no JSON snapshots")
+    value = strict_json(lines[-1] + b"\n", label=label)
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{label} final snapshot is not an object")
+    return value
+
+
+def _validate_repository(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise EvidenceError(f"{label} must be one safe owner/repository")
+    parts = value.split("/")
+    if (
+        len(parts) != 2
+        or any(SAFE_REPOSITORY_COMPONENT.fullmatch(part) is None for part in parts)
+        or any(part in {".", ".."} or part.endswith(".git") for part in parts)
+    ):
+        raise EvidenceError(f"{label} must be one safe owner/repository")
+    return value
+
+
+def _validate_control(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != CONTROL_FIELDS:
+        raise EvidenceError("control document has unexpected or missing fields")
+    run_id = value.get("run_id")
+    source_revision_b = value.get("source_revision_b")
+    source_repository = _validate_repository(
+        value.get("source_repository"), label="control source repository"
+    )
+    test_repository = _validate_repository(
+        value.get("test_publication_repository"),
+        label="control test publication repository",
+    )
+    fixed_values = {
+        "schema": "cathedral_validator_live_update_control_v1",
+        "gcp_project": "polaris-tdx-attest",
+        "controller_transport": "gcp_iap_tcp_forwarding",
+        "iap_source_range": "35.235.240.0/20",
+        "vm_service_account_attached": False,
+        "machine_type": "e2-standard-2",
+        "vm_count": 2,
+        "max_run_seconds": 14400,
+        "vm_and_disk_estimate_usd": "0.6240",
+        "network_ipv4_and_egress_allowance_usd": "0.20",
+        "planning_total_usd": "0.8240",
+        "cost_scope": CONTROL_COST_SCOPE,
+        "source_repository": "cathedralai/cathedral-validator",
+        "canonical_source_write_allowed": False,
+        "bootstrap_track": "test",
+        "bootstrap_transport": "anonymous_immutable_github_release",
+        "anonymous_bootstrap_download_required": True,
+        "fixed_channel_cache_max_seconds": 300,
+        "update_timer_interval_seconds": 60,
+        "fixed_channel_wait_seconds": 1860,
+    }
+    for field, expected in fixed_values.items():
+        observed = value.get(field)
+        if type(observed) is not type(expected) or observed != expected:
+            raise EvidenceError(f"control document has an invalid {field}")
+    if (
+        not isinstance(run_id, str)
+        or SAFE_RUN_ID.fullmatch(run_id) is None
+        or not isinstance(value.get("zone"), str)
+        or SAFE_ZONE.fullmatch(value["zone"]) is None
+        or test_repository.casefold() == source_repository.casefold()
+        or not isinstance(source_revision_b, str)
+        or REVISION.fullmatch(source_revision_b) is None
+        or value.get("test_mirror_main_sha") != source_revision_b
+    ):
+        raise EvidenceError("control document has an invalid run or execution boundary")
+    for field, pattern in (
+        ("source_revision_a", REVISION),
+        ("source_revision_b", REVISION),
+        ("archive_a_sha256", HEX_64),
+        ("archive_b_sha256", HEX_64),
+        ("no_chain_harness_sha256", HEX_64),
+        ("fault_origin_sha256", HEX_64),
+        ("state_waiter_sha256", HEX_64),
+    ):
+        observed = value.get(field)
+        if not isinstance(observed, str) or pattern.fullmatch(observed) is None:
+            raise EvidenceError(f"control document has an invalid {field}")
+    if value["source_revision_a"] == source_revision_b:
+        raise EvidenceError("control document source revisions must be distinct")
+    if value["archive_a_sha256"] == value["archive_b_sha256"]:
+        raise EvidenceError("control document release archives must be distinct")
+    for field in ("bootstrap_key_fingerprint", "runtime_key_fingerprint"):
+        observed = value.get(field)
+        if (
+            not isinstance(observed, str)
+            or not observed.startswith("sha256:")
+            or HEX_64.fullmatch(observed.removeprefix("sha256:")) is None
+        ):
+            raise EvidenceError(f"control document has an invalid {field}")
+    if value["bootstrap_key_fingerprint"] == value["runtime_key_fingerprint"]:
+        raise EvidenceError("control document release signing keys must be distinct")
+    expected_branches = {
+        "canary_branch": f"validator-release-live-{run_id}-canary",
+        "stable_branch": f"validator-release-live-{run_id}-stable",
+        "fault_branch": f"validator-release-fault-{run_id}",
+    }
+    for field, expected in expected_branches.items():
+        if value.get(field) != expected:
+            raise EvidenceError(f"control document has an invalid {field}")
+    bootstrap_tag = value.get("bootstrap_tag")
+    if (
+        not isinstance(bootstrap_tag, str)
+        or re.fullmatch(
+            r"validator-bootstrap-test-s[1-9][0-9]*-[0-9a-f]{64}", bootstrap_tag
+        )
+        is None
+    ):
+        raise EvidenceError("control document has an invalid bootstrap_tag")
+    signer = value.get("result_signer")
+    if not isinstance(signer, dict) or set(signer) != {
+        "purpose",
+        "key_id",
+        "algorithm",
+        "public_key_fingerprint",
+    }:
+        raise EvidenceError("control document has an invalid result_signer")
+    key_id = signer.get("key_id")
+    fingerprint = signer.get("public_key_fingerprint")
+    if (
+        signer.get("purpose") != SIGNER_PURPOSE
+        or signer.get("algorithm") != SIGNER_ALGORITHM
+        or not isinstance(key_id, str)
+        or SAFE_KEY_ID.fullmatch(key_id) is None
+        or not isinstance(fingerprint, str)
+        or not fingerprint.startswith("sha256:")
+        or HEX_64.fullmatch(fingerprint.removeprefix("sha256:")) is None
+        or fingerprint
+        in {value["bootstrap_key_fingerprint"], value["runtime_key_fingerprint"]}
+    ):
+        raise EvidenceError("control document has an invalid result_signer")
+    return value
+
+
+def _instance_identity(
+    value: Any, *, expected_name: str, control: dict[str, Any], label: str
+) -> str:
+    if not isinstance(value, dict) or value.get("name") != expected_name:
+        raise EvidenceError(f"{label} has the wrong instance name")
+    instance_id = value.get("id")
+    if isinstance(instance_id, int) and not isinstance(instance_id, bool):
+        instance_id = str(instance_id)
+    if (
+        not isinstance(instance_id, str)
+        or re.fullmatch(r"[1-9][0-9]*", instance_id) is None
+    ):
+        raise EvidenceError(f"{label} has no immutable instance id")
+    zone = value.get("zone")
+    if not isinstance(zone, str) or not (
+        zone == control["zone"] or zone.endswith(f"/zones/{control['zone']}")
+    ):
+        raise EvidenceError(f"{label} has the wrong zone")
+    labels = value.get("labels")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("cathedral-live-run") != control["run_id"]
+    ):
+        raise EvidenceError(f"{label} has the wrong run label")
+    service_accounts = value.get("serviceAccounts")
+    if service_accounts not in (None, []):
+        raise EvidenceError(f"{label} unexpectedly has a service account")
+    return instance_id
+
+
+def _instance_inventory(
+    value: Any, *, control: dict[str, Any], label: str
+) -> dict[str, str]:
+    if not isinstance(value, list) or len(value) != 2:
+        raise EvidenceError(f"{label} does not contain exactly two hosts")
+    identities: dict[str, str] = {}
+    for row in value:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            raise EvidenceError(f"{label} has a malformed host")
+        name = row["name"]
+        if name in identities:
+            raise EvidenceError(f"{label} contains a duplicate host")
+        identities[name] = _instance_identity(
+            row,
+            expected_name=name,
+            control=control,
+            label=f"{label}:{name}",
+        )
+    expected_names = {
+        f"catval-{control['run_id']}-canary",
+        f"catval-{control['run_id']}-stable",
+    }
+    if set(identities) != expected_names:
+        raise EvidenceError(f"{label} has the wrong host set")
+    return identities
+
+
+def _retained_ed25519_key(root: Path, relative: str, *, label: str) -> dict[str, Any]:
+    pem = _read_regular(root / relative, label=label, require_nonempty=True)
+    try:
+        public = serialization.load_pem_public_key(pem)
+    except ValueError as exc:
+        raise EvidenceError(f"{label} is invalid") from exc
+    if not isinstance(public, Ed25519PublicKey):
+        raise EvidenceError(f"{label} must use Ed25519")
+    canonical_pem = public.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    if pem != canonical_pem:
+        raise EvidenceError(f"{label} is not one canonical public PEM")
+    der = public.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    raw = public.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return {
+        "public": public,
+        "pem": pem,
+        "raw": raw,
+        "fingerprint": f"sha256:{_sha256(der)}",
+    }
+
+
+def _decoded_signature(value: Any, *, label: str) -> bytes:
+    if not isinstance(value, str):
+        raise EvidenceError(f"{label} is invalid")
+    try:
+        signature = base64.b64decode(value.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+        raise EvidenceError(f"{label} is invalid") from exc
+    if len(signature) != 64 or base64.b64encode(signature).decode("ascii") != value:
+        raise EvidenceError(f"{label} is invalid")
+    return signature
+
+
+def _runtime_metadata_record(
+    root: Path,
+    *,
+    name: str,
+    channel: str,
+    sequence: int,
+    archive_field: str,
+    control: dict[str, Any],
+    public: Ed25519PublicKey,
+) -> dict[str, Any]:
+    label = f"retained runtime metadata {name}"
+    raw = _read_regular(
+        root / "signed-runtime-metadata" / name,
+        label=label,
+        require_nonempty=True,
+    )
+    envelope = strict_json(raw, label=label, canonical=True)
+    if not isinstance(envelope, dict) or set(envelope) != {"signed", "signature"}:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    signed = envelope.get("signed")
+    if not isinstance(signed, dict) or set(signed) != {
+        "schema",
+        "channel",
+        "sequence",
+        "issued_unix",
+        "expires_unix",
+        "release",
+    }:
+        raise EvidenceError(f"{label} has an invalid signed payload")
+    signature = _decoded_signature(
+        envelope.get("signature"), label=f"{label} signature"
+    )
+    signed_bytes = canonical_bytes(signed)
+    try:
+        public.verify(signature, signed_bytes)
+    except InvalidSignature as exc:
+        raise EvidenceError(f"{label} signature is invalid") from exc
+    issued_unix = signed.get("issued_unix")
+    expires_unix = signed.get("expires_unix")
+    if (
+        signed.get("schema") != RUNTIME_METADATA_SCHEMA
+        or signed.get("channel") != channel
+        or type(signed.get("sequence")) is not int
+        or signed["sequence"] != sequence
+        or type(issued_unix) is not int
+        or issued_unix < 1
+        or type(expires_unix) is not int
+        or expires_unix - issued_unix != RUNTIME_METADATA_LIFETIME_SECONDS
+    ):
+        raise EvidenceError(f"{label} identity or validity window is invalid")
+    release = signed.get("release")
+    expected_release_fields = {
+        "version",
+        "archive_url",
+        "archive_sha256",
+        "tree_sha256",
+        "entrypoint",
+    }
+    if channel == "stable":
+        expected_release_fields.add("promoted_canary")
+    if not isinstance(release, dict) or set(release) != expected_release_fields:
+        raise EvidenceError(f"{label} has an invalid release payload")
+    archive_sha256 = control[archive_field]
+    expected_url = (
+        f"https://github.com/{control['test_publication_repository']}/releases/"
+        f"download/validator-{archive_sha256}/"
+        f"cathedral-validator-{archive_sha256}.tar.gz"
+    )
+    version = release.get("version")
+    tree_sha256 = release.get("tree_sha256")
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 128
+        or not version.isascii()
+        or release.get("archive_url") != expected_url
+        or release.get("archive_sha256") != archive_sha256
+        or not isinstance(tree_sha256, str)
+        or HEX_64.fullmatch(tree_sha256) is None
+        or release.get("entrypoint") != RUNTIME_RELEASE_ENTRYPOINT
+    ):
+        raise EvidenceError(f"{label} does not identify its exact release")
+    if channel == "stable":
+        promoted = release.get("promoted_canary")
+        if not isinstance(promoted, dict) or set(promoted) != {
+            "sequence",
+            "signed_sha256",
+            "metadata_sha256",
+            "archive_sha256",
+        }:
+            raise EvidenceError(f"{label} has an invalid canary promotion")
+    base_release = {
+        field: release[field]
+        for field in (
+            "version",
+            "archive_url",
+            "archive_sha256",
+            "tree_sha256",
+            "entrypoint",
+        )
+    }
+    return {
+        "raw": raw,
+        "signed": signed,
+        "signature": signature,
+        "release": release,
+        "base_release": base_release,
+        "record": {
+            "sequence": sequence,
+            "archive_sha256": archive_sha256,
+            "signed_sha256": _sha256(signed_bytes),
+            "metadata_sha256": _sha256(raw),
+        },
+    }
+
+
+def _validate_runtime_metadata(
+    root: Path, control: dict[str, Any], public: Ed25519PublicKey
+) -> dict[str, dict[str, Any]]:
+    metadata_root = root / "signed-runtime-metadata"
+    try:
+        info = metadata_root.lstat()
+    except FileNotFoundError as exc:
+        raise EvidenceError("signed runtime metadata directory is missing") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise EvidenceError(
+            "signed runtime metadata must be a regular non-symlink directory"
+        )
+    observed_names = {path.name for path in metadata_root.iterdir()}
+    if observed_names != RUNTIME_METADATA_NAMES:
+        raise EvidenceError("signed runtime metadata has an unexpected or missing file")
+
+    records: dict[str, dict[str, Any]] = {}
+    for name, channel, sequence, archive_field, _promotion in RUNTIME_METADATA_SPECS:
+        records[name] = _runtime_metadata_record(
+            root,
+            name=name,
+            channel=channel,
+            sequence=sequence,
+            archive_field=archive_field,
+            control=control,
+            public=public,
+        )
+
+    for group in (
+        (
+            "canary-a-seq1.json",
+            "canary-a-equivocation-seq3.json",
+            "canary-a-seq4.json",
+        ),
+        ("canary-b-seq2.json", "canary-b-renewal-seq3.json"),
+    ):
+        expected_release = records[group[0]]["base_release"]
+        if any(records[name]["base_release"] != expected_release for name in group[1:]):
+            raise EvidenceError("retained canary renewal changed the exact release")
+
+    for name, _channel, _sequence, _archive_field, promotion in RUNTIME_METADATA_SPECS:
+        if promotion is None:
+            continue
+        source = records[promotion]
+        stable = records[name]
+        expected_promotion = {
+            "sequence": source["record"]["sequence"],
+            "signed_sha256": source["record"]["signed_sha256"],
+            "metadata_sha256": source["record"]["metadata_sha256"],
+            "archive_sha256": source["record"]["archive_sha256"],
+        }
+        if (
+            stable["base_release"] != source["base_release"]
+            or stable["release"].get("promoted_canary") != expected_promotion
+        ):
+            raise EvidenceError(
+                f"retained stable metadata {name} is not the exact promoted canary"
+            )
+
+    invalid_name = INVALID_RUNTIME_METADATA_NAME
+    invalid_label = f"retained runtime metadata {invalid_name}"
+    invalid_raw = _read_regular(
+        metadata_root / invalid_name, label=invalid_label, require_nonempty=True
+    )
+    invalid = strict_json(invalid_raw, label=invalid_label, canonical=True)
+    if not isinstance(invalid, dict) or set(invalid) != {"signed", "signature"}:
+        raise EvidenceError(f"{invalid_label} has unexpected or missing fields")
+    source = records["canary-b-seq2.json"]
+    invalid_signature = _decoded_signature(
+        invalid.get("signature"), label=f"{invalid_label} signature"
+    )
+    expected_invalid_signature = (
+        bytes([source["signature"][0] ^ 1]) + source["signature"][1:]
+    )
+    if (
+        invalid.get("signed") != source["signed"]
+        or invalid_signature != expected_invalid_signature
+    ):
+        raise EvidenceError(
+            "invalid-signature metadata is not the exact one-bit B2 mutation"
+        )
+    try:
+        public.verify(invalid_signature, canonical_bytes(invalid["signed"]))
+    except InvalidSignature:
+        pass
+    else:
+        raise EvidenceError("invalid-signature metadata unexpectedly verifies")
+    return records
+
+
+def _validate_first_install_state_evidence(
+    root: Path, control: dict[str, Any], records: dict[str, dict[str, Any]]
+) -> None:
+    for channel, name in (
+        ("canary", "canary-a-seq1.json"),
+        ("stable", "stable-a-seq1.json"),
+    ):
+        relative = f"{channel}-first-install-sequence-state.json"
+        state = strict_json(
+            _read_regular(
+                root / relative,
+                label=f"first-install {channel} updater state",
+                require_nonempty=True,
+            ),
+            label=f"first-install {channel} updater state",
+            canonical=True,
+        )
+        _require_exact_object(
+            state,
+            {
+                "channel": channel,
+                "current": f"releases/{control['archive_a_sha256']}",
+                "record": records[name]["record"],
+                "sequence": 1,
+                "pending": None,
+            },
+            label=f"first-install {channel} updater state",
+        )
+
+
+def _validate_bootstrap_manifest_files(
+    value: Any, *, runtime_public_pem: bytes
+) -> None:
+    if not isinstance(value, list) or not value:
+        raise EvidenceError("bootstrap manifest files must be a non-empty list")
+    paths: list[str] = []
+    runtime_entry: dict[str, Any] | None = None
+    for index, entry in enumerate(value):
+        label = f"bootstrap manifest file {index}"
+        if not isinstance(entry, dict) or set(entry) != {
+            "mode",
+            "path",
+            "sha256",
+            "size",
+        }:
+            raise EvidenceError(f"{label} has unexpected or missing fields")
+        path_value = entry.get("path")
+        path = PurePosixPath(path_value) if isinstance(path_value, str) else None
+        if (
+            path is None
+            or path.is_absolute()
+            or not path.parts
+            or path == PurePosixPath(".")
+            or ".." in path.parts
+            or path.as_posix() != path_value
+            or not isinstance(entry.get("mode"), str)
+            or re.fullmatch(r"0[0-7]{3}", entry["mode"]) is None
+            or not isinstance(entry.get("sha256"), str)
+            or HEX_64.fullmatch(entry["sha256"]) is None
+            or type(entry.get("size")) is not int
+            or entry["size"] < 0
+        ):
+            raise EvidenceError(f"{label} is invalid")
+        paths.append(path_value)
+        if path_value == RUNTIME_KEY_BUNDLE_PATH:
+            runtime_entry = entry
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise EvidenceError("bootstrap manifest file paths are not unique and sorted")
+    if runtime_entry != {
+        "mode": "0644",
+        "path": RUNTIME_KEY_BUNDLE_PATH,
+        "sha256": _sha256(runtime_public_pem),
+        "size": len(runtime_public_pem),
+    }:
+        raise EvidenceError(
+            "bootstrap manifest does not embed the retained runtime public key"
+        )
+
+
+def _validate_bootstrap_evidence(
+    root: Path,
+    control: dict[str, Any],
+    *,
+    runtime_key: dict[str, Any],
+    bootstrap_key: dict[str, Any],
+    records: dict[str, dict[str, Any]],
+) -> None:
+    manifest_raw = _read_regular(
+        root / "updater-bootstrap.manifest.json",
+        label="bootstrap manifest",
+        require_nonempty=True,
+    )
+    manifest = strict_json(manifest_raw, label="bootstrap manifest", canonical=True)
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "bundle",
+        "files",
+        "install",
+        "bootstrap_signing_key",
+        "bootstrap_metadata",
+        "runtime_release_key",
+        "stable_release_floor",
+        "schema",
+    }:
+        raise EvidenceError("bootstrap manifest has unexpected or missing fields")
+    if manifest.get("schema") != BOOTSTRAP_MANIFEST_SCHEMA:
+        raise EvidenceError("bootstrap manifest has the wrong schema")
+    bundle = manifest.get("bundle")
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != {"sha256", "size"}
+        or not isinstance(bundle.get("sha256"), str)
+        or HEX_64.fullmatch(bundle["sha256"]) is None
+        or type(bundle.get("size")) is not int
+        or bundle["size"] < 1
+    ):
+        raise EvidenceError("bootstrap manifest bundle is invalid")
+    _validate_bootstrap_manifest_files(
+        manifest.get("files"), runtime_public_pem=runtime_key["pem"]
+    )
+    _require_exact_object(
+        manifest.get("install"),
+        {
+            "enable_units": False,
+            "installer": "payload/installer/install_updater_bundle.py",
+            "python": "CPython==3.12.*",
+            "requirements": "payload/requirements.txt",
+            "wheelhouse": "payload/wheelhouse",
+        },
+        label="bootstrap manifest install policy",
+    )
+    _require_exact_object(
+        manifest.get("bootstrap_signing_key"),
+        {
+            "algorithm": "Ed25519",
+            "fingerprint": bootstrap_key["fingerprint"],
+            "source": "operator-pinned-external",
+        },
+        label="bootstrap manifest signing key",
+    )
+    metadata = manifest.get("bootstrap_metadata")
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != {"expires_unix", "issued_unix", "sequence"}
+        or type(metadata.get("issued_unix")) is not int
+        or metadata["issued_unix"] < 1
+        or type(metadata.get("expires_unix")) is not int
+        or metadata["expires_unix"] - metadata["issued_unix"]
+        != BOOTSTRAP_LIFETIME_SECONDS
+        or type(metadata.get("sequence")) is not int
+        or metadata["sequence"] != 1
+    ):
+        raise EvidenceError("bootstrap manifest metadata is invalid")
+    _require_exact_object(
+        manifest.get("runtime_release_key"),
+        {
+            "algorithm": "Ed25519",
+            "fingerprint": runtime_key["fingerprint"],
+            "path": RUNTIME_KEY_BUNDLE_PATH,
+        },
+        label="bootstrap manifest runtime release key",
+    )
+    _require_exact_object(
+        manifest.get("stable_release_floor"),
+        {
+            "metadata_sha256": records["stable-a-seq1.json"]["record"][
+                "metadata_sha256"
+            ],
+            "sequence": 1,
+        },
+        label="bootstrap manifest stable release floor",
+    )
+    manifest_signature = _read_regular(
+        root / "updater-bootstrap.manifest.sig",
+        label="bootstrap manifest signature",
+        require_nonempty=True,
+    )
+    if len(manifest_signature) != 64:
+        raise EvidenceError("bootstrap manifest signature is invalid")
+    try:
+        bootstrap_key["public"].verify(manifest_signature, manifest_raw)
+    except InvalidSignature as exc:
+        raise EvidenceError("bootstrap manifest signature is invalid") from exc
+
+    build_raw = _read_regular(
+        root / "bootstrap-build.json",
+        label="bootstrap build record",
+        require_nonempty=True,
+    )
+    build = strict_json(build_raw, label="bootstrap build record", canonical=True)
+    if not isinstance(build, dict) or set(build) != {
+        "bundle_sha256",
+        "manifest_sha256",
+        "bootstrap_sequence",
+        "bootstrap_signing_key_fingerprint",
+        "runtime_release_key_fingerprint",
+        "stable_release_minimum_sequence",
+        "signature_base64",
+    }:
+        raise EvidenceError("bootstrap build record has unexpected or missing fields")
+    encoded_signature = base64.b64encode(manifest_signature).decode("ascii")
+    expected_build = {
+        "bundle_sha256": bundle["sha256"],
+        "manifest_sha256": _sha256(manifest_raw),
+        "bootstrap_sequence": 1,
+        "bootstrap_signing_key_fingerprint": bootstrap_key["fingerprint"],
+        "runtime_release_key_fingerprint": runtime_key["fingerprint"],
+        "stable_release_minimum_sequence": 1,
+        "signature_base64": encoded_signature,
+    }
+    _require_exact_object(build, expected_build, label="bootstrap build record")
+    expected_tag = f"validator-bootstrap-test-s1-{expected_build['manifest_sha256']}"
+    if control["bootstrap_tag"] != expected_tag:
+        raise EvidenceError("control bootstrap tag does not bind the retained manifest")
+
+    publication_raw = _read_regular(
+        root / "bootstrap-publication.json",
+        label="bootstrap publication record",
+        require_nonempty=True,
+    )
+    publication = strict_json(publication_raw, label="bootstrap publication record")
+    if not isinstance(publication, dict) or set(publication) != {
+        "schema",
+        "source_repository",
+        "publication_repository",
+        "canonical_source_write_allowed",
+        "track",
+        "tag",
+        "target_revision",
+        "sequence",
+        "bootstrap_key_fingerprint",
+        "runtime_key_fingerprint",
+        "anonymous_download_required",
+        "assets",
+    }:
+        raise EvidenceError(
+            "bootstrap publication record has unexpected or missing fields"
+        )
+    base_url = (
+        f"https://github.com/{control['test_publication_repository']}/releases/"
+        f"download/{expected_tag}"
+    )
+    expected_publication = {
+        "schema": BOOTSTRAP_PUBLICATION_SCHEMA,
+        "source_repository": control["source_repository"],
+        "publication_repository": control["test_publication_repository"],
+        "canonical_source_write_allowed": False,
+        "track": "test",
+        "tag": expected_tag,
+        "target_revision": control["source_revision_b"],
+        "sequence": 1,
+        "bootstrap_key_fingerprint": bootstrap_key["fingerprint"],
+        "runtime_key_fingerprint": runtime_key["fingerprint"],
+        "anonymous_download_required": True,
+        "assets": {
+            "bundle": {
+                "url": f"{base_url}/updater-bootstrap.tar.gz",
+                "sha256": bundle["sha256"],
+            },
+            "manifest": {
+                "url": f"{base_url}/updater-bootstrap.manifest.json",
+                "sha256": _sha256(manifest_raw),
+            },
+            "signature": {
+                "url": f"{base_url}/updater-bootstrap.manifest.sig",
+                "sha256": _sha256(manifest_signature),
+            },
+            "public_key": {
+                "url": f"{base_url}/bootstrap-signing-public-key.pem",
+                "sha256": _sha256(bootstrap_key["pem"]),
+            },
+        },
+    }
+    _require_exact_object(
+        publication,
+        expected_publication,
+        label="bootstrap publication record",
+    )
+
+
+def _validate_release_and_bootstrap_evidence(
+    root: Path, control: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    runtime_key = _retained_ed25519_key(
+        root, "runtime-release-public-key.pem", label="runtime release public key"
+    )
+    bootstrap_key = _retained_ed25519_key(
+        root, "bootstrap-release-public-key.pem", label="bootstrap release public key"
+    )
+    result_key = _retained_ed25519_key(
+        root, RESULT_PUBLIC_KEY_NAME, label="retained result public key"
+    )
+    if len({runtime_key["raw"], bootstrap_key["raw"], result_key["raw"]}) != 3:
+        raise EvidenceError(
+            "runtime, bootstrap, and result public keys must be pairwise distinct"
+        )
+    expected_fingerprints = (
+        ("runtime_key_fingerprint", runtime_key),
+        ("bootstrap_key_fingerprint", bootstrap_key),
+    )
+    for field, key in expected_fingerprints:
+        if control[field] != key["fingerprint"]:
+            raise EvidenceError(f"retained public key differs from control {field}")
+    if control["result_signer"]["public_key_fingerprint"] != result_key["fingerprint"]:
+        raise EvidenceError(
+            "retained result public key differs from the control fingerprint"
+        )
+    records = _validate_runtime_metadata(root, control, runtime_key["public"])
+    _validate_first_install_state_evidence(root, control, records)
+    _validate_bootstrap_evidence(
+        root,
+        control,
+        runtime_key=runtime_key,
+        bootstrap_key=bootstrap_key,
+        records=records,
+    )
+    return records
+
+
 def _validate_success_evidence(root: Path) -> dict[str, Any]:
     for relative in REQUIRED_SUCCESS_FILES:
         _read_regular(
@@ -684,14 +2343,9 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         )
     teardown = _read_regular(root / "teardown-status.txt", label="teardown status")
     if teardown != b"original_status=0\nteardown_verified=1\n":
-        raise EvidenceError("teardown status does not prove a successful clean teardown")
-    steps = _read_regular(root / "steps.log", label="scenario steps").decode(
-        "utf-8", errors="strict"
-    )
-    marker = "SCENARIOS_PASS_PENDING_TEARDOWN all bounded no-chain updater scenarios"
-    lines = steps.splitlines()
-    if not lines or not lines[-1].endswith(f" {marker}") or steps.count(marker) != 1:
-        raise EvidenceError("scenario completion marker is missing, duplicated, or non-terminal")
+        raise EvidenceError(
+            "teardown status does not prove a successful clean teardown"
+        )
     for relative in EMPTY_TEARDOWN_LISTS:
         value = strict_json(
             _read_regular(root / relative, label=relative), label=relative
@@ -702,30 +2356,13 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         root / "project-metadata-after-teardown.json"
     ).read_bytes():
         raise EvidenceError("project metadata changed during the live test")
-    control = strict_json(
-        _read_regular(root / "control.json", label="control document"),
-        label="control document",
-    )
-    if not isinstance(control, dict) or control.get("schema") != (
-        "cathedral_validator_live_update_control_v1"
-    ):
-        raise EvidenceError("control document has the wrong schema")
-    if (
-        control.get("source_repository") != "cathedralai/cathedral-validator"
-        or not isinstance(control.get("run_id"), str)
-        or SAFE_CAPTURE_ID.fullmatch(control["run_id"]) is None
-        or any(
-            not isinstance(control.get(field), str)
-            or pattern.fullmatch(control[field]) is None
-            for field, pattern in (
-                ("source_revision_a", REVISION),
-                ("source_revision_b", REVISION),
-                ("archive_a_sha256", HEX_64),
-                ("archive_b_sha256", HEX_64),
-            )
+    control = _validate_control(
+        strict_json(
+            _read_regular(root / "control.json", label="control document"),
+            label="control document",
         )
-    ):
-        raise EvidenceError("control document has an invalid run or source identity")
+    )
+    runtime_records = _validate_release_and_bootstrap_evidence(root, control)
     pid_values = [
         _single_ascii_line(root, relative, label=f"direct service PID proof {relative}")
         for relative in DIRECT_SERVICE_PID_PROOFS
@@ -745,10 +2382,13 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         )
         for relative in DIRECT_SERVICE_INVOCATION_PROOFS
     ]
-    if any(
-        re.fullmatch(r"[0-9A-Fa-f]{32}", value) is None
-        for value in invocation_values
-    ) or len(set(invocation_values)) != 1:
+    if (
+        any(
+            re.fullmatch(r"[0-9A-Fa-f]{32}", value) is None
+            for value in invocation_values
+        )
+        or len(set(invocation_values)) != 1
+    ):
         raise EvidenceError(
             "same-archive renewal or same-boot timer reactivation changed the direct "
             "service invocation"
@@ -758,14 +2398,60 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         label="same-boot timer reactivation start proof",
         require_nonempty=True,
     )
-    if any(
-        marker not in reactivation_start
-        for marker in (
-            b"OnActiveUSec=",
-            b"OnUnitActiveUSec=",
-            b"UnitFileState=enabled",
-            b"ActiveState=active",
+    start_lines = reactivation_start.splitlines()
+    if not start_lines or start_lines[0] != b"CATHEDRAL_TIMER_REACTIVATION_PROOF_V1":
+        raise EvidenceError("same-boot timer reactivation start proof is incomplete")
+    start_values = _property_values(
+        reactivation_start, label="same-boot timer reactivation start proof"
+    )
+    expected_timer = "cathedral-validator-canary-update.timer"
+    expected_service = "cathedral-validator-canary-update.service"
+    expected_host = f"catval-{control['run_id']}-canary"
+    if (
+        _one_property(start_values, "ProofHost", label="reactivation start")
+        != expected_host
+        or _one_property(start_values, "ProofTimer", label="reactivation start")
+        != expected_timer
+        or _one_property(start_values, "ProofService", label="reactivation start")
+        != expected_service
+        or _one_property(start_values, "ProofChannel", label="reactivation start")
+        != "canary"
+        or _one_property(start_values, "ExpectedRelease", label="reactivation start")
+        != control["archive_b_sha256"]
+        or _one_property(start_values, "Id", label="reactivation start")
+        != expected_timer
+        or _one_property(start_values, "UnitFileState", label="reactivation start")
+        != "enabled"
+    ):
+        raise EvidenceError("same-boot timer reactivation start proof is inconsistent")
+    before_invocation = _one_property(
+        start_values, "BeforeServiceInvocationID", label="reactivation start"
+    )
+    before_trigger = _one_property(
+        start_values, "BeforeLastTriggerUSec", label="reactivation start"
+    )
+    if (
+        re.fullmatch(r"[0-9A-Fa-f]{32}", before_invocation) is None
+        or not before_trigger
+        or _one_property(start_values, "LastTriggerUSec", label="reactivation start")
+        != before_trigger
+        or not _timer_is_rearmed(
+            active=_one_property(
+                start_values, "ActiveState", label="reactivation start"
+            ),
+            substate=_one_property(
+                start_values, "SubState", label="reactivation start"
+            ),
+            next_elapse=_one_property(
+                start_values, "NextElapseUSecMonotonic", label="reactivation start"
+            ),
         )
+        or _one_timer_schedule_value(reactivation_start, "OnActiveUSec")
+        in {"", "0", "infinity", "n/a"}
+        or _one_timer_schedule_value(reactivation_start, "OnUnitActiveUSec")
+        in {"", "0", "infinity", "n/a"}
+        or re.search(r"(?:^|[ {;])OnBootUSec=", reactivation_start.decode("utf-8"))
+        is not None
     ):
         raise EvidenceError("same-boot timer reactivation start proof is incomplete")
     reactivation_wait = _read_regular(
@@ -773,27 +2459,81 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         label="same-boot timer reactivation completion proof",
         require_nonempty=True,
     )
-    if any(
-        marker not in reactivation_wait
-        for marker in (
-            b"ServiceResult=success",
-            b"ServiceExecMainStatus=0",
-            b"ServiceActiveState=inactive",
+    wait_snapshot = _last_reactivation_snapshot(reactivation_wait)
+    wait_invocation = wait_snapshot.get("ServiceInvocationID", "")
+    wait_trigger = wait_snapshot.get("LastTriggerUSec", "")
+    if (
+        re.fullmatch(r"[0-9A-Fa-f]{32}", wait_invocation) is None
+        or wait_invocation == before_invocation
+        or not wait_trigger
+        or wait_trigger == before_trigger
+        or wait_snapshot.get("ServiceResult") != "success"
+        or wait_snapshot.get("ServiceExecMainStatus") != "0"
+        or wait_snapshot.get("ServiceActiveState") != "inactive"
+        or not _timer_is_rearmed(
+            active=wait_snapshot.get("ActiveState", ""),
+            substate=wait_snapshot.get("SubState", ""),
+            next_elapse=wait_snapshot.get("NextElapseUSecMonotonic", ""),
         )
     ):
-        raise EvidenceError("same-boot timer reactivation completion proof is incomplete")
+        raise EvidenceError(
+            "same-boot timer reactivation completion proof is incomplete"
+        )
+    reactivation_state = _last_json_line(
+        _read_regular(
+            root / "canary-same-boot-reactivation-timer-reactivation-state.log",
+            label="same-boot timer reactivation updater state proof",
+            require_nonempty=True,
+        ),
+        label="same-boot timer reactivation updater state proof",
+    )
+    reactivation_record = reactivation_state.get("record")
+    if (
+        set(reactivation_state)
+        != {"channel", "current", "record", "sequence", "pending"}
+        or reactivation_state.get("channel") != "canary"
+        or reactivation_state.get("current")
+        != f"releases/{control['archive_b_sha256']}"
+        or reactivation_state.get("sequence") != 3
+        or not isinstance(reactivation_record, dict)
+        or reactivation_record.get("sequence") != 3
+        or reactivation_record.get("archive_sha256") != control["archive_b_sha256"]
+        or reactivation_state.get("pending") is not None
+    ):
+        raise EvidenceError("same-boot timer reactivation updater state is not settled")
     run_id = control["run_id"]
     for relative, kind, name_template in TEARDOWN_RESOURCE_PROOFS:
         value = _single_ascii_line(
             root, relative, label=f"teardown resource proof {relative}"
         )
         expected_name = name_template.format(run_id=run_id)
-        if re.fullmatch(
+        proof_match = re.fullmatch(
             rf"TEARDOWN_RESOURCE_ABSENT kind={re.escape(kind)} "
-            rf"name={re.escape(expected_name)} attempt=(?:[1-9][0-9]*|final)",
+            rf"name={re.escape(expected_name)} attempt=([1-9][0-9]*|final)",
             value,
-        ) is None:
+        )
+        if proof_match is None:
             raise EvidenceError(f"teardown resource proof is invalid: {relative}")
+        label = relative.removeprefix("teardown-").removesuffix("-result.txt")
+        attempt = proof_match.group(1)
+        snapshot_name = (
+            f"teardown-{label}-final.json"
+            if attempt == "final"
+            else f"teardown-{label}-check-{attempt}.json"
+        )
+        snapshot = strict_json(
+            _read_regular(
+                root / snapshot_name,
+                label=f"teardown snapshot {snapshot_name}",
+                require_nonempty=True,
+            ),
+            label=f"teardown snapshot {snapshot_name}",
+            canonical=True,
+        )
+        if snapshot != []:
+            raise EvidenceError(
+                f"teardown resource marker is not bound to an empty snapshot: {relative}"
+            )
     for label in ("final-canary", "final-stable"):
         manifest_path = root / f"{label}-sections.json"
         artifacts_dir = root / f"{label}.d"
@@ -805,16 +2545,24 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
             str(manifest.get("label")),
         )
         if manifest.get("host") != expected_host or label_match is None:
-            raise EvidenceError(f"required final capture {label} has the wrong host or label")
-        retry_lines = _read_regular(
-            root / f"{label}-capture-retries.log",
-            label=f"{label} retry selection",
-            require_nonempty=True,
-        ).decode("ascii").splitlines()
+            raise EvidenceError(
+                f"required final capture {label} has the wrong host or label"
+            )
+        retry_lines = (
+            _read_regular(
+                root / f"{label}-capture-retries.log",
+                label=f"{label} retry selection",
+                require_nonempty=True,
+            )
+            .decode("ascii")
+            .splitlines()
+        )
         if not retry_lines or retry_lines[-1] != (
             f"attempt={label_match.group(1)} status=0"
         ):
-            raise EvidenceError(f"required final capture {label} lacks its selection proof")
+            raise EvidenceError(
+                f"required final capture {label} lacks its selection proof"
+            )
         complete, errors = _capture_manifest_complete(manifest, artifacts_dir)
         if not complete or manifest.get("complete") is not True:
             raise EvidenceError(
@@ -825,38 +2573,81 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
             _read_regular(state_path, label=f"{label} updater state"),
             label=f"{label} updater state",
         )
-        if not isinstance(state, dict) or state.get("pending") is not None:
-            raise EvidenceError(f"{label} updater state is not settled")
+        expected_metadata_name = (
+            "canary-b-renewal-seq3.json"
+            if role == "canary"
+            else "stable-a-rescue-seq5.json"
+        )
+        expected_record = runtime_records[expected_metadata_name]["record"]
+        expected_archive_text = expected_record["archive_sha256"]
+        _validate_final_updater_state(
+            state,
+            label=label,
+            channel=role,
+            expected_record=expected_record,
+        )
         current = _read_regular(
             artifacts_dir / "current_release.txt", label=f"{label} current release"
         ).strip()
-        expected_archive = control[
-            "archive_b_sha256" if label == "final-canary" else "archive_a_sha256"
-        ].encode("ascii")
+        expected_archive = expected_archive_text.encode("ascii")
         if current != b"releases/" + expected_archive:
             raise EvidenceError(f"{label} does not point to its expected final release")
-        _validate_final_systemd_state(artifacts_dir, label=label)
+        direct_identity = _validate_final_systemd_state(artifacts_dir, label=label)
+        if label == "final-canary" and (
+            str(direct_identity["main_pid"]) != pid_values[0]
+            or str(direct_identity["invocation_id"]).lower()
+            != invocation_values[0].lower()
+        ):
+            raise EvidenceError(
+                "final-canary direct service identity differs from continuity proofs"
+            )
+    initial_identities: dict[str, str] = {}
+    for role in ("canary", "stable"):
+        name = f"catval-{control['run_id']}-{role}"
+        document = strict_json(
+            _read_regular(
+                root / f"{role}-instance.json",
+                label=f"initial {role} instance",
+                require_nonempty=True,
+            ),
+            label=f"initial {role} instance",
+        )
+        initial_identities[name] = _instance_identity(
+            document,
+            expected_name=name,
+            control=control,
+            label=f"initial {role} instance",
+        )
+    created_identities = _instance_inventory(
+        strict_json(
+            _read_regular(
+                root / "created-run-instances.json",
+                label="created host inventory",
+                require_nonempty=True,
+            ),
+            label="created host inventory",
+        ),
+        control=control,
+        label="created host inventory",
+    )
     pre_teardown = strict_json(
         _read_regular(root / "pre-teardown-instances.json", label="pre-teardown hosts"),
         label="pre-teardown hosts",
     )
-    if (
-        not isinstance(pre_teardown, list)
-        or len(pre_teardown) != control.get("vm_count")
-        or control.get("vm_count") != 2
-        or {item.get("name") for item in pre_teardown if isinstance(item, dict)}
-        != {
-            f"catval-{control['run_id']}-canary",
-            f"catval-{control['run_id']}-stable",
-        }
-    ):
-        raise EvidenceError("pre-teardown inventory does not contain exactly two hosts")
+    pre_teardown_identities = _instance_inventory(
+        pre_teardown, control=control, label="pre-teardown host inventory"
+    )
+    if not (initial_identities == created_identities == pre_teardown_identities):
+        raise EvidenceError("host immutable identities changed during the live test")
+    _scenario_matrix(root, control)
     return control
 
 
 def _inventory(root: Path, exclusions: frozenset[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
         relative = path.relative_to(root).as_posix()
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
@@ -864,7 +2655,9 @@ def _inventory(root: Path, exclusions: frozenset[str]) -> list[dict[str, Any]]:
         if stat.S_ISDIR(info.st_mode):
             continue
         if not stat.S_ISREG(info.st_mode):
-            raise EvidenceError(f"evidence tree contains a non-regular file: {relative}")
+            raise EvidenceError(
+                f"evidence tree contains a non-regular file: {relative}"
+            )
         if relative in exclusions:
             continue
         data = path.read_bytes()
@@ -883,14 +2676,13 @@ def _result_paths(root: Path) -> tuple[Path, Path, Path]:
 
 def _validate_result_path(root: Path, path: Path, expected_name: str) -> None:
     if path.parent.resolve() != root.resolve() or path.name != expected_name:
-        raise EvidenceError(f"{expected_name} must use its canonical name in EVIDENCE_DIR")
+        raise EvidenceError(
+            f"{expected_name} must use its canonical name in EVIDENCE_DIR"
+        )
 
 
 def finalize_result(args: argparse.Namespace) -> int:
-    evidence_info = args.evidence_dir.lstat()
-    if stat.S_ISLNK(evidence_info.st_mode) or not stat.S_ISDIR(evidence_info.st_mode):
-        raise EvidenceError("EVIDENCE_DIR must be a regular directory")
-    root = args.evidence_dir.resolve(strict=True)
+    root = _resolve_evidence_root(args.evidence_dir)
     if not SAFE_KEY_ID.fullmatch(args.key_id):
         raise EvidenceError("result signer key id is unsafe")
     result_path, signature_path, digest_path = _result_paths(root)
@@ -912,74 +2704,58 @@ def finalize_result(args: argparse.Namespace) -> int:
         raise EvidenceError("retained result public key differs from the reviewed key")
     control = _validate_success_evidence(root)
     if control.get("result_signer") != {
-        "purpose": "live_e2e_test_evidence_only",
+        "purpose": SIGNER_PURPOSE,
         "key_id": args.key_id,
-        "algorithm": "ed25519",
+        "algorithm": SIGNER_ALGORITHM,
         "public_key_fingerprint": fingerprint,
     }:
-        raise EvidenceError("control document result signer differs from the configured key")
+        raise EvidenceError(
+            "control document result signer differs from the configured key"
+        )
+    scenario_matrix = _scenario_matrix(root, control)
     rows = _inventory(root, RESULT_EXCLUSIONS)
-    controller_bytes = _read_regular(
-        args.controller_script, label="live controller source", require_nonempty=True
+    _controller_path, controller_bytes, result_tool_bytes = _reviewed_source_identity(
+        args.controller_script
     )
     result: dict[str, Any] = {
         "schema": RESULT_SCHEMA,
         "run": {
             "id": control.get("run_id"),
-            "finished_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-                "+00:00", "Z"
-            ),
+            "finished_at": datetime.now(UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "source_revision_a": control.get("source_revision_a"),
             "source_revision_b": control.get("source_revision_b"),
             "archive_a_sha256": control.get("archive_a_sha256"),
             "archive_b_sha256": control.get("archive_b_sha256"),
         },
-        "terminal": {
-            "state": "pass",
-            "original_exit_status": 0,
-            "scenarios_complete": True,
-            "required_evidence_complete": True,
-            "teardown_verified": True,
-        },
-        "scope": {
-            "kind": "no_chain_updater_live_acceptance",
-            "chain_write": False,
-            "validator_cycle": False,
-            "wallet_loaded": False,
-            "production_release_key_loaded": False,
-            "disposable_test_release_keys_generated": True,
-        },
+        "terminal": TERMINAL_PASS,
+        "scope": NO_CHAIN_SCOPE,
         "controller": {
             "repository": control.get("source_repository"),
             "revision": control.get("source_revision_b"),
-            "path": "scripts/live_validator_update_e2e.sh",
+            "path": CONTROLLER_PATH,
             "sha256": _sha256(controller_bytes),
-            "result_tool_path": "scripts/live_update_e2e_result.py",
-            "result_tool_sha256": _sha256(Path(__file__).read_bytes()),
+            "result_tool_path": RESULT_TOOL_PATH,
+            "result_tool_sha256": _sha256(result_tool_bytes),
         },
         "signer": {
-            "purpose": "live_e2e_test_evidence_only",
+            "purpose": SIGNER_PURPOSE,
             "key_id": args.key_id,
-            "algorithm": "ed25519",
+            "algorithm": SIGNER_ALGORITHM,
             "public_key_path": RESULT_PUBLIC_KEY_NAME,
             "public_key_fingerprint": fingerprint,
             "authorizes_chain_or_weight_changes": False,
         },
+        "scenario_matrix": scenario_matrix,
         "evidence_tree": {
-            "algorithm": "sha256-domain-separated-canonical-json-file-list-v1",
+            "algorithm": EVIDENCE_TREE_ALGORITHM,
             "root_sha256": _evidence_root(rows),
             "file_count": len(rows),
             "files": rows,
         },
-        "authority": {
-            "operator_identity_attested": False,
-            "immutable_publication_present": False,
-            "note": (
-                "The detached signature authenticates the configured test-evidence "
-                "key only; operator identity and immutable publication remain separate "
-                "owner/operator actions."
-            ),
-        },
+        "authority": UNATTESTED_AUTHORITY,
     }
     result_data = canonical_bytes(result)
     signature = private.sign(result_data)
@@ -1015,34 +2791,44 @@ def _verify_result(
     if digest_data != expected_digest_data:
         raise EvidenceError("live E2E result digest mismatch")
     result = strict_json(result_data, label="live E2E result", canonical=True)
-    if not isinstance(result, dict) or result.get("schema") != RESULT_SCHEMA:
+    if not isinstance(result, dict) or set(result) != RESULT_TOP_LEVEL_FIELDS:
+        raise EvidenceError("live E2E result has unexpected or missing fields")
+    if type(result.get("schema")) is not str or result["schema"] != RESULT_SCHEMA:
         raise EvidenceError("live E2E result has the wrong schema")
-    terminal = result.get("terminal")
-    if not isinstance(terminal, dict) or terminal != {
-        "state": "pass",
-        "original_exit_status": 0,
-        "scenarios_complete": True,
-        "required_evidence_complete": True,
-        "teardown_verified": True,
-    }:
-        raise EvidenceError("live E2E result does not encode an exact passing terminal state")
+    _require_exact_object(
+        result.get("terminal"), TERMINAL_PASS, label="live E2E result terminal"
+    )
+    _require_exact_object(
+        result.get("scope"), NO_CHAIN_SCOPE, label="live E2E result scope"
+    )
+    _require_exact_object(
+        result.get("authority"),
+        UNATTESTED_AUTHORITY,
+        label="live E2E result authority",
+    )
     public_data = _read_regular(
         public_key_path, label="result verification public key", require_nonempty=True
     )
+    retained_public = _read_regular(
+        root / RESULT_PUBLIC_KEY_NAME,
+        label="retained result public key",
+        require_nonempty=True,
+    )
+    if retained_public != public_data:
+        raise EvidenceError(
+            "retained result public key differs from the pinned verifier key"
+        )
     try:
         public = serialization.load_pem_public_key(public_data)
     except ValueError as exc:
         raise EvidenceError("result verification public key is invalid") from exc
     if not isinstance(public, Ed25519PublicKey):
         raise EvidenceError("result verification public key must use Ed25519")
-    signer = result.get("signer")
     der = public.public_bytes(
         serialization.Encoding.DER,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     fingerprint = f"sha256:{_sha256(der)}"
-    if not isinstance(signer, dict) or signer.get("public_key_fingerprint") != fingerprint:
-        raise EvidenceError("live E2E result signer fingerprint mismatch")
     signature = _read_regular(
         signature_path, label="live E2E result signature", require_nonempty=True
     )
@@ -1052,7 +2838,20 @@ def _verify_result(
         raise EvidenceError("live E2E result signature is invalid") from exc
     control = _validate_success_evidence(root)
     run = result.get("run")
-    if not isinstance(run, dict) or any(
+    if not isinstance(run, dict) or set(run) != RUN_FIELDS:
+        raise EvidenceError("live E2E result run has unexpected or missing fields")
+    if any(type(run[field]) is not str for field in RUN_FIELDS):
+        raise EvidenceError("live E2E result run fields must be strings")
+    if (
+        SAFE_CAPTURE_ID.fullmatch(run["id"]) is None
+        or REVISION.fullmatch(run["source_revision_a"]) is None
+        or REVISION.fullmatch(run["source_revision_b"]) is None
+        or HEX_64.fullmatch(run["archive_a_sha256"]) is None
+        or HEX_64.fullmatch(run["archive_b_sha256"]) is None
+    ):
+        raise EvidenceError("live E2E result run identity has invalid syntax")
+    _validate_utc_seconds(run["finished_at"], label="live E2E result finished_at")
+    if any(
         run.get(field) != control.get(field)
         for field in (
             "source_revision_a",
@@ -1064,16 +2863,65 @@ def _verify_result(
         raise EvidenceError("live E2E result run identity differs from control.json")
     if run.get("id") != control.get("run_id"):
         raise EvidenceError("live E2E result run id differs from control.json")
+    _controller_path, controller_bytes, result_tool_bytes = _reviewed_source_identity()
+    expected_controller = {
+        "repository": control.get("source_repository"),
+        "revision": control.get("source_revision_b"),
+        "path": CONTROLLER_PATH,
+        "sha256": _sha256(controller_bytes),
+        "result_tool_path": RESULT_TOOL_PATH,
+        "result_tool_sha256": _sha256(result_tool_bytes),
+    }
+    _require_exact_object(
+        result.get("controller"),
+        expected_controller,
+        label="live E2E result controller",
+    )
+    signer_value = result.get("signer")
+    if not isinstance(signer_value, dict) or set(signer_value) != SIGNER_FIELDS:
+        raise EvidenceError("live E2E result signer has unexpected or missing fields")
+    key_id = signer_value.get("key_id")
+    if not isinstance(key_id, str) or SAFE_KEY_ID.fullmatch(key_id) is None:
+        raise EvidenceError("live E2E result signer key id is unsafe")
+    signer = _require_exact_object(
+        signer_value,
+        {
+            "purpose": SIGNER_PURPOSE,
+            "key_id": key_id,
+            "algorithm": SIGNER_ALGORITHM,
+            "public_key_path": RESULT_PUBLIC_KEY_NAME,
+            "public_key_fingerprint": fingerprint,
+            "authorizes_chain_or_weight_changes": False,
+        },
+        label="live E2E result signer",
+    )
     control_signer = control.get("result_signer")
-    if not isinstance(control_signer, dict) or any(
-        signer.get(field) != control_signer.get(field)
-        for field in ("purpose", "key_id", "algorithm", "public_key_fingerprint")
-    ):
-        raise EvidenceError("live E2E result signer differs from control.json")
+    _require_exact_object(
+        control_signer,
+        {
+            "purpose": SIGNER_PURPOSE,
+            "key_id": signer["key_id"],
+            "algorithm": SIGNER_ALGORITHM,
+            "public_key_fingerprint": fingerprint,
+        },
+        label="control document result signer",
+    )
+    expected_scenario_matrix = _scenario_matrix(root, control)
+    if result.get("scenario_matrix") != expected_scenario_matrix:
+        raise EvidenceError(
+            "live E2E result scenario matrix differs from recomputed evidence"
+        )
     rows = _inventory(root, RESULT_EXCLUSIONS)
     tree = result.get("evidence_tree")
     if (
         not isinstance(tree, dict)
+        or set(tree) != EVIDENCE_TREE_FIELDS
+        or type(tree.get("algorithm")) is not str
+        or tree.get("algorithm") != EVIDENCE_TREE_ALGORITHM
+        or type(tree.get("root_sha256")) is not str
+        or HEX_64.fullmatch(tree["root_sha256"]) is None
+        or type(tree.get("file_count")) is not int
+        or not isinstance(tree.get("files"), list)
         or tree.get("files") != rows
         or tree.get("file_count") != len(rows)
         or tree.get("root_sha256") != _evidence_root(rows)
@@ -1083,10 +2931,7 @@ def _verify_result(
 
 
 def verify_result(args: argparse.Namespace) -> int:
-    evidence_info = args.evidence_dir.lstat()
-    if stat.S_ISLNK(evidence_info.st_mode) or not stat.S_ISDIR(evidence_info.st_mode):
-        raise EvidenceError("EVIDENCE_DIR must be a regular directory")
-    root = args.evidence_dir.resolve(strict=True)
+    root = _resolve_evidence_root(args.evidence_dir)
     result_path, signature_path, digest_path = _result_paths(root)
     digest = _verify_result(
         root, result_path, signature_path, digest_path, args.public_key

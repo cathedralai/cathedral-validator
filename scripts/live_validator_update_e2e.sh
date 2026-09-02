@@ -595,12 +595,29 @@ PY
 verify_candidate "$CANDIDATE_A_DIR" "$SOURCE_REVISION_A"
 verify_candidate "$CANDIDATE_B_DIR" "$SOURCE_REVISION_B"
 
-if [[ "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)" != "$SOURCE_REVISION_B" ]]; then
-  printf 'REFUSED: controller checkout HEAD must equal SOURCE_REVISION_B\n' >&2
-  exit 2
-fi
-if [[ -n "$(git -C "$REPOSITORY_ROOT" status --short)" ]]; then
-  printf 'REFUSED: controller checkout must be clean\n' >&2
+verify_controller_source_identity() {
+  local head=""
+  local worktree_status=""
+  if ! head="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"; then
+    printf 'REFUSED: controller checkout HEAD could not be verified\n' >&2
+    return 1
+  fi
+  if [[ "$head" != "$SOURCE_REVISION_B" ]]; then
+    printf 'REFUSED: controller checkout HEAD must equal SOURCE_REVISION_B\n' >&2
+    return 1
+  fi
+  if ! worktree_status="$(git -C "$REPOSITORY_ROOT" status --short)"; then
+    printf 'REFUSED: controller checkout cleanliness could not be verified\n' >&2
+    return 1
+  fi
+  if [[ -n "$worktree_status" ]]; then
+    printf 'REFUSED: controller checkout must be clean\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! verify_controller_source_identity; then
   exit 2
 fi
 
@@ -974,6 +991,7 @@ cleanup_resource_until_absent() {
 
 cleanup() {
   local status=$?
+  local source_identity_ok=0
   local observed_result_digest=""
   local result_digest=""
   local result_ok=0
@@ -1070,8 +1088,11 @@ cleanup() {
   printf 'original_status=%s\nteardown_verified=%s\n' \
     "$status" "$teardown_ok" >"$EVIDENCE_DIR/teardown-status.txt"
   if [[ $status -eq 0 && "$teardown_ok" == 1 ]]; then
-    if [[ "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD 2>/dev/null)" != "$SOURCE_REVISION_B" || \
-      -n "$(git -C "$REPOSITORY_ROOT" status --short 2>/dev/null)" ]]; then
+    if verify_controller_source_identity \
+      2>>"$EVIDENCE_DIR/controller-source-finalization.stderr"; then
+      source_identity_ok=1
+    fi
+    if [[ "$source_identity_ok" != 1 ]]; then
       printf 'REFUSED: controller source identity changed during the live test\n' >&2
     elif result_digest="$(python3 "$RESULT_TOOL" finalize \
       --evidence-dir "$EVIDENCE_DIR" \
@@ -2106,7 +2127,7 @@ capture_host() {
     return 2
   fi
   capture_prelude='capture_failed=0; capture_section() { section="$1"; requirement="$2"; shift 2; output="$(mktemp)" || exit 70; "$@" >"$output" 2>&1; command_status=$?; byte_count="$(wc -c <"$output")"; digest="$(sha256sum "$output" | cut -d" " -f1)"; encoded="$(base64 -w 0 "$output")"; printf "CATHEDRAL_EVIDENCE_SECTION_V1\t%s\t%s\t%s\t%s\t%s\t%s\n" "$section" "$requirement" "$command_status" "$byte_count" "$digest" "$encoded"; rm -f -- "$output"; if [ "$requirement" = required ] && { [ "$command_status" -ne 0 ] || [ "$byte_count" -eq 0 ]; }; then capture_failed=1; fi; }'
-  if remote "$host" "$capture_prelude; capture_section current_release required sudo readlink /opt/cathedral-validator/current; capture_section updater_state required sudo cat /var/lib/cathedral-validator-update/state.json; capture_section direct_unit_show required sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny; capture_section direct_unit_status optional sudo systemctl status cathedral-validator-direct.service --full --no-pager; capture_section direct_unit_definition required sudo systemctl cat cathedral-validator-direct.service; capture_section boot_reconcile_show required sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section boot_reconcile_status optional sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager; capture_section boot_reconcile_definition required sudo systemctl cat cathedral-validator-boot-reconcile.service; capture_section updater_services_show required sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section updater_services_status optional sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager; capture_section updater_services_definitions required sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service; capture_section timers_show required sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths; capture_section timer_definitions required sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer; capture_section timer_list required sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer'; capture_section updater_runtime_journal optional sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager; exit \"\$capture_failed\"" >"$EVIDENCE_DIR/${label}-sections.tsv" 2>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
+  if remote "$host" "$capture_prelude; capture_section current_release required sudo readlink /opt/cathedral-validator/current; capture_section updater_state required sudo cat /var/lib/cathedral-validator-update/state.json; capture_section direct_unit_show required sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny; capture_section direct_unit_status optional sudo systemctl status cathedral-validator-direct.service --full --no-pager; capture_section direct_unit_definition required sudo systemctl cat cathedral-validator-direct.service; capture_section boot_reconcile_show required sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section boot_reconcile_status optional sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager; capture_section boot_reconcile_definition required sudo systemctl cat cathedral-validator-boot-reconcile.service; capture_section updater_services_show required sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section updater_services_status optional sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager; capture_section updater_services_definitions required sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service; capture_section timers_show required sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths; capture_section timer_definitions required sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer; capture_section timer_list required sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer'; capture_section updater_runtime_journal optional sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager; exit \"\$capture_failed\"" >"$EVIDENCE_DIR/${label}-sections.tsv" 2>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
     :
   else
     generic_status=$?
@@ -2494,8 +2515,17 @@ wait_sequence() {
   while (( SECONDS < deadline )); do
     if snapshot="$(snapshot_state "$host" "$channel" 2>>"$EVIDENCE_DIR/${label}-sequence-snapshot-ssh.stderr")"; then
       printf '%s\n' "$snapshot"
-      if printf '%s\n' "$snapshot" | jq -e --argjson expected "$expected_record" \
-        '.record == $expected and .sequence == $expected.sequence and .pending == null' >/dev/null; then
+      if printf '%s\n' "$snapshot" | jq -e \
+        --arg channel "$channel" --argjson expected "$expected_record" \
+        'type == "object" and
+         keys == ["channel", "current", "pending", "record", "sequence"] and
+         .channel == $channel and
+         .current == ("releases/" + $expected.archive_sha256) and
+         .record == $expected and
+         .sequence == $expected.sequence and
+         .pending == null' >/dev/null; then
+        printf '%s\n' "$snapshot" \
+          >"$EVIDENCE_DIR/${label}-sequence-state.json"
         return 0
       fi
     fi
@@ -2668,14 +2698,25 @@ observe_timer_reactivation() {
   local failure_status
   before_invocation="$(remote "$host" "sudo systemctl show '$service' -p InvocationID --value" | tr -d '\r')"
   before_trigger="$(remote "$host" "sudo systemctl show '$timer' -p LastTriggerUSec --value" | tr -d '\r')"
-  if [[ -z "$before_invocation" || -z "$before_trigger" ]]; then
+  if [[ ! "$before_invocation" =~ ^[0-9A-Fa-f]{32}$ || \
+    -z "$before_trigger" || "$before_trigger" == *$'\n'* ]]; then
     printf 'REFUSED: timer reactivation requires prior timer and service evidence host=%s timer=%s\n' \
       "$host" "$timer" >&2
     return 1
   fi
-  if start_reactivation_proof_timer "$host" "$timer" \
-    "$before_invocation" "$before_trigger" 2>&1 | \
-    tee "$EVIDENCE_DIR/${label}-timer-reactivation-start.log"; then
+  if {
+    printf '%s\n' \
+      'CATHEDRAL_TIMER_REACTIVATION_PROOF_V1' \
+      "ProofHost=$host" \
+      "ProofTimer=$timer" \
+      "ProofService=$service" \
+      "ProofChannel=$channel" \
+      "ExpectedRelease=$expected_digest" \
+      "BeforeServiceInvocationID=$before_invocation" \
+      "BeforeLastTriggerUSec=$before_trigger"
+    start_reactivation_proof_timer "$host" "$timer" \
+      "$before_invocation" "$before_trigger"
+  } 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-reactivation-start.log"; then
     :
   else
     failure_status=$?

@@ -238,9 +238,20 @@ Run the identical environment with `--execute` only after preflight prints
 state, service and timer properties, unit definitions, and timer inventory.
 Status output and journals are explicitly optional diagnostics: their failures
 are recorded but do not hide a missing required section.
-The signed result also requires the same-boot timer-reactivation logs, matching
-direct-service PID and invocation evidence before and after reactivation, and
-an exact absence proof for every disposable cloud resource.
+The signed result also requires the exact ordered 17-step scenario transcript
+and a closed scenario matrix. Each matrix row names its required artifacts and
+binds their byte lengths and SHA-256 digests; deleting a required scenario
+proof cannot produce a smaller passing result. The closure retains and verifies
+the complete runtime-metadata graph, its deliberate invalid-signature mutation,
+the bootstrap manifest and signature, the build record, the release-key
+fingerprints, and their publication binding. First-install and refusal scenarios
+bind exact updater state and service identity rather than relying on opaque log
+files. The same-boot timer proof binds the host, timer, service, channel,
+expected release, prior trigger and prior invocation to a fresh successful
+trigger. Final captures require the exact settled channel record, successful
+control services, disabled timers, and direct-service continuity. Every teardown
+marker must point to the exact canonical empty provider snapshot for the attempt
+it cites.
 
 The success grammar is result finalization and signature verification, then
 `TEARDOWN_COMPLETE`, then `LIVE_UPDATE_E2E_RESULT`, followed by
@@ -255,10 +266,22 @@ live_update_e2e_result_v1.json.sig
 live-update-e2e-result-public-key.pem
 ```
 
-Independent verification must use a separately reviewed and pinned copy of the
-result-signing public key, or its recorded fingerprint. The public key bundled
-with the evidence is a transport copy and is not, by itself, an authenticated
-trust root.
+Independent verification must run from a clean checkout of the exact
+`source_revision_b` recorded in the result, using the reviewed verifier and
+controller bytes from that revision. A verifier from a later revision rejects
+the older bundle by design. Verification must also use a separately reviewed
+and pinned copy of the result-signing public key, or its recorded fingerprint.
+The public key bundled with the evidence is a transport copy and is not, by
+itself, an authenticated trust root. Verification freezes the v1 no-chain scope
+and test-only signer purpose: the result key cannot claim a validator cycle,
+wallet use, chain or weight authority, production-key use, operator identity
+attestation, or immutable publication.
+
+```bash
+python3 scripts/live_update_e2e_result.py verify-result \
+  --evidence-dir /secure/reviewed-live-test-evidence \
+  --public-key /secure/separately-pinned-live-e2e-public.pem
+```
 
 The test mirror's branches and immutable bootstrap prerelease remain public as
 the remote test record. The controller does not upload the raw evidence bundle

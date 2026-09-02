@@ -561,8 +561,8 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "capture_host() { capture_attempts=$((capture_attempts + 1)); "
             "printf 'attempt-%s\\n' \"$capture_attempts\" "
             '>"$EVIDENCE_DIR/$1.txt"; '
-            'printf \'{}\\n\' >"$EVIDENCE_DIR/$1-sections.json"; '
-            'mkdir "$EVIDENCE_DIR/$1.d"; printf \'section\\n\' '
+            "printf '{}\\n' >\"$EVIDENCE_DIR/$1-sections.json\"; "
+            "mkdir \"$EVIDENCE_DIR/$1.d\"; printf 'section\\n' "
             '>"$EVIDENCE_DIR/$1.d/section.txt"; '
             "(( capture_attempts >= 3 )); }\n"
             "python3() { return 0; }\n"
@@ -733,6 +733,7 @@ def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     assert "capture_section current_release required" in capture_host
     assert "capture_section updater_state required" in capture_host
     assert "capture_section direct_unit_status optional" in capture_host
+    assert "-p MainPID -p InvocationID -p FragmentPath" in capture_host
     assert "capture_section updater_runtime_journal optional" in capture_host
     assert "unsafe transient systemd unit for evidence capture" in capture_host
     assert "systemctl show '${transient_unit}.service'" in capture_host
@@ -807,6 +808,112 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
     assert dynamic_check.returncode == 0, dynamic_check.stderr
 
 
+def test_live_controller_refuses_when_git_cleanliness_is_unverifiable(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    source_check = (
+        "verify_controller_source_identity() {"
+        + script.split("verify_controller_source_identity() {", 1)[1].split(
+            "if ! verify_controller_source_identity; then", 1
+        )[0]
+    )
+    marker = tmp_path / "execution-started"
+    checked = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "REPOSITORY_ROOT=/reviewed/repository\n"
+            "SOURCE_REVISION_B=" + "b" * 40 + "\n"
+            'MARKER="$1"\n'
+            "git() {\n"
+            '  if [[ "$*" == *"rev-parse HEAD"* ]]; then '
+            'printf "%s\\n" "$SOURCE_REVISION_B"; return 0; fi\n'
+            '  if [[ "$*" == *"status --short"* ]]; then return 42; fi\n'
+            "  return 99\n"
+            "}\n"
+            'begin_execution() { : >"$MARKER"; }\n' + source_check + "\n"
+            "if verify_controller_source_identity; then begin_execution; "
+            "else status=$?; fi\n"
+            'test "$status" -eq 1\n'
+            'test ! -e "$MARKER"',
+            "git-cleanliness-preflight-test",
+            str(marker),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert "checkout cleanliness could not be verified" in checked.stderr
+    assert script.index("if ! verify_controller_source_identity; then") < script.index(
+        "gh auth status"
+    )
+
+
+def test_live_controller_git_status_failure_blocks_result_finalization(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    source_check = (
+        "verify_controller_source_identity() {"
+        + script.split("verify_controller_source_identity() {", 1)[1].split(
+            "if ! verify_controller_source_identity; then", 1
+        )[0]
+    )
+    cleanup = (
+        "cleanup() {"
+        + script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            'EVIDENCE_DIR="$1"\n'
+            "RUN_ID=status-failure\n"
+            "CANARY_VM=canary\nSTABLE_VM=stable\nZONE=zone\nREGION=region\n"
+            "FIREWALL=firewall\nSUBNET=subnet\nNETWORK=network\n"
+            "CREATED_CANARY_VM=0\nCREATED_STABLE_VM=0\nCREATED_FIREWALL=0\n"
+            "CREATED_SUBNET=0\nCREATED_NETWORK=0\n"
+            "RUN_ROOT=/tmp/cathedral-validator-live-status-failure.does-not-exist\n"
+            "REPOSITORY_ROOT=/reviewed/repository\nSOURCE_REVISION_B=" + "b" * 40 + "\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
+            "E2E_RESULT_SIGNING_PRIVATE_KEY=/secure/private.pem\n"
+            "E2E_RESULT_SIGNING_PUBLIC_KEY=/secure/public.pem\n"
+            "E2E_RESULT_SIGNER_KEY_ID=test-result-key\n"
+            "TEST_GITHUB_REPOSITORY=owner/test\nESTIMATED_COST_USD=0.1\n"
+            "PLANNING_TOTAL_USD=0.3\nBOOTSTRAP_TAG=test-tag\n"
+            "gc() { printf '[]\\n'; }\n"
+            "git() {\n"
+            '  if [[ "$*" == *"rev-parse HEAD"* ]]; then '
+            'printf "%s\\n" "$SOURCE_REVISION_B"; return 0; fi\n'
+            '  if [[ "$*" == *"status --short"* ]]; then return 42; fi\n'
+            "  return 99\n"
+            "}\n"
+            'python3() { : >"$EVIDENCE_DIR/finalizer-called"; return 0; }\n'
+            + source_check
+            + "\n"
+            + cleanup
+            + "\ntrue\ncleanup",
+            "git-cleanliness-finalization-test",
+            str(evidence),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 1
+    assert "TEARDOWN_COMPLETE" in completed.stdout
+    assert "LIVE_UPDATE_E2E_RESULT_NOT_PROVEN" in completed.stderr
+    assert "LIVE_UPDATE_E2E_PASS" not in completed.stdout
+    assert not (evidence / "finalizer-called").exists()
+    assert "checkout cleanliness could not be verified" in (
+        evidence / "controller-source-finalization.stderr"
+    ).read_text(encoding="utf-8")
+
+
 def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
@@ -855,6 +962,12 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     )
     assert "TriggeredServiceActiveState=" in start_timer
     assert "enabled timer has no scheduled trigger" in start_timer
+    assert (
+        'keys == ["channel", "current", "pending", "record", "sequence"]'
+        in wait_sequence
+    )
+    assert ".channel == $channel" in wait_sequence
+    assert '.current == ("releases/" + $expected.archive_sha256)' in wait_sequence
     assert ".record == $expected" in wait_sequence
     assert ".sequence == $expected.sequence" in wait_sequence
     assert ".pending == null" in wait_sequence
@@ -864,6 +977,7 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
         'capture_host_with_retries "${label}-sequence-wait-failure" '
         '"$host" || true' in wait_sequence
     )
+    assert '>"$EVIDENCE_DIR/${label}-sequence-state.json"' in wait_sequence
     assert "sleep 5" in wait_sequence
     assert "systemctl show '$timer'" in rearm_timer
     assert "-p ActiveState -p SubState -p NextElapseUSecMonotonic" in rearm_timer
@@ -1001,6 +1115,10 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     assert start_reactivation.count("= '$before_trigger'") == 2
     assert "systemctl enable --now '$timer'" in start_reactivation
     assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in start_reactivation
+    assert "CATHEDRAL_TIMER_REACTIVATION_PROOF_V1" in observe_reactivation
+    assert "BeforeServiceInvocationID=$before_invocation" in observe_reactivation
+    assert "BeforeLastTriggerUSec=$before_trigger" in observe_reactivation
+    assert "ExpectedRelease=$expected_digest" in observe_reactivation
     assert "start_reactivation_proof_timer" in observe_reactivation
     assert "timer-reactivation-start-failure" in observe_reactivation
     assert "wait_timer_reactivation" in observe_reactivation
