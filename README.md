@@ -36,16 +36,74 @@ address before chain access.
 
 ## Install and start
 
-The public signed bootstrap bundle is not published yet. Do not install or
-enable updater services from a source checkout.
+Install only from the signed bootstrap below. Do not install or enable updater
+services from a source checkout.
 
 <!-- BEGIN GENERATED VALIDATOR INSTALL -->
-Publication pending. This block will contain the authenticated bundle URLs,
-offline bootstrap-signing-key fingerprint, bootstrap and stable sequence
-checkpoints, and exact install commands after the artifacts pass live testing.
+Bootstrap sequence 1, signed 2026-09-02T15:26:48Z, valid until 2026-10-02T15:26:48Z.
+Immutable release tag: `validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312`.
+
+Pin these two fingerprints from a Cathedral announcement or another channel you
+trust before you run anything. The installer refuses a bootstrap key whose
+fingerprint differs from the one you pass.
+
+- Bootstrap signing key: `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013`
+- Runtime release key bound inside the signed manifest: `sha256:56a0284790edac88e6b62e8256c43900ff3a43e590e0696c62ad224b5e0766bf`
+- Stable floor bound by this bootstrap: sequence 1, metadata SHA-256
+  `e99f8b81b377677797686d4263d3e619db03e7c950f136ced3065d5fd80ff2a5`
+
+Download, verify, and install the signed bootstrap as root-owned files:
+
+```bash
+set -euo pipefail
+sudo apt-get update && sudo apt-get install -y ca-certificates curl openssl python3.12 python3.12-venv
+BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312
+sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-bootstrap
+for f in updater-bootstrap.tar.gz updater-bootstrap.manifest.json updater-bootstrap.manifest.sig bootstrap-signing-public-key.pem; do
+  sudo curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --output "/var/tmp/cathedral-bootstrap/$f" "$BASE/$f"
+done
+printf '%s\n' \
+  '6436995b7c6d7e1853aa52db12675c00d495f1312264df34fe2e7b822e44983c  /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz' \
+  '655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312  /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json' \
+  '7b0aaebe67411f0e0f8d32fa5fff79a331c657022af87acf761228afa23d0c5a  /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig' \
+  '390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e  /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem' \
+  | sudo sha256sum --check --strict
+test "sha256:$(sudo openssl pkey -pubin -in /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem -outform DER | sha256sum | cut -d' ' -f1)" = sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
+sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem \
+  -rawin -in /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json \
+  -sigfile /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig
+sudo sh -c 'tar -xOf /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-bootstrap/install_updater_bundle.py'
+sudo /usr/bin/python3.12 /var/tmp/cathedral-bootstrap/install_updater_bundle.py \
+  --bundle /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz \
+  --manifest /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json \
+  --signature /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig \
+  --bootstrap-public-key /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem \
+  --expected-bootstrap-key-fingerprint sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013 \
+  --minimum-bootstrap-sequence 1
+```
+
+The installer prints one JSON line ending in `"status":"installed"` and enables
+nothing. Then run the guided setup once with your hotkey file, its public
+address, and your reviewed SNP policy, and read the local status:
+
+```bash
+sudo cathedral-validator-setup \
+  --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
+  --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
+  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
+  --confirm-direct-write
+sudo cathedral-validator-status
+```
+
+Setup installs the signed stable release at or above sequence 1 from
+`https://raw.githubusercontent.com/cathedralai/cathedral-validator/validator-release-channel/validator/stable.json`,
+starts the validator, and enables only the stable update timer. `SETUP_COMPLETE`
+on the last line means the host is running. `SETUP_REFUSED` names the exact
+check that failed and changes nothing.
 <!-- END GENERATED VALIDATOR INSTALL -->
 
-After publication, the signed installation path will:
+The signed installation path:
 
 1. Verify the bootstrap with the separately pinned bootstrap key.
 2. Install the fixed updater, service files, and bundled runtime release key.
@@ -100,5 +158,5 @@ or operator configuration. Those are host trust settings and need an explicit
 bootstrap migration when they change.
 
 Public setup follows `stable` only. Cathedral tests the same signed release on
-its separate canary host before publishing it to `stable`. The public signed
-bootstrap stays unpublished until both paths pass live testing end to end.
+its separate canary host before publishing it to `stable`. Both paths passed
+live testing end to end on 2026-09-02 before this bootstrap was published.
