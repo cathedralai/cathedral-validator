@@ -886,6 +886,10 @@ if seen != set(urls):
 example.write_text("".join(rewritten), encoding="ascii")
 PY
 
+GUIDED_SETUP_SOURCE_SHA="$(shasum -a 256 "$ASSETS_DIR/cathedral-validator-setup" | cut -d' ' -f1)"
+GUIDED_STATUS_SOURCE_SHA="$(shasum -a 256 "$ASSETS_DIR/cathedral-validator-status" | cut -d' ' -f1)"
+readonly GUIDED_SETUP_SOURCE_SHA GUIDED_STATUS_SOURCE_SHA
+
 CREATED_CANARY_VM=0
 CREATED_STABLE_VM=0
 CREATED_FIREWALL=0
@@ -1071,6 +1075,62 @@ cleanup() {
   fi
 
   if [[ -n "${RUN_ROOT:-}" && "$RUN_ROOT" == "${TMPDIR:-/tmp}/cathedral-validator-live-${RUN_ID}."* && -d "$RUN_ROOT" ]]; then
+    # On a successful run, independently scan every evidence file that exists
+    # before destroying the disposable wallet. The report records field names
+    # and the input-file digest only; it never records secret values or hashes
+    # of individual secret values. Files created below this point are fixed
+    # teardown/result metadata and never interpolate operator material.
+    if [[ "$status" == 0 && "$teardown_ok" == 1 ]]; then
+      if ! python3 - "$OPERATOR_HOTKEY" "$EVIDENCE_DIR" \
+        "$EVIDENCE_DIR/operator-secret-scan.json" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+keyfile_path = pathlib.Path(sys.argv[1])
+evidence_dir = pathlib.Path(sys.argv[2])
+output = pathlib.Path(sys.argv[3])
+keyfile_bytes = keyfile_path.read_bytes()
+document = json.loads(keyfile_bytes)
+public_fields = ("ss58Address", "publicKey", "accountId")
+private_fields = ("privateKey", "secretPhrase", "secretSeed")
+checked = []
+needles = []
+for name in public_fields + private_fields:
+    value = document.get(name)
+    if isinstance(value, str) and value:
+        checked.append(name)
+        needles.append(value.encode("utf-8"))
+if not any(name in checked for name in public_fields):
+    raise SystemExit("REFUSED: operator keyfile has no public identity field")
+if not any(name in checked for name in private_fields):
+    raise SystemExit("REFUSED: operator keyfile has no private field to scan")
+files = sorted(path for path in evidence_dir.rglob("*") if path.is_file())
+matches = []
+for path in files:
+    content = path.read_bytes()
+    for name, needle in zip(checked, needles, strict=True):
+        if needle in content:
+            matches.append((path.relative_to(evidence_dir).as_posix(), name))
+if matches:
+    raise SystemExit("REFUSED: operator key material occurred in evidence")
+report = {
+    "schema": "cathedral_validator_operator_secret_scan_v1",
+    "operator_input_file_sha256": hashlib.sha256(keyfile_bytes).hexdigest(),
+    "checked_field_names": sorted(checked),
+    "evidence_file_count": len(files),
+    "exact_match_count": 0,
+}
+output.write_text(
+    json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+PY
+      then
+        teardown_ok=0
+      fi
+    fi
     rm -f -- "$SSH_PRIVATE_KEY"
     if [[ -e "$SSH_PRIVATE_KEY" ]]; then
       teardown_ok=0
@@ -1476,7 +1536,9 @@ python3 - \
   "$FIXED_CHANNEL_CACHE_MAX_SECONDS" "$UPDATE_TIMER_INTERVAL_SECONDS" \
   "$FIXED_CHANNEL_WAIT_SECONDS" \
   "$HARNESS_SHA" "$FAULT_ORIGIN_SHA" "$STATE_WAITER_SHA" \
-  "$E2E_RESULT_SIGNER_KEY_ID" "$RESULT_SIGNER_FINGERPRINT" <<'PY'
+  "$E2E_RESULT_SIGNER_KEY_ID" "$RESULT_SIGNER_FINGERPRINT" \
+  "$GUIDED_SETUP_SOURCE_SHA" "$GUIDED_STATUS_SOURCE_SHA" \
+  "$OPERATOR_HOTKEY_SHA" "$OPERATOR_POLICY_SHA" <<'PY'
 import json
 import pathlib
 import sys
@@ -1515,6 +1577,10 @@ import sys
     state_waiter_sha256,
     result_signer_key_id,
     result_signer_fingerprint,
+    guided_setup_source_sha256,
+    guided_status_source_sha256,
+    operator_hotkey_sha256,
+    operator_policy_sha256,
 ) = sys.argv[1:]
 path = pathlib.Path(output)
 document = {
@@ -1567,6 +1633,22 @@ document = {
     "canary_host_configuration": "internal direct updater first install; not a public operating mode",
     "operator_hotkey_shape": "disposable bittensor-wallet keyfile, unregistered, never recorded",
     "bootstrap_assets": "reviewed deploy assets with both channel URLs rewritten to the isolated mirror branches",
+    "guided_operator": {
+        "setup": {
+            "source_sha256": guided_setup_source_sha256,
+            "installed_path": "/usr/local/sbin/cathedral-validator-setup",
+        },
+        "status": {
+            "source_sha256": guided_status_source_sha256,
+            "installed_path": "/usr/local/sbin/cathedral-validator-status",
+        },
+        "operator_inputs": {
+            "hotkey_keyfile_sha256": operator_hotkey_sha256,
+            "snp_policy_sha256": operator_policy_sha256,
+            "raw_key_material_recorded": False,
+        },
+        "terminal_expectation": "stopped_writer_needs_review",
+    },
     "fixed_channel_cache_max_seconds": int(fixed_channel_cache_max_seconds),
     "update_timer_interval_seconds": int(update_timer_interval_seconds),
     "fixed_channel_wait_seconds": int(fixed_channel_wait_seconds),
@@ -2308,7 +2390,151 @@ assert_guided_status() {
 
 direct_writer_identity() {
   local host="$1"
-  remote "$host" "set -eu; sudo systemctl show cathedral-validator-direct.service -p MainPID -p InvocationID --value | paste -sd: -; sudo sha256sum /var/lib/cathedral-validator-update/state.json /etc/cathedral-validator/setup-complete.json /etc/cathedral-validator/validator-hotkey /etc/cathedral-validator/update.env | cut -d' ' -f1 | paste -sd: -" | tr -d '\r'
+  remote "$host" "set -eu; sudo systemctl show cathedral-validator-direct.service -p MainPID -p InvocationID --value | paste -sd: -; sudo sha256sum /var/lib/cathedral-validator-update/state.json /etc/cathedral-validator/setup-complete.json /etc/cathedral-validator/validator-hotkey /etc/cathedral-validator/update.env /etc/cathedral-validator/snp-policy.json | cut -d' ' -f1 | paste -sd: -" | tr -d '\r'
+}
+
+guided_installed_asset_identity() {
+  local host="$1"
+  remote "$host" "set -eu
+for path in '$GUIDED_SETUP' '$GUIDED_STATUS'; do
+  sudo test -f \"\$path\"
+  ! sudo test -L \"\$path\"
+  digest=\$(sudo sha256sum \"\$path\" | cut -d' ' -f1)
+  uid=\$(sudo stat -c '%u' \"\$path\")
+  gid=\$(sudo stat -c '%g' \"\$path\")
+  mode=\$(sudo stat -c '%a' \"\$path\")
+  printf '%s\t%s\t%s\t%s\t%s\ttrue\tfalse\n' \
+    \"\$path\" \"\$digest\" \"\$uid\" \"\$gid\" \"\$mode\"
+done" | tr -d '\r'
+}
+
+write_guided_transition_proof() {
+  local output="$1"
+  local schema="$2"
+  local host="$3"
+  local before="$4"
+  local after="$5"
+  local installed="$6"
+  local status_file="$7"
+  local first_exit="$8"
+  local second_exit="$9"
+  python3 - "$output" "$schema" "$host" "$before" "$after" "$installed" \
+    "$status_file" "$first_exit" "$second_exit" \
+    "$GUIDED_SETUP_SOURCE_SHA" "$GUIDED_STATUS_SOURCE_SHA" \
+    "$OPERATOR_HOTKEY_SHA" "$OPERATOR_POLICY_SHA" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+(
+    output, schema, host, before_raw, after_raw, installed_raw, status_name,
+    first_exit, second_exit, setup_source, status_source, hotkey_digest,
+    policy_digest,
+) = sys.argv[1:]
+
+durable_names = (
+    "updater_state_sha256",
+    "setup_complete_sha256",
+    "installed_hotkey_sha256",
+    "update_env_sha256",
+    "installed_snp_policy_sha256",
+)
+
+def identity(raw):
+    lines = raw.splitlines()
+    if len(lines) != 2:
+        raise SystemExit("REFUSED: malformed direct writer identity")
+    service = lines[0].split(":")
+    durable_values = lines[1].split(":")
+    if len(service) != 2 or not service[0].isdigit():
+        raise SystemExit("REFUSED: malformed direct writer service identity")
+    if len(durable_values) != len(durable_names) or any(
+        len(value) != 64 for value in durable_values
+    ):
+        raise SystemExit("REFUSED: malformed durable-state digest")
+    return {
+        "main_pid": int(service[0]),
+        "invocation_id": service[1],
+        "durable_sha256": dict(zip(durable_names, durable_values, strict=True)),
+    }
+
+installed = {}
+for line in installed_raw.splitlines():
+    parts = line.split("\t")
+    if len(parts) != 7 or parts[0] in installed:
+        raise SystemExit("REFUSED: malformed installed guided operator identity")
+    path, digest, uid, gid, mode, regular_file, symlink = parts
+    if len(mode) != 3 or any(character not in "01234567" for character in mode):
+        raise SystemExit("REFUSED: malformed installed guided operator mode")
+    installed[path] = {
+        "installed_path": path,
+        "sha256": digest,
+        "uid": int(uid),
+        "gid": int(gid),
+        "mode": f"0{mode}",
+        "regular_file": regular_file == "true",
+        "symlink": symlink == "true",
+    }
+expected_installed = {
+    "/usr/local/sbin/cathedral-validator-setup": setup_source,
+    "/usr/local/sbin/cathedral-validator-status": status_source,
+}
+if set(installed) != set(expected_installed):
+    raise SystemExit("REFUSED: installed guided operator asset set differs")
+for path, digest in expected_installed.items():
+    value = installed[path]
+    if value != {
+        "installed_path": path,
+        "sha256": digest,
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+        "regular_file": True,
+        "symlink": False,
+    }:
+        raise SystemExit("REFUSED: installed guided operator asset metadata differs")
+status_path = pathlib.Path(output).parent / status_name
+status_bytes = status_path.read_bytes()
+document = {
+    "schema": schema,
+    "host": host,
+    "guided_assets": {
+        "setup": installed["/usr/local/sbin/cathedral-validator-setup"],
+        "status": installed["/usr/local/sbin/cathedral-validator-status"],
+    },
+    "operator_inputs": {
+        "hotkey_keyfile_sha256": hotkey_digest,
+        "snp_policy_sha256": policy_digest,
+        "raw_key_material_recorded": False,
+    },
+    "before": identity(before_raw),
+    "after": identity(after_raw),
+    "status": {
+        "file": status_name,
+        "sha256": hashlib.sha256(status_bytes).hexdigest(),
+    },
+}
+if schema == "cathedral_validator_guided_setup_idempotence_proof_v1":
+    document["outcomes"] = {
+        "initial_setup_exit": int(first_exit),
+        "idempotent_rerun_exit": int(second_exit),
+        "setup_complete_marker": "SETUP_COMPLETE: stable direct validator configured",
+    }
+elif schema == "cathedral_validator_guided_setup_stopped_writer_proof_v1":
+    document["outcomes"] = {
+        "stop_writer_exit": int(first_exit),
+        "refused_setup_exit": int(second_exit),
+        "refusal_marker": "SETUP_REFUSED: existing direct validator is stopped and needs review",
+        "writer_remained_stopped": True,
+    }
+else:
+    raise SystemExit("REFUSED: unsupported guided transition proof schema")
+pathlib.Path(output).write_text(
+    json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+PY
 }
 
 configure_stable_host_through_operator_cli() {
@@ -2322,6 +2548,7 @@ configure_stable_host_through_operator_cli() {
   local rerun_output
   local identity_before
   local identity_after
+  local installed_assets
   local status
   remote "$host" "set -eu; test \"\$(sha256sum /tmp/validator | cut -d' ' -f1)\" = '$OPERATOR_HOTKEY_SHA'; test \"\$(sha256sum /tmp/amd-sev-snp-policy.json | cut -d' ' -f1)\" = '$OPERATOR_POLICY_SHA'; install -d -m 0700 /home/${SSH_USER}/.bittensor /home/${SSH_USER}/.bittensor/wallets /home/${SSH_USER}/.bittensor/wallets/live /home/${SSH_USER}/.bittensor/wallets/live/hotkeys; install -m 0600 /tmp/validator '$OPERATOR_HOTKEY_PATH'; install -m 0600 /tmp/amd-sev-snp-policy.json '$OPERATOR_POLICY_PATH'; rm -f /tmp/validator /tmp/amd-sev-snp-policy.json; test \"\$(stat -c '%a' '$OPERATOR_HOTKEY_PATH')\" = 600; printf 'OPERATOR_INPUTS_STAGED hotkey_sha256=%s policy_sha256=%s\n' '$OPERATOR_HOTKEY_SHA' '$OPERATOR_POLICY_SHA'" || return $?
   if setup_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
@@ -2354,6 +2581,7 @@ sudo systemctl is-active --quiet cathedral-validator-update.timer
 printf 'GUIDED_SETUP_CONFIG_PROOF host=%s\n' '$host'" || return $?
   assert_guided_status guided-status-after-setup "$host" "$ARCHIVE_A_SHA" 1 NOT_PROVEN true true || return $?
   identity_before="$(direct_writer_identity "$host")" || return $?
+  installed_assets="$(guided_installed_asset_identity "$host")" || return $?
   if rerun_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
     :
   else
@@ -2370,6 +2598,11 @@ printf 'GUIDED_SETUP_CONFIG_PROOF host=%s\n' '$host'" || return $?
       "$host" "$identity_before" "$identity_after" >&2
     return 1
   fi
+  write_guided_transition_proof \
+    "$EVIDENCE_DIR/guided-setup-idempotence-proof.json" \
+    cathedral_validator_guided_setup_idempotence_proof_v1 "$host" \
+    "$identity_before" "$identity_after" "$installed_assets" \
+    guided-status-after-setup.json 0 0 || return $?
   printf 'GUIDED_SETUP_IDEMPOTENT_RERUN host=%s identity=%s\n' "$host" "$identity_after"
 }
 
@@ -2381,6 +2614,9 @@ prove_guided_setup_refuses_stopped_writer() {
   local after
   local refusal
   local status
+  local installed_assets
+  local before_durable
+  local after_durable
   before="$(direct_writer_identity "$host")" || return $?
   remote "$host" "set -eu; sudo systemctl stop cathedral-validator-direct.service; ! sudo systemctl is-active --quiet cathedral-validator-direct.service; printf 'DIRECT_WRITER_STOPPED_FOR_PROOF\n'" || return $?
   if refusal="$(remote "$host" "set +e; output=\$($(guided_setup_command) 2>&1); status=\$?; printf '%s\n' \"\$output\"; printf 'SETUP_EXIT=%s\n' \"\$status\"; test \"\$status\" -eq 2 && ! sudo systemctl is-active --quiet cathedral-validator-direct.service && printf 'DIRECT_WRITER_STILL_STOPPED\n'" 2>&1)"; then
@@ -2395,12 +2631,20 @@ prove_guided_setup_refuses_stopped_writer() {
   printf '%s\n' "$refusal" | grep -Fx 'DIRECT_WRITER_STILL_STOPPED' >/dev/null || return 1
   assert_no_operator_secret_in "$refusal" || return $?
   after="$(direct_writer_identity "$host")" || return $?
-  if [[ "${before#*:*:}" != "${after#*:*:}" ]]; then
+  before_durable="${before#*$'\n'}"
+  after_durable="${after#*$'\n'}"
+  if [[ "$before_durable" != "$after_durable" ]]; then
     printf 'REFUSED: refused guided setup rerun changed durable state host=%s before=%s after=%s\n' \
       "$host" "$before" "$after" >&2
     return 1
   fi
-  assert_guided_status guided-status-stopped-writer "$host" "$ARCHIVE_A_SHA" 5 NEEDS_REVIEW false any || return $?
+  assert_guided_status guided-status-stopped-writer "$host" "$ARCHIVE_A_SHA" 5 NEEDS_REVIEW false false || return $?
+  installed_assets="$(guided_installed_asset_identity "$host")" || return $?
+  write_guided_transition_proof \
+    "$EVIDENCE_DIR/guided-setup-stopped-writer-proof.json" \
+    cathedral_validator_guided_setup_stopped_writer_proof_v1 "$host" \
+    "$before" "$after" "$installed_assets" \
+    guided-status-stopped-writer.json 0 2 || return $?
   printf 'GUIDED_SETUP_STOPPED_WRITER_REFUSED host=%s\n' "$host"
 }
 

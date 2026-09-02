@@ -235,6 +235,7 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "final-stable-capture-retries.log",
         "final-stable-sections.json",
         "final-stable.txt",
+        "operator-secret-scan.json",
         RESULT_PUBLIC_KEY_NAME,
         "post-teardown-exact-disks.json",
         "post-teardown-exact-instances.json",
@@ -347,6 +348,12 @@ CONTROL_FIELDS = frozenset(
         "bootstrap_tag",
         "bootstrap_transport",
         "anonymous_bootstrap_download_required",
+        "stable_host_configuration",
+        "stable_host_status_command",
+        "canary_host_configuration",
+        "operator_hotkey_shape",
+        "bootstrap_assets",
+        "guided_operator",
         "fixed_channel_cache_max_seconds",
         "update_timer_interval_seconds",
         "fixed_channel_wait_seconds",
@@ -375,6 +382,7 @@ RECORDED_STEPS = (
     "target-specific readiness failure rolls A back to B",
     "reset at durable may_have_run and reconcile exact A on boot",
     "leave B crash-uncertain, then rescue with higher signed A sequence",
+    "guided setup rerun refuses the stopped writer and status reports review",
     "SCENARIOS_PASS_PENDING_TEARDOWN all bounded no-chain updater scenarios",
 )
 
@@ -405,6 +413,8 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
             ("first-install-command-catval-{run_id}-stable.log", False),
             ("first-readiness-command-catval-{run_id}-canary.log", False),
             ("first-readiness-command-catval-{run_id}-stable.log", False),
+            ("guided-status-after-setup.json", False),
+            ("guided-setup-idempotence-proof.json", False),
         ),
     ),
     (
@@ -465,6 +475,8 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
             ("stable-exact-promotion-timer-wait-command.log", False),
             ("stable-exact-promotion-timer-rearm-command.log", False),
             ("stable-exact-promotion-current-proof.txt", False),
+            ("guided-status-after-timer-b-command.log", False),
+            ("guided-status-after-timer-b.json", False),
         ),
     ),
     (
@@ -584,8 +596,17 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
         ),
     ),
     (
-        "final_capture",
+        "guided_operator_stopped_writer_review",
         RECORDED_STEPS[16],
+        (
+            ("guided-setup-stopped-writer-command.log", False),
+            ("guided-setup-stopped-writer-proof.json", False),
+            ("guided-status-stopped-writer.json", False),
+        ),
+    ),
+    (
+        "final_capture",
+        RECORDED_STEPS[17],
         (
             ("final-canary-sections.json", False),
             ("final-canary-capture-retries.log", False),
@@ -595,6 +616,7 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
             ("final-stable-capture-retries.log", False),
             ("final-stable.d/direct_unit_show.txt", False),
             ("final-stable.d/updater_state.txt", False),
+            ("operator-secret-scan.json", False),
         ),
     ),
 )
@@ -1129,7 +1151,7 @@ def _systemd_show_blocks(data: bytes, *, label: str) -> list[dict[str, str]]:
 
 
 def _validate_final_systemd_state(
-    artifacts_dir: Path, *, label: str
+    artifacts_dir: Path, *, label: str, direct_active: bool = True
 ) -> dict[str, str | int]:
     direct_blocks = _systemd_show_blocks(
         _read_regular(
@@ -1144,19 +1166,35 @@ def _validate_final_systemd_state(
         main_pid = int(direct.get("MainPID", "0"), 10)
     except ValueError as exc:
         raise EvidenceError(f"{label} direct unit has an invalid MainPID") from exc
-    if (
-        direct.get("Result") != "success"
-        or direct.get("ExecMainCode") != "0"
-        or direct.get("ExecMainStatus") != "0"
-        or direct.get("ActiveState") != "active"
-        or direct.get("SubState") != "running"
-        or main_pid <= 0
-    ):
-        raise EvidenceError(f"{label} direct validator service is not healthy")
     invocation_id = direct.get("InvocationID", "")
-    if re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None:
+    if direct_active:
+        if (
+            direct.get("Result") != "success"
+            or direct.get("ExecMainCode") != "0"
+            or direct.get("ExecMainStatus") != "0"
+            or direct.get("ActiveState") != "active"
+            or direct.get("SubState") != "running"
+            or main_pid <= 0
+        ):
+            raise EvidenceError(f"{label} direct validator service is not healthy")
+        if re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None:
+            raise EvidenceError(
+                f"{label} direct validator service has no valid InvocationID"
+            )
+    elif (
+        direct.get("Result") != "success"
+        or direct.get("ExecMainCode") not in {"0", "1"}
+        or direct.get("ExecMainStatus") != "0"
+        or direct.get("ActiveState") != "inactive"
+        or direct.get("SubState") != "dead"
+        or main_pid != 0
+        or (
+            invocation_id != ""
+            and re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None
+        )
+    ):
         raise EvidenceError(
-            f"{label} direct validator service has no valid InvocationID"
+            f"{label} direct validator service is not proven safely stopped"
         )
 
     boot_blocks = _systemd_show_blocks(
@@ -1624,6 +1662,20 @@ def _validate_control(value: Any) -> dict[str, Any]:
         "bootstrap_track": "test",
         "bootstrap_transport": "anonymous_immutable_github_release",
         "anonymous_bootstrap_download_required": True,
+        "stable_host_configuration": (
+            "cathedral-validator-setup from the signed bootstrap"
+        ),
+        "stable_host_status_command": "cathedral-validator-status --json",
+        "canary_host_configuration": (
+            "internal direct updater first install; not a public operating mode"
+        ),
+        "operator_hotkey_shape": (
+            "disposable bittensor-wallet keyfile, unregistered, never recorded"
+        ),
+        "bootstrap_assets": (
+            "reviewed deploy assets with both channel URLs rewritten to the "
+            "isolated mirror branches"
+        ),
         "fixed_channel_cache_max_seconds": 300,
         "update_timer_interval_seconds": 60,
         "fixed_channel_wait_seconds": 1860,
@@ -1669,6 +1721,62 @@ def _validate_control(value: Any) -> dict[str, Any]:
             raise EvidenceError(f"control document has an invalid {field}")
     if value["bootstrap_key_fingerprint"] == value["runtime_key_fingerprint"]:
         raise EvidenceError("control document release signing keys must be distinct")
+    guided = value.get("guided_operator")
+    if not isinstance(guided, dict) or set(guided) != {
+        "setup",
+        "status",
+        "operator_inputs",
+        "terminal_expectation",
+    }:
+        raise EvidenceError("control document has an invalid guided_operator")
+    reviewed_root = Path(__file__).resolve().parents[1] / "deploy" / "validator-update"
+    expected_guided_assets = {
+        "setup": {
+            "source_sha256": _sha256(
+                _read_regular(
+                    reviewed_root / "cathedral-validator-setup",
+                    label="reviewed guided setup source",
+                    require_nonempty=True,
+                )
+            ),
+            "installed_path": "/usr/local/sbin/cathedral-validator-setup",
+        },
+        "status": {
+            "source_sha256": _sha256(
+                _read_regular(
+                    reviewed_root / "cathedral-validator-status",
+                    label="reviewed guided status source",
+                    require_nonempty=True,
+                )
+            ),
+            "installed_path": "/usr/local/sbin/cathedral-validator-status",
+        },
+    }
+    for name, expected in expected_guided_assets.items():
+        _require_exact_object(
+            guided.get(name), expected, label=f"control guided_operator {name}"
+        )
+    operator_inputs = guided.get("operator_inputs")
+    if not isinstance(operator_inputs, dict) or set(operator_inputs) != {
+        "hotkey_keyfile_sha256",
+        "snp_policy_sha256",
+        "raw_key_material_recorded",
+    }:
+        raise EvidenceError("control guided_operator operator_inputs is invalid")
+    input_digests = (
+        operator_inputs.get("hotkey_keyfile_sha256"),
+        operator_inputs.get("snp_policy_sha256"),
+    )
+    if (
+        any(
+            not isinstance(digest, str) or HEX_64.fullmatch(digest) is None
+            for digest in input_digests
+        )
+        or input_digests[0] == input_digests[1]
+        or operator_inputs.get("raw_key_material_recorded") is not False
+        or guided.get("terminal_expectation") != "stopped_writer_needs_review"
+    ):
+        raise EvidenceError("control guided_operator boundary is invalid")
     expected_branches = {
         "canary_branch": f"validator-release-live-{run_id}-canary",
         "stable_branch": f"validator-release-live-{run_id}-stable",
@@ -2047,12 +2155,17 @@ def _validate_first_install_state_evidence(
 
 
 def _validate_bootstrap_manifest_files(
-    value: Any, *, runtime_public_pem: bytes
+    value: Any, *, runtime_public_pem: bytes, control: dict[str, Any]
 ) -> None:
     if not isinstance(value, list) or not value:
         raise EvidenceError("bootstrap manifest files must be a non-empty list")
     paths: list[str] = []
-    runtime_entry: dict[str, Any] | None = None
+    retained_entries: dict[str, dict[str, Any]] = {}
+    retained_paths = {
+        RUNTIME_KEY_BUNDLE_PATH,
+        "payload/operator/cathedral-validator-setup",
+        "payload/operator/cathedral-validator-status",
+    }
     for index, entry in enumerate(value):
         label = f"bootstrap manifest file {index}"
         if not isinstance(entry, dict) or set(entry) != {
@@ -2080,11 +2193,11 @@ def _validate_bootstrap_manifest_files(
         ):
             raise EvidenceError(f"{label} is invalid")
         paths.append(path_value)
-        if path_value == RUNTIME_KEY_BUNDLE_PATH:
-            runtime_entry = entry
+        if path_value in retained_paths:
+            retained_entries[path_value] = entry
     if paths != sorted(paths) or len(paths) != len(set(paths)):
         raise EvidenceError("bootstrap manifest file paths are not unique and sorted")
-    if runtime_entry != {
+    if retained_entries.get(RUNTIME_KEY_BUNDLE_PATH) != {
         "mode": "0644",
         "path": RUNTIME_KEY_BUNDLE_PATH,
         "sha256": _sha256(runtime_public_pem),
@@ -2093,6 +2206,29 @@ def _validate_bootstrap_manifest_files(
         raise EvidenceError(
             "bootstrap manifest does not embed the retained runtime public key"
         )
+    reviewed_root = Path(__file__).resolve().parents[1] / "deploy" / "validator-update"
+    for name in ("cathedral-validator-setup", "cathedral-validator-status"):
+        reviewed = _read_regular(
+            reviewed_root / name,
+            label=f"reviewed bootstrap operator asset {name}",
+            require_nonempty=True,
+        )
+        archive_path = f"payload/operator/{name}"
+        expected = {
+            "mode": "0644",
+            "path": archive_path,
+            "sha256": control["guided_operator"][
+                "setup" if name.endswith("setup") else "status"
+            ]["source_sha256"],
+            "size": len(reviewed),
+        }
+        if (
+            expected["sha256"] != _sha256(reviewed)
+            or retained_entries.get(archive_path) != expected
+        ):
+            raise EvidenceError(
+                f"bootstrap manifest does not embed the reviewed {name}"
+            )
 
 
 def _validate_bootstrap_evidence(
@@ -2133,7 +2269,9 @@ def _validate_bootstrap_evidence(
     ):
         raise EvidenceError("bootstrap manifest bundle is invalid")
     _validate_bootstrap_manifest_files(
-        manifest.get("files"), runtime_public_pem=runtime_key["pem"]
+        manifest.get("files"),
+        runtime_public_pem=runtime_key["pem"],
+        control=control,
     )
     _require_exact_object(
         manifest.get("install"),
@@ -2334,6 +2472,514 @@ def _validate_release_and_bootstrap_evidence(
     return records
 
 
+def _guided_status_report(
+    root: Path,
+    *,
+    relative: str,
+    expected_result: str,
+    expected_record: dict[str, Any],
+    service_active: bool,
+    timer_active: bool,
+) -> None:
+    label = f"guided operator status {relative}"
+    raw = _read_regular(root / relative, label=label, require_nonempty=True)
+    if not raw.endswith(b"\n") or b"\n" in raw[:-1]:
+        raise EvidenceError(f"{label} must contain exactly one JSON line")
+    report = strict_json(raw, label=label)
+    expected_top_level = {
+        "schema",
+        "service_active",
+        "stable_timer_active",
+        "stable_timer_enabled",
+        "release",
+        "evidence",
+        "updater",
+        "direct",
+        "result",
+        "action",
+    }
+    if not isinstance(report, dict) or set(report) != expected_top_level:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    expected_action = (
+        "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
+        if expected_result == "NEEDS_REVIEW"
+        else "Wait for recovery or the next cycle. Do not retry or replace the journal."
+    )
+    for field, expected in {
+        "schema": "cathedral_validator_local_status_v1",
+        "service_active": service_active,
+        "stable_timer_active": timer_active,
+        "stable_timer_enabled": timer_active,
+        "release": expected_record["archive_sha256"],
+        "evidence": (
+            "local process and durable state only. This does not prove current "
+            "chain inclusion."
+        ),
+        "result": expected_result,
+        "action": expected_action,
+    }.items():
+        if type(report.get(field)) is not type(expected) or report[field] != expected:
+            raise EvidenceError(f"{label} has an invalid {field}")
+    _require_exact_object(
+        report.get("updater"),
+        {
+            "channel": "stable",
+            "sequence": expected_record["sequence"],
+            "archive_digest": expected_record["archive_sha256"],
+            "pending_recovery": False,
+        },
+        label=f"{label} updater",
+    )
+    direct = report.get("direct")
+    if not isinstance(direct, dict) or set(direct) != {
+        "pending",
+        "last_result",
+        "block_number",
+        "recorded_age_seconds",
+    }:
+        raise EvidenceError(f"{label} direct state has unexpected or missing fields")
+    age = direct.get("recorded_age_seconds")
+    if (
+        direct.get("pending") is not False
+        or direct.get("last_result") is not None
+        or direct.get("block_number") is not None
+        or type(age) is not int
+        or age < 0
+    ):
+        raise EvidenceError(f"{label} direct state is not the no-chain test state")
+    if any(
+        marker in raw
+        for marker in (
+            b"privateKey",
+            b"secretPhrase",
+            b"secretSeed",
+            b"validator-hotkey",
+        )
+    ):
+        raise EvidenceError(f"{label} exposes operator hotkey material")
+
+
+def _guided_ascii_log(root: Path, relative: str) -> str:
+    raw = _read_regular(
+        root / relative,
+        label=f"guided operator log {relative}",
+        require_nonempty=True,
+    )
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(f"guided operator log {relative} must be ASCII") from exc
+    if not text.endswith("\n"):
+        raise EvidenceError(f"guided operator log {relative} must end with a newline")
+    if any(
+        marker in text
+        for marker in ("privateKey", "secretPhrase", "secretSeed", "validator-hotkey")
+    ):
+        raise EvidenceError(f"guided operator log {relative} exposes hotkey material")
+    return text
+
+
+GUIDED_DURABLE_DIGEST_FIELDS = (
+    "updater_state_sha256",
+    "setup_complete_sha256",
+    "installed_hotkey_sha256",
+    "update_env_sha256",
+    "installed_snp_policy_sha256",
+)
+
+
+def _guided_transition_identity(
+    value: Any, *, label: str, active: bool
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "main_pid",
+        "invocation_id",
+        "durable_sha256",
+    }:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    main_pid = value.get("main_pid")
+    invocation_id = value.get("invocation_id")
+    durable = value.get("durable_sha256")
+    if type(main_pid) is not int or not isinstance(invocation_id, str):
+        raise EvidenceError(f"{label} has an invalid service identity")
+    if active:
+        if main_pid <= 0 or re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None:
+            raise EvidenceError(f"{label} does not prove an active writer identity")
+    elif main_pid != 0 or (
+        invocation_id != "" and re.fullmatch(r"[0-9A-Fa-f]{32}", invocation_id) is None
+    ):
+        raise EvidenceError(f"{label} does not prove a stopped writer identity")
+    if not isinstance(durable, dict) or tuple(sorted(durable)) != tuple(
+        sorted(GUIDED_DURABLE_DIGEST_FIELDS)
+    ):
+        raise EvidenceError(f"{label} has unexpected durable-state fields")
+    for field in GUIDED_DURABLE_DIGEST_FIELDS:
+        digest = durable.get(field)
+        if not isinstance(digest, str) or HEX_64.fullmatch(digest) is None:
+            raise EvidenceError(f"{label} has an invalid {field}")
+    return value
+
+
+def _guided_transition_proof(
+    root: Path,
+    control: dict[str, Any],
+    *,
+    relative: str,
+    schema: str,
+    status_file: str,
+    stopped_after: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    label = f"guided transition proof {relative}"
+    proof = strict_json(
+        _read_regular(root / relative, label=label, require_nonempty=True),
+        label=label,
+        canonical=True,
+    )
+    if not isinstance(proof, dict) or set(proof) != {
+        "schema",
+        "host",
+        "guided_assets",
+        "operator_inputs",
+        "before",
+        "after",
+        "status",
+        "outcomes",
+    }:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    expected_host = f"catval-{control['run_id']}-stable"
+    if proof.get("schema") != schema or proof.get("host") != expected_host:
+        raise EvidenceError(f"{label} has an invalid schema or host")
+
+    guided = control["guided_operator"]
+    expected_assets = {
+        name: {
+            "installed_path": guided[name]["installed_path"],
+            "sha256": guided[name]["source_sha256"],
+            "uid": 0,
+            "gid": 0,
+            "mode": "0755",
+            "regular_file": True,
+            "symlink": False,
+        }
+        for name in ("setup", "status")
+    }
+    assets = proof.get("guided_assets")
+    if not isinstance(assets, dict) or set(assets) != set(expected_assets):
+        raise EvidenceError(f"{label} guided assets has unexpected or missing fields")
+    for name, expected in expected_assets.items():
+        _require_exact_object(
+            assets.get(name), expected, label=f"{label} guided asset {name}"
+        )
+    _require_exact_object(
+        proof.get("operator_inputs"),
+        guided["operator_inputs"],
+        label=f"{label} operator inputs",
+    )
+
+    before = _guided_transition_identity(
+        proof.get("before"), label=f"{label} before", active=True
+    )
+    after = _guided_transition_identity(
+        proof.get("after"), label=f"{label} after", active=not stopped_after
+    )
+    hotkey_digest = guided["operator_inputs"]["hotkey_keyfile_sha256"]
+    policy_digest = guided["operator_inputs"]["snp_policy_sha256"]
+    if (
+        before["durable_sha256"]["installed_hotkey_sha256"] != hotkey_digest
+        or after["durable_sha256"]["installed_hotkey_sha256"] != hotkey_digest
+    ):
+        raise EvidenceError(f"{label} does not bind the installed operator hotkey")
+    if (
+        before["durable_sha256"]["installed_snp_policy_sha256"] != policy_digest
+        or after["durable_sha256"]["installed_snp_policy_sha256"] != policy_digest
+    ):
+        raise EvidenceError(f"{label} does not bind the installed SNP policy")
+
+    status_bytes = _read_regular(
+        root / status_file,
+        label=f"{label} status evidence",
+        require_nonempty=True,
+    )
+    _require_exact_object(
+        proof.get("status"),
+        {"file": status_file, "sha256": _sha256(status_bytes)},
+        label=f"{label} status binding",
+    )
+    if stopped_after:
+        _require_exact_object(
+            proof.get("outcomes"),
+            {
+                "stop_writer_exit": 0,
+                "refused_setup_exit": 2,
+                "refusal_marker": (
+                    "SETUP_REFUSED: existing direct validator is stopped and "
+                    "needs review"
+                ),
+                "writer_remained_stopped": True,
+            },
+            label=f"{label} outcomes",
+        )
+        if before["durable_sha256"] != after["durable_sha256"]:
+            raise EvidenceError(f"{label} refused rerun changed durable state")
+    else:
+        _require_exact_object(
+            proof.get("outcomes"),
+            {
+                "initial_setup_exit": 0,
+                "idempotent_rerun_exit": 0,
+                "setup_complete_marker": (
+                    "SETUP_COMPLETE: stable direct validator configured"
+                ),
+            },
+            label=f"{label} outcomes",
+        )
+        if before != after:
+            raise EvidenceError(f"{label} idempotent rerun changed writer state")
+    return before, after
+
+
+def _validate_operator_secret_scan(root: Path, control: dict[str, Any]) -> None:
+    label = "operator secret scan"
+    report = strict_json(
+        _read_regular(
+            root / "operator-secret-scan.json", label=label, require_nonempty=True
+        ),
+        label=label,
+        canonical=True,
+    )
+    if not isinstance(report, dict) or set(report) != {
+        "schema",
+        "operator_input_file_sha256",
+        "checked_field_names",
+        "evidence_file_count",
+        "exact_match_count",
+    }:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    expected_input = control["guided_operator"]["operator_inputs"][
+        "hotkey_keyfile_sha256"
+    ]
+    if (
+        report.get("schema") != "cathedral_validator_operator_secret_scan_v1"
+        or report.get("operator_input_file_sha256") != expected_input
+        or report.get("exact_match_count") != 0
+        or type(report.get("exact_match_count")) is not int
+    ):
+        raise EvidenceError(f"{label} has an invalid result or input binding")
+    checked = report.get("checked_field_names")
+    allowed_public = {"accountId", "ss58Address", "publicKey"}
+    allowed_private = {"privateKey", "secretPhrase", "secretSeed"}
+    if (
+        not isinstance(checked, list)
+        or any(not isinstance(name, str) for name in checked)
+        or checked != sorted(set(checked))
+        or not set(checked).issubset(allowed_public | allowed_private)
+        or not set(checked).intersection(allowed_public)
+        or not set(checked).intersection(allowed_private)
+    ):
+        raise EvidenceError(f"{label} has invalid checked field names")
+    post_scan_files = {
+        "operator-secret-scan.json",
+        "teardown-status.txt",
+        "controller-source-finalization.stderr",
+        *RESULT_EXCLUSIONS,
+    }
+    expected_file_count = sum(
+        1
+        for path in root.rglob("*")
+        if stat.S_ISREG(path.lstat().st_mode)
+        and path.relative_to(root).as_posix() not in post_scan_files
+    )
+    if (
+        type(report.get("evidence_file_count")) is not int
+        or report["evidence_file_count"] != expected_file_count
+    ):
+        raise EvidenceError(f"{label} has an invalid evidence file count")
+
+
+def _validate_guided_operator_evidence(
+    root: Path,
+    control: dict[str, Any],
+    runtime_records: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    host = f"catval-{control['run_id']}-stable"
+    archive_a = control["archive_a_sha256"]
+    archive_b = control["archive_b_sha256"]
+    a1 = runtime_records["stable-a-seq1.json"]["record"]
+    b2 = runtime_records["stable-b-seq2.json"]["record"]
+    a5 = runtime_records["stable-a-rescue-seq5.json"]["record"]
+
+    idempotent_before, idempotent_after = _guided_transition_proof(
+        root,
+        control,
+        relative="guided-setup-idempotence-proof.json",
+        schema="cathedral_validator_guided_setup_idempotence_proof_v1",
+        status_file="guided-status-after-setup.json",
+        stopped_after=False,
+    )
+
+    setup_log = _guided_ascii_log(root, f"first-install-command-{host}.log")
+    staged = re.findall(
+        r"^OPERATOR_INPUTS_STAGED hotkey_sha256=([0-9a-f]{64}) "
+        r"policy_sha256=([0-9a-f]{64})$",
+        setup_log,
+        flags=re.MULTILINE,
+    )
+    idempotent = list(
+        re.finditer(
+            rf"^GUIDED_SETUP_IDEMPOTENT_RERUN host={re.escape(host)} "
+            r"identity=([1-9][0-9]*):([0-9A-Fa-f]{32})\n"
+            r"((?:[0-9a-f]{64}:){4}[0-9a-f]{64})$",
+            setup_log,
+            flags=re.MULTILINE,
+        )
+    )
+    setup_status_line = (
+        "GUIDED_STATUS_PROOF label=guided-status-after-setup "
+        f"result=NOT_PROVEN release={archive_a} sequence=1"
+    )
+    config_line = f"GUIDED_SETUP_CONFIG_PROOF host={host}"
+    setup_complete = "SETUP_COMPLETE: stable direct validator configured"
+    if (
+        len(staged) != 1
+        or staged[0]
+        != (
+            control["guided_operator"]["operator_inputs"]["hotkey_keyfile_sha256"],
+            control["guided_operator"]["operator_inputs"]["snp_policy_sha256"],
+        )
+        or len(idempotent) != 1
+        or idempotent[0].group(1) != str(idempotent_after["main_pid"])
+        or idempotent[0].group(2).lower() != idempotent_after["invocation_id"].lower()
+        or idempotent[0].group(3)
+        != ":".join(
+            idempotent_after["durable_sha256"][field]
+            for field in GUIDED_DURABLE_DIGEST_FIELDS
+        )
+        or idempotent_before != idempotent_after
+        or setup_log.splitlines().count(setup_complete) != 2
+        or setup_log.splitlines().count(config_line) != 1
+        or setup_log.splitlines().count(setup_status_line) != 1
+        or not (
+            setup_log.index("OPERATOR_INPUTS_STAGED ")
+            < setup_log.index(setup_complete)
+            < setup_log.index(config_line)
+            < setup_log.index(setup_status_line)
+            < setup_log.index(setup_complete, setup_log.index(setup_complete) + 1)
+            < idempotent[0].start()
+        )
+    ):
+        raise EvidenceError(
+            "guided setup evidence does not prove configuration and idempotent rerun"
+        )
+
+    _guided_status_report(
+        root,
+        relative="guided-status-after-setup.json",
+        expected_result="NOT_PROVEN",
+        expected_record=a1,
+        service_active=True,
+        timer_active=True,
+    )
+
+    _, stopped_after = _guided_transition_proof(
+        root,
+        control,
+        relative="guided-setup-stopped-writer-proof.json",
+        schema="cathedral_validator_guided_setup_stopped_writer_proof_v1",
+        status_file="guided-status-stopped-writer.json",
+        stopped_after=True,
+    )
+    timer_status_line = (
+        "GUIDED_STATUS_PROOF label=guided-status-after-timer-b "
+        f"result=NOT_PROVEN release={archive_b} sequence=2"
+    )
+    timer_log = _guided_ascii_log(root, "guided-status-after-timer-b-command.log")
+    if timer_log.splitlines().count(timer_status_line) != 1:
+        raise EvidenceError("guided timer-B status proof is incomplete")
+    _guided_status_report(
+        root,
+        relative="guided-status-after-timer-b.json",
+        expected_result="NOT_PROVEN",
+        expected_record=b2,
+        service_active=True,
+        timer_active=True,
+    )
+
+    before_state = strict_json(
+        _read_regular(
+            root / "stable-higher-sequence-rescue-sequence-state.json",
+            label="guided stopped-writer pre-state",
+            require_nonempty=True,
+        ),
+        label="guided stopped-writer pre-state",
+        canonical=True,
+    )
+    _require_exact_object(
+        before_state,
+        {
+            "channel": "stable",
+            "current": f"releases/{archive_a}",
+            "record": a5,
+            "sequence": 5,
+            "pending": None,
+        },
+        label="guided stopped-writer pre-state",
+    )
+    _validate_current_release_proof(
+        _read_regular(
+            root / "higher-sequence-rescue-current-proof.txt",
+            label="guided stopped-writer pre-current",
+            require_nonempty=True,
+        ),
+        label="guided stopped-writer pre-current",
+        archive_sha256=archive_a,
+    )
+    if (
+        _read_regular(
+            root / "higher-sequence-rescue-service-command.log",
+            label="guided stopped-writer pre-service",
+            require_nonempty=True,
+        )
+        != b"active\n"
+    ):
+        raise EvidenceError("guided stopped-writer pre-service was not active")
+
+    stopped_status_line = (
+        "GUIDED_STATUS_PROOF label=guided-status-stopped-writer "
+        f"result=NEEDS_REVIEW release={archive_a} sequence=5"
+    )
+    stopped_lines = _guided_ascii_log(
+        root, "guided-setup-stopped-writer-command.log"
+    ).splitlines()
+    expected_stopped_markers = (
+        "DIRECT_WRITER_STOPPED_FOR_PROOF",
+        "SETUP_REFUSED: existing direct validator is stopped and needs review",
+        "SETUP_EXIT=2",
+        "DIRECT_WRITER_STILL_STOPPED",
+        stopped_status_line,
+        f"GUIDED_SETUP_STOPPED_WRITER_REFUSED host={host}",
+    )
+    positions: list[int] = []
+    for marker in expected_stopped_markers:
+        if stopped_lines.count(marker) != 1:
+            raise EvidenceError(
+                "guided stopped-writer refusal log is incomplete or ambiguous"
+            )
+        positions.append(stopped_lines.index(marker))
+    if positions != sorted(positions) or any(
+        line == setup_complete for line in stopped_lines
+    ):
+        raise EvidenceError("guided stopped-writer refusal ordering is invalid")
+    _guided_status_report(
+        root,
+        relative="guided-status-stopped-writer.json",
+        expected_result="NEEDS_REVIEW",
+        expected_record=a5,
+        service_active=False,
+        timer_active=False,
+    )
+    return stopped_after
+
+
 def _validate_success_evidence(root: Path) -> dict[str, Any]:
     for relative in REQUIRED_SUCCESS_FILES:
         _read_regular(
@@ -2363,6 +3009,9 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         )
     )
     runtime_records = _validate_release_and_bootstrap_evidence(root, control)
+    guided_stopped_identity = _validate_guided_operator_evidence(
+        root, control, runtime_records
+    )
     pid_values = [
         _single_ascii_line(root, relative, label=f"direct service PID proof {relative}")
         for relative in DIRECT_SERVICE_PID_PROOFS
@@ -2592,7 +3241,11 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         expected_archive = expected_archive_text.encode("ascii")
         if current != b"releases/" + expected_archive:
             raise EvidenceError(f"{label} does not point to its expected final release")
-        direct_identity = _validate_final_systemd_state(artifacts_dir, label=label)
+        direct_identity = _validate_final_systemd_state(
+            artifacts_dir,
+            label=label,
+            direct_active=role == "canary",
+        )
         if label == "final-canary" and (
             str(direct_identity["main_pid"]) != pid_values[0]
             or str(direct_identity["invocation_id"]).lower()
@@ -2600,6 +3253,15 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
         ):
             raise EvidenceError(
                 "final-canary direct service identity differs from continuity proofs"
+            )
+        if (
+            label == "final-stable"
+            and str(direct_identity["invocation_id"]).lower()
+            != str(guided_stopped_identity["invocation_id"]).lower()
+        ):
+            raise EvidenceError(
+                "final-stable direct service invocation differs from the stopped "
+                "writer proof"
             )
     initial_identities: dict[str, str] = {}
     for role in ("canary", "stable"):
@@ -2640,6 +3302,7 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
     if not (initial_identities == created_identities == pre_teardown_identities):
         raise EvidenceError("host immutable identities changed during the live test")
     _scenario_matrix(root, control)
+    _validate_operator_secret_scan(root, control)
     return control
 
 

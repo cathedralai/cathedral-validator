@@ -376,6 +376,12 @@ def _bootstrap_fixture(
     target_revision,
 ):
     bundle_sha256 = hashlib.sha256(b"fixture bootstrap bundle").hexdigest()
+    guided_setup = (
+        ROOT / "deploy" / "validator-update" / "cathedral-validator-setup"
+    ).read_bytes()
+    guided_status = (
+        ROOT / "deploy" / "validator-update" / "cathedral-validator-status"
+    ).read_bytes()
     manifest = {
         "bundle": {"sha256": bundle_sha256, "size": 4096},
         "files": [
@@ -384,6 +390,18 @@ def _bootstrap_fixture(
                 "path": "payload/installer/install_updater_bundle.py",
                 "sha256": hashlib.sha256(b"fixture installer").hexdigest(),
                 "size": len(b"fixture installer"),
+            },
+            {
+                "mode": "0644",
+                "path": "payload/operator/cathedral-validator-setup",
+                "sha256": hashlib.sha256(guided_setup).hexdigest(),
+                "size": len(guided_setup),
+            },
+            {
+                "mode": "0644",
+                "path": "payload/operator/cathedral-validator-status",
+                "sha256": hashlib.sha256(guided_status).hexdigest(),
+                "size": len(guided_status),
             },
             {
                 "mode": "0644",
@@ -498,11 +516,18 @@ def _capture_manifest(evidence, label, expected_record):
         elif section_id == "current_release":
             payload = f"releases/{expected_record['archive_sha256']}\n".encode("ascii")
         elif section_id == "direct_unit_show":
-            payload = (
-                b"Result=success\nExecMainCode=0\nExecMainStatus=0\n"
-                b"ActiveState=active\nSubState=running\nMainPID=42\n"
-                b"InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-            )
+            if role == "canary":
+                payload = (
+                    b"Result=success\nExecMainCode=0\nExecMainStatus=0\n"
+                    b"ActiveState=active\nSubState=running\nMainPID=42\n"
+                    b"InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+                )
+            else:
+                payload = (
+                    b"Result=success\nExecMainCode=1\nExecMainStatus=0\n"
+                    b"ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+                    b"InvocationID=\n"
+                )
         elif section_id == "boot_reconcile_show":
             payload = (
                 b"Result=success\nExecMainCode=1\nExecMainStatus=0\n"
@@ -553,6 +578,88 @@ def _capture_manifest(evidence, label, expected_record):
     (evidence / f"{label}-capture-retries.log").write_text(
         "attempt=1 status=0\n", encoding="ascii"
     )
+
+
+def _guided_status_fixture(
+    evidence,
+    relative,
+    record,
+    *,
+    service_active,
+    timer_active,
+    result,
+):
+    action = (
+        "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
+        if result == "NEEDS_REVIEW"
+        else "Wait for recovery or the next cycle. Do not retry or replace the journal."
+    )
+    document = {
+        "schema": "cathedral_validator_local_status_v1",
+        "service_active": service_active,
+        "stable_timer_active": timer_active,
+        "stable_timer_enabled": timer_active,
+        "release": record["archive_sha256"],
+        "evidence": (
+            "local process and durable state only. This does not prove current "
+            "chain inclusion."
+        ),
+        "updater": {
+            "channel": "stable",
+            "sequence": record["sequence"],
+            "archive_digest": record["archive_sha256"],
+            "pending_recovery": False,
+        },
+        "direct": {
+            "pending": False,
+            "last_result": None,
+            "block_number": None,
+            "recorded_age_seconds": 0,
+        },
+        "result": result,
+        "action": action,
+    }
+    raw = RESULT.canonical_bytes(document)
+    (evidence / relative).write_bytes(raw)
+    return raw
+
+
+def _guided_transition_fixture(
+    evidence,
+    control,
+    *,
+    relative,
+    schema,
+    status_file,
+    before,
+    after,
+    outcomes,
+):
+    proof = {
+        "schema": schema,
+        "host": "catval-valupd-fixture-stable",
+        "guided_assets": {
+            name: {
+                "installed_path": control["guided_operator"][name]["installed_path"],
+                "sha256": control["guided_operator"][name]["source_sha256"],
+                "uid": 0,
+                "gid": 0,
+                "mode": "0755",
+                "regular_file": True,
+                "symlink": False,
+            }
+            for name in ("setup", "status")
+        },
+        "operator_inputs": control["guided_operator"]["operator_inputs"],
+        "before": before,
+        "after": after,
+        "status": {
+            "file": status_file,
+            "sha256": hashlib.sha256((evidence / status_file).read_bytes()).hexdigest(),
+        },
+        "outcomes": outcomes,
+    }
+    (evidence / relative).write_bytes(RESULT.canonical_bytes(proof))
 
 
 def _success_tree(tmp_path):
@@ -721,6 +828,50 @@ def _success_tree(tmp_path):
         "bootstrap_tag": bootstrap_tag,
         "bootstrap_transport": "anonymous_immutable_github_release",
         "anonymous_bootstrap_download_required": True,
+        "stable_host_configuration": (
+            "cathedral-validator-setup from the signed bootstrap"
+        ),
+        "stable_host_status_command": "cathedral-validator-status --json",
+        "canary_host_configuration": (
+            "internal direct updater first install; not a public operating mode"
+        ),
+        "operator_hotkey_shape": (
+            "disposable bittensor-wallet keyfile, unregistered, never recorded"
+        ),
+        "bootstrap_assets": (
+            "reviewed deploy assets with both channel URLs rewritten to the "
+            "isolated mirror branches"
+        ),
+        "guided_operator": {
+            "setup": {
+                "source_sha256": hashlib.sha256(
+                    (
+                        ROOT
+                        / "deploy"
+                        / "validator-update"
+                        / "cathedral-validator-setup"
+                    ).read_bytes()
+                ).hexdigest(),
+                "installed_path": "/usr/local/sbin/cathedral-validator-setup",
+            },
+            "status": {
+                "source_sha256": hashlib.sha256(
+                    (
+                        ROOT
+                        / "deploy"
+                        / "validator-update"
+                        / "cathedral-validator-status"
+                    ).read_bytes()
+                ).hexdigest(),
+                "installed_path": "/usr/local/sbin/cathedral-validator-status",
+            },
+            "operator_inputs": {
+                "hotkey_keyfile_sha256": "8" * 64,
+                "snp_policy_sha256": "9" * 64,
+                "raw_key_material_recorded": False,
+            },
+            "terminal_expectation": "stopped_writer_needs_review",
+        },
         "fixed_channel_cache_max_seconds": 300,
         "update_timer_interval_seconds": 60,
         "fixed_channel_wait_seconds": 1860,
@@ -771,6 +922,142 @@ def _success_tree(tmp_path):
     metadata = b'{"items":[]}\n'
     (evidence / "project-metadata-before.json").write_bytes(metadata)
     (evidence / "project-metadata-after-teardown.json").write_bytes(metadata)
+
+    a1 = runtime_records["stable-a-seq1.json"]
+    b2 = runtime_records["stable-b-seq2.json"]
+    a5 = runtime_records["stable-a-rescue-seq5.json"]
+    _guided_status_fixture(
+        evidence,
+        "guided-status-after-setup.json",
+        a1,
+        service_active=True,
+        timer_active=True,
+        result="NOT_PROVEN",
+    )
+    _guided_status_fixture(
+        evidence,
+        "guided-status-after-timer-b.json",
+        b2,
+        service_active=True,
+        timer_active=True,
+        result="NOT_PROVEN",
+    )
+    _guided_status_fixture(
+        evidence,
+        "guided-status-stopped-writer.json",
+        a5,
+        service_active=False,
+        timer_active=False,
+        result="NEEDS_REVIEW",
+    )
+    durable_initial = {
+        "updater_state_sha256": "a" * 64,
+        "setup_complete_sha256": "b" * 64,
+        "installed_hotkey_sha256": "8" * 64,
+        "installed_snp_policy_sha256": "9" * 64,
+        "update_env_sha256": "c" * 64,
+    }
+    idempotent_identity = {
+        "main_pid": 42,
+        "invocation_id": "a" * 32,
+        "durable_sha256": durable_initial,
+    }
+    _guided_transition_fixture(
+        evidence,
+        control,
+        relative="guided-setup-idempotence-proof.json",
+        schema="cathedral_validator_guided_setup_idempotence_proof_v1",
+        status_file="guided-status-after-setup.json",
+        before=idempotent_identity,
+        after=idempotent_identity,
+        outcomes={
+            "initial_setup_exit": 0,
+            "idempotent_rerun_exit": 0,
+            "setup_complete_marker": (
+                "SETUP_COMPLETE: stable direct validator configured"
+            ),
+        },
+    )
+    durable_stopped = {
+        "updater_state_sha256": "d" * 64,
+        "setup_complete_sha256": "e" * 64,
+        "installed_hotkey_sha256": "8" * 64,
+        "installed_snp_policy_sha256": "9" * 64,
+        "update_env_sha256": "f" * 64,
+    }
+    _guided_transition_fixture(
+        evidence,
+        control,
+        relative="guided-setup-stopped-writer-proof.json",
+        schema="cathedral_validator_guided_setup_stopped_writer_proof_v1",
+        status_file="guided-status-stopped-writer.json",
+        before={
+            "main_pid": 55,
+            "invocation_id": "d" * 32,
+            "durable_sha256": durable_stopped,
+        },
+        after={
+            "main_pid": 0,
+            "invocation_id": "",
+            "durable_sha256": durable_stopped,
+        },
+        outcomes={
+            "stop_writer_exit": 0,
+            "refused_setup_exit": 2,
+            "refusal_marker": (
+                "SETUP_REFUSED: existing direct validator is stopped and needs review"
+            ),
+            "writer_remained_stopped": True,
+        },
+    )
+    idempotent_digests = ":".join(
+        durable_initial[field] for field in RESULT.GUIDED_DURABLE_DIGEST_FIELDS
+    )
+    (evidence / "first-install-command-catval-valupd-fixture-stable.log").write_text(
+        "OPERATOR_INPUTS_STAGED "
+        f"hotkey_sha256={'8' * 64} policy_sha256={'9' * 64}\n"
+        "SETUP_COMPLETE: stable direct validator configured\n"
+        "GUIDED_SETUP_CONFIG_PROOF host=catval-valupd-fixture-stable\n"
+        "GUIDED_STATUS_PROOF label=guided-status-after-setup "
+        f"result=NOT_PROVEN release={'1' * 64} sequence=1\n"
+        "SETUP_COMPLETE: stable direct validator configured\n"
+        "GUIDED_SETUP_IDEMPOTENT_RERUN host=catval-valupd-fixture-stable "
+        f"identity=42:{'a' * 32}\n{idempotent_digests}\n",
+        encoding="ascii",
+    )
+    (evidence / "guided-status-after-timer-b-command.log").write_text(
+        "GUIDED_STATUS_PROOF label=guided-status-after-timer-b "
+        f"result=NOT_PROVEN release={'2' * 64} sequence=2\n",
+        encoding="ascii",
+    )
+    (evidence / "guided-setup-stopped-writer-command.log").write_text(
+        "DIRECT_WRITER_STOPPED_FOR_PROOF\n"
+        "SETUP_REFUSED: existing direct validator is stopped and needs review\n"
+        "SETUP_EXIT=2\n"
+        "DIRECT_WRITER_STILL_STOPPED\n"
+        "GUIDED_STATUS_PROOF label=guided-status-stopped-writer "
+        f"result=NEEDS_REVIEW release={'1' * 64} sequence=5\n"
+        "GUIDED_SETUP_STOPPED_WRITER_REFUSED host="
+        "catval-valupd-fixture-stable\n",
+        encoding="ascii",
+    )
+    (evidence / "stable-higher-sequence-rescue-sequence-state.json").write_bytes(
+        RESULT.canonical_bytes(
+            {
+                "channel": "stable",
+                "current": "releases/" + "1" * 64,
+                "record": a5,
+                "sequence": 5,
+                "pending": None,
+            }
+        )
+    )
+    (evidence / "higher-sequence-rescue-current-proof.txt").write_text(
+        f"expected={'1' * 64} observed={'1' * 64}\n", encoding="ascii"
+    )
+    (evidence / "higher-sequence-rescue-service-command.log").write_text(
+        "active\n", encoding="ascii"
+    )
     _capture_manifest(
         evidence, "final-canary", runtime_records["canary-b-renewal-seq3.json"]
     )
@@ -823,6 +1110,29 @@ def _success_tree(tmp_path):
             f"expected={archive_sha256} observed={archive_sha256}\n",
             encoding="ascii",
         )
+    scan_exclusions = {
+        "operator-secret-scan.json",
+        "teardown-status.txt",
+        "controller-source-finalization.stderr",
+        *RESULT.RESULT_EXCLUSIONS,
+    }
+    evidence_file_count = sum(
+        1
+        for path in evidence.rglob("*")
+        if path.is_file()
+        and path.relative_to(evidence).as_posix() not in scan_exclusions
+    )
+    (evidence / "operator-secret-scan.json").write_bytes(
+        RESULT.canonical_bytes(
+            {
+                "schema": "cathedral_validator_operator_secret_scan_v1",
+                "operator_input_file_sha256": "8" * 64,
+                "checked_field_names": ["privateKey", "publicKey", "ss58Address"],
+                "evidence_file_count": evidence_file_count,
+                "exact_match_count": 0,
+            }
+        )
+    )
     return evidence, private_path, public_path, CONTROLLER
 
 
@@ -1321,6 +1631,240 @@ def test_negative_scenario_matrix_binds_all_state_and_service_proofs():
             f"{label}-service-before.txt",
             f"{label}-service-after.txt",
         } <= matrix_paths
+
+
+def test_scenario_contract_has_exact_guided_operator_evidence_grouping():
+    assert len(RESULT.RECORDED_STEPS) == 18
+    assert len(RESULT.SCENARIO_SPECS) == 18
+    scenarios = {
+        scenario_id: {path for path, _empty in artifacts}
+        for scenario_id, _step, artifacts in RESULT.SCENARIO_SPECS
+    }
+    assert {
+        "guided-status-after-setup.json",
+        "guided-setup-idempotence-proof.json",
+    } <= scenarios["signed_first_install"]
+    assert {
+        "guided-status-after-timer-b-command.log",
+        "guided-status-after-timer-b.json",
+    } <= scenarios["stable_timer_promotion"]
+    assert scenarios["guided_operator_stopped_writer_review"] == {
+        "guided-setup-stopped-writer-command.log",
+        "guided-setup-stopped-writer-proof.json",
+        "guided-status-stopped-writer.json",
+    }
+    assert "operator-secret-scan.json" in scenarios["final_capture"]
+
+
+@pytest.mark.parametrize(
+    ("relative", "mutation", "error"),
+    (
+        (
+            "guided-setup-idempotence-proof.json",
+            "changed_identity",
+            "idempotent rerun changed writer state",
+        ),
+        (
+            "guided-setup-stopped-writer-proof.json",
+            "changed_durable_state",
+            "refused rerun changed durable state",
+        ),
+        (
+            "guided-setup-stopped-writer-proof.json",
+            "writer_restarted",
+            "does not prove a stopped writer identity",
+        ),
+        (
+            "guided-setup-idempotence-proof.json",
+            "detached_asset",
+            "guided asset setup has an invalid sha256",
+        ),
+        (
+            "guided-setup-idempotence-proof.json",
+            "detached_policy",
+            "does not bind the installed SNP policy",
+        ),
+        (
+            "guided-setup-idempotence-proof.json",
+            "detached_status",
+            "status binding has an invalid sha256",
+        ),
+    ),
+)
+def test_canonical_result_refuses_guided_transition_proof_mutation(
+    tmp_path, relative, mutation, error
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    proof_path = evidence / relative
+    proof = json.loads(proof_path.read_text(encoding="ascii"))
+    if mutation == "changed_identity":
+        proof["after"]["main_pid"] += 1
+    elif mutation == "changed_durable_state":
+        proof["after"]["durable_sha256"]["updater_state_sha256"] = "0" * 64
+    elif mutation == "writer_restarted":
+        proof["after"]["main_pid"] = 56
+        proof["after"]["invocation_id"] = "e" * 32
+    elif mutation == "detached_asset":
+        proof["guided_assets"]["setup"]["sha256"] = "0" * 64
+    elif mutation == "detached_policy":
+        proof["before"]["durable_sha256"]["installed_snp_policy_sha256"] = "0" * 64
+        proof["after"]["durable_sha256"]["installed_snp_policy_sha256"] = "0" * 64
+    else:
+        proof["status"]["sha256"] = "0" * 64
+    proof_path.write_bytes(RESULT.canonical_bytes(proof))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert error in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("installed_path", "/tmp/cathedral-validator-setup"),
+        ("uid", 1),
+        ("uid", False),
+        ("gid", 1),
+        ("mode", "0777"),
+        ("regular_file", False),
+        ("symlink", True),
+    ),
+)
+def test_canonical_result_refuses_guided_asset_metadata_mutation(
+    tmp_path, field, value
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    proof_path = evidence / "guided-setup-idempotence-proof.json"
+    proof = json.loads(proof_path.read_text(encoding="ascii"))
+    proof["guided_assets"]["setup"][field] = value
+    proof_path.write_bytes(RESULT.canonical_bytes(proof))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "guided asset setup has an invalid" in rejected.stderr
+
+
+def test_canonical_result_refuses_stopped_status_with_live_timers(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    status_path = evidence / "guided-status-stopped-writer.json"
+    status = json.loads(status_path.read_text(encoding="ascii"))
+    status["stable_timer_active"] = True
+    status["stable_timer_enabled"] = True
+    status_path.write_bytes(RESULT.canonical_bytes(status))
+    proof_path = evidence / "guided-setup-stopped-writer-proof.json"
+    proof = json.loads(proof_path.read_text(encoding="ascii"))
+    proof["status"]["sha256"] = hashlib.sha256(status_path.read_bytes()).hexdigest()
+    proof_path.write_bytes(RESULT.canonical_bytes(proof))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "invalid stable_timer_active" in rejected.stderr
+
+
+def test_canonical_result_requires_final_stable_writer_to_remain_stopped(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    active = (
+        b"Result=success\nExecMainCode=0\nExecMainStatus=0\n"
+        b"ActiveState=active\nSubState=running\nMainPID=42\n"
+        b"InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+    )
+    _rewrite_capture_artifact(evidence, "final-stable", "direct_unit_show", active)
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "final-stable direct validator service is not proven safely stopped" in (
+        rejected.stderr
+    )
+
+
+def test_canonical_result_binds_final_stable_to_stopped_writer_invocation(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    stopped_again = (
+        b"Result=success\nExecMainCode=1\nExecMainStatus=0\n"
+        b"ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+        b"InvocationID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n"
+    )
+    _rewrite_capture_artifact(
+        evidence, "final-stable", "direct_unit_show", stopped_again
+    )
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "invocation differs from the stopped writer proof" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("input_digest", "invalid result or input binding"),
+        ("match", "invalid result or input binding"),
+        ("file_count", "invalid evidence file count"),
+        ("field_names", "invalid checked field names"),
+    ),
+)
+def test_canonical_result_refuses_operator_secret_scan_mutation(
+    tmp_path, mutation, error
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "operator-secret-scan.json"
+    scan = json.loads(path.read_text(encoding="ascii"))
+    if mutation == "input_digest":
+        scan["operator_input_file_sha256"] = "0" * 64
+    elif mutation == "match":
+        scan["exact_match_count"] = 1
+    elif mutation == "file_count":
+        scan["evidence_file_count"] += 1
+    else:
+        scan["checked_field_names"] = ["publicKey"]
+    path.write_bytes(RESULT.canonical_bytes(scan))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert error in rejected.stderr
+
+
+def test_canonical_result_binds_control_to_reviewed_guided_source(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "control.json"
+    control = json.loads(path.read_text(encoding="ascii"))
+    control["guided_operator"]["setup"]["source_sha256"] = "0" * 64
+    path.write_bytes(RESULT.canonical_bytes(control))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "control guided_operator setup has an invalid source_sha256" in (
+        rejected.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "asset", ("cathedral-validator-setup", "cathedral-validator-status")
+)
+def test_canonical_result_requires_reviewed_guided_assets_in_bootstrap_manifest(
+    tmp_path, asset
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "updater-bootstrap.manifest.json"
+    manifest = json.loads(path.read_text(encoding="ascii"))
+    entry = next(
+        item
+        for item in manifest["files"]
+        if item["path"] == f"payload/operator/{asset}"
+    )
+    entry["sha256"] = "0" * 64
+    path.write_bytes(RESULT.canonical_bytes(manifest))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert f"bootstrap manifest does not embed the reviewed {asset}" in rejected.stderr
 
 
 def test_canonical_result_refuses_resigned_negative_proof_deletion(tmp_path):

@@ -238,20 +238,30 @@ Run the identical environment with `--execute` only after preflight prints
 state, service and timer properties, unit definitions, and timer inventory.
 Status output and journals are explicitly optional diagnostics: their failures
 are recorded but do not hide a missing required section.
-The signed result also requires the exact ordered 17-step scenario transcript
+The signed result also requires the exact ordered 18-step scenario transcript
 and a closed scenario matrix. Each matrix row names its required artifacts and
 binds their byte lengths and SHA-256 digests; deleting a required scenario
 proof cannot produce a smaller passing result. The closure retains and verifies
 the complete runtime-metadata graph, its deliberate invalid-signature mutation,
 the bootstrap manifest and signature, the build record, the release-key
-fingerprints, and their publication binding. First-install and refusal scenarios
-bind exact updater state and service identity rather than relying on opaque log
-files. The same-boot timer proof binds the host, timer, service, channel,
-expected release, prior trigger and prior invocation to a fresh successful
-trigger. Final captures require the exact settled channel record, successful
-control services, disabled timers, and direct-service continuity. Every teardown
-marker must point to the exact canonical empty provider snapshot for the attempt
-it cites.
+fingerprints, and their publication binding. The bootstrap manifest must embed
+the reviewed guided setup and status assets at their exact modes, sizes, and
+digests. First-install and refusal scenarios bind exact updater state, reviewed
+guided-asset ownership, type and symlink state, sanitized status bytes, writer
+identity, installed hotkey and SNP-policy digests, and other durable-state
+digests rather than relying on opaque log files. Before destroying the
+disposable wallet, the controller runs an exact-value scan over every earlier
+evidence file. Its zero-match report is included in and bound by the signed
+result. The scan is not independently reproducible after the disposable wallet
+is destroyed; the durable claim is the controller-produced, signed report and
+its exact evidence-file count. The same-boot timer proof binds the host, timer,
+service, channel, expected release, prior trigger and prior invocation to a
+fresh successful trigger. Final captures require the exact settled channel
+record, successful control services, disabled timers, canary direct-service
+continuity, and the stable direct writer to remain safely stopped with the same
+stopped-writer invocation identity after the refusal proof. Every teardown
+marker must point to the exact canonical empty provider snapshot for the
+attempt it cites.
 
 The success grammar is result finalization and signature verification, then
 `TEARDOWN_COMPLETE`, then `LIVE_UPDATE_E2E_RESULT`, followed by

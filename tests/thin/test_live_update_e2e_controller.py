@@ -456,9 +456,15 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
         in refusal
     )
     assert "DIRECT_WRITER_STILL_STOPPED" in refusal
-    assert "NEEDS_REVIEW false any" in refusal
+    assert "NEEDS_REVIEW false false" in refusal
     assert 'record_step "guided setup rerun refuses the stopped writer' in script
     assert "guided-status-after-timer-b" in script
+    assert "guided-setup-idempotence-proof.json" in helper
+    assert "cathedral_validator_guided_setup_idempotence_proof_v1" in helper
+    assert "guided-setup-stopped-writer-proof.json" in refusal
+    assert "cathedral_validator_guided_setup_stopped_writer_proof_v1" in refusal
+    assert "guided_installed_asset_identity" in helper
+    assert "write_guided_transition_proof" in helper
 
     # Disposable operator inputs and mirror-bound signed assets.
     assert "import bittensor_wallet" in script
@@ -470,6 +476,10 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     # The hotkey never enters evidence: only digests of the inputs are recorded.
     assert 'cp "$OPERATOR_HOTKEY" "$EVIDENCE_DIR' not in script
     assert "OPERATOR_HOTKEY_SHA" in script
+    assert '"raw_key_material_recorded": False' in script
+    assert '"terminal_expectation": "stopped_writer_needs_review"' in script
+    assert '"installed_path": "/usr/local/sbin/cathedral-validator-setup"' in script
+    assert '"installed_path": "/usr/local/sbin/cathedral-validator-status"' in script
     # The harness root travels through the drop-in, so direct.env stays the
     # signed example and an idempotent setup rerun can match it.
     assert "sudo tee -a /etc/cathedral-validator/direct.env" not in script
@@ -477,6 +487,83 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
         "'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex'"
         in configure_host
     )
+
+
+def test_live_controller_guided_proofs_are_canonical_and_secret_safe():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    proof = script.split("write_guided_transition_proof() {", 1)[1].split(
+        "configure_stable_host_through_operator_cli() {", 1
+    )[0]
+
+    assert 'json.dumps(document, sort_keys=True, separators=(",", ":"))' in proof
+    assert '"hotkey_keyfile_sha256": hotkey_digest' in proof
+    assert '"snp_policy_sha256": policy_digest' in proof
+    assert '"raw_key_material_recorded": False' in proof
+    assert "lines = raw.splitlines()" in proof
+    assert "if len(lines) != 2" in proof
+    assert '"main_pid": int(service[0])' in proof
+    assert '"invocation_id": service[1]' in proof
+    for name in (
+        "updater_state_sha256",
+        "setup_complete_sha256",
+        "installed_hotkey_sha256",
+        "update_env_sha256",
+        "installed_snp_policy_sha256",
+    ):
+        assert name in proof
+    for field in (
+        '"uid": 0',
+        '"gid": 0',
+        '"mode": "0755"',
+        '"regular_file": True',
+        '"symlink": False',
+    ):
+        assert field in proof
+    installed = script.split("guided_installed_asset_identity() {", 1)[1].split(
+        "write_guided_transition_proof() {", 1
+    )[0]
+    assert 'sudo test -f \\"\\$path\\"' in installed
+    assert '! sudo test -L \\"\\$path\\"' in installed
+    assert "sudo stat -c '%u'" in installed
+    assert "sudo stat -c '%g'" in installed
+    assert "sudo stat -c '%a'" in installed
+    assert "printf '%s\\t%s\\t%s\\t%s\\t%s\\ttrue\\tfalse\\n'" in installed
+    stopped = script.split("prove_guided_setup_refuses_stopped_writer() {", 1)[1].split(
+        "configure_host() {", 1
+    )[0]
+    assert "before_durable=\"${before#*$'\\n'}\"" in stopped
+    assert "after_durable=\"${after#*$'\\n'}\"" in stopped
+    assert '[[ "$before_durable" != "$after_durable" ]]' in stopped
+    assert '"initial_setup_exit": int(first_exit)' in proof
+    assert '"idempotent_rerun_exit": int(second_exit)' in proof
+    assert '"refused_setup_exit": int(second_exit)' in proof
+    assert '"writer_remained_stopped": True' in proof
+    assert "hashlib.sha256(status_bytes).hexdigest()" in proof
+    assert "TEST_HOTKEY" not in proof
+
+
+def test_live_controller_scans_all_evidence_before_destroying_operator_key():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    cleanup = script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    scan_at = cleanup.index("operator-secret-scan.json")
+    delete_at = cleanup.index('rm -rf -- "$RUN_ROOT"')
+
+    assert scan_at < delete_at
+    assert "cathedral_validator_operator_secret_scan_v1" in cleanup
+    assert 'evidence_dir.rglob("*")' in cleanup
+    assert '"ss58Address", "publicKey", "accountId"' in cleanup
+    assert '"privateKey", "secretPhrase", "secretSeed"' in cleanup
+    assert '"operator_input_file_sha256"' in cleanup
+    assert '"checked_field_names"' in cleanup
+    assert '"exact_match_count": 0' in cleanup
+    assert "operator key material occurred in evidence" in cleanup
+    # The artifact does not contain the values, per-field hashes, or paths of
+    # matching files (a successful artifact can only describe zero matches).
+    report_block = cleanup.split("report = {", 1)[1].split("output.write_text", 1)[0]
+    assert '"matches"' not in report_block
+    assert "hashlib.sha256(value" not in cleanup
 
 
 def test_live_controller_records_both_timer_states_in_host_evidence():
