@@ -46,6 +46,13 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "Do not install or enable updater services from a source checkout" in words
     assert "BEGIN GENERATED VALIDATOR INSTALL" in guide
     assert "END GENERATED VALIDATOR INSTALL" in guide
+    assert "Publication pending" not in guide
+    assert "REPLACE_WITH" not in guide
+    assert "--expected-bootstrap-key-fingerprint sha256:9339edab" in guide
+    assert "--minimum-bootstrap-sequence 1" in guide
+    assert "sudo cathedral-validator-setup" in guide
+    assert "--confirm-direct-write" in guide
+    assert "install_updater_bundle.py" in guide
     assert "deploy/sn39/install-validator" not in guide
     assert "CONFIRMED" in guide
     assert "does not download a weight vector" in words
@@ -82,7 +89,14 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
 
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
     assert updater.startswith("# Validator auto-update\n\nStatus:")
-    assert "public bootstrap artifacts are not published yet" in updater
+    assert "public bootstrap artifacts are published" in updater
+    assert "Publication pending" not in updater
+    assert "REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE" not in updater
+    assert "validator-bootstrap-production-s1-" in updater
+    assert (
+        "sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013"
+        in updater
+    )
     assert "Do not install\nor enable updater units from a source checkout" in updater
     assert "BEGIN GENERATED UPDATER BOOTSTRAP" in updater
     assert "END GENERATED UPDATER BOOTSTRAP" in updater
