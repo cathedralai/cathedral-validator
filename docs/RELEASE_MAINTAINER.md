@@ -186,6 +186,19 @@ resources, and both `iap.googleapis.com` and
 controller always uses authenticated IAP. It refuses a direct-IP transport and
 does not attach a service account to either test host.
 
+The stable host follows the public operator path only. The controller stages a
+disposable bittensor-wallet hotkey and a reviewed SNP policy as operator inputs,
+runs the installed `cathedral-validator-setup` from the signed bootstrap, proves
+that the setup never printed hotkey material, reads
+`cathedral-validator-status --json` after the first install and after the stable
+timer activates the promoted release, proves an idempotent setup rerun changes
+nothing, and finally proves that a setup rerun refuses a stopped writer and that
+status reports `NEEDS_REVIEW`. The signed test bootstrap carries the reviewed
+deploy assets with only the two channel URLs rewritten to the run's isolated
+mirror branches. The canary host uses the internal direct-updater path, which is
+not a public operating mode. The disposable hotkey is never registered and never
+written to evidence.
+
 ```bash
 env \
   RUN_ID=REPLACE_WITH_UNIQUE_RUN_ID \

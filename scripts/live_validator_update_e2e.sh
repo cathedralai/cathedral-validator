@@ -232,9 +232,10 @@ readonly CANARY_BRANCH="validator-release-live-${RUN_ID}-canary"
 readonly STABLE_BRANCH="validator-release-live-${RUN_ID}-stable"
 readonly FAULT_BRANCH="validator-release-fault-${RUN_ID}"
 readonly SSH_USER="cathedrallive"
-TEST_HOTKEY="LiveTestHotkey$(printf '%s' "$RUN_ID" | shasum -a 256 | cut -c1-20)"
-readonly TEST_HOTKEY
-readonly JOURNAL="/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0/${TEST_HOTKEY}/state.json"
+# TEST_HOTKEY and JOURNAL are bound after the run root exists, from a
+# disposable bittensor-wallet keyfile, so the stable host can be configured
+# through the installed guided setup exactly as a public operator would.
+readonly SNP_POLICY_JSON='{"schema":"cathedral_amd_sev_snp_policy_v1","generations":{"genoa":{"allowed_measurements":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"minimum_tcb":"0x0000000000000001"}}}'
 readonly CANARY_URL="https://raw.githubusercontent.com/${TEST_GITHUB_REPOSITORY}/${CANARY_BRANCH}/validator/canary.json"
 readonly STABLE_URL="https://raw.githubusercontent.com/${TEST_GITHUB_REPOSITORY}/${STABLE_BRANCH}/validator/stable.json"
 readonly ARCHIVE_URL_TEMPLATE="https://github.com/${TEST_GITHUB_REPOSITORY}/releases/download/validator-{archive_sha256}/cathedral-validator-{archive_sha256}.tar.gz"
@@ -292,6 +293,10 @@ for command in awk basename cmp curl cut find gcloud gh git grep jq openssl pyth
 done
 if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
   printf 'REFUSED: controller Python cannot import cryptography\n' >&2
+  exit 2
+fi
+if ! python3 -c 'import bittensor_wallet' >/dev/null 2>&1; then
+  printf 'REFUSED: controller Python cannot import bittensor_wallet for the disposable operator hotkey\n' >&2
   exit 2
 fi
 for file in \
@@ -749,6 +754,79 @@ chmod 0644 "$SSH_PUBLIC_KEY"
 printf '%s:%s\n' "$SSH_USER" "$(cat "$SSH_PUBLIC_KEY")" >"$SSH_METADATA_FILE"
 chmod 0600 "$SSH_METADATA_FILE"
 
+# Disposable operator inputs for the stable host. The hotkey is a real
+# bittensor-wallet keyfile written by the pinned writer, so the guided setup is
+# exercised against the exact shape btcli produces. It is never registered on
+# any chain, never recorded in evidence, and dies with the run root and host.
+readonly OPERATOR_DIR="$RUN_ROOT/operator"
+readonly OPERATOR_HOTKEY="$OPERATOR_DIR/hotkeys/validator"
+readonly OPERATOR_POLICY="$OPERATOR_DIR/amd-sev-snp-policy.json"
+readonly ASSETS_DIR="$RUN_ROOT/assets"
+mkdir -m 0700 "$OPERATOR_DIR" "$OPERATOR_DIR/hotkeys" "$ASSETS_DIR"
+TEST_HOTKEY="$(python3 - "$OPERATOR_HOTKEY" <<'PY'
+import sys
+
+from bittensor_wallet import Keyfile, Keypair
+
+path = sys.argv[1]
+keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+Keyfile(path).set_keypair(keypair, encrypt=False, overwrite=True)
+print(keypair.ss58_address)
+PY
+)"
+readonly TEST_HOTKEY
+if [[ ! "$TEST_HOTKEY" =~ ^5[1-9A-HJ-NP-Za-km-z]{47}$ ]]; then
+  printf 'REFUSED: disposable operator hotkey is not a Bittensor SS58 address\n' >&2
+  exit 2
+fi
+chmod 0600 "$OPERATOR_HOTKEY"
+readonly JOURNAL="/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0/${TEST_HOTKEY}/state.json"
+printf '%s\n' "$SNP_POLICY_JSON" >"$OPERATOR_POLICY"
+chmod 0600 "$OPERATOR_POLICY"
+OPERATOR_HOTKEY_SHA="$(shasum -a 256 "$OPERATOR_HOTKEY" | cut -d' ' -f1)"
+OPERATOR_POLICY_SHA="$(shasum -a 256 "$OPERATOR_POLICY" | cut -d' ' -f1)"
+readonly OPERATOR_HOTKEY_SHA OPERATOR_POLICY_SHA
+
+# Signed bootstrap assets: the reviewed deploy assets with only the two channel
+# URLs in update.env.example pointed at this run's isolated mirror branches.
+# The installed guided setup then follows the signed example exactly as a
+# public operator's setup follows the production example.
+python3 - "$REPOSITORY_ROOT/deploy/validator-update" "$ASSETS_DIR" \
+  "$CANARY_URL" "$STABLE_URL" <<'PY'
+import importlib.util
+import shutil
+import sys
+from pathlib import Path
+
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+urls = {
+    "CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=": sys.argv[3],
+    "CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=": sys.argv[4],
+}
+spec = importlib.util.spec_from_file_location(
+    "live_bootstrap_builder", source / "build_updater_bundle.py"
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for name in sorted(module.REQUIRED_ASSETS):
+    shutil.copyfile(source / name, target / name)
+    (target / name).chmod(0o644)
+example = target / "update.env.example"
+rewritten = []
+seen = set()
+for line in example.read_text(encoding="ascii").splitlines(keepends=True):
+    for key, url in urls.items():
+        if line.startswith(key):
+            if key in seen:
+                raise SystemExit(f"REFUSED: update.env.example repeats {key}")
+            seen.add(key)
+            line = f"{key}{url}\n"
+    rewritten.append(line)
+if seen != set(urls):
+    raise SystemExit("REFUSED: update.env.example lacks a channel URL line")
+example.write_text("".join(rewritten), encoding="ascii")
+PY
+
 CREATED_CANARY_VM=0
 CREATED_STABLE_VM=0
 CREATED_FIREWALL=0
@@ -1166,7 +1244,7 @@ bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --bootstrap-signing-public-key "$bootstrap_public" \
   --runtime-release-public-key "$runtime_public" \
   --stable-release-metadata "$STABLE_A1" \
-  --assets-dir "$REPOSITORY_ROOT/deploy/validator-update" \
+  --assets-dir "$ASSETS_DIR" \
   --bundle-out "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
   --manifest-out "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
   --signature-out "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
@@ -1378,6 +1456,11 @@ document = {
     "bootstrap_tag": bootstrap_tag,
     "bootstrap_transport": "anonymous_immutable_github_release",
     "anonymous_bootstrap_download_required": True,
+    "stable_host_configuration": "cathedral-validator-setup from the signed bootstrap",
+    "stable_host_status_command": "cathedral-validator-status --json",
+    "canary_host_configuration": "internal direct updater first install; not a public operating mode",
+    "operator_hotkey_shape": "disposable bittensor-wallet keyfile, unregistered, never recorded",
+    "bootstrap_assets": "reviewed deploy assets with both channel URLs rewritten to the isolated mirror branches",
     "fixed_channel_cache_max_seconds": int(fixed_channel_cache_max_seconds),
     "update_timer_interval_seconds": int(update_timer_interval_seconds),
     "fixed_channel_wait_seconds": int(fixed_channel_wait_seconds),
@@ -1872,6 +1955,11 @@ stage_host_files() {
   local attempt
   local status=1
   local attempt_evidence
+  local -a operator_inputs=()
+  if [[ "$role" == stable ]]; then
+    # The stable host receives the operator inputs the guided setup consumes.
+    operator_inputs=("$OPERATOR_HOTKEY" "$OPERATOR_POLICY")
+  fi
   for attempt in $(seq 1 "$IAP_SCP_MAX_ATTEMPTS"); do
     attempt_evidence="$EVIDENCE_DIR/${role}-iap-scp-attempt-${attempt}.log"
     if gc compute scp --zone="$ZONE" \
@@ -1888,6 +1976,7 @@ stage_host_files() {
       "$HARNESS_SOURCE" \
       "$FAULT_ORIGIN_SOURCE" \
       "$STATE_WAITER_SOURCE" \
+      ${operator_inputs[@]+"${operator_inputs[@]}"} \
       "${SSH_USER}@${host}:/tmp/" \
       2>&1 | tee "$attempt_evidence"; then
       printf 'IAP_SCP_PASS host=%s attempt=%s\n' "$host" "$attempt" \
@@ -1976,6 +2065,200 @@ capture_host_with_retries() {
   return "$capture_status"
 }
 
+readonly GUIDED_SETUP="/usr/local/sbin/cathedral-validator-setup"
+readonly GUIDED_STATUS="/usr/local/sbin/cathedral-validator-status"
+readonly OPERATOR_HOTKEY_PATH="/home/${SSH_USER}/.bittensor/wallets/live/hotkeys/validator"
+readonly OPERATOR_POLICY_PATH="/home/${SSH_USER}/amd-sev-snp-policy.json"
+
+guided_setup_command() {
+  printf 'sudo %s --hotkey-file %s --expected-hotkey %s --snp-policy %s --confirm-direct-write' \
+    "$GUIDED_SETUP" "$OPERATOR_HOTKEY_PATH" "$TEST_HOTKEY" "$OPERATOR_POLICY_PATH"
+}
+
+assert_no_operator_secret_in() {
+  # The guided setup must never print or pass the hotkey. Every secret field of
+  # the disposable keyfile is checked against the captured output.
+  local output="$1"
+  local secrets
+  secrets="$(python3 - "$OPERATOR_HOTKEY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for field in ("privateKey", "secretPhrase", "secretSeed"):
+    value = document.get(field)
+    if isinstance(value, str) and value:
+        print(value)
+PY
+)"
+  if [[ -z "$secrets" ]]; then
+    printf 'REFUSED: disposable operator hotkey has no secret fields to guard\n' >&2
+    return 2
+  fi
+  if printf '%s\n' "$output" | grep -F -f <(printf '%s\n' "$secrets") >/dev/null; then
+    printf 'REFUSED: guided setup output exposed operator hotkey material\n' >&2
+    return 1
+  fi
+}
+
+guided_status_json() {
+  # The status command exits 2 whenever it cannot claim OPERATING_CONFIRMED,
+  # which the no-chain harness never reaches. Only stdout carries the report.
+  local host="$1"
+  remote "$host" "set +e; sudo $GUIDED_STATUS --json; status=\$?; test \"\$status\" -eq 2 || test \"\$status\" -eq 0"
+}
+
+assert_guided_status() {
+  local label="$1"
+  local host="$2"
+  local expected_release="$3"
+  local expected_sequence="$4"
+  local expected_result="$5"
+  local expected_service_active="$6"
+  local expected_timer="$7"
+  local report
+  local failure_status
+  if report="$(guided_status_json "$host" 2>>"$EVIDENCE_DIR/${label}-ssh.stderr")"; then
+    :
+  else
+    failure_status=$?
+    printf 'REFUSED: guided status unavailable host=%s label=%s\n' "$host" "$label" >&2
+    capture_host_with_retries "${label}-status-failure" "$host" || true
+    return "$failure_status"
+  fi
+  printf '%s\n' "$report" | grep -F '"schema":' | tail -n 1 >"$EVIDENCE_DIR/${label}.json"
+  if ! jq -e \
+    --arg release "$expected_release" \
+    --argjson sequence "$expected_sequence" \
+    --arg result "$expected_result" \
+    --argjson active "$expected_service_active" \
+    --arg timer "$expected_timer" \
+    --arg hotkey "$TEST_HOTKEY" '
+      .schema == "cathedral_validator_local_status_v1"
+      and .result == $result
+      and .service_active == $active
+      and ($timer == "any"
+        or (.stable_timer_active == ($timer == "true")
+          and .stable_timer_enabled == ($timer == "true")))
+      and .release == $release
+      and .updater.channel == "stable"
+      and .updater.sequence == $sequence
+      and .updater.archive_digest == $release
+      and .updater.pending_recovery == false
+      and .direct.pending == false
+      and .direct.last_result == null
+      and .direct.block_number == null
+      and (tostring | contains($hotkey) | not)
+      and (tostring | contains("validator-hotkey") | not)
+    ' "$EVIDENCE_DIR/${label}.json" >/dev/null; then
+    printf 'REFUSED: guided status differs from expectation host=%s label=%s\n' \
+      "$host" "$label" >&2
+    capture_host_with_retries "${label}-status-mismatch" "$host" || true
+    return 1
+  fi
+  printf 'GUIDED_STATUS_PROOF label=%s result=%s release=%s sequence=%s\n' \
+    "$label" "$expected_result" "$expected_release" "$expected_sequence"
+}
+
+direct_writer_identity() {
+  local host="$1"
+  remote "$host" "set -eu; sudo systemctl show cathedral-validator-direct.service -p MainPID -p InvocationID --value | paste -sd: -; sudo sha256sum /var/lib/cathedral-validator-update/state.json /etc/cathedral-validator/setup-complete.json /etc/cathedral-validator/validator-hotkey /etc/cathedral-validator/update.env | cut -d' ' -f1 | paste -sd: -" | tr -d '\r'
+}
+
+configure_stable_host_through_operator_cli() {
+  # The public operator path: staged hotkey and policy inputs, one guided
+  # setup command, a sanitized status report, and an idempotent rerun that
+  # touches neither the writer nor any durable state. Every step returns the
+  # failing status explicitly because set -e is suppressed inside the caller's
+  # if condition.
+  local host="$1"
+  local setup_output
+  local rerun_output
+  local identity_before
+  local identity_after
+  local status
+  remote "$host" "set -eu; test \"\$(sha256sum /tmp/validator | cut -d' ' -f1)\" = '$OPERATOR_HOTKEY_SHA'; test \"\$(sha256sum /tmp/amd-sev-snp-policy.json | cut -d' ' -f1)\" = '$OPERATOR_POLICY_SHA'; install -d -m 0700 /home/${SSH_USER}/.bittensor /home/${SSH_USER}/.bittensor/wallets /home/${SSH_USER}/.bittensor/wallets/live /home/${SSH_USER}/.bittensor/wallets/live/hotkeys; install -m 0600 /tmp/validator '$OPERATOR_HOTKEY_PATH'; install -m 0600 /tmp/amd-sev-snp-policy.json '$OPERATOR_POLICY_PATH'; rm -f /tmp/validator /tmp/amd-sev-snp-policy.json; test \"\$(stat -c '%a' '$OPERATOR_HOTKEY_PATH')\" = 600; printf 'OPERATOR_INPUTS_STAGED hotkey_sha256=%s policy_sha256=%s\n' '$OPERATOR_HOTKEY_SHA' '$OPERATOR_POLICY_SHA'" || return $?
+  if setup_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
+    :
+  else
+    status=$?
+    printf '%s\n' "$setup_output"
+    return "$status"
+  fi
+  printf '%s\n' "$setup_output"
+  printf '%s\n' "$setup_output" | grep -Fx 'SETUP_COMPLETE: stable direct validator configured' >/dev/null || return 1
+  assert_no_operator_secret_in "$setup_output" || return $?
+  remote "$host" "set -eu
+sudo test -f /etc/cathedral-validator/setup-complete.json
+sudo jq -e --arg hotkey '$TEST_HOTKEY' '.schema == \"cathedral_validator_setup_complete_v1\" and .expected_hotkey == \$hotkey' /etc/cathedral-validator/setup-complete.json >/dev/null
+test \"\$(sudo cat /etc/cathedral-validator/identity.env)\" = 'CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$TEST_HOTKEY'
+sudo grep -Fx 'CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=$STABLE_URL' /etc/cathedral-validator/update.env >/dev/null
+sudo grep -Fx 'CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=1' /etc/cathedral-validator/update.env >/dev/null
+! sudo grep -F CANARY /etc/cathedral-validator/update.env >/dev/null
+test \"\$(sudo sha256sum /etc/cathedral-validator/validator-hotkey | cut -d' ' -f1)\" = '$OPERATOR_HOTKEY_SHA'
+test \"\$(sudo stat -c '%U:%G:%a' /etc/cathedral-validator/validator-hotkey)\" = root:root:600
+test \"\$(sudo stat -c '%U:%G:%a' /etc/cathedral-validator/snp-policy.json)\" = root:cathedral-validator:440
+test \"\$(sudo sha256sum /etc/cathedral-validator/snp-policy.json | cut -d' ' -f1)\" = '$OPERATOR_POLICY_SHA'
+sudo systemctl is-enabled --quiet cathedral-validator-direct.service
+sudo systemctl is-active --quiet cathedral-validator-direct.service
+sudo systemctl is-enabled --quiet cathedral-validator-update.timer
+sudo systemctl is-active --quiet cathedral-validator-update.timer
+! sudo systemctl is-enabled --quiet cathedral-validator-canary-update.timer
+! sudo systemctl is-active --quiet cathedral-validator-canary-update.timer
+printf 'GUIDED_SETUP_CONFIG_PROOF host=%s\n' '$host'" || return $?
+  assert_guided_status guided-status-after-setup "$host" "$ARCHIVE_A_SHA" 1 NOT_PROVEN true true || return $?
+  identity_before="$(direct_writer_identity "$host")" || return $?
+  if rerun_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
+    :
+  else
+    status=$?
+    printf '%s\n' "$rerun_output"
+    return "$status"
+  fi
+  printf '%s\n' "$rerun_output"
+  printf '%s\n' "$rerun_output" | grep -Fx 'SETUP_COMPLETE: stable direct validator configured' >/dev/null || return 1
+  assert_no_operator_secret_in "$rerun_output" || return $?
+  identity_after="$(direct_writer_identity "$host")" || return $?
+  if [[ -z "$identity_before" || "$identity_before" != "$identity_after" ]]; then
+    printf 'REFUSED: idempotent guided setup rerun changed the writer or durable state host=%s before=%s after=%s\n' \
+      "$host" "$identity_before" "$identity_after" >&2
+    return 1
+  fi
+  printf 'GUIDED_SETUP_IDEMPOTENT_RERUN host=%s identity=%s\n' "$host" "$identity_after"
+}
+
+prove_guided_setup_refuses_stopped_writer() {
+  # A committed installation whose writer is stopped, for any reason, must
+  # refuse a setup rerun before any mutation and must not be restarted by it.
+  local host="$1"
+  local before
+  local after
+  local refusal
+  local status
+  before="$(direct_writer_identity "$host")" || return $?
+  remote "$host" "set -eu; sudo systemctl stop cathedral-validator-direct.service; ! sudo systemctl is-active --quiet cathedral-validator-direct.service; printf 'DIRECT_WRITER_STOPPED_FOR_PROOF\n'" || return $?
+  if refusal="$(remote "$host" "set +e; output=\$($(guided_setup_command) 2>&1); status=\$?; printf '%s\n' \"\$output\"; printf 'SETUP_EXIT=%s\n' \"\$status\"; test \"\$status\" -eq 2 && ! sudo systemctl is-active --quiet cathedral-validator-direct.service && printf 'DIRECT_WRITER_STILL_STOPPED\n'" 2>&1)"; then
+    :
+  else
+    status=$?
+    printf '%s\n' "$refusal"
+    return "$status"
+  fi
+  printf '%s\n' "$refusal"
+  printf '%s\n' "$refusal" | grep -Fx 'SETUP_REFUSED: existing direct validator is stopped and needs review' >/dev/null || return 1
+  printf '%s\n' "$refusal" | grep -Fx 'DIRECT_WRITER_STILL_STOPPED' >/dev/null || return 1
+  assert_no_operator_secret_in "$refusal" || return $?
+  after="$(direct_writer_identity "$host")" || return $?
+  if [[ "${before#*:*:}" != "${after#*:*:}" ]]; then
+    printf 'REFUSED: refused guided setup rerun changed durable state host=%s before=%s after=%s\n' \
+      "$host" "$before" "$after" >&2
+    return 1
+  fi
+  assert_guided_status guided-status-stopped-writer "$host" "$ARCHIVE_A_SHA" 5 NEEDS_REVIEW false any || return $?
+  printf 'GUIDED_SETUP_STOPPED_WRITER_REFUSED host=%s\n' "$host"
+}
+
 configure_host() {
   local host="$1"
   local channel="$2"
@@ -1984,9 +2267,14 @@ configure_host() {
   local failure_status
   remote "$host" "sudo env DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl python3.12 python3.12-venv python3-cryptography >/dev/null"
   remote "$host" "sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-live-${RUN_ID} && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz '$BOOTSTRAP_BUNDLE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.json '$BOOTSTRAP_MANIFEST_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:manifest && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.sig '$BOOTSTRAP_SIGNATURE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:signature && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem '$BOOTSTRAP_PUBLIC_KEY_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:public_key && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz /var/tmp/cathedral-live-${RUN_ID}/manifest.json /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && sudo chmod 0444 /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem && sudo /usr/bin/python3 -c 'import hashlib,pathlib; expected={\"bundle.tar.gz\":\"$BOOTSTRAP_BUNDLE_SHA\",\"manifest.json\":\"$BOOTSTRAP_MANIFEST_SHA\",\"manifest.sig\":\"$BOOTSTRAP_SIGNATURE_SHA\",\"bootstrap-public.pem\":\"$BOOTSTRAP_PUBLIC_KEY_SHA\"}; root=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}\"); assert all(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest for name,digest in expected.items())' && printf '%s\n' ANONYMOUS_BOOTSTRAP_EXACT_BYTES_VERIFIED && sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -rawin -in /var/tmp/cathedral-live-${RUN_ID}/manifest.json -sigfile /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && test \"sha256:\$(sudo openssl pkey -pubin -in /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)\" = '$BOOTSTRAP_FINGERPRINT' && sudo /usr/bin/python3 -c 'import hashlib,json,pathlib; b=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz\").read_bytes(); m=json.loads(pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/manifest.json\").read_text(encoding=\"ascii\")); assert len(b)==m[\"bundle\"][\"size\"] and hashlib.sha256(b).hexdigest()==m[\"bundle\"][\"sha256\"]; assert m[\"bootstrap_signing_key\"][\"fingerprint\"]==\"$BOOTSTRAP_FINGERPRINT\"; assert m[\"bootstrap_metadata\"][\"sequence\"]>=1' && sudo sh -c 'tar -xOf /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py' && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py && sudo /usr/bin/python3.12 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py --bundle /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz --manifest /var/tmp/cathedral-live-${RUN_ID}/manifest.json --signature /var/tmp/cathedral-live-${RUN_ID}/manifest.sig --bootstrap-public-key /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem --expected-bootstrap-key-fingerprint '$BOOTSTRAP_FINGERPRINT' --minimum-bootstrap-sequence '$BOOTSTRAP_SEQUENCE'" | tee "$EVIDENCE_DIR/bootstrap-install-${host}.log"
-  remote "$host" "test \"\$(sha256sum /tmp/cathedral_no_chain_readiness.py | cut -d' ' -f1)\" = '$HARNESS_SHA' && test \"\$(sha256sum /tmp/tampered_https_origin.py | cut -d' ' -f1)\" = '$FAULT_ORIGIN_SHA' && test \"\$(sha256sum /tmp/wait_updater_state.py | cut -d' ' -f1)\" = '$STATE_WAITER_SHA' && sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/cathedral-validator-live-test /etc/systemd/system/cathedral-validator-direct.service.d /etc/systemd/system/${timer}.d /etc/systemd/system/${other_timer}.d && sudo install -o root -g root -m 0555 /tmp/cathedral_no_chain_readiness.py /usr/local/libexec/cathedral-no-chain-readiness.py && sudo install -o root -g root -m 0555 /tmp/tampered_https_origin.py /usr/local/libexec/cathedral-tampered-https-origin.py && sudo install -o root -g root -m 0555 /tmp/wait_updater_state.py /usr/local/libexec/cathedral-wait-updater-state.py && printf '%s\n' 'CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$TEST_HOTKEY' | sudo tee /etc/cathedral-validator/identity.env >/dev/null && printf '%s\n' 'CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json' 'CATHEDRAL_VALIDATOR_INTERVAL_SECONDS=86400' | sudo tee /etc/cathedral-validator/direct.env >/dev/null && printf '%s\n' 'CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=$CANARY_URL' 'CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=$STABLE_URL' 'CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE=1' 'CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=1' | sudo tee /etc/cathedral-validator/update.env >/dev/null && printf '%s\n' '{\"schema\":\"cathedral_amd_sev_snp_policy_v1\",\"generations\":{\"genoa\":{\"allowed_measurements\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],\"minimum_tcb\":\"0x0000000000000001\"}}}' | sudo tee /etc/cathedral-validator/snp-policy.json >/dev/null && sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/validator-hotkey && sudo chmod 0600 /etc/cathedral-validator/identity.env /etc/cathedral-validator/direct.env /etc/cathedral-validator/update.env && sudo chown root:cathedral-validator /etc/cathedral-validator/snp-policy.json && sudo chmod 0440 /etc/cathedral-validator/snp-policy.json"
-  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=20s' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\" && ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
-  remote "$host" "printf '%s\n' 'CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex' | sudo tee -a /etc/cathedral-validator/direct.env >/dev/null"
+  remote "$host" "test \"\$(sha256sum /tmp/cathedral_no_chain_readiness.py | cut -d' ' -f1)\" = '$HARNESS_SHA' && test \"\$(sha256sum /tmp/tampered_https_origin.py | cut -d' ' -f1)\" = '$FAULT_ORIGIN_SHA' && test \"\$(sha256sum /tmp/wait_updater_state.py | cut -d' ' -f1)\" = '$STATE_WAITER_SHA' && sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/cathedral-validator-live-test /etc/systemd/system/cathedral-validator-direct.service.d /etc/systemd/system/${timer}.d /etc/systemd/system/${other_timer}.d && sudo install -o root -g root -m 0555 /tmp/cathedral_no_chain_readiness.py /usr/local/libexec/cathedral-no-chain-readiness.py && sudo install -o root -g root -m 0555 /tmp/tampered_https_origin.py /usr/local/libexec/cathedral-tampered-https-origin.py && sudo install -o root -g root -m 0555 /tmp/wait_updater_state.py /usr/local/libexec/cathedral-wait-updater-state.py"
+  if [[ "$channel" == "canary" ]]; then
+    # Cathedral's internal canary host is not a public operating mode, so it
+    # keeps the direct configuration path. The stable host is configured only
+    # through the installed guided setup.
+    remote "$host" "printf '%s\n' 'CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$TEST_HOTKEY' | sudo tee /etc/cathedral-validator/identity.env >/dev/null && printf '%s\n' 'CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json' 'CATHEDRAL_VALIDATOR_INTERVAL_SECONDS=86400' | sudo tee /etc/cathedral-validator/direct.env >/dev/null && printf '%s\n' 'CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=$CANARY_URL' 'CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=$STABLE_URL' 'CATHEDRAL_VALIDATOR_CANARY_MINIMUM_SEQUENCE=1' 'CATHEDRAL_VALIDATOR_STABLE_MINIMUM_SEQUENCE=1' | sudo tee /etc/cathedral-validator/update.env >/dev/null && printf '%s\n' '$SNP_POLICY_JSON' | sudo tee /etc/cathedral-validator/snp-policy.json >/dev/null && sudo install -o root -g root -m 0600 /dev/null /etc/cathedral-validator/validator-hotkey && sudo chmod 0600 /etc/cathedral-validator/identity.env /etc/cathedral-validator/direct.env /etc/cathedral-validator/update.env && sudo chown root:cathedral-validator /etc/cathedral-validator/snp-policy.json && sudo chmod 0440 /etc/cathedral-validator/snp-policy.json"
+  fi
+  remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=20s' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\" && ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
   if [[ "$channel" == "canary" ]]; then
     if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=canary --metadata-url='$CANARY_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
       :
@@ -1996,7 +2284,7 @@ configure_host() {
       return "$failure_status"
     fi
   else
-    if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=stable --metadata-url='$STABLE_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
+    if configure_stable_host_through_operator_cli "$host" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
       :
     else
       failure_status=$?
@@ -2497,6 +2785,9 @@ record_step "promote exact B archive and observe stable timer activate it"
 publish_release "$STABLE_B2" "$ARCHIVE_B" "$STABLE_BRANCH" "stable-b2"
 observe_timer_update stable-exact-promotion "$STABLE_VM" \
   cathedral-validator-update.timer stable "$STABLE_B2" "$ARCHIVE_B_SHA"
+require_host_proof guided-status-after-timer-b "$STABLE_VM" \
+  assert_guided_status guided-status-after-timer-b "$STABLE_VM" \
+  "$ARCHIVE_B_SHA" 2 NOT_PROVEN true true
 remote "$STABLE_VM" 'sudo systemctl disable --now cathedral-validator-update.timer'
 capture_host_with_retries stable-after-timer-b "$STABLE_VM"
 
@@ -2861,6 +3152,10 @@ assert_current "$STABLE_VM" "$ARCHIVE_A_SHA" higher-sequence-rescue
 require_host_proof higher-sequence-rescue-service "$STABLE_VM" \
   remote "$STABLE_VM" \
   'sudo systemctl is-active cathedral-validator-direct.service'
+
+record_step "guided setup rerun refuses the stopped writer and status reports review"
+require_host_proof guided-setup-stopped-writer "$STABLE_VM" \
+  prove_guided_setup_refuses_stopped_writer "$STABLE_VM"
 
 assert_project_metadata_unchanged final
 assert_instance_metadata_unchanged "$CANARY_VM" canary final

@@ -414,6 +414,66 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex" in configure_host
 
 
+def test_live_controller_configures_the_stable_host_through_the_operator_cli():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    helper = script.split("configure_stable_host_through_operator_cli() {", 1)[1]
+    helper = helper.split("prove_guided_setup_refuses_stopped_writer() {", 1)[0]
+    refusal = script.split("prove_guided_setup_refuses_stopped_writer() {", 1)[1]
+    refusal = refusal.split("configure_host() {", 1)[0]
+    configure_host = script.split("configure_host() {", 1)[1].split(
+        'record_step "first install A', 1
+    )[0]
+
+    # The stable host is configured only by the installed guided setup.
+    assert 'if configure_stable_host_through_operator_cli "$host"' in configure_host
+    assert configure_host.count("--bootstrap-first-install") == 1
+    assert configure_host.count('if [[ "$channel" == "canary" ]]; then') == 2
+    assert "sudo tee /etc/cathedral-validator/update.env" not in helper
+    assert "sudo tee /etc/cathedral-validator/identity.env" not in helper
+    assert "cathedral-validator-update --bootstrap-first-install" not in helper
+    assert "$(guided_setup_command)" in helper
+    assert "--confirm-direct-write" in script.split("guided_setup_command() {", 1)[1]
+    assert "SETUP_COMPLETE: stable direct validator configured" in helper
+    assert "assert_no_operator_secret_in" in helper
+    assert "GUIDED_SETUP_CONFIG_PROOF" in helper
+    assert "GUIDED_SETUP_IDEMPOTENT_RERUN" in helper
+    assert 'assert_guided_status guided-status-after-setup "$host"' in helper
+    # Every step in the helper propagates its own failure status.
+    assert "|| return $?" in helper
+    assert "return 1" in helper
+
+    # The stopped-writer proof stops the writer, expects exit 2, and proves it
+    # was not restarted.
+    assert "sudo systemctl stop cathedral-validator-direct.service" in refusal
+    assert (
+        "SETUP_REFUSED: existing direct validator is stopped and needs review"
+        in refusal
+    )
+    assert "DIRECT_WRITER_STILL_STOPPED" in refusal
+    assert "NEEDS_REVIEW false any" in refusal
+    assert 'record_step "guided setup rerun refuses the stopped writer' in script
+    assert "guided-status-after-timer-b" in script
+
+    # Disposable operator inputs and mirror-bound signed assets.
+    assert "import bittensor_wallet" in script
+    assert "Keyfile(path).set_keypair(keypair, encrypt=False, overwrite=True)" in script
+    assert '--assets-dir "$ASSETS_DIR"' in script
+    assert '--assets-dir "$REPOSITORY_ROOT/deploy/validator-update"' not in script
+    assert "CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=" in script
+    assert "LiveTestHotkey" not in script
+    # The hotkey never enters evidence: only digests of the inputs are recorded.
+    assert 'cp "$OPERATOR_HOTKEY" "$EVIDENCE_DIR' not in script
+    assert "OPERATOR_HOTKEY_SHA" in script
+    # The harness root travels through the drop-in, so direct.env stays the
+    # signed example and an idempotent setup rerun can match it.
+    assert "sudo tee -a /etc/cathedral-validator/direct.env" not in script
+    assert (
+        "'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex'"
+        in configure_host
+    )
+
+
 def test_live_controller_records_both_timer_states_in_host_evidence():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
