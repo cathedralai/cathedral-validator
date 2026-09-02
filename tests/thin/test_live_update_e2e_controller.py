@@ -428,6 +428,11 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     # The stable host is configured only by the installed guided setup.
     assert 'if configure_stable_host_through_operator_cli "$host"' in configure_host
     assert configure_host.count("--bootstrap-first-install") == 1
+    # The internal canary first install binds its signed record like the
+    # guided stable setup does; the digest flag is required with the bootstrap.
+    assert "--first-install-metadata-sha256='$CANARY_A1_SHA'" in configure_host
+    assert 'CANARY_A1_SHA="$(shasum -a 256 "$CANARY_A1" | cut -d' in script
+    assert script.count("--first-install-metadata-sha256=") == 1
     assert configure_host.count('if [[ "$channel" == "canary" ]]; then') == 2
     assert "sudo tee /etc/cathedral-validator/update.env" not in helper
     assert "sudo tee /etc/cathedral-validator/identity.env" not in helper
