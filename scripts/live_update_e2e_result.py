@@ -3654,7 +3654,21 @@ def _validate_success_evidence(root: Path) -> dict[str, Any]:
     if (
         re.fullmatch(r"[0-9A-Fa-f]{32}", before_invocation) is None
         or not before_trigger
-        or _one_property(start_values, "LastTriggerUSec", label="reactivation start")
+    ):
+        raise EvidenceError("same-boot timer reactivation start proof is incomplete")
+    observed_invocations = start_values.get("InvocationIDObserved", [])
+    observed_triggers = start_values.get("LastTriggerObserved", [])
+    if (
+        len(observed_invocations) != 2
+        or len(observed_triggers) != 2
+        or any(value not in {"", before_invocation} for value in observed_invocations)
+        or any(value not in {"", before_trigger} for value in observed_triggers)
+    ):
+        raise EvidenceError(
+            "same-boot timer reactivation observations are incomplete or changed"
+        )
+    if (
+        _one_property(start_values, "LastTriggerUSec", label="reactivation start")
         != before_trigger
         or not _timer_is_rearmed(
             active=_one_property(

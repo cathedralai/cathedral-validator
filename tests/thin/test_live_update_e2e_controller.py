@@ -1351,6 +1351,8 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     )
     assert "InvocationIDObserved=" in start_reactivation
     assert "LastTriggerObserved=" in start_reactivation
+    assert start_reactivation.count("InvocationIDObserved=") == 2
+    assert start_reactivation.count("LastTriggerObserved=") == 2
     assert "systemctl enable --now '$timer'" in start_reactivation
     assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in start_reactivation
     assert "CATHEDRAL_TIMER_REACTIVATION_PROOF_V1" in observe_reactivation

@@ -869,6 +869,10 @@ def _success_tree(tmp_path):
         f"BeforeServiceInvocationID={'b' * 32}\n"
         "BeforeLastTriggerUSec=Mon 2026-09-01 00:00:00 UTC\n"
         "OnActiveUSec=1s\nOnUnitActiveUSec=2s\n"
+        "InvocationIDObserved=\n"
+        "LastTriggerObserved=\n"
+        f"InvocationIDObserved={'b' * 32}\n"
+        "LastTriggerObserved=Mon 2026-09-01 00:00:00 UTC\n"
         "Id=cathedral-validator-canary-update.timer\n"
         "UnitFileState=enabled\nActiveState=active\nSubState=waiting\n"
         "NextElapseUSecMonotonic=1min\n"
@@ -1729,6 +1733,39 @@ def test_canonical_result_refuses_direct_service_continuity_mismatch(tmp_path):
     rejected = _finalize(evidence, private_path, public_path, controller)
     assert rejected.returncode != 0
     assert "changed the direct service PID" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
+        ("InvocationIDObserved=\n", ""),
+        (
+            f"InvocationIDObserved={'b' * 32}\n",
+            f"InvocationIDObserved={'b' * 32}\nInvocationIDObserved={'b' * 32}\n",
+        ),
+        ("InvocationIDObserved=\n", f"InvocationIDObserved={'d' * 32}\n"),
+        (
+            "LastTriggerObserved=\n",
+            "LastTriggerObserved=Mon 2026-09-01 00:00:01 UTC\n",
+        ),
+    ),
+)
+def test_canonical_result_refuses_incomplete_or_changed_reactivation_observations(
+    tmp_path, needle, replacement
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    artifact = evidence / "canary-same-boot-reactivation-timer-reactivation-start.log"
+    original = artifact.read_text(encoding="ascii")
+    assert needle in original
+    artifact.write_text(original.replace(needle, replacement, 1), encoding="ascii")
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert (
+        "same-boot timer reactivation observations are incomplete or changed"
+        in rejected.stderr
+    )
 
 
 def test_canonical_result_requires_every_scenario_artifact(tmp_path):
