@@ -1161,8 +1161,10 @@ class _FakeGitHub:
         branch_created: bool | None = None,
         branch_revision: str | None = None,
         objects: dict[str, bytes] | None = None,
+        channel_ever_committed: bool = True,
     ) -> None:
         self.pointer = pointer
+        self.channel_ever_committed = channel_ever_committed
         self.branch_created = (
             pointer is None if branch_created is None else branch_created
         )
@@ -1200,6 +1202,12 @@ class _FakeGitHub:
             )
             or None
         )
+
+    def channel_was_ever_committed(self, publication, revision: str) -> bool:
+        assert revision == self.branch_revision
+        assert publication.pointer_path.endswith(f"/{publication.channel}.json")
+        self.events.append("commit-history")
+        return self.channel_ever_committed
 
     def read_content(self, path: str, revision: str):
         assert revision == self.branch_revision
@@ -1589,14 +1597,47 @@ def test_missing_pointer_refuses_existing_branch_without_retained_history(
         _anonymous_publication_fetch(publication, github),
     )
 
-    with pytest.raises(UpdateRefused, match="without retained signed history"):
+    with pytest.raises(UpdateRefused, match="branch once carried this channel"):
         publisher["publish"](
             publication,
             public_key_path=public_path,
             github=github,
         )
-    assert github.events == ["release", "branch", "history-list"]
+    assert github.events == ["release", "branch", "history-list", "commit-history"]
     assert github.objects == {}
+
+
+def test_first_publication_of_a_channel_on_a_shared_branch_is_accepted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Production keeps canary and stable on one branch.
+
+    After the first canary publication moved the branch, the first stable
+    publication finds no stable pointer and no stable history. That is a new
+    channel, not removed history, when no commit ever touched its paths.
+    """
+
+    publisher, _private, public_path, _archive_path, publication = _validated(tmp_path)
+    github = _FakeGitHub(branch_created=False, channel_ever_committed=False)
+    monkeypatch.setitem(
+        publisher["publish"].__globals__,
+        "_anonymous_fetch",
+        _anonymous_publication_fetch(publication, github),
+    )
+
+    publisher["publish"](
+        publication,
+        public_key_path=public_path,
+        github=github,
+    )
+    assert github.events == [
+        "release",
+        "branch",
+        "history-list",
+        "commit-history",
+        "channel-commit",
+    ]
+    assert github.pointer == publication.metadata
 
 
 def test_first_publication_resumes_an_empty_branch_at_the_exact_source(

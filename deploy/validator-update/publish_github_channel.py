@@ -625,6 +625,29 @@ class GitHub:
             objects.append(ChannelObject(path=record_path, sha=sha, size=size))
         return tuple(sorted(objects, key=lambda item: item.path))
 
+    def channel_was_ever_committed(
+        self, publication: Publication, revision: str
+    ) -> bool:
+        """Report whether any commit reachable from ``revision`` touched the channel.
+
+        Both channels share one branch, so a missing pointer with no retained
+        history is normal for the first publication of the second channel. It
+        is an equivocation only when the branch once carried the channel's
+        pointer or history and no longer does.
+        """
+        if _REVISION.fullmatch(revision) is None:
+            raise UpdateRefused("GitHub channel revision is invalid")
+        for path in (publication.pointer_path, publication.history_root):
+            encoded_path = urllib.parse.quote(path, safe="/")
+            records = self.api_records(
+                f"commits?sha={revision}&path={encoded_path}&per_page=1"
+            )
+            if records is None:
+                raise UpdateRefused("GitHub channel commit history is unavailable")
+            if records:
+                return True
+        return False
+
     def read_content(self, path: str, branch: str) -> tuple[str, bytes] | None:
         encoded_path = urllib.parse.quote(path, safe="/")
         encoded_branch = urllib.parse.quote(branch, safe="")
@@ -1033,10 +1056,17 @@ def publish(
             revision=branch.revision,
         )
         if history_floor is None:
-            if branch.revision != publication.source_revision:
+            if (
+                branch.revision != publication.source_revision
+                and github.channel_was_ever_committed(publication, branch.revision)
+            ):
+                # The branch moved on and once carried this channel: its pointer
+                # and retained history were removed, which is never resumable.
+                # A branch that only carries the other channel's history is the
+                # normal first publication of this channel.
                 raise UpdateRefused(
                     "channel pointer is missing without retained signed history "
-                    "on the exact initial branch revision"
+                    "and the branch once carried this channel"
                 )
         elif branch.created:
             raise UpdateRefused("new channel branch already contains retained history")
