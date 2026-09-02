@@ -1,5 +1,6 @@
 import importlib.abc
 import importlib.util
+import hashlib
 import json
 import re
 import runpy
@@ -98,6 +99,13 @@ def test_live_controller_uses_one_forced_iap_transport():
     assert "os.killpg(process.pid, signal.SIGKILL)" in before_preflight
     assert "Google API total deadline expired" in before_preflight
     assert "transient Google API failure" in before_preflight
+    assert "gh attestation verify --help" in before_preflight
+    for option in (
+        "--source-digest",
+        "--signer-workflow",
+        "--deny-self-hosted-runners",
+    ):
+        assert option in before_preflight
     assert script.index("ENABLED_CONTROLLER_APIS=") < script.index(
         'if [[ "$MODE" == "--preflight" ]]'
     )
@@ -551,19 +559,145 @@ def test_live_controller_scans_all_evidence_before_destroying_operator_key():
     delete_at = cleanup.index('rm -rf -- "$RUN_ROOT"')
 
     assert scan_at < delete_at
-    assert "cathedral_validator_operator_secret_scan_v1" in cleanup
+    assert "cathedral_validator_operator_secret_scan_v2" in cleanup
     assert 'evidence_dir.rglob("*")' in cleanup
+    assert "stream.read(1024 * 1024)" in cleanup
+    assert 'getattr(os, "O_NOFOLLOW", 0)' in cleanup
+    assert "evidence changed during secret scan" in cleanup
+    assert "evidence changed before secret scan" in cleanup
+    assert "before.st_ctime_ns" in cleanup
+    assert "discovered.st_ino" in cleanup
+    assert "content = path.read_bytes()" not in cleanup
     assert '"ss58Address", "publicKey", "accountId"' in cleanup
     assert '"privateKey", "secretPhrase", "secretSeed"' in cleanup
     assert '"operator_input_file_sha256"' in cleanup
     assert '"checked_field_names"' in cleanup
     assert '"exact_match_count": 0' in cleanup
+    assert '"scanned_evidence_tree"' in cleanup
+    assert "cathedral-validator-live-update-evidence-v1\\x00" in cleanup
     assert "operator key material occurred in evidence" in cleanup
     # The artifact does not contain the values, per-field hashes, or paths of
     # matching files (a successful artifact can only describe zero matches).
     report_block = cleanup.split("report = {", 1)[1].split("output.write_text", 1)[0]
     assert '"matches"' not in report_block
     assert "hashlib.sha256(value" not in cleanup
+
+
+def test_live_controller_secret_scan_detects_a_chunk_boundary_match(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    cleanup = script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    scanner = cleanup.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    keyfile = tmp_path / "operator-hotkey"
+    keyfile.write_text(
+        json.dumps(
+            {
+                "ss58Address": "public-marker",
+                "privateKey": "private-marker",
+            }
+        ),
+        encoding="ascii",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    candidate = evidence / "large-artifact.bin"
+    candidate.write_bytes(b"x" * (1024 * 1024 - 4) + b"private-marker")
+    output = evidence / "operator-secret-scan.json"
+
+    rejected = subprocess.run(
+        [sys.executable, "-", str(keyfile), str(evidence), str(output)],
+        input=scanner,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert rejected.returncode != 0
+    assert "operator key material occurred in evidence" in rejected.stderr
+    assert "private-marker" not in rejected.stderr
+    assert not output.exists()
+
+    candidate.write_bytes(b"clean evidence\n")
+    accepted = subprocess.run(
+        [sys.executable, "-", str(keyfile), str(evidence), str(output)],
+        input=scanner,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    body = candidate.read_bytes()
+    rows = [
+        {
+            "path": candidate.name,
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+        }
+    ]
+    index = {
+        "schema": "cathedral_validator_live_update_evidence_index_v1",
+        "files": rows,
+    }
+    index_bytes = (
+        json.dumps(
+            index,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    assert json.loads(output.read_text(encoding="ascii")) == {
+        "schema": "cathedral_validator_operator_secret_scan_v2",
+        "operator_input_file_sha256": hashlib.sha256(keyfile.read_bytes()).hexdigest(),
+        "checked_field_names": ["privateKey", "ss58Address"],
+        "scanned_evidence_tree": {
+            "algorithm": "sha256-domain-separated-canonical-json-file-list-v1",
+            "root_sha256": hashlib.sha256(
+                b"cathedral-validator-live-update-evidence-v1\x00" + index_bytes
+            ).hexdigest(),
+            "file_count": 1,
+        },
+        "exact_match_count": 0,
+    }
+
+
+def test_live_controller_retains_the_exact_bootstrap_bundle_for_review():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    build = script.split('bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER"', 1)[
+        1
+    ].split('BOOTSTRAP_FINGERPRINT="', 1)[0]
+
+    assert (
+        'install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" '
+        '\\\n  "$EVIDENCE_DIR/updater-bootstrap.tar.gz"' in build
+    )
+    assert build.index('"$EVIDENCE_DIR/bootstrap-build.json"') < build.index(
+        '"$EVIDENCE_DIR/updater-bootstrap.tar.gz"'
+    )
+    candidate_retention = script.index('install -m 0444 "$CANDIDATE_B_DIR/INPUTS.json"')
+    candidate_verification = script.index(
+        'gh attestation verify "$candidate_root/INPUTS.json"'
+    )
+    bootstrap_build = script.index(
+        'bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER"'
+    )
+    assert candidate_verification < candidate_retention < bootstrap_build
+    attestation_block = script.split(
+        "printf 'GitHub artifact attestation verification", 1
+    )[1].split('bootstrap_build_json="', 1)[0]
+    assert '--source-digest "$candidate_revision"' in attestation_block
+    assert (
+        '"${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml"'
+        in attestation_block
+    )
+    assert "--deny-self-hosted-runners" in attestation_block
+    assert build.index('"$EVIDENCE_DIR/updater-bootstrap.tar.gz"') < build.index(
+        '"$EVIDENCE_DIR/updater-bootstrap.manifest.json"'
+    )
 
 
 def test_live_controller_records_both_timer_states_in_host_evidence():

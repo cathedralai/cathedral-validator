@@ -186,18 +186,20 @@ resources, and both `iap.googleapis.com` and
 controller always uses authenticated IAP. It refuses a direct-IP transport and
 does not attach a service account to either test host.
 
-The stable host follows the public operator path only. The controller stages a
-disposable bittensor-wallet hotkey and a reviewed SNP policy as operator inputs,
-runs the installed `cathedral-validator-setup` from the signed bootstrap, proves
-that the setup never printed hotkey material, reads
+The stable host's initial installation follows the public guided operator path.
+Later bounded resilience scenarios intentionally use controller-only fault hooks.
+The controller stages a disposable bittensor-wallet hotkey and a reviewed SNP
+policy as operator inputs, runs the installed `cathedral-validator-setup` from
+the signed bootstrap, proves that the setup never printed hotkey material, reads
 `cathedral-validator-status --json` after the first install and after the stable
 timer activates the promoted release, proves an idempotent setup rerun changes
 nothing, and finally proves that a setup rerun refuses a stopped writer and that
 status reports `NEEDS_REVIEW`. The signed test bootstrap carries the reviewed
-deploy assets with only the two channel URLs rewritten to the run's isolated
-mirror branches. The canary host uses the internal direct-updater path, which is
-not a public operating mode. The disposable hotkey is never registered and never
-written to evidence.
+deploy assets with channel URLs rewritten to the run's isolated mirror branches
+and the authenticated stable-floor sequence and metadata digest substituted.
+The canary host uses the internal direct-updater path, which is not a public
+operating mode. The disposable hotkey is never registered and never written to
+evidence.
 
 Create a dedicated Ed25519 key for live-test evidence. This key is not a
 validator wallet key, subnet wallet key, runtime-release key, bootstrap-release
@@ -243,18 +245,39 @@ and a closed scenario matrix. Each matrix row names its required artifacts and
 binds their byte lengths and SHA-256 digests; deleting a required scenario
 proof cannot produce a smaller passing result. The closure retains and verifies
 the complete runtime-metadata graph, its deliberate invalid-signature mutation,
-the bootstrap manifest and signature, the build record, the release-key
-fingerprints, and their publication binding. The bootstrap manifest must embed
-the reviewed guided setup and status assets at their exact modes, sizes, and
-digests. First-install and refusal scenarios bind exact updater state, reviewed
+the exact bootstrap tarball, its manifest and signature, the build record, the
+release-key fingerprints, and the controller-observed GitHub publication
+records. The release record must describe an immutable non-draft test prerelease
+with exactly four uploaded assets bound by size, SHA-256 digest, and public URL;
+the lightweight tag record must point at exact source revision B. These API
+snapshots are controller-captured and result-signed evidence, not an independent
+reviewer fetch from GitHub. The retained tarball must match the signed size and
+digest. Every parsed regular member's path, mode, size, and digest must match the
+complete manifest set, with root ownership, zero mtime, and no link target;
+validation does not materialize members on the filesystem. Do not recompress or
+otherwise rewrite it before review. The manifest must embed every fixed
+installer, systemd, example,
+operator, sysusers, and runtime-key asset from the reviewed checkout, including
+the exact authorized channel-URL and stable-floor transformation. The retained
+candidate-B-declared input manifest binds the bundled requirements lock and
+complete wheelhouse to its claimed source revision B. Before the build, the
+controller records successful online GitHub attestation checks constrained to
+the source repository, exact source digest, release-candidate workflow, and a
+GitHub-hosted runner. The result verifier does not independently replay Sigstore
+verification from a retained bundle, so an external reviewer must repeat that
+check when source provenance—not only byte consistency—is required.
+First-install and refusal scenarios bind exact updater state, reviewed
 guided-asset ownership, type and symlink state, sanitized status bytes, writer
 identity, installed hotkey and SNP-policy digests, and other durable-state
 digests rather than relying on opaque log files. Before destroying the
 disposable wallet, the controller runs an exact-value scan over every earlier
-evidence file. Its zero-match report is included in and bound by the signed
-result. The scan is not independently reproducible after the disposable wallet
-is destroyed; the durable claim is the controller-produced, signed report and
-its exact evidence-file count. The same-boot timer proof binds the host, timer,
+evidence file. Its zero-match report commits a domain-separated content root and
+file count for the exact scanned inventory. Finalization recomputes that root,
+so a same-count path or content change after scanning fails closed, and the
+report is then included in the signed result. The scan is not independently reproducible after
+the disposable wallet is destroyed; the durable claim is the controller-produced
+report, its scanned-content root, and the detached-signed final result. The
+same-boot timer proof binds the host, timer,
 service, channel, expected release, prior trigger and prior invocation to a
 fresh successful trigger. Final captures require the exact settled channel
 record, successful control services, disabled timers, canary direct-service
@@ -276,11 +299,13 @@ live_update_e2e_result_v1.json.sig
 live-update-e2e-result-public-key.pem
 ```
 
-Independent verification must run from a clean checkout of the exact
+Independent verification must be initiated from a clean checkout of the exact
 `source_revision_b` recorded in the result, using the reviewed verifier and
-controller bytes from that revision. A verifier from a later revision rejects
-the older bundle by design. Verification must also use a separately reviewed
-and pinned copy of the result-signing public key, or its recorded fingerprint.
+controller bytes from that revision. The v1 result binds those exact source
+bytes, but it does not independently derive the checkout's Git identity or
+clean-tree state; the reviewer must record that procedural check separately.
+Verification must also use a separately reviewed and pinned copy of the
+result-signing public key, or its recorded fingerprint.
 The public key bundled with the evidence is a transport copy and is not, by
 itself, an authenticated trust root. Verification freezes the v1 no-chain scope
 and test-only signer purpose: the result key cannot claim a validator cycle,

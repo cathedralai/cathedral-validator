@@ -13,11 +13,13 @@ import argparse
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import re
 import stat
 import sys
+import tarfile
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -108,10 +110,67 @@ EVIDENCE_TREE_FIELDS = frozenset({"algorithm", "root_sha256", "file_count", "fil
 RUNTIME_METADATA_SCHEMA = "cathedral_validator_release_v1"
 BOOTSTRAP_MANIFEST_SCHEMA = "cathedral_validator_updater_bootstrap_v3"
 BOOTSTRAP_PUBLICATION_SCHEMA = "cathedral_validator_live_bootstrap_publication_v1"
+CANDIDATE_INPUTS_SCHEMA = "cathedral_validator_release_inputs_v1"
 RUNTIME_METADATA_LIFETIME_SECONDS = 43_200
 BOOTSTRAP_LIFETIME_SECONDS = 43_200
 RUNTIME_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 RUNTIME_KEY_BUNDLE_PATH = "payload/runtime-release-public-key.pem"
+BOOTSTRAP_BUNDLE_NAME = "updater-bootstrap.tar.gz"
+MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_PAYLOAD_FILES = 2_000
+MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 * 1024
+MAX_REVIEWED_ASSET_BYTES = 2 * 1024 * 1024
+STABLE_SEQUENCE_PLACEHOLDER = b"REPLACE_WITH_AUTHENTICATED_STABLE_SEQUENCE"
+STABLE_METADATA_SHA256_PLACEHOLDER = (
+    b"REPLACE_WITH_AUTHENTICATED_STABLE_METADATA_SHA256"
+)
+BOOTSTRAP_EVIDENCE_LIMITS = {
+    BOOTSTRAP_BUNDLE_NAME: MAX_BUNDLE_BYTES,
+    "updater-bootstrap.manifest.json": MAX_MANIFEST_BYTES,
+    "updater-bootstrap.manifest.sig": 64,
+    "candidate-b-inputs.json": MAX_MANIFEST_BYTES,
+}
+SYSTEMD_ASSETS = frozenset(
+    {
+        "cathedral-validator-boot-reconcile.service",
+        "cathedral-validator-canary-update.service",
+        "cathedral-validator-canary-update.timer",
+        "cathedral-validator-direct.service",
+        "cathedral-validator-update.service",
+        "cathedral-validator-update.timer",
+    }
+)
+EXAMPLE_ASSETS = frozenset(
+    {
+        "direct-telemetry.env.example",
+        "direct.env.example",
+        "identity.env.example",
+        "update.env.example",
+    }
+)
+OPERATOR_ASSETS = frozenset({"cathedral-validator-setup", "cathedral-validator-status"})
+EXPECTED_NON_WHEEL_PATHS = (
+    {f"payload/systemd/{name}" for name in SYSTEMD_ASSETS}
+    | {f"payload/examples/{name}" for name in EXAMPLE_ASSETS}
+    | {f"payload/operator/{name}" for name in OPERATOR_ASSETS}
+    | {
+        RUNTIME_KEY_BUNDLE_PATH,
+        "payload/requirements.txt",
+        "payload/installer/install_updater_bundle.py",
+        "payload/sysusers/cathedral-validator.conf",
+    }
+)
+CANDIDATE_REQUIRED_PATHS = frozenset(
+    {
+        "runtime/cathedral-validator.pex",
+        "runtime/cathedral-tdx-verifier",
+        "runtime/snpguest",
+        "runtime/cathedral-validator-cpython312-linux-x86_64.pex.lock",
+        "runtime/cathedral-validator.pex-distributions.json",
+        "updater-requirements.lock",
+    }
+)
 RUNTIME_METADATA_SPECS: tuple[tuple[str, str, int, str, str | None], ...] = (
     ("canary-a-seq1.json", "canary", 1, "archive_a_sha256", None),
     ("canary-b-seq2.json", "canary", 2, "archive_b_sha256", None),
@@ -162,6 +221,10 @@ RUNTIME_METADATA_NAMES = frozenset(
 BOOTSTRAP_PROOF_FILES = frozenset(
     {
         "bootstrap-build.json",
+        "bootstrap-publication.json",
+        "bootstrap-release-record.json",
+        "bootstrap-tag-record.json",
+        BOOTSTRAP_BUNDLE_NAME,
         "updater-bootstrap.manifest.json",
         "updater-bootstrap.manifest.sig",
     }
@@ -223,6 +286,7 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "canary-same-boot-reactivation-timer-reactivation-state.log",
         "canary-same-boot-reactivation-timer-reactivation-wait.log",
         "candidate-attestations.log",
+        "candidate-b-inputs.json",
         "control.json",
         "controller-api-state.json",
         "controller-project-permissions.json",
@@ -278,6 +342,7 @@ REQUIRED_SUCCESS_FILES = frozenset(
         "test-publication-main-before.json",
         "test-publication-repository.json",
         "bootstrap-release-public-key.pem",
+        BOOTSTRAP_BUNDLE_NAME,
         "updater-bootstrap.manifest.json",
         "updater-bootstrap.manifest.sig",
         *{f"signed-runtime-metadata/{name}" for name in RUNTIME_METADATA_NAMES},
@@ -405,8 +470,14 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
         RECORDED_STEPS[2],
         (
             ("bootstrap-build.json", False),
+            (BOOTSTRAP_BUNDLE_NAME, False),
             ("updater-bootstrap.manifest.json", False),
             ("updater-bootstrap.manifest.sig", False),
+            ("bootstrap-publication.json", False),
+            ("bootstrap-release-record.json", False),
+            ("bootstrap-tag-record.json", False),
+            ("candidate-attestations.log", False),
+            ("candidate-b-inputs.json", False),
             ("bootstrap-release-public-key.pem", False),
             ("runtime-release-public-key.pem", False),
             ("first-install-command-catval-{run_id}-canary.log", False),
@@ -593,6 +664,8 @@ SCENARIO_SPECS: tuple[tuple[str, str, tuple[tuple[str, bool], ...]], ...] = (
             ("stable-rescue-crash-command.log", False),
             ("higher-sequence-rescue-update-command.log", False),
             ("higher-sequence-rescue-current-proof.txt", False),
+            ("stable-higher-sequence-rescue-sequence-state.json", False),
+            ("higher-sequence-rescue-service-command.log", False),
         ),
     ),
     (
@@ -649,6 +722,14 @@ CURRENT_RELEASE_PROOFS = (
     ("readiness-rollback-current-proof.txt", "archive_b_sha256"),
 )
 RESULT_EXCLUSIONS = frozenset({RESULT_NAME, SIGNATURE_NAME, DIGEST_NAME})
+SECRET_SCAN_EXCLUSIONS = frozenset(
+    {
+        "operator-secret-scan.json",
+        "teardown-status.txt",
+        "controller-source-finalization.stderr",
+        *RESULT_EXCLUSIONS,
+    }
+)
 
 
 class EvidenceError(ValueError):
@@ -703,17 +784,115 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _read_regular(path: Path, *, label: str, require_nonempty: bool = False) -> bytes:
+def _open_regular(path: Path, *, label: str) -> tuple[int, os.stat_result]:
     try:
         info = path.lstat()
     except FileNotFoundError as exc:
         raise EvidenceError(f"missing {label}: {path}") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise EvidenceError(f"{label} must be a regular non-symlink file: {path}")
-    data = path.read_bytes()
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise EvidenceError(f"cannot open {label}: {path}") from exc
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_dev != info.st_dev
+        or opened.st_ino != info.st_ino
+    ):
+        os.close(descriptor)
+        raise EvidenceError(f"{label} changed while it was opened: {path}")
+    return descriptor, opened
+
+
+def _unchanged_regular(
+    descriptor: int, before: os.stat_result, *, label: str, path: Path
+) -> None:
+    after = os.fstat(descriptor)
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ):
+        raise EvidenceError(f"{label} changed while it was read: {path}")
+
+
+def _read_regular(
+    path: Path,
+    *,
+    label: str,
+    require_nonempty: bool = False,
+    maximum_bytes: int | None = None,
+) -> bytes:
+    descriptor, info = _open_regular(path, label=label)
+    try:
+        if maximum_bytes is not None and info.st_size > maximum_bytes:
+            raise EvidenceError(f"{label} exceeds its size limit: {path}")
+        limit = info.st_size if maximum_bytes is None else maximum_bytes
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read(limit + 1)
+        _unchanged_regular(descriptor, info, label=label, path=path)
+    finally:
+        os.close(descriptor)
+    if len(data) != info.st_size or len(data) > limit:
+        raise EvidenceError(f"{label} changed while it was read: {path}")
     if require_nonempty and not data:
         raise EvidenceError(f"{label} must not be empty: {path}")
     return data
+
+
+def _regular_size(
+    path: Path,
+    *,
+    label: str,
+    require_nonempty: bool = False,
+    maximum_bytes: int | None = None,
+) -> int:
+    descriptor, info = _open_regular(path, label=label)
+    try:
+        if maximum_bytes is not None and info.st_size > maximum_bytes:
+            raise EvidenceError(f"{label} exceeds its size limit: {path}")
+        if require_nonempty and info.st_size == 0:
+            raise EvidenceError(f"{label} must not be empty: {path}")
+        return info.st_size
+    finally:
+        os.close(descriptor)
+
+
+def _hash_regular(
+    path: Path,
+    *,
+    label: str,
+    require_nonempty: bool = False,
+    maximum_bytes: int | None = None,
+) -> tuple[int, str]:
+    descriptor, info = _open_regular(path, label=label)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        if maximum_bytes is not None and info.st_size > maximum_bytes:
+            raise EvidenceError(f"{label} exceeds its size limit: {path}")
+        if require_nonempty and info.st_size == 0:
+            raise EvidenceError(f"{label} must not be empty: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            while chunk := handle.read(1024 * 1024):
+                total += len(chunk)
+                digest.update(chunk)
+        _unchanged_regular(descriptor, info, label=label, path=path)
+    finally:
+        os.close(descriptor)
+    if total != info.st_size:
+        raise EvidenceError(f"{label} changed while it was read: {path}")
+    return total, digest.hexdigest()
 
 
 def _resolve_evidence_root(path: Path) -> Path:
@@ -1515,17 +1694,18 @@ def _scenario_matrix(root: Path, control: dict[str, Any]) -> dict[str, Any]:
         artifact_rows: list[dict[str, Any]] = []
         for template, empty_allowed in artifacts:
             relative = _scenario_artifact_path(template, run_id=run_id)
-            data = _read_regular(
+            size, digest = _hash_regular(
                 root / relative,
                 label=f"scenario artifact {scenario_id}:{relative}",
                 require_nonempty=not empty_allowed,
+                maximum_bytes=BOOTSTRAP_EVIDENCE_LIMITS.get(relative),
             )
             artifact_rows.append(
                 {
                     "path": relative,
                     "empty_allowed": empty_allowed,
-                    "bytes": len(data),
-                    "sha256": _sha256(data),
+                    "bytes": size,
+                    "sha256": digest,
                 }
             )
         scenarios.append(
@@ -1673,8 +1853,8 @@ def _validate_control(value: Any) -> dict[str, Any]:
             "disposable bittensor-wallet keyfile, unregistered, never recorded"
         ),
         "bootstrap_assets": (
-            "reviewed deploy assets with both channel URLs rewritten to the "
-            "isolated mirror branches"
+            "reviewed deploy assets with isolated mirror channel URLs and the "
+            "authenticated stable floor"
         ),
         "fixed_channel_cache_max_seconds": 300,
         "update_timer_interval_seconds": 60,
@@ -2154,18 +2334,120 @@ def _validate_first_install_state_evidence(
         )
 
 
-def _validate_bootstrap_manifest_files(
-    value: Any, *, runtime_public_pem: bytes, control: dict[str, Any]
-) -> None:
-    if not isinstance(value, list) or not value:
-        raise EvidenceError("bootstrap manifest files must be a non-empty list")
-    paths: list[str] = []
-    retained_entries: dict[str, dict[str, Any]] = {}
-    retained_paths = {
-        RUNTIME_KEY_BUNDLE_PATH,
-        "payload/operator/cathedral-validator-setup",
-        "payload/operator/cathedral-validator-status",
+def _bootstrap_archive_path(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise EvidenceError(f"{label} path is not a string")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EvidenceError(f"{label} has an unsafe archive path") from exc
+    path = PurePosixPath(value)
+    if (
+        not value
+        or len(encoded) > 255
+        or path.is_absolute()
+        or not path.parts
+        or ".." in path.parts
+        or "." in path.parts
+        or "" in path.parts
+        or path.as_posix() != value
+    ):
+        raise EvidenceError(f"{label} has an unsafe archive path")
+    return value
+
+
+def _expected_reviewed_bootstrap_assets(
+    *,
+    runtime_public_pem: bytes,
+    control: dict[str, Any],
+    stable_metadata_sha256: str,
+) -> dict[str, bytes]:
+    reviewed_root = Path(__file__).resolve().parents[1] / "deploy" / "validator-update"
+
+    def reviewed(name: str) -> bytes:
+        return _read_regular(
+            reviewed_root / name,
+            label=f"reviewed bootstrap source asset {name}",
+            require_nonempty=True,
+            maximum_bytes=MAX_REVIEWED_ASSET_BYTES,
+        )
+
+    expected: dict[str, bytes] = {
+        RUNTIME_KEY_BUNDLE_PATH: runtime_public_pem,
+        "payload/installer/install_updater_bundle.py": reviewed(
+            "install_updater_bundle.py"
+        ),
+        "payload/sysusers/cathedral-validator.conf": reviewed(
+            "cathedral-validator.sysusers"
+        ),
     }
+    expected.update(
+        {f"payload/systemd/{name}": reviewed(name) for name in SYSTEMD_ASSETS}
+    )
+    expected.update(
+        {f"payload/operator/{name}": reviewed(name) for name in OPERATOR_ASSETS}
+    )
+    for name in EXAMPLE_ASSETS - {"update.env.example"}:
+        expected[f"payload/examples/{name}"] = reviewed(name)
+
+    try:
+        update_text = reviewed("update.env.example").decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError("reviewed update.env.example is not ASCII") from exc
+    update_text = update_text.replace("\r\n", "\n").replace("\r", "\n")
+    urls = {
+        "CATHEDRAL_VALIDATOR_CANARY_METADATA_URL=": (
+            "https://raw.githubusercontent.com/"
+            f"{control['test_publication_repository']}/{control['canary_branch']}"
+            "/validator/canary.json"
+        ),
+        "CATHEDRAL_VALIDATOR_STABLE_METADATA_URL=": (
+            "https://raw.githubusercontent.com/"
+            f"{control['test_publication_repository']}/{control['stable_branch']}"
+            "/validator/stable.json"
+        ),
+    }
+    rewritten: list[str] = []
+    seen: set[str] = set()
+    for line in update_text.splitlines(keepends=True):
+        for key, url in urls.items():
+            if line.startswith(key):
+                if key in seen:
+                    raise EvidenceError(f"reviewed update.env.example repeats {key}")
+                seen.add(key)
+                line = f"{key}{url}\n"
+        rewritten.append(line)
+    if seen != set(urls):
+        raise EvidenceError("reviewed update.env.example lacks a channel URL line")
+    update_body = "".join(rewritten).encode("ascii")
+    if update_body.count(STABLE_SEQUENCE_PLACEHOLDER) != 1:
+        raise EvidenceError(
+            "reviewed update.env.example has an invalid stable sequence placeholder"
+        )
+    if update_body.count(STABLE_METADATA_SHA256_PLACEHOLDER) != 1:
+        raise EvidenceError(
+            "reviewed update.env.example has an invalid stable metadata placeholder"
+        )
+    update_body = update_body.replace(STABLE_SEQUENCE_PLACEHOLDER, b"1").replace(
+        STABLE_METADATA_SHA256_PLACEHOLDER,
+        stable_metadata_sha256.encode("ascii"),
+    )
+    expected["payload/examples/update.env.example"] = update_body
+    return expected
+
+
+def _validate_bootstrap_manifest_files(
+    value: Any,
+    *,
+    runtime_public_pem: bytes,
+    control: dict[str, Any],
+    stable_metadata_sha256: str,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_PAYLOAD_FILES:
+        raise EvidenceError("bootstrap manifest files must be a non-empty list")
+    parsed: dict[str, dict[str, Any]] = {}
+    previous = ""
+    total = 0
     for index, entry in enumerate(value):
         label = f"bootstrap manifest file {index}"
         if not isinstance(entry, dict) or set(entry) != {
@@ -2175,60 +2457,316 @@ def _validate_bootstrap_manifest_files(
             "size",
         }:
             raise EvidenceError(f"{label} has unexpected or missing fields")
-        path_value = entry.get("path")
-        path = PurePosixPath(path_value) if isinstance(path_value, str) else None
+        path_value = _bootstrap_archive_path(entry.get("path"), label=label)
         if (
-            path is None
-            or path.is_absolute()
-            or not path.parts
-            or path == PurePosixPath(".")
-            or ".." in path.parts
-            or path.as_posix() != path_value
-            or not isinstance(entry.get("mode"), str)
-            or re.fullmatch(r"0[0-7]{3}", entry["mode"]) is None
+            path_value <= previous
+            or path_value in parsed
+            or entry.get("mode") != "0644"
             or not isinstance(entry.get("sha256"), str)
             or HEX_64.fullmatch(entry["sha256"]) is None
             or type(entry.get("size")) is not int
-            or entry["size"] < 0
+            or not 1 <= entry["size"] <= MAX_BUNDLE_BYTES
         ):
             raise EvidenceError(f"{label} is invalid")
-        paths.append(path_value)
-        if path_value in retained_paths:
-            retained_entries[path_value] = entry
-    if paths != sorted(paths) or len(paths) != len(set(paths)):
-        raise EvidenceError("bootstrap manifest file paths are not unique and sorted")
-    if retained_entries.get(RUNTIME_KEY_BUNDLE_PATH) != {
-        "mode": "0644",
-        "path": RUNTIME_KEY_BUNDLE_PATH,
-        "sha256": _sha256(runtime_public_pem),
-        "size": len(runtime_public_pem),
-    }:
-        raise EvidenceError(
-            "bootstrap manifest does not embed the retained runtime public key"
-        )
-    reviewed_root = Path(__file__).resolve().parents[1] / "deploy" / "validator-update"
-    for name in ("cathedral-validator-setup", "cathedral-validator-status"):
-        reviewed = _read_regular(
-            reviewed_root / name,
-            label=f"reviewed bootstrap operator asset {name}",
-            require_nonempty=True,
-        )
-        archive_path = f"payload/operator/{name}"
+        previous = path_value
+        total += entry["size"]
+        if total > MAX_PAYLOAD_BYTES:
+            raise EvidenceError("bootstrap manifest payload exceeds its expanded limit")
+        parsed[path_value] = entry
+    non_wheels = {path for path in parsed if not path.startswith("payload/wheelhouse/")}
+    wheels = {path for path in parsed if path.startswith("payload/wheelhouse/")}
+    if non_wheels != EXPECTED_NON_WHEEL_PATHS or not wheels:
+        raise EvidenceError("bootstrap manifest lacks the fixed bootstrap asset set")
+    if any(
+        PurePosixPath(path).parent != PurePosixPath("payload/wheelhouse")
+        or not path.endswith(".whl")
+        for path in wheels
+    ):
+        raise EvidenceError("bootstrap manifest wheelhouse path is invalid")
+    expected_assets = _expected_reviewed_bootstrap_assets(
+        runtime_public_pem=runtime_public_pem,
+        control=control,
+        stable_metadata_sha256=stable_metadata_sha256,
+    )
+    for archive_path, body in expected_assets.items():
         expected = {
             "mode": "0644",
             "path": archive_path,
-            "sha256": control["guided_operator"][
-                "setup" if name.endswith("setup") else "status"
-            ]["source_sha256"],
-            "size": len(reviewed),
+            "sha256": _sha256(body),
+            "size": len(body),
         }
+        if parsed.get(archive_path) != expected:
+            raise EvidenceError(
+                f"bootstrap manifest does not embed reviewed {archive_path}"
+            )
+    return parsed
+
+
+def _validate_bootstrap_archive_stream(
+    stream: Any, records: dict[str, dict[str, Any]]
+) -> None:
+    observed: set[str] = set()
+    try:
+        with tarfile.open(fileobj=stream, mode="r:gz") as bundle:
+            members = bundle.getmembers()
+            if len(members) != len(records):
+                raise EvidenceError(
+                    "bootstrap bundle member count differs from manifest"
+                )
+            for member in members:
+                path_value = _bootstrap_archive_path(
+                    member.name, label="bootstrap bundle member"
+                )
+                if path_value in observed or path_value not in records:
+                    raise EvidenceError(
+                        "bootstrap bundle contains an unsafe, duplicate, or unexpected member"
+                    )
+                record = records[path_value]
+                if (
+                    not member.isreg()
+                    or member.uid != 0
+                    or member.gid != 0
+                    or member.uname != "root"
+                    or member.gname != "root"
+                    or member.mtime != 0
+                    or stat.S_IMODE(member.mode) != int(record["mode"], 8)
+                    or member.size != record["size"]
+                    or member.linkname
+                ):
+                    raise EvidenceError(
+                        "bootstrap bundle member metadata differs from manifest"
+                    )
+                handle = bundle.extractfile(member)
+                if handle is None:
+                    raise EvidenceError("bootstrap bundle member cannot be read")
+                digest = hashlib.sha256()
+                total = 0
+                while total < record["size"]:
+                    body = handle.read(min(1024 * 1024, record["size"] - total))
+                    if not body:
+                        break
+                    total += len(body)
+                    digest.update(body)
+                if (
+                    total != record["size"]
+                    or handle.read(1)
+                    or digest.hexdigest() != record["sha256"]
+                ):
+                    raise EvidenceError(
+                        "bootstrap bundle member content differs from manifest"
+                    )
+                observed.add(path_value)
+    except (EOFError, OSError, tarfile.TarError) as exc:
+        raise EvidenceError(
+            "bootstrap bundle is not a readable gzip tar archive"
+        ) from exc
+    if observed != set(records):
+        raise EvidenceError("bootstrap bundle omits a manifest member")
+
+
+def _validate_bootstrap_archive(
+    archive: bytes, records: dict[str, dict[str, Any]]
+) -> None:
+    _validate_bootstrap_archive_stream(io.BytesIO(archive), records)
+
+
+def _validate_retained_bootstrap_archive(
+    path: Path,
+    records: dict[str, dict[str, Any]],
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    label = "retained bootstrap bundle"
+    descriptor, info = _open_regular(path, label=label)
+    try:
+        if info.st_size == 0:
+            raise EvidenceError(f"{label} must not be empty: {path}")
+        if info.st_size > MAX_BUNDLE_BYTES:
+            raise EvidenceError(f"{label} exceeds its size limit: {path}")
+        if info.st_size != expected_size:
+            raise EvidenceError(
+                "retained bootstrap bundle differs from signed manifest"
+            )
+        digest = hashlib.sha256()
+        total = 0
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while chunk := stream.read(1024 * 1024):
+                total += len(chunk)
+                digest.update(chunk)
+            if total != expected_size or digest.hexdigest() != expected_sha256:
+                raise EvidenceError(
+                    "retained bootstrap bundle differs from signed manifest"
+                )
+            stream.seek(0)
+            _validate_bootstrap_archive_stream(stream, records)
+        _unchanged_regular(descriptor, info, label=label, path=path)
+    finally:
+        os.close(descriptor)
+    if total != info.st_size:
+        raise EvidenceError(f"{label} changed while it was read: {path}")
+
+
+def _validate_candidate_b_inputs(
+    root: Path,
+    control: dict[str, Any],
+    manifest_records: dict[str, dict[str, Any]],
+) -> None:
+    label = "retained candidate B input manifest"
+    document = strict_json(
+        _read_regular(
+            root / "candidate-b-inputs.json",
+            label=label,
+            require_nonempty=True,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+        ),
+        label=label,
+        canonical=True,
+    )
+    if not isinstance(document, dict) or set(document) != {
+        "schema",
+        "source_revision",
+        "files",
+    }:
+        raise EvidenceError(f"{label} has unexpected or missing fields")
+    if (
+        document.get("schema") != CANDIDATE_INPUTS_SCHEMA
+        or document.get("source_revision") != control["source_revision_b"]
+    ):
+        raise EvidenceError(f"{label} does not bind source revision B")
+    files = document.get("files")
+    if not isinstance(files, dict) or not 1 <= len(files) <= MAX_PAYLOAD_FILES:
+        raise EvidenceError(f"{label} has an invalid file map")
+    for relative, digest in files.items():
         if (
-            expected["sha256"] != _sha256(reviewed)
-            or retained_entries.get(archive_path) != expected
+            not isinstance(relative, str)
+            or _bootstrap_archive_path(relative, label=label) != relative
+            or not isinstance(digest, str)
+            or HEX_64.fullmatch(digest) is None
+        ):
+            raise EvidenceError(f"{label} has an invalid file record")
+    if not CANDIDATE_REQUIRED_PATHS.issubset(files):
+        raise EvidenceError(f"{label} lacks required release inputs")
+    requirements_digest = files.get("updater-requirements.lock")
+    if requirements_digest is None:
+        raise EvidenceError(f"{label} lacks updater-requirements.lock")
+    requirements_record = manifest_records.get("payload/requirements.txt")
+    if (
+        requirements_record is None
+        or requirements_record["sha256"] != requirements_digest
+    ):
+        raise EvidenceError(
+            "bootstrap requirements differ from retained candidate B inputs"
+        )
+    candidate_wheels = {
+        relative: digest
+        for relative, digest in files.items()
+        if relative.startswith("updater-wheelhouse/")
+    }
+    if not candidate_wheels or any(
+        PurePosixPath(relative).parent != PurePosixPath("updater-wheelhouse")
+        or not relative.endswith(".whl")
+        for relative in candidate_wheels
+    ):
+        raise EvidenceError(f"{label} has an invalid updater wheelhouse")
+    expected_wheels = {
+        f"payload/wheelhouse/{PurePosixPath(relative).name}": digest
+        for relative, digest in candidate_wheels.items()
+    }
+    manifest_wheels = {
+        path: record["sha256"]
+        for path, record in manifest_records.items()
+        if path.startswith("payload/wheelhouse/")
+    }
+    if manifest_wheels != expected_wheels:
+        raise EvidenceError(
+            "bootstrap wheelhouse differs from retained candidate B inputs"
+        )
+
+
+def _validate_bootstrap_api_records(
+    root: Path,
+    control: dict[str, Any],
+    *,
+    expected_tag: str,
+    assets: dict[str, dict[str, Any]],
+) -> None:
+    repository = control["test_publication_repository"]
+    release_label = "GitHub bootstrap release record"
+    release = strict_json(
+        _read_regular(
+            root / "bootstrap-release-record.json",
+            label=release_label,
+            require_nonempty=True,
+        ),
+        label=release_label,
+    )
+    if not isinstance(release, dict):
+        raise EvidenceError(f"{release_label} must be an object")
+    expected_release_fields = {
+        "tag_name": expected_tag,
+        "name": expected_tag,
+        "target_commitish": control["source_revision_b"],
+        "draft": False,
+        "prerelease": True,
+        "immutable": True,
+        "html_url": f"https://github.com/{repository}/releases/tag/{expected_tag}",
+    }
+    if any(
+        type(release.get(field)) is not type(expected) or release.get(field) != expected
+        for field, expected in expected_release_fields.items()
+    ):
+        raise EvidenceError(f"{release_label} has invalid release metadata")
+    observed_assets = release.get("assets")
+    if not isinstance(observed_assets, list) or len(observed_assets) != len(assets):
+        raise EvidenceError(f"{release_label} has an invalid asset set")
+    by_name: dict[str, dict[str, Any]] = {}
+    for item in observed_assets:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise EvidenceError(f"{release_label} contains an invalid asset")
+        name = item["name"]
+        if name in by_name:
+            raise EvidenceError(f"{release_label} repeats an asset")
+        by_name[name] = item
+    if set(by_name) != set(assets):
+        raise EvidenceError(f"{release_label} has an invalid asset set")
+    for name, expected in assets.items():
+        observed = by_name[name]
+        if (
+            observed.get("state") != "uploaded"
+            or type(observed.get("size")) is not int
+            or observed["size"] != expected["size"]
+            or observed.get("digest") != f"sha256:{expected['sha256']}"
+            or observed.get("browser_download_url") != expected["url"]
         ):
             raise EvidenceError(
-                f"bootstrap manifest does not embed the reviewed {name}"
+                f"{release_label} has invalid metadata for asset {name}"
             )
+
+    tag_label = "GitHub bootstrap tag record"
+    tag = strict_json(
+        _read_regular(
+            root / "bootstrap-tag-record.json",
+            label=tag_label,
+            require_nonempty=True,
+        ),
+        label=tag_label,
+    )
+    if not isinstance(tag, dict):
+        raise EvidenceError(f"{tag_label} must be an object")
+    expected_ref = f"refs/tags/{expected_tag}"
+    expected_api = f"https://api.github.com/repos/{repository}"
+    target = tag.get("object")
+    if (
+        tag.get("ref") != expected_ref
+        or tag.get("url") != f"{expected_api}/git/refs/tags/{expected_tag}"
+        or not isinstance(target, dict)
+        or target.get("type") != "commit"
+        or target.get("sha") != control["source_revision_b"]
+        or target.get("url")
+        != f"{expected_api}/git/commits/{control['source_revision_b']}"
+    ):
+        raise EvidenceError(f"{tag_label} does not bind the exact source revision")
 
 
 def _validate_bootstrap_evidence(
@@ -2243,6 +2781,7 @@ def _validate_bootstrap_evidence(
         root / "updater-bootstrap.manifest.json",
         label="bootstrap manifest",
         require_nonempty=True,
+        maximum_bytes=MAX_MANIFEST_BYTES,
     )
     manifest = strict_json(manifest_raw, label="bootstrap manifest", canonical=True)
     if not isinstance(manifest, dict) or set(manifest) != {
@@ -2265,14 +2804,18 @@ def _validate_bootstrap_evidence(
         or not isinstance(bundle.get("sha256"), str)
         or HEX_64.fullmatch(bundle["sha256"]) is None
         or type(bundle.get("size")) is not int
-        or bundle["size"] < 1
+        or not 1 <= bundle["size"] <= MAX_BUNDLE_BYTES
     ):
         raise EvidenceError("bootstrap manifest bundle is invalid")
-    _validate_bootstrap_manifest_files(
+    manifest_records = _validate_bootstrap_manifest_files(
         manifest.get("files"),
         runtime_public_pem=runtime_key["pem"],
         control=control,
+        stable_metadata_sha256=records["stable-a-seq1.json"]["record"][
+            "metadata_sha256"
+        ],
     )
+    _validate_candidate_b_inputs(root, control, manifest_records)
     _require_exact_object(
         manifest.get("install"),
         {
@@ -2329,6 +2872,7 @@ def _validate_bootstrap_evidence(
         root / "updater-bootstrap.manifest.sig",
         label="bootstrap manifest signature",
         require_nonempty=True,
+        maximum_bytes=64,
     )
     if len(manifest_signature) != 64:
         raise EvidenceError("bootstrap manifest signature is invalid")
@@ -2336,6 +2880,13 @@ def _validate_bootstrap_evidence(
         bootstrap_key["public"].verify(manifest_signature, manifest_raw)
     except InvalidSignature as exc:
         raise EvidenceError("bootstrap manifest signature is invalid") from exc
+
+    _validate_retained_bootstrap_archive(
+        root / BOOTSTRAP_BUNDLE_NAME,
+        manifest_records,
+        expected_size=bundle["size"],
+        expected_sha256=bundle["sha256"],
+    )
 
     build_raw = _read_regular(
         root / "bootstrap-build.json",
@@ -2430,6 +2981,33 @@ def _validate_bootstrap_evidence(
         publication,
         expected_publication,
         label="bootstrap publication record",
+    )
+    _validate_bootstrap_api_records(
+        root,
+        control,
+        expected_tag=expected_tag,
+        assets={
+            "updater-bootstrap.tar.gz": {
+                "url": expected_publication["assets"]["bundle"]["url"],
+                "sha256": bundle["sha256"],
+                "size": bundle["size"],
+            },
+            "updater-bootstrap.manifest.json": {
+                "url": expected_publication["assets"]["manifest"]["url"],
+                "sha256": _sha256(manifest_raw),
+                "size": len(manifest_raw),
+            },
+            "updater-bootstrap.manifest.sig": {
+                "url": expected_publication["assets"]["signature"]["url"],
+                "sha256": _sha256(manifest_signature),
+                "size": len(manifest_signature),
+            },
+            "bootstrap-signing-public-key.pem": {
+                "url": expected_publication["assets"]["public_key"]["url"],
+                "sha256": _sha256(bootstrap_key["pem"]),
+                "size": len(bootstrap_key["pem"]),
+            },
+        },
     )
 
 
@@ -2751,7 +3329,7 @@ def _validate_operator_secret_scan(root: Path, control: dict[str, Any]) -> None:
         "schema",
         "operator_input_file_sha256",
         "checked_field_names",
-        "evidence_file_count",
+        "scanned_evidence_tree",
         "exact_match_count",
     }:
         raise EvidenceError(f"{label} has unexpected or missing fields")
@@ -2759,7 +3337,7 @@ def _validate_operator_secret_scan(root: Path, control: dict[str, Any]) -> None:
         "hotkey_keyfile_sha256"
     ]
     if (
-        report.get("schema") != "cathedral_validator_operator_secret_scan_v1"
+        report.get("schema") != "cathedral_validator_operator_secret_scan_v2"
         or report.get("operator_input_file_sha256") != expected_input
         or report.get("exact_match_count") != 0
         or type(report.get("exact_match_count")) is not int
@@ -2777,23 +3355,16 @@ def _validate_operator_secret_scan(root: Path, control: dict[str, Any]) -> None:
         or not set(checked).intersection(allowed_private)
     ):
         raise EvidenceError(f"{label} has invalid checked field names")
-    post_scan_files = {
-        "operator-secret-scan.json",
-        "teardown-status.txt",
-        "controller-source-finalization.stderr",
-        *RESULT_EXCLUSIONS,
-    }
-    expected_file_count = sum(
-        1
-        for path in root.rglob("*")
-        if stat.S_ISREG(path.lstat().st_mode)
-        and path.relative_to(root).as_posix() not in post_scan_files
+    scanned_rows = _inventory(root, SECRET_SCAN_EXCLUSIONS)
+    _require_exact_object(
+        report.get("scanned_evidence_tree"),
+        {
+            "algorithm": EVIDENCE_TREE_ALGORITHM,
+            "root_sha256": _evidence_root(scanned_rows),
+            "file_count": len(scanned_rows),
+        },
+        label=f"{label} evidence tree",
     )
-    if (
-        type(report.get("evidence_file_count")) is not int
-        or report["evidence_file_count"] != expected_file_count
-    ):
-        raise EvidenceError(f"{label} has an invalid evidence file count")
 
 
 def _validate_guided_operator_evidence(
@@ -2982,10 +3553,11 @@ def _validate_guided_operator_evidence(
 
 def _validate_success_evidence(root: Path) -> dict[str, Any]:
     for relative in REQUIRED_SUCCESS_FILES:
-        _read_regular(
+        _regular_size(
             root / relative,
             label=f"required success evidence {relative}",
             require_nonempty=True,
+            maximum_bytes=BOOTSTRAP_EVIDENCE_LIMITS.get(relative),
         )
     teardown = _read_regular(root / "teardown-status.txt", label="teardown status")
     if teardown != b"original_status=0\nteardown_verified=1\n":
@@ -3323,8 +3895,8 @@ def _inventory(root: Path, exclusions: frozenset[str]) -> list[dict[str, Any]]:
             )
         if relative in exclusions:
             continue
-        data = path.read_bytes()
-        rows.append({"path": relative, "bytes": len(data), "sha256": _sha256(data)})
+        size, digest = _hash_regular(path, label=f"evidence file {relative}")
+        rows.append({"path": relative, "bytes": size, "sha256": digest})
     return rows
 
 

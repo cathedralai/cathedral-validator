@@ -295,6 +295,17 @@ for command in awk basename cmp cp curl cut find gcloud gh git grep jq openssl p
     exit 2
   }
 done
+if ! GH_ATTESTATION_HELP="$(gh attestation verify --help 2>&1)"; then
+  printf 'REFUSED: GitHub CLI lacks artifact-attestation verification\n' >&2
+  exit 2
+fi
+for option in --source-digest --signer-workflow --deny-self-hosted-runners; do
+  if [[ "$GH_ATTESTATION_HELP" != *"$option"* ]]; then
+    printf 'REFUSED: GitHub CLI attestation verifier lacks %s\n' "$option" >&2
+    exit 2
+  fi
+done
+readonly GH_ATTESTATION_HELP
 if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
   printf 'REFUSED: controller Python cannot import cryptography\n' >&2
   exit 2
@@ -1076,16 +1087,19 @@ cleanup() {
 
   if [[ -n "${RUN_ROOT:-}" && "$RUN_ROOT" == "${TMPDIR:-/tmp}/cathedral-validator-live-${RUN_ID}."* && -d "$RUN_ROOT" ]]; then
     # On a successful run, independently scan every evidence file that exists
-    # before destroying the disposable wallet. The report records field names
-    # and the input-file digest only; it never records secret values or hashes
-    # of individual secret values. Files created below this point are fixed
-    # teardown/result metadata and never interpolate operator material.
+    # before destroying the disposable wallet. The report records field names,
+    # the input-file digest and a domain-separated root over the exact scanned
+    # evidence bytes; it never records secret values or hashes of individual
+    # secret values. Files created below this point are fixed teardown/result
+    # metadata and never interpolate operator material.
     if [[ "$status" == 0 && "$teardown_ok" == 1 ]]; then
       if ! python3 - "$OPERATOR_HOTKEY" "$EVIDENCE_DIR" \
         "$EVIDENCE_DIR/operator-secret-scan.json" <<'PY'
 import hashlib
 import json
+import os
 import pathlib
+import stat
 import sys
 
 keyfile_path = pathlib.Path(sys.argv[1])
@@ -1106,20 +1120,89 @@ if not any(name in checked for name in public_fields):
     raise SystemExit("REFUSED: operator keyfile has no public identity field")
 if not any(name in checked for name in private_fields):
     raise SystemExit("REFUSED: operator keyfile has no private field to scan")
-files = sorted(path for path in evidence_dir.rglob("*") if path.is_file())
-matches = []
-for path in files:
-    content = path.read_bytes()
-    for name, needle in zip(checked, needles, strict=True):
-        if needle in content:
-            matches.append((path.relative_to(evidence_dir).as_posix(), name))
-if matches:
-    raise SystemExit("REFUSED: operator key material occurred in evidence")
+files = []
+for path in sorted(evidence_dir.rglob("*")):
+    metadata = path.lstat()
+    if stat.S_ISDIR(metadata.st_mode):
+        continue
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit("REFUSED: evidence contains a non-regular file")
+    files.append((path, path.relative_to(evidence_dir).as_posix(), metadata))
+
+maximum_overlap = max(len(needle) for needle in needles) - 1
+rows = []
+for path, relative, discovered in files:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_dev != discovered.st_dev
+            or before.st_ino != discovered.st_ino
+        ):
+            raise SystemExit("REFUSED: evidence changed before secret scan")
+        overlap = b""
+        digest = hashlib.sha256()
+        total = 0
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                observed = overlap + chunk
+                if any(needle in observed for needle in needles):
+                    raise SystemExit(
+                        "REFUSED: operator key material occurred in evidence"
+                    )
+                overlap = observed[-maximum_overlap:] if maximum_overlap else b""
+                digest.update(chunk)
+                total += len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise SystemExit("REFUSED: evidence changed during secret scan")
+        if total != before.st_size:
+            raise SystemExit("REFUSED: evidence changed during secret scan")
+        rows.append({"path": relative, "bytes": total, "sha256": digest.hexdigest()})
+    except OSError as exc:
+        raise SystemExit("REFUSED: evidence could not be scanned safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+index = {
+    "schema": "cathedral_validator_live_update_evidence_index_v1",
+    "files": rows,
+}
+index_bytes = (
+    json.dumps(index, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+               allow_nan=False).encode("ascii")
+    + b"\n"
+)
+tree_root = hashlib.sha256(
+    b"cathedral-validator-live-update-evidence-v1\x00" + index_bytes
+).hexdigest()
 report = {
-    "schema": "cathedral_validator_operator_secret_scan_v1",
+    "schema": "cathedral_validator_operator_secret_scan_v2",
     "operator_input_file_sha256": hashlib.sha256(keyfile_bytes).hexdigest(),
     "checked_field_names": sorted(checked),
-    "evidence_file_count": len(files),
+    "scanned_evidence_tree": {
+        "algorithm": "sha256-domain-separated-canonical-json-file-list-v1",
+        "root_sha256": tree_root,
+        "file_count": len(rows),
+    },
     "exact_match_count": 0,
 }
 output.write_text(
@@ -1377,17 +1460,33 @@ fi
 
 printf 'GitHub artifact attestation verification\n' >"$EVIDENCE_DIR/candidate-attestations.log"
 for candidate_root in "$CANDIDATE_A_DIR" "$CANDIDATE_B_DIR"; do
+  candidate_revision="$SOURCE_REVISION_B"
+  if [[ "$candidate_root" == "$CANDIDATE_A_DIR" ]]; then
+    candidate_revision="$SOURCE_REVISION_A"
+  fi
   while IFS= read -r relative; do
     {
       printf '\nVERIFY %s\n' "$candidate_root/$relative"
-      gh attestation verify "$candidate_root/$relative" --repo "$SOURCE_GITHUB_REPOSITORY"
+      gh attestation verify "$candidate_root/$relative" \
+        --repo "$SOURCE_GITHUB_REPOSITORY" \
+        --source-digest "$candidate_revision" \
+        --signer-workflow \
+          "${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml" \
+        --deny-self-hosted-runners
     } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
   done < <(jq -r '.files | keys[]' "$candidate_root/INPUTS.json")
   {
     printf '\nVERIFY %s\n' "$candidate_root/INPUTS.json"
-    gh attestation verify "$candidate_root/INPUTS.json" --repo "$SOURCE_GITHUB_REPOSITORY"
+    gh attestation verify "$candidate_root/INPUTS.json" \
+      --repo "$SOURCE_GITHUB_REPOSITORY" \
+      --source-digest "$candidate_revision" \
+      --signer-workflow \
+        "${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml" \
+      --deny-self-hosted-runners
   } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
 done
+install -m 0444 "$CANDIDATE_B_DIR/INPUTS.json" \
+  "$EVIDENCE_DIR/candidate-b-inputs.json"
 
 bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --wheelhouse "$CANDIDATE_B_DIR/updater-wheelhouse" \
@@ -1403,6 +1502,8 @@ bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --sequence 1 \
   --lifetime-seconds 43200)"
 printf '%s\n' "$bootstrap_build_json" >"$EVIDENCE_DIR/bootstrap-build.json"
+install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  "$EVIDENCE_DIR/updater-bootstrap.tar.gz"
 install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
   "$EVIDENCE_DIR/updater-bootstrap.manifest.json"
 install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
@@ -1632,7 +1733,7 @@ document = {
     "stable_host_status_command": "cathedral-validator-status --json",
     "canary_host_configuration": "internal direct updater first install; not a public operating mode",
     "operator_hotkey_shape": "disposable bittensor-wallet keyfile, unregistered, never recorded",
-    "bootstrap_assets": "reviewed deploy assets with both channel URLs rewritten to the isolated mirror branches",
+    "bootstrap_assets": "reviewed deploy assets with isolated mirror channel URLs and the authenticated stable floor",
     "guided_operator": {
         "setup": {
             "source_sha256": guided_setup_source_sha256,

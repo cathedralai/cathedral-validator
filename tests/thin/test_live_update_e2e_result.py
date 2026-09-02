@@ -1,10 +1,13 @@
 import base64
+import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -362,6 +365,82 @@ def _runtime_metadata_fixture(evidence, private, repository):
     return records
 
 
+def _bootstrap_archive(payloads, *, paths=None, mutate=None):
+    ordered_paths = sorted(payloads) if paths is None else list(paths)
+    output = io.BytesIO()
+    with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as zipped:
+        with tarfile.open(
+            fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT
+        ) as bundle:
+            for index, path in enumerate(ordered_paths):
+                body = payloads[path]
+                info = tarfile.TarInfo(path)
+                info.size = len(body)
+                info.mode = 0o644
+                info.uid = 0
+                info.gid = 0
+                info.uname = "root"
+                info.gname = "root"
+                info.mtime = 0
+                if mutate is not None:
+                    info, body = mutate(index, info, body)
+                bundle.addfile(info, io.BytesIO(body) if info.isreg() else None)
+    return output.getvalue()
+
+
+def _bootstrap_payloads(
+    *,
+    runtime_public_pem,
+    stable_metadata_sha256="a" * 64,
+    publication_repository="cathedralai/cathedral-validator-release-e2e",
+):
+    payloads = RESULT._expected_reviewed_bootstrap_assets(
+        runtime_public_pem=runtime_public_pem,
+        control={
+            "test_publication_repository": publication_repository,
+            "canary_branch": "validator-release-live-valupd-fixture-canary",
+            "stable_branch": "validator-release-live-valupd-fixture-stable",
+        },
+        stable_metadata_sha256=stable_metadata_sha256,
+    )
+    payloads["payload/requirements.txt"] = (
+        b"fixture==1.0 --hash=sha256:" + (b"a" * 64) + b"\n"
+    )
+    payloads["payload/wheelhouse/cathedral_fixture-1.0-py3-none-any.whl"] = (
+        b"fixture wheel"
+    )
+    return payloads
+
+
+def _bootstrap_records(payloads):
+    return {
+        path: {
+            "mode": "0644",
+            "path": path,
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "size": len(body),
+        }
+        for path, body in sorted(payloads.items())
+    }
+
+
+def _bind_resigned_bootstrap_archive(evidence, archive, private_path):
+    manifest_path = evidence / "updater-bootstrap.manifest.json"
+    signature_path = evidence / "updater-bootstrap.manifest.sig"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    manifest["bundle"] = {
+        "sha256": hashlib.sha256(archive).hexdigest(),
+        "size": len(archive),
+    }
+    manifest_raw = RESULT.canonical_bytes(manifest)
+    private = serialization.load_pem_private_key(
+        private_path.read_bytes(), password=None
+    )
+    (evidence / RESULT.BOOTSTRAP_BUNDLE_NAME).write_bytes(archive)
+    manifest_path.write_bytes(manifest_raw)
+    signature_path.write_bytes(private.sign(manifest_raw))
+
+
 def _bootstrap_fixture(
     evidence,
     *,
@@ -375,47 +454,36 @@ def _bootstrap_fixture(
     publication_repository,
     target_revision,
 ):
-    bundle_sha256 = hashlib.sha256(b"fixture bootstrap bundle").hexdigest()
-    guided_setup = (
-        ROOT / "deploy" / "validator-update" / "cathedral-validator-setup"
-    ).read_bytes()
-    guided_status = (
-        ROOT / "deploy" / "validator-update" / "cathedral-validator-status"
-    ).read_bytes()
+    payloads = _bootstrap_payloads(
+        runtime_public_pem=runtime_public_pem,
+        stable_metadata_sha256=stable_a1_record["metadata_sha256"],
+        publication_repository=publication_repository,
+    )
+    candidate_files = {
+        relative: "d" * 64 for relative in RESULT.CANDIDATE_REQUIRED_PATHS
+    }
+    candidate_files["updater-requirements.lock"] = hashlib.sha256(
+        payloads["payload/requirements.txt"]
+    ).hexdigest()
+    for path, body in payloads.items():
+        if path.startswith("payload/wheelhouse/"):
+            candidate_files[f"updater-wheelhouse/{Path(path).name}"] = hashlib.sha256(
+                body
+            ).hexdigest()
+    (evidence / "candidate-b-inputs.json").write_bytes(
+        RESULT.canonical_bytes(
+            {
+                "schema": RESULT.CANDIDATE_INPUTS_SCHEMA,
+                "source_revision": target_revision,
+                "files": candidate_files,
+            }
+        )
+    )
+    archive = _bootstrap_archive(payloads)
+    bundle_sha256 = hashlib.sha256(archive).hexdigest()
     manifest = {
-        "bundle": {"sha256": bundle_sha256, "size": 4096},
-        "files": [
-            {
-                "mode": "0755",
-                "path": "payload/installer/install_updater_bundle.py",
-                "sha256": hashlib.sha256(b"fixture installer").hexdigest(),
-                "size": len(b"fixture installer"),
-            },
-            {
-                "mode": "0644",
-                "path": "payload/operator/cathedral-validator-setup",
-                "sha256": hashlib.sha256(guided_setup).hexdigest(),
-                "size": len(guided_setup),
-            },
-            {
-                "mode": "0644",
-                "path": "payload/operator/cathedral-validator-status",
-                "sha256": hashlib.sha256(guided_status).hexdigest(),
-                "size": len(guided_status),
-            },
-            {
-                "mode": "0644",
-                "path": "payload/requirements.txt",
-                "sha256": hashlib.sha256(b"fixture requirements").hexdigest(),
-                "size": len(b"fixture requirements"),
-            },
-            {
-                "mode": "0644",
-                "path": RESULT.RUNTIME_KEY_BUNDLE_PATH,
-                "sha256": hashlib.sha256(runtime_public_pem).hexdigest(),
-                "size": len(runtime_public_pem),
-            },
-        ],
+        "bundle": {"sha256": bundle_sha256, "size": len(archive)},
+        "files": list(_bootstrap_records(payloads).values()),
         "install": {
             "enable_units": False,
             "installer": "payload/installer/install_updater_bundle.py",
@@ -444,6 +512,7 @@ def _bootstrap_fixture(
         },
         "schema": RESULT.BOOTSTRAP_MANIFEST_SCHEMA,
     }
+    (evidence / RESULT.BOOTSTRAP_BUNDLE_NAME).write_bytes(archive)
     manifest_raw = RESULT.canonical_bytes(manifest)
     manifest_signature = private.sign(manifest_raw)
     manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
@@ -494,6 +563,70 @@ def _bootstrap_fixture(
     }
     (evidence / "bootstrap-publication.json").write_bytes(
         RESULT.canonical_bytes(publication)
+    )
+    github_assets = (
+        (
+            "updater-bootstrap.tar.gz",
+            archive,
+            publication["assets"]["bundle"]["url"],
+        ),
+        (
+            "updater-bootstrap.manifest.json",
+            manifest_raw,
+            publication["assets"]["manifest"]["url"],
+        ),
+        (
+            "updater-bootstrap.manifest.sig",
+            manifest_signature,
+            publication["assets"]["signature"]["url"],
+        ),
+        (
+            "bootstrap-signing-public-key.pem",
+            bootstrap_public_pem,
+            publication["assets"]["public_key"]["url"],
+        ),
+    )
+    (evidence / "bootstrap-release-record.json").write_bytes(
+        RESULT.canonical_bytes(
+            {
+                "id": 101,
+                "tag_name": tag,
+                "name": tag,
+                "target_commitish": target_revision,
+                "draft": False,
+                "prerelease": True,
+                "immutable": True,
+                "html_url": (
+                    f"https://github.com/{publication_repository}/releases/tag/{tag}"
+                ),
+                "assets": [
+                    {
+                        "id": index,
+                        "name": name,
+                        "state": "uploaded",
+                        "size": len(body),
+                        "digest": f"sha256:{hashlib.sha256(body).hexdigest()}",
+                        "browser_download_url": url,
+                    }
+                    for index, (name, body, url) in enumerate(github_assets, start=1)
+                ],
+            }
+        )
+    )
+    api_root = f"https://api.github.com/repos/{publication_repository}"
+    (evidence / "bootstrap-tag-record.json").write_bytes(
+        RESULT.canonical_bytes(
+            {
+                "ref": f"refs/tags/{tag}",
+                "node_id": "fixture-tag-node",
+                "url": f"{api_root}/git/refs/tags/{tag}",
+                "object": {
+                    "sha": target_revision,
+                    "type": "commit",
+                    "url": f"{api_root}/git/commits/{target_revision}",
+                },
+            }
+        )
     )
     return tag
 
@@ -839,8 +972,8 @@ def _success_tree(tmp_path):
             "disposable bittensor-wallet keyfile, unregistered, never recorded"
         ),
         "bootstrap_assets": (
-            "reviewed deploy assets with both channel URLs rewritten to the "
-            "isolated mirror branches"
+            "reviewed deploy assets with isolated mirror channel URLs and the "
+            "authenticated stable floor"
         ),
         "guided_operator": {
             "setup": {
@@ -1110,25 +1243,18 @@ def _success_tree(tmp_path):
             f"expected={archive_sha256} observed={archive_sha256}\n",
             encoding="ascii",
         )
-    scan_exclusions = {
-        "operator-secret-scan.json",
-        "teardown-status.txt",
-        "controller-source-finalization.stderr",
-        *RESULT.RESULT_EXCLUSIONS,
-    }
-    evidence_file_count = sum(
-        1
-        for path in evidence.rglob("*")
-        if path.is_file()
-        and path.relative_to(evidence).as_posix() not in scan_exclusions
-    )
+    scanned_rows = RESULT._inventory(evidence, RESULT.SECRET_SCAN_EXCLUSIONS)
     (evidence / "operator-secret-scan.json").write_bytes(
         RESULT.canonical_bytes(
             {
-                "schema": "cathedral_validator_operator_secret_scan_v1",
+                "schema": "cathedral_validator_operator_secret_scan_v2",
                 "operator_input_file_sha256": "8" * 64,
                 "checked_field_names": ["privateKey", "publicKey", "ss58Address"],
-                "evidence_file_count": evidence_file_count,
+                "scanned_evidence_tree": {
+                    "algorithm": RESULT.EVIDENCE_TREE_ALGORITHM,
+                    "root_sha256": RESULT._evidence_root(scanned_rows),
+                    "file_count": len(scanned_rows),
+                },
                 "exact_match_count": 0,
             }
         )
@@ -1250,7 +1376,9 @@ def test_canonical_result_refuses_bound_evidence_tampering(tmp_path):
     (evidence / "source-repository.json").write_bytes(b"tampered\n")
     rejected = _verify(evidence, public_path)
     assert rejected.returncode != 0
-    assert "evidence-tree digest mismatch" in rejected.stderr
+    assert "operator secret scan evidence tree has an invalid root_sha256" in (
+        rejected.stderr
+    )
 
 
 def test_canonical_result_refuses_result_digest_mismatch(tmp_path):
@@ -1803,7 +1931,8 @@ def test_canonical_result_binds_final_stable_to_stopped_writer_invocation(tmp_pa
     (
         ("input_digest", "invalid result or input binding"),
         ("match", "invalid result or input binding"),
-        ("file_count", "invalid evidence file count"),
+        ("file_count", "operator secret scan evidence tree has an invalid"),
+        ("tree_root", "operator secret scan evidence tree has an invalid"),
         ("field_names", "invalid checked field names"),
     ),
 )
@@ -1818,7 +1947,9 @@ def test_canonical_result_refuses_operator_secret_scan_mutation(
     elif mutation == "match":
         scan["exact_match_count"] = 1
     elif mutation == "file_count":
-        scan["evidence_file_count"] += 1
+        scan["scanned_evidence_tree"]["file_count"] += 1
+    elif mutation == "tree_root":
+        scan["scanned_evidence_tree"]["root_sha256"] = "0" * 64
     else:
         scan["checked_field_names"] = ["publicKey"]
     path.write_bytes(RESULT.canonical_bytes(scan))
@@ -1827,6 +1958,19 @@ def test_canonical_result_refuses_operator_secret_scan_mutation(
 
     assert rejected.returncode != 0
     assert error in rejected.stderr
+
+
+def test_canonical_result_refuses_same_count_post_scan_content_replacement(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "candidate-attestations.log"
+    path.write_bytes(b"replacement evidence with no operator secret\n")
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "operator secret scan evidence tree has an invalid root_sha256" in (
+        rejected.stderr
+    )
 
 
 def test_canonical_result_binds_control_to_reviewed_guided_source(tmp_path):
@@ -1864,7 +2008,10 @@ def test_canonical_result_requires_reviewed_guided_assets_in_bootstrap_manifest(
     rejected = _finalize(evidence, private_path, public_path, controller)
 
     assert rejected.returncode != 0
-    assert f"bootstrap manifest does not embed the reviewed {asset}" in rejected.stderr
+    assert (
+        f"bootstrap manifest does not embed reviewed payload/operator/{asset}"
+        in rejected.stderr
+    )
 
 
 def test_canonical_result_refuses_resigned_negative_proof_deletion(tmp_path):
@@ -2071,6 +2218,343 @@ def test_canonical_result_refuses_a_tampered_bootstrap_signature(tmp_path):
     assert "bootstrap manifest signature is invalid" in rejected.stderr
 
 
+def test_bootstrap_archive_fixture_matches_the_installer_contract():
+    payloads = _bootstrap_payloads(runtime_public_pem=b"fixture runtime key\n")
+    records = _bootstrap_records(payloads)
+
+    RESULT._validate_bootstrap_archive(_bootstrap_archive(payloads), records)
+
+
+def test_bootstrap_archive_path_refuses_non_utf8_surrogates():
+    with pytest.raises(RESULT.EvidenceError, match="unsafe archive path"):
+        RESULT._bootstrap_archive_path("payload/\udcff", label="surrogate member")
+
+
+def test_result_bootstrap_limits_and_asset_set_match_the_installer():
+    installer_path = ROOT / "deploy" / "validator-update" / "install_updater_bundle.py"
+    spec = importlib.util.spec_from_file_location(
+        "live_result_installer_contract", installer_path
+    )
+    assert spec is not None and spec.loader is not None
+    installer = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = installer
+    spec.loader.exec_module(installer)
+
+    assert RESULT.MAX_BUNDLE_BYTES == installer.MAX_BUNDLE_BYTES
+    assert RESULT.MAX_MANIFEST_BYTES == installer.MAX_MANIFEST_BYTES
+    assert RESULT.MAX_PAYLOAD_FILES == installer.MAX_PAYLOAD_FILES
+    assert RESULT.MAX_PAYLOAD_BYTES == installer.MAX_PAYLOAD_BYTES
+    assert RESULT.EXPECTED_NON_WHEEL_PATHS == installer.EXPECTED_NON_WHEEL_PATHS
+
+
+def test_bootstrap_manifest_requires_the_exact_installer_asset_topology():
+    runtime_key = b"fixture runtime key\n"
+    payloads = _bootstrap_payloads(runtime_public_pem=runtime_key)
+    entries = list(_bootstrap_records(payloads).values())
+    control = {
+        "test_publication_repository": ("cathedralai/cathedral-validator-release-e2e"),
+        "canary_branch": "validator-release-live-valupd-fixture-canary",
+        "stable_branch": "validator-release-live-valupd-fixture-stable",
+    }
+
+    parsed = RESULT._validate_bootstrap_manifest_files(
+        entries,
+        runtime_public_pem=runtime_key,
+        control=control,
+        stable_metadata_sha256="a" * 64,
+    )
+    assert set(parsed) == set(payloads)
+
+    missing = [
+        entry
+        for entry in entries
+        if entry["path"] != "payload/sysusers/cathedral-validator.conf"
+    ]
+    with pytest.raises(RESULT.EvidenceError, match="fixed bootstrap asset set"):
+        RESULT._validate_bootstrap_manifest_files(
+            missing,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+    no_wheel = [
+        entry
+        for entry in entries
+        if not entry["path"].startswith("payload/wheelhouse/")
+    ]
+    with pytest.raises(RESULT.EvidenceError, match="fixed bootstrap asset set"):
+        RESULT._validate_bootstrap_manifest_files(
+            no_wheel,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+    nested_wheel = json.loads(json.dumps(entries))
+    wheel = next(
+        entry
+        for entry in nested_wheel
+        if entry["path"].startswith("payload/wheelhouse/")
+    )
+    wheel["path"] = "payload/wheelhouse/nested/fixture.whl"
+    nested_wheel.sort(key=lambda entry: entry["path"])
+    with pytest.raises(RESULT.EvidenceError, match="wheelhouse path"):
+        RESULT._validate_bootstrap_manifest_files(
+            nested_wheel,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+    executable = json.loads(json.dumps(entries))
+    executable[0]["mode"] = "0755"
+    with pytest.raises(RESULT.EvidenceError, match="manifest file 0 is invalid"):
+        RESULT._validate_bootstrap_manifest_files(
+            executable,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+    empty = json.loads(json.dumps(entries))
+    empty[0]["size"] = 0
+    with pytest.raises(RESULT.EvidenceError, match="manifest file 0 is invalid"):
+        RESULT._validate_bootstrap_manifest_files(
+            empty,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+    duplicate = json.loads(json.dumps(entries))
+    duplicate[1] = duplicate[0]
+    with pytest.raises(RESULT.EvidenceError, match="manifest file 1 is invalid"):
+        RESULT._validate_bootstrap_manifest_files(
+            duplicate,
+            runtime_public_pem=runtime_key,
+            control=control,
+            stable_metadata_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("missing", "member count differs"),
+        ("duplicate", "duplicate, or unexpected member"),
+        ("traversal", "unsafe archive path"),
+        ("noncanonical", "unsafe archive path"),
+        ("symlink", "metadata differs"),
+        ("hardlink", "metadata differs"),
+        ("uid", "metadata differs"),
+        ("gid", "metadata differs"),
+        ("uname", "metadata differs"),
+        ("gname", "metadata differs"),
+        ("mtime", "metadata differs"),
+        ("mode", "metadata differs"),
+        ("linkname", "metadata differs"),
+        ("size", "metadata differs"),
+        ("content", "content differs"),
+        ("malformed", "not a readable gzip tar archive"),
+    ),
+)
+def test_bootstrap_archive_verifier_refuses_unsafe_or_detached_members(mutation, error):
+    payloads = _bootstrap_payloads(runtime_public_pem=b"fixture runtime key\n")
+    records = _bootstrap_records(payloads)
+    paths = sorted(payloads)
+
+    if mutation == "malformed":
+        archive = b"not a gzip tar archive"
+    else:
+        selected_paths = paths
+        if mutation == "missing":
+            selected_paths = paths[:-1]
+        elif mutation == "duplicate":
+            selected_paths = [*paths[:-1], paths[0]]
+
+        def mutate(index, info, body):
+            if index != 0 or mutation in {"missing", "duplicate"}:
+                return info, body
+            if mutation == "traversal":
+                info.name = "../escape"
+            elif mutation == "noncanonical":
+                info.name = "payload//not-canonical"
+            elif mutation == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = "../secret"
+                info.size = 0
+            elif mutation == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = paths[1]
+                info.size = 0
+            elif mutation == "uid":
+                info.uid = 1000
+            elif mutation == "gid":
+                info.gid = 1000
+            elif mutation == "uname":
+                info.uname = "operator"
+            elif mutation == "gname":
+                info.gname = "operator"
+            elif mutation == "mtime":
+                info.mtime = 1
+            elif mutation == "mode":
+                info.mode = 0o755
+            elif mutation == "linkname":
+                info.linkname = "unexpected"
+            elif mutation == "size":
+                body += b"x"
+                info.size = len(body)
+            elif mutation == "content":
+                body = bytes([body[0] ^ 1]) + body[1:]
+            return info, body
+
+        archive = _bootstrap_archive(payloads, paths=selected_paths, mutate=mutate)
+
+    with pytest.raises(RESULT.EvidenceError, match=error):
+        RESULT._validate_bootstrap_archive(archive, records)
+
+
+def test_canonical_result_refuses_a_truncated_retained_bootstrap_bundle(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    bundle_path = evidence / RESULT.BOOTSTRAP_BUNDLE_NAME
+    bundle_path.write_bytes(bundle_path.read_bytes()[:-1])
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "retained bootstrap bundle differs from signed manifest" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "maximum"),
+    (
+        (RESULT.BOOTSTRAP_BUNDLE_NAME, RESULT.MAX_BUNDLE_BYTES),
+        ("updater-bootstrap.manifest.json", RESULT.MAX_MANIFEST_BYTES),
+    ),
+)
+def test_required_bootstrap_caps_reject_sparse_files_before_read(
+    tmp_path, name, maximum
+):
+    path = tmp_path / name
+    with path.open("wb") as handle:
+        handle.truncate(maximum + 1)
+
+    with pytest.raises(RESULT.EvidenceError, match="exceeds its size limit"):
+        RESULT._regular_size(
+            path,
+            label="bounded bootstrap evidence",
+            require_nonempty=True,
+            maximum_bytes=maximum,
+        )
+    with pytest.raises(RESULT.EvidenceError, match="exceeds its size limit"):
+        RESULT._hash_regular(
+            path,
+            label="bounded bootstrap scenario evidence",
+            require_nonempty=True,
+            maximum_bytes=maximum,
+        )
+
+
+def test_canonical_result_refuses_a_resigned_malformed_bootstrap_bundle(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    bootstrap_private = private_path.parent / "bootstrap-private.pem"
+    _bind_resigned_bootstrap_archive(
+        evidence, b"not a gzip tar archive", bootstrap_private
+    )
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "bootstrap bundle is not a readable gzip tar archive" in rejected.stderr
+
+
+def test_canonical_result_refuses_resigned_bootstrap_member_content(tmp_path):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    payloads = _bootstrap_payloads(
+        runtime_public_pem=(evidence / "runtime-release-public-key.pem").read_bytes()
+    )
+    target = "payload/installer/install_updater_bundle.py"
+
+    def mutate(_index, info, body):
+        if info.name == target:
+            body = bytes([body[0] ^ 1]) + body[1:]
+        return info, body
+
+    archive = _bootstrap_archive(payloads, mutate=mutate)
+    _bind_resigned_bootstrap_archive(
+        evidence, archive, private_path.parent / "bootstrap-private.pem"
+    )
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "bootstrap bundle member content differs from manifest" in rejected.stderr
+
+
+def test_canonical_result_refuses_internally_consistent_resigned_source_asset(
+    tmp_path,
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    manifest_path = evidence / "updater-bootstrap.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    payloads = _bootstrap_payloads(
+        runtime_public_pem=(evidence / "runtime-release-public-key.pem").read_bytes(),
+        stable_metadata_sha256=manifest["stable_release_floor"]["metadata_sha256"],
+    )
+    target = "payload/systemd/cathedral-validator-direct.service"
+    payloads[target] += b"\n# self-consistent unreviewed mutation\n"
+    archive = _bootstrap_archive(payloads)
+    manifest["files"] = list(_bootstrap_records(payloads).values())
+    manifest["bundle"] = {
+        "sha256": hashlib.sha256(archive).hexdigest(),
+        "size": len(archive),
+    }
+    manifest_raw = RESULT.canonical_bytes(manifest)
+    bootstrap_private = serialization.load_pem_private_key(
+        (private_path.parent / "bootstrap-private.pem").read_bytes(), password=None
+    )
+    (evidence / RESULT.BOOTSTRAP_BUNDLE_NAME).write_bytes(archive)
+    manifest_path.write_bytes(manifest_raw)
+    (evidence / "updater-bootstrap.manifest.sig").write_bytes(
+        bootstrap_private.sign(manifest_raw)
+    )
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert (
+        "bootstrap manifest does not embed reviewed "
+        "payload/systemd/cathedral-validator-direct.service"
+    ) in rejected.stderr
+
+
+@pytest.mark.parametrize("mutation", ("source", "requirements", "wheel", "missing"))
+def test_canonical_result_binds_bootstrap_dependencies_to_candidate_b_inputs(
+    tmp_path, mutation
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "candidate-b-inputs.json"
+    inputs = json.loads(path.read_text(encoding="ascii"))
+    if mutation == "source":
+        inputs["source_revision"] = "0" * 40
+    elif mutation == "requirements":
+        inputs["files"]["updater-requirements.lock"] = "0" * 64
+    elif mutation == "wheel":
+        wheel = next(
+            name for name in inputs["files"] if name.startswith("updater-wheelhouse/")
+        )
+        inputs["files"][wheel] = "0" * 64
+    else:
+        del inputs["files"]["runtime/cathedral-validator.pex"]
+    path.write_bytes(RESULT.canonical_bytes(inputs))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "candidate B" in rejected.stderr
+
+
 def test_canonical_result_refuses_a_detached_bootstrap_build_record(tmp_path):
     evidence, private_path, public_path, controller = _success_tree(tmp_path)
     build_path = evidence / "bootstrap-build.json"
@@ -2082,6 +2566,75 @@ def test_canonical_result_refuses_a_detached_bootstrap_build_record(tmp_path):
 
     assert rejected.returncode != 0
     assert "bootstrap build record has an invalid bundle_sha256" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "tag",
+        "target",
+        "draft",
+        "immutable",
+        "asset_set",
+        "asset_state",
+        "asset_size",
+        "asset_digest",
+        "asset_url",
+    ),
+)
+def test_canonical_result_validates_observed_github_bootstrap_release(
+    tmp_path, mutation
+):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "bootstrap-release-record.json"
+    release = json.loads(path.read_text(encoding="ascii"))
+    if mutation == "tag":
+        release["tag_name"] += "-wrong"
+    elif mutation == "target":
+        release["target_commitish"] = "0" * 40
+    elif mutation == "draft":
+        release["draft"] = True
+    elif mutation == "immutable":
+        release["immutable"] = False
+    elif mutation == "asset_set":
+        release["assets"].pop()
+    elif mutation == "asset_state":
+        release["assets"][0]["state"] = "new"
+    elif mutation == "asset_size":
+        release["assets"][0]["size"] += 1
+    elif mutation == "asset_digest":
+        release["assets"][0]["digest"] = "sha256:" + "0" * 64
+    else:
+        release["assets"][0]["browser_download_url"] += "-wrong"
+    path.write_bytes(RESULT.canonical_bytes(release))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "GitHub bootstrap release record" in rejected.stderr
+
+
+@pytest.mark.parametrize("mutation", ("ref", "type", "sha", "ref_url", "commit_url"))
+def test_canonical_result_validates_observed_github_bootstrap_tag(tmp_path, mutation):
+    evidence, private_path, public_path, controller = _success_tree(tmp_path)
+    path = evidence / "bootstrap-tag-record.json"
+    tag = json.loads(path.read_text(encoding="ascii"))
+    if mutation == "ref":
+        tag["ref"] += "-wrong"
+    elif mutation == "type":
+        tag["object"]["type"] = "tag"
+    elif mutation == "sha":
+        tag["object"]["sha"] = "0" * 40
+    elif mutation == "ref_url":
+        tag["url"] += "-wrong"
+    else:
+        tag["object"]["url"] += "-wrong"
+    path.write_bytes(RESULT.canonical_bytes(tag))
+
+    rejected = _finalize(evidence, private_path, public_path, controller)
+
+    assert rejected.returncode != 0
+    assert "GitHub bootstrap tag record" in rejected.stderr
 
 
 def test_canonical_result_refuses_a_resigned_bootstrap_floor_detachment(tmp_path):
