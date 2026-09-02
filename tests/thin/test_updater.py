@@ -2475,7 +2475,7 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert "CATHEDRAL_RELEASE_SMOKE_CHECKOUT" in smoke
 
     docs = (root / "docs" / "AUTO_UPDATE.md").read_text()
-    assert "public bootstrap artifacts are not published yet" in docs
+    assert "public bootstrap artifacts are published" in docs
     assert "Do not install\nor enable updater units from a source checkout" in docs
     assert "signed manifest" in docs
     assert "two distinct Ed25519 keys" in docs
