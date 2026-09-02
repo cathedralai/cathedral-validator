@@ -1138,6 +1138,8 @@ sign_canary "$CANDIDATE_B_DIR" "$SOURCE_REVISION_B" 3 "$CANARY_B3"
 sign_canary "$CANDIDATE_A_DIR" "$SOURCE_REVISION_A" 3 "$CANARY_A_EQ3"
 sign_canary "$CANDIDATE_A_DIR" "$SOURCE_REVISION_A" 4 "$CANARY_A4"
 promote_stable "$CANARY_A1" 1 "$STABLE_A1"
+CANARY_A1_SHA="$(shasum -a 256 "$CANARY_A1" | cut -d' ' -f1)"
+readonly CANARY_A1_SHA
 promote_stable "$CANARY_B2" 2 "$STABLE_B2"
 promote_stable "$CANARY_A4" 3 "$STABLE_A3"
 promote_stable "$CANARY_B3" 4 "$STABLE_B4"
@@ -2278,7 +2280,10 @@ configure_host() {
   fi
   remote "$host" "sudo systemctl disable --now '$other_timer' && printf '%s\n' '[Service]' 'Environment=PEX_INTERPRETER=1' 'LoadCredential=' 'ExecStartPre=' 'ExecStart=' 'ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator /usr/local/libexec/cathedral-no-chain-readiness.py' 'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex' 'Restart=no' 'TimeoutStartSec=${DIRECT_START_TIMEOUT_SECONDS}s' 'TimeoutStopSec=10s' 'RestrictAddressFamilies=' 'RestrictAddressFamilies=AF_UNIX' 'IPAddressDeny=any' 'PrivateNetwork=true' | sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/no-chain-live-test.conf >/dev/null && printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=20s' 'OnUnitActiveSec=${UPDATE_TIMER_INTERVAL_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/live-test.conf >/dev/null && printf '%s\n' '[Unit]' 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' | sudo tee /etc/systemd/system/${other_timer}.d/deny-live-test.conf >/dev/null && test ! -e '/run/cathedral-live-${RUN_ID}-permit-${other_timer}' && sudo systemctl daemon-reload && timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\" && ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null && printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null && test \"\$(sudo systemctl show '$timer' -p UnitFileState --value)\" = disabled && test \"\$(sudo systemctl show '$timer' -p ActiveState --value)\" = inactive && test \"\$(sudo systemctl show '$other_timer' -p UnitFileState --value)\" = disabled && sudo systemctl cat '$other_timer' | grep -Fx 'ConditionPathExists=/run/cathedral-live-${RUN_ID}-permit-${other_timer}' >/dev/null && sudo systemctl start '$other_timer' && other_timer_state=\"\$(sudo systemctl show '$other_timer' -p ActiveState -p SubState -p ConditionResult)\" && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'ActiveState=inactive' >/dev/null && printf '%s\n' \"\$other_timer_state\" | grep -Fx 'SubState=dead' >/dev/null && ! sudo systemctl is-active --quiet '$other_timer' && sudo systemctl enable cathedral-validator-direct.service"
   if [[ "$channel" == "canary" ]]; then
-    if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=canary --metadata-url='$CANARY_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
+    # The internal canary first install binds the exact signed canary record
+    # at the minimum sequence, the same anchor the guided setup passes for
+    # stable from the signed example.
+    if remote "$host" "sudo /usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update --bootstrap-first-install --channel=canary --metadata-url='$CANARY_URL' --public-key=/etc/cathedral-validator/runtime-release-public-key.pem --identity-file=/etc/cathedral-validator/identity.env --minimum-sequence=1 --first-install-metadata-sha256='$CANARY_A1_SHA' --cycle-wait-seconds=10 --operation-timeout-seconds=180" 2>&1 | tee "$EVIDENCE_DIR/first-install-command-${host}.log"; then
       :
     else
       failure_status=$?
