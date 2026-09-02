@@ -137,8 +137,8 @@ Published bootstrap, sequence 1, signed 2026-09-02T15:26:48Z, valid until
 
 The README's install block passes the bootstrap key only through
 `--bootstrap-public-key`, its pin through `--expected-bootstrap-key-fingerprint`,
-and the replay checkpoint through `--minimum-bootstrap-sequence`. There is no
-runtime-key argument.
+and the replay checkpoint through `--minimum-bootstrap-sequence`.
+There is no runtime-key argument.
 <!-- END GENERATED UPDATER BOOTSTRAP -->
 
 ## Set up and start
