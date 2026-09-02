@@ -422,6 +422,102 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex" in configure_host
 
 
+def test_live_controller_uses_private_random_bootstrap_staging():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    configure_host = script.split("configure_host() {", 1)[1].split(
+        'record_step "first install A', 1
+    )[0]
+    bootstrap = configure_host.split(
+        'remote "$host" "test \\"\\$(sha256sum /tmp/cathedral_no_chain_readiness.py',
+        1,
+    )[0]
+
+    create = "/usr/bin/mktemp -d /var/tmp/cathedral-live.XXXXXXXXXX"
+    guard = "/var/tmp/cathedral-live." + "[[:alnum:]]" * 10
+    assert create in bootstrap
+    assert "readonly bootstrap_dir" in bootstrap
+    assert guard in bootstrap
+    assert "unsafe bootstrap staging path" in bootstrap
+    assert "trap 'sudo /usr/bin/rm -rf -- \\\"\\$bootstrap_dir\\\"' EXIT" in bootstrap
+    assert "/var/tmp/cathedral-live-${RUN_ID}" not in bootstrap
+    for name in (
+        "bundle.tar.gz",
+        "manifest.json",
+        "manifest.sig",
+        "bootstrap-public.pem",
+        "signed-installer.py",
+    ):
+        assert f'\\"\\$bootstrap_dir/{name}\\"' in bootstrap
+    assert "; assert " not in bootstrap
+    assert bootstrap.index(create) < bootstrap.index(
+        "ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle"
+    )
+    assert bootstrap.index("openssl pkeyutl -verify") < bootstrap.index(
+        "signed bootstrap claims do not match"
+    )
+    assert bootstrap.index("signed bootstrap claims do not match") < bootstrap.index(
+        "tar -xOf"
+    )
+
+
+def test_live_controller_emits_valid_remote_bootstrap_shell(tmp_path: Path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    configure_host = (
+        "configure_host() {"
+        + script.split("configure_host() {", 1)[1].split(
+            'record_step "first install A', 1
+        )[0]
+    )
+    marker = tmp_path / "bootstrap-command-parsed"
+    shell = (
+        "set -Eeo pipefail\n"
+        f'EVIDENCE_DIR="{tmp_path}"\n'
+        f'MARKER="{marker}"\n'
+        "RUN_ID=syntax-test\n"
+        "BOOTSTRAP_BUNDLE_URL=https://example.invalid/bundle\n"
+        "BOOTSTRAP_MANIFEST_URL=https://example.invalid/manifest\n"
+        "BOOTSTRAP_SIGNATURE_URL=https://example.invalid/signature\n"
+        "BOOTSTRAP_PUBLIC_KEY_URL=https://example.invalid/key\n"
+        f"BOOTSTRAP_BUNDLE_SHA={'a' * 64}\n"
+        f"BOOTSTRAP_MANIFEST_SHA={'b' * 64}\n"
+        f"BOOTSTRAP_SIGNATURE_SHA={'c' * 64}\n"
+        f"BOOTSTRAP_PUBLIC_KEY_SHA={'d' * 64}\n"
+        "BOOTSTRAP_FINGERPRINT=sha256:test\n"
+        "BOOTSTRAP_SEQUENCE=1\n"
+        "HARNESS_SHA=harness\n"
+        "FAULT_ORIGIN_SHA=fault\n"
+        "STATE_WAITER_SHA=waiter\n"
+        "TEST_HOTKEY=test-hotkey\n"
+        "SNP_POLICY_JSON={}\n"
+        "CANARY_URL=https://example.invalid/canary\n"
+        "CANARY_A1_SHA=canary-digest\n"
+        "ARCHIVE_A_SHA=archive-digest\n"
+        "DIRECT_START_TIMEOUT_SECONDS=300\n"
+        "UPDATE_TIMER_INTERVAL_SECONDS=60\n"
+        "remote() {\n"
+        "  local host=$1\n"
+        "  shift\n"
+        "  if [[ $* == *'/usr/bin/mktemp -d /var/tmp/cathedral-live.XXXXXXXXXX'* ]]; then\n"
+        '    /bin/bash -n -c "$*"\n'
+        "    printf 'parsed\\n' >\"$MARKER\"\n"
+        "  fi\n"
+        "}\n"
+        + configure_host
+        + "\nconfigure_host test-host canary selected.timer other.timer\n"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "parsed\n"
+
+
 def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
