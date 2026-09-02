@@ -807,6 +807,8 @@ spec = importlib.util.spec_from_file_location(
     "live_bootstrap_builder", source / "build_updater_bundle.py"
 )
 module = importlib.util.module_from_spec(spec)
+# Dataclass processing resolves the defining module through sys.modules.
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 for name in sorted(module.REQUIRED_ASSETS):
     shutil.copyfile(source / name, target / name)
