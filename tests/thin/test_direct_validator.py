@@ -1097,9 +1097,7 @@ def test_submit_stops_rereading_finalized_history_at_the_bound_then_recovers(
     ):
         submit_before_deadline(instance, planned)
 
-    assert sum(sleeps) == pytest.approx(
-        writer_runtime.FINALIZED_HISTORY_WAIT_SECONDS
-    )
+    assert sum(sleeps) == pytest.approx(writer_runtime.FINALIZED_HISTORY_WAIT_SECONDS)
     assert locates == 1, "an unchanged finalized head is never re-scanned"
     assert substrate.sign_calls == 1
     assert substrate.submit_calls == 1
