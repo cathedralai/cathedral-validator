@@ -1378,7 +1378,20 @@ class DirectWeightWriter:
                     "direct submission result is ambiguous; recover, never retry"
                 ) from exc
 
-            status, located = self._await_finalized_history(pending)
+            try:
+                status, located = self._await_finalized_history(pending)
+            except DirectValidatorError as exc:
+                # The extrinsic was broadcast, so never leave the journal
+                # reading like a signed intent that never reached the chain.
+                pending["phase"] = (
+                    "confirmation_contradiction"
+                    if isinstance(exc, DirectSubmissionContradiction)
+                    else "ambiguous"
+                )
+                pending["error"] = type(exc).__name__
+                state["pending"] = pending
+                self._write_state(state)
+                raise
             if status == "finalized" and located is not None:
                 try:
                     confirmed = self._confirm_finalized_effect(

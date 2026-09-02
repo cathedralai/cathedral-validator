@@ -1113,6 +1113,79 @@ def test_submit_stops_rereading_finalized_history_at_the_bound_then_recovers(
     assert substrate.submit_calls == 1
 
 
+def test_finalized_head_failure_during_the_wait_journals_the_broadcast(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.finalized_number = substrate.inclusion_block - 1
+    monkeypatch.setattr(writer_runtime.time, "sleep", lambda _delay: None)
+    original = substrate.get_chain_finalised_head
+    reads = 0
+
+    def fail_on_the_second_poll() -> str:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            raise ConnectionError("finalized head RPC disconnected")
+        return original()
+
+    monkeypatch.setattr(substrate, "get_chain_finalised_head", fail_on_the_second_poll)
+
+    with pytest.raises(
+        DirectSubmissionAmbiguous,
+        match="finalized head is unavailable after submission",
+    ):
+        submit_before_deadline(instance, planned)
+
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == "ambiguous"
+    assert state["pending"]["error"] == "DirectSubmissionAmbiguous"
+
+    monkeypatch.setattr(substrate, "get_chain_finalised_head", original)
+    substrate.finalized_number = ANCHOR_NUMBER + 4
+    receipt = instance.recover()
+
+    assert receipt is not None
+    assert receipt.status == STATUS_RECOVERED
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+
+def test_two_head_advances_rescan_the_era_each_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.finalized_number = substrate.inclusion_block - 2
+    locates = 0
+    original_locate = instance._locate
+
+    def counting_locate(pending, **kwargs):
+        nonlocal locates
+        locates += 1
+        return original_locate(pending, **kwargs)
+
+    monkeypatch.setattr(instance, "_locate", counting_locate)
+    sleeps: list[float] = []
+
+    def advance_head_each_poll(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 1:
+            substrate.finalized_number = substrate.inclusion_block - 1
+        elif len(sleeps) == 2:
+            substrate.finalized_number = ANCHOR_NUMBER + 4
+
+    monkeypatch.setattr(writer_runtime.time, "sleep", advance_head_each_poll)
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert locates == 3
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+
 def test_post_broadcast_waits_stay_well_under_the_cycle_interval() -> None:
     combined = (
         writer_runtime.FINALIZED_HISTORY_WAIT_SECONDS
