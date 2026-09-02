@@ -1334,6 +1334,23 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     )
     assert start_reactivation.count("= '$before_invocation'") == 2
     assert start_reactivation.count("= '$before_trigger'") == 2
+    # An inactive disabled timer is unloaded across daemon-reload and reports
+    # an empty InvocationID and LastTriggerUSec; only a changed value proves
+    # an unwanted trigger.
+    assert (
+        start_reactivation.count(
+            'test -z \\"\\$invocation_now\\" -o \\"\\$invocation_now\\" = \'$before_invocation\''
+        )
+        == 2
+    )
+    assert (
+        start_reactivation.count(
+            'test -z \\"\\$trigger_now\\" -o \\"\\$trigger_now\\" = \'$before_trigger\''
+        )
+        == 2
+    )
+    assert "InvocationIDObserved=" in start_reactivation
+    assert "LastTriggerObserved=" in start_reactivation
     assert "systemctl enable --now '$timer'" in start_reactivation
     assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in start_reactivation
     assert "CATHEDRAL_TIMER_REACTIVATION_PROOF_V1" in observe_reactivation
