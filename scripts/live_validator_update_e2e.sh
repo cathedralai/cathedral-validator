@@ -2510,6 +2510,10 @@ wait_timer_reactivation() {
 }
 
 start_reactivation_proof_timer() {
+  # A fresh trigger during reconfiguration would show as a new non-empty
+  # invocation and a new non-empty trigger time. An inactive, disabled timer
+  # is unloaded across daemon-reload and legitimately reports both as empty,
+  # so empty-or-unchanged is the invariant, never a changed value.
   local host="$1"
   local timer="$2"
   local before_invocation="$3"
@@ -2519,7 +2523,7 @@ start_reactivation_proof_timer() {
   local next
   local substate
   local timer_output
-  if timer_output="$(remote "$host" "set -eu; sudo systemctl disable --now '$timer'; printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=${REACTIVATION_PROOF_DELAY_SECONDS}s' 'OnUnitActiveSec=${REACTIVATION_PROOF_REARM_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/reactivation-proof.conf >/dev/null; sudo systemctl daemon-reload; timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\"; printf '%s\n' \"\$timer_schedule\"; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null; ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null; test \"\$(sudo systemctl show '$service' -p InvocationID --value)\" = '$before_invocation'; test \"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\" = '$before_trigger'; sudo systemctl enable --now '$timer'; sudo systemctl is-enabled --quiet '$timer'; sudo systemctl is-active --quiet '$timer'; test \"\$(sudo systemctl show '$service' -p InvocationID --value)\" = '$before_invocation'; test \"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\" = '$before_trigger'; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic; sudo systemctl list-timers --all --no-pager '$timer'")"; then
+  if timer_output="$(remote "$host" "set -eu; sudo systemctl disable --now '$timer'; printf '%s\n' '[Timer]' 'OnBootSec=' 'OnActiveSec=${REACTIVATION_PROOF_DELAY_SECONDS}s' 'OnUnitActiveSec=${REACTIVATION_PROOF_REARM_SECONDS}s' 'RandomizedDelaySec=0' | sudo tee /etc/systemd/system/${timer}.d/reactivation-proof.conf >/dev/null; sudo systemctl daemon-reload; timer_schedule=\"\$(sudo systemctl show '$timer' -p TimersMonotonic --value)\"; printf '%s\n' \"\$timer_schedule\"; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnActiveUSec=' >/dev/null; printf '%s\n' \"\$timer_schedule\" | grep -F 'OnUnitActiveUSec=' >/dev/null; ! printf '%s\n' \"\$timer_schedule\" | grep -F 'OnBootUSec=' >/dev/null; invocation_now=\"\$(sudo systemctl show '$service' -p InvocationID --value)\"; trigger_now=\"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\"; printf 'InvocationIDObserved=%s\nLastTriggerObserved=%s\n' \"\$invocation_now\" \"\$trigger_now\"; test -z \"\$invocation_now\" -o \"\$invocation_now\" = '$before_invocation'; test -z \"\$trigger_now\" -o \"\$trigger_now\" = '$before_trigger'; sudo systemctl enable --now '$timer'; sudo systemctl is-enabled --quiet '$timer'; sudo systemctl is-active --quiet '$timer'; invocation_now=\"\$(sudo systemctl show '$service' -p InvocationID --value)\"; trigger_now=\"\$(sudo systemctl show '$timer' -p LastTriggerUSec --value)\"; printf 'InvocationIDObserved=%s\nLastTriggerObserved=%s\n' \"\$invocation_now\" \"\$trigger_now\"; test -z \"\$invocation_now\" -o \"\$invocation_now\" = '$before_invocation'; test -z \"\$trigger_now\" -o \"\$trigger_now\" = '$before_trigger'; sudo systemctl show '$timer' -p Id -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic; sudo systemctl list-timers --all --no-pager '$timer'")"; then
     :
   else
     return $?
