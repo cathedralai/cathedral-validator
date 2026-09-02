@@ -166,20 +166,26 @@ def _setup_runner(
 
     active = direct_active
 
-    def returncode_for(command: list[str]) -> int:
+    def returncode_for(command: list[str]) -> tuple[int, str]:
         if (
             len(command) > 2
             and command[1] == "is-active"
             and command[-1] == setup.DIRECT_UNIT
         ):
-            return 0 if active else 3
-        if (
-            len(command) > 2
-            and command[1] in {"is-active", "is-enabled"}
-            and command[-1] in setup.REFUSED_UNITS
-        ):
-            return 3
-        return 0
+            return (0 if active else 3), ""
+        if len(command) > 2 and command[-1] in setup.REFUSED_UNITS:
+            if command[1] == "is-active":
+                return 3, ""
+            if command[1] == "is-enabled":
+                # Mirror a real bootstrap host: the canary timer is installed
+                # but disabled, its oneshot service has no install section and
+                # is therefore static (exit 0), and legacy units do not exist.
+                if command[-1] == "cathedral-validator-canary-update.service":
+                    return 0, "static\n"
+                if command[-1] == "cathedral-validator-canary-update.timer":
+                    return 1, "disabled\n"
+                return 1, ""
+        return 0, ""
 
     def run(command, **kwargs):
         nonlocal active
@@ -193,12 +199,12 @@ def _setup_runner(
             active = True
         if writer_stops_after_timer_enable and command == ENABLE_TIMER:
             active = False
-        returncode = returncode_for(command)
+        returncode, stdout = returncode_for(command)
         # Like subprocess.run, a checked call with a non-zero exit raises, so
         # the readiness checks in setup are really exercised.
         if kwargs.get("check") and returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
-        return SimpleNamespace(returncode=returncode)
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
     return run
 
@@ -726,12 +732,79 @@ def test_setup_refuses_coldkey_and_conflicting_writer_before_mutation(
 
     def conflicting(command, **_kwargs):
         if command[-1] == "cathedral-validator-sn39-relay.service":
-            return SimpleNamespace(returncode=0)
-        return SimpleNamespace(returncode=3)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=3, stdout="", stderr="")
 
     with pytest.raises(setup.SetupRefused, match="conflicting"):
         _configure(hotkey, policy, conflicting)
     _assert_no_configuration_written()
+
+
+@pytest.mark.parametrize(
+    ("returncode", "state", "conflicts"),
+    [
+        (0, "enabled\n", True),
+        (0, "enabled-runtime\n", True),
+        (0, "linked\n", True),
+        (0, "alias\n", True),
+        (0, "static\n", False),
+        (0, "indirect\n", False),
+        (0, "generated\n", False),
+        (1, "disabled\n", False),
+        (1, "masked\n", False),
+        (1, "", False),
+    ],
+    ids=[
+        "enabled",
+        "enabled-runtime",
+        "linked",
+        "alias",
+        "static",
+        "indirect",
+        "generated",
+        "disabled",
+        "masked",
+        "missing-unit",
+    ],
+)
+def test_setup_conflict_check_reads_the_unit_file_state_not_the_exit_code(
+    monkeypatch, tmp_path: Path, returncode: int, state: str, conflicts: bool
+) -> None:
+    """``systemctl is-enabled`` exits 0 for static units too.
+
+    A bootstrap host always carries the static canary oneshot service, so an
+    exit-code check would refuse every public install. Only unit file states
+    that start the unit count as a conflict; an active unit is caught by
+    ``is-active`` regardless of its file state.
+    """
+
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+    inner = _setup_runner(calls)
+
+    def runner(command, **kwargs):
+        if command[-1] == "cathedral-validator-sn39.service":
+            if command[1] == "is-enabled":
+                return SimpleNamespace(returncode=returncode, stdout=state, stderr="")
+            if command[1] == "is-active":
+                return SimpleNamespace(returncode=3, stdout="", stderr="")
+        return inner(command, **kwargs)
+
+    if conflicts:
+        with pytest.raises(setup.SetupRefused, match="conflicting"):
+            _configure(hotkey, policy, runner)
+        _assert_no_configuration_written()
+    else:
+        _configure(hotkey, policy, runner)
+        assert (setup.ETC / "setup-complete.json").exists()
+    assert [
+        "/usr/bin/systemctl",
+        "is-enabled",
+        "cathedral-validator-sn39.service",
+    ] not in calls
+    assert not any(
+        command[1] == "is-enabled" and "--quiet" in command for command in calls
+    )
 
 
 @pytest.mark.parametrize(
