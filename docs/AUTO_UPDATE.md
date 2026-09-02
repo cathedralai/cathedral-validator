@@ -20,8 +20,8 @@ One signed runtime release contains all three of these:
 - the pinned Intel TDX verifier
 - the pinned AMD SEV-SNP verifier
 
-The stable timer checks for a release after startup and every six hours, with a
-randomized delay. It schedules a fresh first check whenever the timer is
+The stable timer checks for a release 15 minutes after startup and every hour,
+with up to five minutes of random delay. It schedules a fresh first check whenever the timer is
 re-enabled on a running host. It verifies signed metadata, sequence, expiry,
 archive digest, and extracted tree before activation. It waits for the current
 validator cycle and writer journal to become safe. The new release must report

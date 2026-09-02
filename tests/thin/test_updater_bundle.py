@@ -61,7 +61,9 @@ def test_update_timer_schedules_from_activation_and_repeats(name: str) -> None:
 
     assert not any(line.startswith("OnBootSec=") for line in timer)
     assert timer.count("OnActiveSec=15min") == 1
-    assert timer.count("OnUnitActiveSec=6h") == 1
+    assert timer.count("OnUnitActiveSec=1h") == 1
+    assert timer.count("RandomizedDelaySec=5min") == 1
+    assert "6h" not in timer
     assert "Persistent=true" not in timer
 
 
