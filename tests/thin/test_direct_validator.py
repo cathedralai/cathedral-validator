@@ -1028,6 +1028,101 @@ def test_confirmation_poll_allows_once_style_submission_to_finish(
     assert sleeps and sleeps[0] <= writer_runtime.CONFIRMATION_POLL_SECONDS
 
 
+def test_submit_rereads_finalized_history_once_the_head_reaches_inclusion(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.finalized_number = substrate.inclusion_block - 1
+    locates = 0
+    original_locate = instance._locate
+
+    def counting_locate(pending, **kwargs):
+        nonlocal locates
+        locates += 1
+        return original_locate(pending, **kwargs)
+
+    monkeypatch.setattr(instance, "_locate", counting_locate)
+    sleeps: list[float] = []
+
+    def advance_head_on_third_poll(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            substrate.finalized_number = ANCHOR_NUMBER + 4
+
+    monkeypatch.setattr(writer_runtime.time, "sleep", advance_head_on_third_poll)
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert receipt.recovered is False
+    assert receipt.block_number == substrate.inclusion_block
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+    assert len(sleeps) == 3
+    assert all(delay <= writer_runtime.CONFIRMATION_POLL_SECONDS for delay in sleeps)
+    assert locates == 2, "the era is re-read only when the finalized head advances"
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["status"] == STATUS_CONFIRMED
+
+
+def test_submit_stops_rereading_finalized_history_at_the_bound_then_recovers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.finalized_number = substrate.inclusion_block - 1
+    now = [1000.0]
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+    sleeps: list[float] = []
+
+    def advance_clock(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(writer_runtime.time, "sleep", advance_clock)
+    locates = 0
+    original_locate = instance._locate
+
+    def counting_locate(pending, **kwargs):
+        nonlocal locates
+        locates += 1
+        return original_locate(pending, **kwargs)
+
+    monkeypatch.setattr(instance, "_locate", counting_locate)
+
+    with pytest.raises(
+        DirectSubmissionAmbiguous, match="without exact finalized history"
+    ):
+        submit_before_deadline(instance, planned)
+
+    assert sum(sleeps) == pytest.approx(
+        writer_runtime.FINALIZED_HISTORY_WAIT_SECONDS
+    )
+    assert locates == 1, "an unchanged finalized head is never re-scanned"
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == "ambiguous"
+
+    substrate.finalized_number = ANCHOR_NUMBER + 4
+    receipt = instance.recover()
+
+    assert receipt is not None
+    assert receipt.status == STATUS_RECOVERED
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+
+def test_post_broadcast_waits_stay_well_under_the_cycle_interval() -> None:
+    combined = (
+        writer_runtime.FINALIZED_HISTORY_WAIT_SECONDS
+        + writer_runtime.CONFIRMATION_WAIT_SECONDS
+    )
+    assert combined <= 0.2 * runtime.DEFAULT_INTERVAL_SECONDS
+
+
 def test_timeout_after_inclusion_recovers_hash_and_row_without_resubmit(
     tmp_path: Path, monkeypatch
 ) -> None:
