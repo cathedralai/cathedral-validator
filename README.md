@@ -24,11 +24,43 @@ pinned TDX and SNP verifier programs.
 ## What you need
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
+  Ubuntu 24.04 LTS is what Cathedral tests on.
+- A hotkey registered on SN39 that holds a validator permit. The validator
+  refuses to start otherwise, and a permit depends on your stake relative to
+  other validators.
 - Your Bittensor validator hotkey file and its public SS58 address. The file
   must be unencrypted (the `btcli` default for hotkeys) and readable only by
   its owner.
 - A reviewed AMD SEV-SNP policy containing only measurements and TCB floors you
   trust.
+
+### Machine
+
+Two virtual CPUs, 4 GB of memory, and 20 GB of disk are enough. The validator
+is light: one scoring cycle every 25 minutes, and between cycles it is idle.
+Measured on the Cathedral production validator, a 4 vCPU cloud instance:
+
+| Resource | Observed |
+|---|---|
+| Peak memory of the validator service | 349 MB |
+| CPU time per scoring cycle | about 11 seconds |
+| Disk used by the installed releases | 211 MB for three retained releases |
+
+No GPU. No confidential-computing hardware on the validator host; the TDX and
+SEV-SNP evidence it checks comes from the miners it scores.
+
+### Network
+
+Outbound only. The validator serves nothing and needs no inbound ports or
+public address.
+
+- The Bittensor Finney entrypoint, for finalized chain reads and your weight
+  submissions.
+- `raw.githubusercontent.com` and `github.com`, for the signed release channel
+  and the release archives it downloads.
+- Each serving SN39 miner, on the address and port it advertises on chain.
+  These are arbitrary hosts and ports that change as miners come and go, so
+  outbound traffic to them cannot be pinned to a fixed allowlist.
 
 Never copy a coldkey, mnemonic, or coldkey password to the validator host. The
 service receives only the hotkey file and checks it against the expected public

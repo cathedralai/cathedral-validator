@@ -46,7 +46,15 @@ def test_false_launch_design_page_is_not_active() -> None:
 def test_readme_is_the_small_public_guide() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     words = " ".join(guide.split())
-    assert guide.count("## ") == 5
+    # Count real second-level headings. A substring count also matches "### ",
+    # so it would forbid subsections rather than keep the guide short.
+    assert [line for line in guide.splitlines() if line.startswith("## ")] == [
+        "## What it does",
+        "## What you need",
+        "## Install and start",
+        "## What to expect",
+        "## Updates",
+    ]
     assert guide.startswith("# Cathedral Validator\n")
     for heading in (
         "## What it does",
