@@ -345,20 +345,20 @@ An interrupted retry resumes only an exact empty or fully uploaded draft. A
 partial or different draft remains refused for manual investigation.
 
 Record both key fingerprints, sequence, issue time, expiry, exact tag, target
-revision, and manifest digest. Then regenerate the block in `README.md` by
-substituting only the per-publication values below into the block already in
-the tree. Never retype or reconstruct the block from the release artifacts.
+revision, and manifest digest. Then regenerate `scripts/install.sh` by
+substituting only the per-publication values below into the script already in
+the tree. Never retype or reconstruct the script from the release artifacts.
 Every other line is fixed text that carries the staging hardening, and
-reconstructing the block is how that hardening gets silently reverted.
+reconstructing the script is how that hardening gets silently reverted.
 
 Substitute only these:
 
 - the `BASE=` release tag
 - the tarball, manifest, and signature digests in the `sha256sum` list
 - the `--minimum-bootstrap-sequence` argument
-- the stable sequence named in the sentence below the block
-- the prose above the block: sequence, issue and expiry timestamps, immutable
-  tag, runtime release key fingerprint, and stable floor sequence and digest
+- in `docs/AUTO_UPDATE.md`, the generated bootstrap block: sequence, issue and
+  expiry timestamps, immutable tag, asset URLs and digests, runtime release
+  key fingerprint, and stable floor sequence and digest
 
 Leave everything else byte for byte, including the `mktemp` staging
 assignment, the `cleanup` function and its path guard, the `trap` that keeps
@@ -367,14 +367,25 @@ the two-column `printf` form, the quoted heredoc that checks the bundle
 against the signed manifest, the `sh -c` argument form used for extraction,
 and the trailing `cleanup` and `trap - ERR`.
 
+Then pin the regenerated script on the README: replace the digest in its
+`sha256sum -c` line with the SHA-256 of the new `scripts/install.sh`. The
+README and the script land in one commit, so `main` is always self-consistent.
+`raw.githubusercontent.com` caches for up to five minutes, so an operator who
+fetches within minutes of the merge can see one digest mismatch; a retry
+resolves it. Publish the script digest in the same announcement as the
+bootstrap key fingerprint: the README is served from the same branch as the
+script, so the announcement is the only anchor an operator has that is not
+under repository write access.
+
 The bootstrap signing key digest and its fingerprint are not per-publication
 values. They change only on key rotation. Do not retype them as if they
 rotate with each bootstrap; the public key file digest in the `sha256sum`
 list and the DER SPKI fingerprint on the `test` line are different values and
 neither changes when a bootstrap is republished.
 
-A regenerated block that fails `tests/thin/test_operator_docs_safety.py`
-means the hardening was dropped. Fix the block. Do not relax the test.
+A regenerated script that fails `tests/thin/test_operator_docs_safety.py`
+means the hardening was dropped or the README digest was not updated. Fix the
+script or the pin. Do not relax the test.
 
 Verify on a clean live-test host before publishing the guide, with
 `/var/tmp/cathedral-bootstrap` pre-planted as a world-writable directory

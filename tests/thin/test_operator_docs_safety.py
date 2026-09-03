@@ -9,10 +9,19 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+INSTALL_SCRIPT_URL = (
+    "https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/"
+    "scripts/install.sh"
+)
+BOOTSTRAP_KEY_FINGERPRINT = (
+    "sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013"
+)
 
 
 _BOOTSTRAP_TAG = re.compile(r"validator-bootstrap-production-s(\d+)-([0-9a-f]{64})\b")
 _MINIMUM_SEQUENCE = re.compile(r"--minimum-bootstrap-sequence (\d+)\b")
+_HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 
 
 def _published_bootstrap_sequence(page: str) -> int:
@@ -33,6 +42,14 @@ def _published_bootstrap_sequence(page: str) -> int:
     return int(sequence)
 
 
+def _readme() -> str:
+    return (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def _install_script() -> str:
+    return INSTALL_SCRIPT.read_text(encoding="utf-8")
+
+
 def test_false_launch_design_page_is_not_active() -> None:
     assert not (ROOT / "MINER_VALIDATOR.md").exists()
     assert not (ROOT / "VALIDATOR-ONBOARDING.md").exists()
@@ -44,26 +61,19 @@ def test_false_launch_design_page_is_not_active() -> None:
 
 
 def test_readme_is_the_small_public_guide() -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = _readme()
     words = " ".join(guide.split())
     # Count real second-level headings. A substring count also matches "### ",
     # so it would forbid subsections rather than keep the guide short.
     assert [line for line in guide.splitlines() if line.startswith("## ")] == [
         "## What it does",
         "## What you need",
-        "## Install and start",
-        "## What to expect",
+        "## Install",
+        "## Operate",
         "## Updates",
+        "## Trust",
     ]
     assert guide.startswith("# Cathedral Validator\n")
-    for heading in (
-        "## What it does",
-        "## What you need",
-        "## Install and start",
-        "## What to expect",
-        "## Updates",
-    ):
-        assert heading in guide
     assert (
         "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
         in guide
@@ -74,34 +84,33 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in words
     assert "`NOT_PROVEN` means success is unresolved" in guide
     assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide
+    assert "`CONTRADICTION_STOPPED`" in guide
+    assert "Never delete or replace the journal" in guide
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
     assert "Do not install or enable updater services from a source checkout" in words
-    assert "BEGIN GENERATED VALIDATOR INSTALL" in guide
-    assert "END GENERATED VALIDATOR INSTALL" in guide
     assert "Publication pending" not in guide
     assert "REPLACE_WITH" not in guide
-    assert "--expected-bootstrap-key-fingerprint sha256:9339edab" in guide
-    assert _published_bootstrap_sequence(guide) >= 1
     assert "sudo cathedral-validator-setup" in guide
     assert "--confirm-direct-write" in guide
-    assert "install_updater_bundle.py" in guide
+    assert "sudo cathedral-validator-status" in guide
     assert "deploy/sn39/install-validator" not in guide
-    assert "CONFIRMED" in guide
     assert "does not download a weight vector" in words
     assert "scored every serving miner" not in guide
     assert "finds serving miners" in guide
     assert "zero burn" in guide
-    assert "`CONTRADICTION_STOPPED`" in guide
-    assert "`RestartPreventExitStatus=2`" in guide
-    assert "Never delete or replace the journal" in guide
-    assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
-    assert "cathedral-validator-boot-reconcile.service" in guide
     assert "pinned TDX verifier, and pinned SNP verifier together" in words
     assert "bootstrap updater, systemd units, host Python" in words
     assert "Public setup follows `stable` only" in guide
-    assert "sudo cathedral-validator-status" in guide
+    assert BOOTSTRAP_KEY_FINGERPRINT in guide
+    # A first-time operator sees exactly two 64-hex values, once each: the
+    # install script digest and the bootstrap signing key fingerprint. Every
+    # other digest belongs in the script or in docs/AUTO_UPDATE.md.
+    assert len(_HEX64.findall(guide)) == 2
+    assert len(set(_HEX64.findall(guide))) == 2
     assert "git clone" not in guide
     assert "python3.12 -m venv" not in guide
+    assert "install_updater_bundle.py" not in guide
+    assert "BEGIN GENERATED" not in guide
     assert "cathedral-tdx-verifier-v1.0.0" not in guide
     assert "snpguest 0.10.0" not in guide
     assert "issue #185" not in guide
@@ -115,11 +124,47 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "cathedral-validator/blob/main/VALIDATOR.md" not in guide
 
 
-def test_readme_bootstrap_uses_unpredictable_root_controlled_staging() -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
-    install = guide.split("<!-- BEGIN GENERATED VALIDATOR INSTALL -->", 1)[1].split(
-        "<!-- END GENERATED VALIDATOR INSTALL -->", 1
-    )[0]
+def test_readme_pins_the_install_script_by_digest() -> None:
+    guide = _readme()
+    script = _install_script()
+    digest = hashlib.sha256(INSTALL_SCRIPT.read_bytes()).hexdigest()
+
+    # The README is the trust root for the script exactly as it was for the
+    # inline block: the digest line must name the bytes in the tree, and the
+    # three commands must be one `&&` chain so a failed digest check runs
+    # nothing when the block is pasted into an interactive shell.
+    install_block = (
+        "```bash\n"
+        "curl -fsSL --proto '=https' --tlsv1.2 -o install.sh \\\n"
+        f"  {INSTALL_SCRIPT_URL} &&\n"
+        f"echo '{digest}  install.sh' | sha256sum -c &&\n"
+        "sudo bash install.sh\n"
+        "```\n"
+    )
+    assert install_block in guide
+    assert guide.count("sudo bash install.sh") == 1
+    assert "If the digest line prints `FAILED`, nothing runs" in guide
+    assert "[Bootstrap trust](docs/AUTO_UPDATE.md#bootstrap-trust)" in guide
+    assert "sudo journalctl -u cathedral-validator-direct.service -f" in guide
+    assert (
+        ROOT / "deploy" / "validator-update" / "cathedral-validator-direct.service"
+    ).exists()
+
+    assert os.access(INSTALL_SCRIPT, os.X_OK)
+    assert script.startswith("#!/usr/bin/env bash\n")
+    first_command = next(
+        line for line in script.splitlines() if line and not line.startswith("#")
+    )
+    assert first_command == "set -euo pipefail"
+    assert f"--expected-bootstrap-key-fingerprint {BOOTSTRAP_KEY_FINGERPRINT}" in script
+    assert script.count(BOOTSTRAP_KEY_FINGERPRINT) == 2
+    assert "REPLACE_WITH" not in script
+    assert _published_bootstrap_sequence(script) >= 1
+    subprocess.run(["bash", "-n", str(INSTALL_SCRIPT)], check=True)
+
+
+def test_install_script_uses_unpredictable_root_controlled_staging() -> None:
+    install = _install_script()
 
     assert (
         "BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d "
@@ -137,7 +182,7 @@ def test_readme_bootstrap_uses_unpredictable_root_controlled_staging() -> None:
     assert "trap cleanup EXIT" not in install
     assert "^/var/tmp/cathedral-bootstrap\\.[[:alnum:]]{10}$" in install
     assert 'sudo /usr/bin/rm -rf -- "$BOOTSTRAP_DIR"' in install
-    assert "cleanup\ntrap - ERR" in install
+    assert install.endswith("cleanup\ntrap - ERR\n")
     assert "/var/tmp/cathedral-bootstrap/" not in install
     assert "sudo install -d" not in install
     for filename in (
@@ -149,17 +194,11 @@ def test_readme_bootstrap_uses_unpredictable_root_controlled_staging() -> None:
     ):
         assert f'"$BOOTSTRAP_DIR/{filename}"' in install
 
-    bootstrap_script = install.split("```bash", 1)[1].split("```", 1)[0]
-    subprocess.run(["bash", "-n"], input=bootstrap_script, text=True, check=True)
 
-
-def test_readme_authenticates_bundle_before_extracting_installer(
+def test_install_script_authenticates_bundle_before_extracting_installer(
     tmp_path: Path,
 ) -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
-    install = guide.split("<!-- BEGIN GENERATED VALIDATOR INSTALL -->", 1)[1].split(
-        "<!-- END GENERATED VALIDATOR INSTALL -->", 1
-    )[0]
+    install = _install_script()
 
     signature_check = install.index("sudo openssl pkeyutl -verify")
     signed_bundle_check = install.index("bundle does not match the signed manifest")
@@ -171,9 +210,8 @@ def test_readme_authenticates_bundle_before_extracting_installer(
     assert "os.fstat(stream.fileno()).st_size" in install
     assert 'hashlib.file_digest(stream, "sha256").hexdigest()' in install
 
-    bootstrap_script = install.split("```bash", 1)[1].split("```", 1)[0]
-    bundle_check = bootstrap_script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    compile(bundle_check, "<README bootstrap bundle check>", "exec")
+    bundle_check = install.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    compile(bundle_check, "<install.sh bootstrap bundle check>", "exec")
 
     bundle_path = tmp_path / "updater-bootstrap.tar.gz"
     manifest_path = tmp_path / "updater-bootstrap.manifest.json"
@@ -204,7 +242,7 @@ def test_readme_authenticates_bundle_before_extracting_installer(
 
 
 def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = _readme()
     updater = (ROOT / "docs" / "AUTO_UPDATE.md").read_text(encoding="utf-8")
 
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
@@ -213,17 +251,14 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
     assert "Publication pending" not in updater
     assert "REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE" not in updater
     assert _published_bootstrap_sequence(updater) == _published_bootstrap_sequence(
-        guide
+        _install_script()
     )
-    assert (
-        "sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013"
-        in updater
-    )
+    assert BOOTSTRAP_KEY_FINGERPRINT in updater
+    assert "`scripts/install.sh`, is pinned by digest on the README" in updater
     assert "Do not install\nor enable updater units from a source checkout" in updater
     assert "BEGIN GENERATED UPDATER BOOTSTRAP" in updater
     assert "END GENERATED UPDATER BOOTSTRAP" in updater
     assert "releases.cathedral.com" not in updater
-    assert "signed installation path" in guide
     assert "The updater has no access to the hotkey" in updater
     assert "repository home page is the only operator install guide" in updater
     assert "sudo cathedral-validator-setup" in updater
@@ -299,6 +334,14 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     assert "It does not hide unresolved recovery" in guide
     assert "exact updater-controlled nested" in guide
     assert "[Release maintainer guide](RELEASE_MAINTAINER.md)" in guide
+    # Operating detail that left the README lives here.
+    assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
+    assert (
+        "direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json" in guide
+    )
+    assert "`RestartPreventExitStatus=2`" in guide
+    assert "cathedral-validator-boot-reconcile.service" in guide
+    assert "Never delete or replace the journal" in guide
     assert "--archive-out-dir" not in guide
     assert "--runtime-lock" not in guide
     assert "two offline encrypted backups" in maintainer
@@ -328,6 +371,11 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
         "Routine validator and verifier releases are unattended after bootstrap"
         in maintainer
     )
+    # The regeneration rule now names the script and the README digest pin.
+    assert "regenerate `scripts/install.sh`" in maintainer
+    assert "replace the digest in its\n`sha256sum -c` line" in maintainer
+    assert "Publish the script digest in the same announcement" in maintainer
+    assert "regenerate the block in `README.md`" not in maintainer
 
 
 def test_retired_guides_are_only_historical_pointers() -> None:
