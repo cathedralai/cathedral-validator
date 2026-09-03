@@ -56,6 +56,13 @@ DIRECT_STATE_ROOT = Path.home() / ".local/state/cathedral-validator/direct-write
 DIRECT_STATE_SCOPE = "finney-sn39-mechanism-0"
 CONFIRMATION_WAIT_SECONDS = 60.0
 CONFIRMATION_POLL_SECONDS = 2.0
+# Bound for re-reading finalized history after the node reported the
+# extrinsic finalized. Readers of chain_getFinalizedHead can trail that
+# report by a block or two, so one immediate lookup misses the inclusion
+# block and the write would otherwise sit in the journal until the next
+# cycle. Together with CONFIRMATION_WAIT_SECONDS this stays far below the
+# cycle interval. Nothing is resubmitted while waiting.
+FINALIZED_HISTORY_WAIT_SECONDS = 90.0
 _CHAIN_HASH_HEX = frozenset("0123456789abcdef")
 _LOCAL_LOCKS_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
@@ -1041,8 +1048,39 @@ class DirectWeightWriter:
             confirmation_heads=tuple(proven),
         )
 
-    def _locate(
+    def _await_finalized_history(
         self, pending: Mapping[str, Any]
+    ) -> tuple[str, DirectSubmissionReceipt | None]:
+        """Re-read finalized history until it settles or the bound is reached.
+
+        Only the finalized head is polled between lookups; the era is re-read
+        once per new finalized head, never on a timer, and never resubmitted.
+        """
+
+        deadline = time.monotonic() + FINALIZED_HISTORY_WAIT_SECONDS
+        scanned_head: int | None = None
+        while True:
+            try:
+                head_number, _head_hash = finalized_head(self.subtensor)
+            except Exception as exc:
+                raise DirectSubmissionAmbiguous(
+                    "finalized head is unavailable after submission"
+                ) from exc
+            if scanned_head is None or head_number > scanned_head:
+                status, located = self._locate(pending, finalized_number=head_number)
+                scanned_head = head_number
+                if status != "pending":
+                    return status, located
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "pending", None
+            time.sleep(min(CONFIRMATION_POLL_SECONDS, remaining))
+
+    def _locate(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        finalized_number: int | None = None,
     ) -> tuple[str, DirectSubmissionReceipt | None]:
         intent = pending["intent"]
         try:
@@ -1076,12 +1114,13 @@ class DirectWeightWriter:
         ):
             raise DirectSubmissionContradiction("pending signed intent is invalid")
 
-        try:
-            finalized_number, _finalized_hash = finalized_head(self.subtensor)
-        except Exception as exc:
-            raise DirectSubmissionAmbiguous(
-                "finalized head is unavailable during recovery"
-            ) from exc
+        if finalized_number is None:
+            try:
+                finalized_number, _finalized_hash = finalized_head(self.subtensor)
+            except Exception as exc:
+                raise DirectSubmissionAmbiguous(
+                    "finalized head is unavailable during recovery"
+                ) from exc
         substrate = self.subtensor.substrate
         matches: list[DirectSubmissionReceipt] = []
         for block_number in range(era_reference, era_reference + period):
@@ -1339,7 +1378,20 @@ class DirectWeightWriter:
                     "direct submission result is ambiguous; recover, never retry"
                 ) from exc
 
-            status, located = self._locate(pending)
+            try:
+                status, located = self._await_finalized_history(pending)
+            except DirectValidatorError as exc:
+                # The extrinsic was broadcast, so never leave the journal
+                # reading like a signed intent that never reached the chain.
+                pending["phase"] = (
+                    "confirmation_contradiction"
+                    if isinstance(exc, DirectSubmissionContradiction)
+                    else "ambiguous"
+                )
+                pending["error"] = type(exc).__name__
+                state["pending"] = pending
+                self._write_state(state)
+                raise
             if status == "finalized" and located is not None:
                 try:
                     confirmed = self._confirm_finalized_effect(
@@ -1381,6 +1433,7 @@ __all__ = [
     "DirectSubmissionReceipt",
     "DirectWeightWriter",
     "CONFIRMATION_WAIT_SECONDS",
+    "FINALIZED_HISTORY_WAIT_SECONDS",
     "DIRECT_STATE_ROOT",
     "DIRECT_STATE_SCOPE",
     "STATE_SCHEMA",
