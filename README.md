@@ -59,7 +59,6 @@ set -euo pipefail
 sudo apt-get update && sudo apt-get install -y ca-certificates curl openssl python3.12 python3.12-venv
 BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e
 BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d /var/tmp/cathedral-bootstrap.XXXXXXXXXX)
-readonly BOOTSTRAP_DIR
 cleanup() {
   if [[ ! "$BOOTSTRAP_DIR" =~ ^/var/tmp/cathedral-bootstrap\.[[:alnum:]]{10}$ ]]; then
     printf 'refusing unsafe bootstrap cleanup path: %s\n' "$BOOTSTRAP_DIR" >&2
@@ -67,7 +66,7 @@ cleanup() {
   fi
   sudo /usr/bin/rm -rf -- "$BOOTSTRAP_DIR"
 }
-trap cleanup EXIT
+trap 'printf "bootstrap staging kept for inspection: %s\n" "$BOOTSTRAP_DIR" >&2' ERR
 for f in updater-bootstrap.tar.gz updater-bootstrap.manifest.json updater-bootstrap.manifest.sig bootstrap-signing-public-key.pem; do
   sudo curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     --output "$BOOTSTRAP_DIR/$f" "$BASE/$f"
@@ -123,7 +122,7 @@ sudo /usr/bin/python3.12 "$BOOTSTRAP_DIR/install_updater_bundle.py" \
   --expected-bootstrap-key-fingerprint sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013 \
   --minimum-bootstrap-sequence 2
 cleanup
-trap - EXIT
+trap - ERR
 ```
 
 The installer prints one JSON line ending in `"status":"installed"` and enables
