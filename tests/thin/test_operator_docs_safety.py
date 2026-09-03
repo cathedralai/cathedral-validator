@@ -2,12 +2,35 @@
 
 import hashlib
 import json
+import re
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+_BOOTSTRAP_TAG = re.compile(r"validator-bootstrap-production-s(\d+)-([0-9a-f]{64})\b")
+_MINIMUM_SEQUENCE = re.compile(r"--minimum-bootstrap-sequence (\d+)\b")
+
+
+def _published_bootstrap_sequence(page: str) -> int:
+    """Return the one published bootstrap sequence a page agrees on.
+
+    The sequence advances with every bootstrap publication, so pinning its
+    current value here would only add a fourth copy of a generated number.
+    What must hold is that every tag, digest, and installer argument on the
+    page names the same published bootstrap.
+    """
+
+    tags = set(_BOOTSTRAP_TAG.findall(page))
+    assert len(tags) == 1, tags
+    (sequence, manifest_digest) = tags.pop()
+    assert manifest_digest in page
+    for argument in _MINIMUM_SEQUENCE.findall(page):
+        assert argument == sequence
+    return int(sequence)
 
 
 def test_false_launch_design_page_is_not_active() -> None:
@@ -50,7 +73,7 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "Publication pending" not in guide
     assert "REPLACE_WITH" not in guide
     assert "--expected-bootstrap-key-fingerprint sha256:9339edab" in guide
-    assert "--minimum-bootstrap-sequence 1" in guide
+    assert _published_bootstrap_sequence(guide) >= 1
     assert "sudo cathedral-validator-setup" in guide
     assert "--confirm-direct-write" in guide
     assert "install_updater_bundle.py" in guide
@@ -173,7 +196,9 @@ def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:
     assert "public bootstrap artifacts are published" in updater
     assert "Publication pending" not in updater
     assert "REPLACE_WITH_NEXT_BOOTSTRAP_SEQUENCE" not in updater
-    assert "validator-bootstrap-production-s1-" in updater
+    assert _published_bootstrap_sequence(updater) == _published_bootstrap_sequence(
+        guide
+    )
     assert (
         "sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013"
         in updater

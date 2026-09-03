@@ -40,8 +40,8 @@ Install only from the signed bootstrap below. Do not install or enable updater
 services from a source checkout.
 
 <!-- BEGIN GENERATED VALIDATOR INSTALL -->
-Bootstrap sequence 1, signed 2026-09-02T15:26:48Z, valid until 2026-10-02T15:26:48Z.
-Immutable release tag: `validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312`.
+Bootstrap sequence 2, signed 2026-09-03T00:00:04Z, valid until 2026-10-03T00:00:04Z.
+Immutable release tag: `validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e`.
 
 Pin these two fingerprints from a Cathedral announcement or another channel you
 trust before you run anything. The installer refuses a bootstrap key whose
@@ -49,15 +49,15 @@ fingerprint differs from the one you pass.
 
 - Bootstrap signing key: `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013`
 - Runtime release key bound inside the signed manifest: `sha256:56a0284790edac88e6b62e8256c43900ff3a43e590e0696c62ad224b5e0766bf`
-- Stable floor bound by this bootstrap: sequence 1, metadata SHA-256
-  `e99f8b81b377677797686d4263d3e619db03e7c950f136ced3065d5fd80ff2a5`
+- Stable floor bound by this bootstrap: sequence 2, metadata SHA-256
+  `5c1a486047b85036c701b61ecc483c3fb748bdd3922fc2df5090cb493e79f8b0`
 
 Download, verify, and install the signed bootstrap as root-owned files:
 
 ```bash
 set -euo pipefail
 sudo apt-get update && sudo apt-get install -y ca-certificates curl openssl python3.12 python3.12-venv
-BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312
+BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e
 BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d /var/tmp/cathedral-bootstrap.XXXXXXXXXX)
 readonly BOOTSTRAP_DIR
 cleanup() {
@@ -73,9 +73,9 @@ for f in updater-bootstrap.tar.gz updater-bootstrap.manifest.json updater-bootst
     --output "$BOOTSTRAP_DIR/$f" "$BASE/$f"
 done
 printf '%s  %s\n' \
-  '6436995b7c6d7e1853aa52db12675c00d495f1312264df34fe2e7b822e44983c' "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
-  '655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
-  '7b0aaebe67411f0e0f8d32fa5fff79a331c657022af87acf761228afa23d0c5a' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
+  'a9c4a083f42988d1d2cbadf5daf95f7aec57fc24caa2d1acb46335fc0ce70319' "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  '1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  '1102f2b98f9de575479a0065033cb3ba2fa9e052d01406ce9a185d9ee20e2121' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
   '390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e' "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   | sudo sha256sum --check --strict
 test "sha256:$(sudo openssl pkey -pubin -in "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" -outform DER | sha256sum | cut -d' ' -f1)" = sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
@@ -121,7 +121,7 @@ sudo /usr/bin/python3.12 "$BOOTSTRAP_DIR/install_updater_bundle.py" \
   --signature "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
   --bootstrap-public-key "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   --expected-bootstrap-key-fingerprint sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013 \
-  --minimum-bootstrap-sequence 1
+  --minimum-bootstrap-sequence 2
 cleanup
 trap - EXIT
 ```
@@ -139,7 +139,7 @@ sudo cathedral-validator-setup \
 sudo cathedral-validator-status
 ```
 
-Setup installs the signed stable release at or above sequence 1 from
+Setup installs the signed stable release at or above sequence 2 from
 `https://raw.githubusercontent.com/cathedralai/cathedral-validator/validator-release-channel/validator/stable.json`,
 starts the validator, and enables only the stable update timer. `SETUP_COMPLETE`
 on the last line means the host is running. `SETUP_REFUSED` names the exact
