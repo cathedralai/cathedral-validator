@@ -90,15 +90,24 @@ provenance = [
 # through both that rename and cathedral-distill's move to public unchanged.
 #
 # Pinned to an immutable reviewed Distill commit, never a mutable branch ref.
-# This revision adds `compute_work_evidence` and the `work_evidence` keyword to
-# `verify_lane_receipt`: a Compute receipt is creditable only after the exact
-# SAT item/result bytes committed by its signed digests replay under
-# `sat_work_units_v1`. The validator forwards this sidecar from `LaneReceipt`
-# and rejects plain receipt-only Compute submissions. Keep this pin and
-# DISTILL_CONTRACT_COMMIT in integration.py in lockstep; a regression test
-# asserts their exact equality.
+# Keep this pin and DISTILL_CONTRACT_COMMIT in integration.py in lockstep; a
+# regression test asserts their exact equality.
+#
+# The `compute_work_evidence` / `work_evidence` contract described here before
+# still holds: a Compute receipt is creditable only after the exact SAT
+# item/result bytes committed by its signed digests replay under
+# `sat_work_units_v1`, and the validator rejects plain receipt-only Compute
+# submissions.
+#
+# Bumped 2026-08-15 from b2ad1edd (2026-08-05) to 4bc31563 (2026-08-14): 52
+# commits and 71 files of drift, because nothing was advancing this pin. The
+# two open PRs that claimed to "pin the current contract" both pointed at
+# commits OLDER than b2ad1edd and would have moved it backwards. What the gap
+# was hiding, in launch terms: the tournament inputs our vendored adapter
+# already reads (nonce + dispatched_units, distill#114) and the sealed-corpus
+# tooling gate 4 depends on (reseal_task.py, distill#122).
 integration = [
-    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b2ad1eddf9235921f8f680342605d5c8a84a8d87",
+    "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@4bc31563b8529db506d02f8ad15068981589acc6",
 ]
 # Development-only AMD SEV-SNP verifier/client contract. This is the exact
 # reviewed cathedral-sandbox merge commit from cathedral-sandbox#189. The
