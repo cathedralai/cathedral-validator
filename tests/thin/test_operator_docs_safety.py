@@ -1,10 +1,11 @@
 """The public validator has one short, runnable operator path."""
 
+import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
-
+import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -81,6 +82,86 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "--offline" not in guide
     assert "cathedral-sandbox/blob/main/MINING.md" not in guide
     assert "cathedral-validator/blob/main/VALIDATOR.md" not in guide
+
+
+def test_readme_bootstrap_uses_unpredictable_root_controlled_staging() -> None:
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    install = guide.split("<!-- BEGIN GENERATED VALIDATOR INSTALL -->", 1)[1].split(
+        "<!-- END GENERATED VALIDATOR INSTALL -->", 1
+    )[0]
+
+    assert (
+        "BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d "
+        "/var/tmp/cathedral-bootstrap.XXXXXXXXXX)" in install
+    )
+    assert "readonly BOOTSTRAP_DIR" in install
+    assert "trap cleanup EXIT" in install
+    assert "^/var/tmp/cathedral-bootstrap\\.[[:alnum:]]{10}$" in install
+    assert 'sudo /usr/bin/rm -rf -- "$BOOTSTRAP_DIR"' in install
+    assert "cleanup\ntrap - EXIT" in install
+    assert "/var/tmp/cathedral-bootstrap/" not in install
+    assert "sudo install -d" not in install
+    for filename in (
+        "updater-bootstrap.tar.gz",
+        "updater-bootstrap.manifest.json",
+        "updater-bootstrap.manifest.sig",
+        "bootstrap-signing-public-key.pem",
+        "install_updater_bundle.py",
+    ):
+        assert f'"$BOOTSTRAP_DIR/{filename}"' in install
+
+    bootstrap_script = install.split("```bash", 1)[1].split("```", 1)[0]
+    subprocess.run(["bash", "-n"], input=bootstrap_script, text=True, check=True)
+
+
+def test_readme_authenticates_bundle_before_extracting_installer(
+    tmp_path: Path,
+) -> None:
+    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    install = guide.split("<!-- BEGIN GENERATED VALIDATOR INSTALL -->", 1)[1].split(
+        "<!-- END GENERATED VALIDATOR INSTALL -->", 1
+    )[0]
+
+    signature_check = install.index("sudo openssl pkeyutl -verify")
+    signed_bundle_check = install.index("bundle does not match the signed manifest")
+    installer_extraction = install.index("tar -xOf")
+    assert signature_check < signed_bundle_check < installer_extraction
+    assert 'manifest.get("bundle")' in install
+    assert 'bundle_claim.get("size")' in install
+    assert 'bundle_claim.get("sha256")' in install
+    assert "os.fstat(stream.fileno()).st_size" in install
+    assert 'hashlib.file_digest(stream, "sha256").hexdigest()' in install
+
+    bootstrap_script = install.split("```bash", 1)[1].split("```", 1)[0]
+    bundle_check = bootstrap_script.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    compile(bundle_check, "<README bootstrap bundle check>", "exec")
+
+    bundle_path = tmp_path / "updater-bootstrap.tar.gz"
+    manifest_path = tmp_path / "updater-bootstrap.manifest.json"
+    bundle_path.write_bytes(b"signed bootstrap bundle")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "bundle": {
+                    "size": bundle_path.stat().st_size,
+                    "sha256": hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
+                }
+            }
+        ),
+        encoding="ascii",
+    )
+    command = [sys.executable, "-", str(manifest_path), str(bundle_path)]
+    accepted = subprocess.run(
+        command, input=bundle_check, text=True, capture_output=True, check=False
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    bundle_path.write_bytes(b"substituted bundle")
+    refused = subprocess.run(
+        command, input=bundle_check, text=True, capture_output=True, check=False
+    )
+    assert refused.returncode != 0
+    assert "bundle does not match the signed manifest" in refused.stderr
 
 
 def test_readme_updater_link_preserves_the_unpublished_boundary() -> None:

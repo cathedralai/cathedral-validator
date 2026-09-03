@@ -58,29 +58,72 @@ Download, verify, and install the signed bootstrap as root-owned files:
 set -euo pipefail
 sudo apt-get update && sudo apt-get install -y ca-certificates curl openssl python3.12 python3.12-venv
 BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312
-sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-bootstrap
+BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d /var/tmp/cathedral-bootstrap.XXXXXXXXXX)
+readonly BOOTSTRAP_DIR
+cleanup() {
+  if [[ ! "$BOOTSTRAP_DIR" =~ ^/var/tmp/cathedral-bootstrap\.[[:alnum:]]{10}$ ]]; then
+    printf 'refusing unsafe bootstrap cleanup path: %s\n' "$BOOTSTRAP_DIR" >&2
+    return 1
+  fi
+  sudo /usr/bin/rm -rf -- "$BOOTSTRAP_DIR"
+}
+trap cleanup EXIT
 for f in updater-bootstrap.tar.gz updater-bootstrap.manifest.json updater-bootstrap.manifest.sig bootstrap-signing-public-key.pem; do
   sudo curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --output "/var/tmp/cathedral-bootstrap/$f" "$BASE/$f"
+    --output "$BOOTSTRAP_DIR/$f" "$BASE/$f"
 done
-printf '%s\n' \
-  '6436995b7c6d7e1853aa52db12675c00d495f1312264df34fe2e7b822e44983c  /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz' \
-  '655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312  /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json' \
-  '7b0aaebe67411f0e0f8d32fa5fff79a331c657022af87acf761228afa23d0c5a  /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig' \
-  '390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e  /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem' \
+printf '%s  %s\n' \
+  '6436995b7c6d7e1853aa52db12675c00d495f1312264df34fe2e7b822e44983c' "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  '655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  '7b0aaebe67411f0e0f8d32fa5fff79a331c657022af87acf761228afa23d0c5a' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
+  '390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e' "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   | sudo sha256sum --check --strict
-test "sha256:$(sudo openssl pkey -pubin -in /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem -outform DER | sha256sum | cut -d' ' -f1)" = sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
-sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem \
-  -rawin -in /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json \
-  -sigfile /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig
-sudo sh -c 'tar -xOf /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-bootstrap/install_updater_bundle.py'
-sudo /usr/bin/python3.12 /var/tmp/cathedral-bootstrap/install_updater_bundle.py \
-  --bundle /var/tmp/cathedral-bootstrap/updater-bootstrap.tar.gz \
-  --manifest /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.json \
-  --signature /var/tmp/cathedral-bootstrap/updater-bootstrap.manifest.sig \
-  --bootstrap-public-key /var/tmp/cathedral-bootstrap/bootstrap-signing-public-key.pem \
+test "sha256:$(sudo openssl pkey -pubin -in "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" -outform DER | sha256sum | cut -d' ' -f1)" = sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
+sudo openssl pkeyutl -verify -pubin -inkey "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
+  -rawin -in "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  -sigfile "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig"
+sudo /usr/bin/python3.12 - \
+  "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+bundle_path = Path(sys.argv[2])
+manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+bundle_claim = manifest.get("bundle")
+if not isinstance(bundle_claim, dict):
+    raise SystemExit("signed manifest has no bundle claim")
+expected_size = bundle_claim.get("size")
+expected_sha256 = bundle_claim.get("sha256")
+if type(expected_size) is not int or expected_size < 1:
+    raise SystemExit("signed manifest has an invalid bundle size")
+if (
+    not isinstance(expected_sha256, str)
+    or len(expected_sha256) != 64
+    or any(character not in "0123456789abcdef" for character in expected_sha256)
+):
+    raise SystemExit("signed manifest has an invalid bundle digest")
+with bundle_path.open("rb") as stream:
+    actual_size = os.fstat(stream.fileno()).st_size
+    actual_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+if actual_size != expected_size or actual_sha256 != expected_sha256:
+    raise SystemExit("bundle does not match the signed manifest")
+PY
+sudo sh -c 'tar -xOf "$1" payload/installer/install_updater_bundle.py > "$2"' sh \
+  "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" "$BOOTSTRAP_DIR/install_updater_bundle.py"
+sudo /usr/bin/python3.12 "$BOOTSTRAP_DIR/install_updater_bundle.py" \
+  --bundle "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  --manifest "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  --signature "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
+  --bootstrap-public-key "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   --expected-bootstrap-key-fingerprint sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013 \
   --minimum-bootstrap-sequence 1
+cleanup
+trap - EXIT
 ```
 
 The installer prints one JSON line ending in `"status":"installed"` and enables
