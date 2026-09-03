@@ -117,11 +117,19 @@ def test_readme_bootstrap_uses_unpredictable_root_controlled_staging() -> None:
         "BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d "
         "/var/tmp/cathedral-bootstrap.XXXXXXXXXX)" in install
     )
-    assert "readonly BOOTSTRAP_DIR" in install
-    assert "trap cleanup EXIT" in install
+    # The staging path must not be readonly: an operator who retries after a
+    # flaky download in the same shell would otherwise hit a fatal assignment
+    # to a readonly variable, or reuse a path the trap already removed.
+    assert "readonly BOOTSTRAP_DIR" not in install
+    # A failed verification must leave the downloaded bytes on disk to inspect.
+    assert (
+        'trap \'printf "bootstrap staging kept for inspection: %s\\n" '
+        '"$BOOTSTRAP_DIR" >&2\' ERR' in install
+    )
+    assert "trap cleanup EXIT" not in install
     assert "^/var/tmp/cathedral-bootstrap\\.[[:alnum:]]{10}$" in install
     assert 'sudo /usr/bin/rm -rf -- "$BOOTSTRAP_DIR"' in install
-    assert "cleanup\ntrap - EXIT" in install
+    assert "cleanup\ntrap - ERR" in install
     assert "/var/tmp/cathedral-bootstrap/" not in install
     assert "sudo install -d" not in install
     for filename in (
