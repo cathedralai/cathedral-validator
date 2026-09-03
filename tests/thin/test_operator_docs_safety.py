@@ -102,10 +102,11 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "bootstrap updater, systemd units, host Python" in words
     assert "Public setup follows `stable` only" in guide
     assert BOOTSTRAP_KEY_FINGERPRINT in guide
-    # A first-time operator sees exactly two 64-hex values: the install script
-    # digest and the bootstrap signing key fingerprint. Every other digest
-    # belongs in the script or in docs/AUTO_UPDATE.md.
+    # A first-time operator sees exactly two 64-hex values, once each: the
+    # install script digest and the bootstrap signing key fingerprint. Every
+    # other digest belongs in the script or in docs/AUTO_UPDATE.md.
     assert len(_HEX64.findall(guide)) == 2
+    assert len(set(_HEX64.findall(guide))) == 2
     assert "git clone" not in guide
     assert "python3.12 -m venv" not in guide
     assert "install_updater_bundle.py" not in guide
@@ -129,11 +130,25 @@ def test_readme_pins_the_install_script_by_digest() -> None:
     digest = hashlib.sha256(INSTALL_SCRIPT.read_bytes()).hexdigest()
 
     # The README is the trust root for the script exactly as it was for the
-    # inline block: the digest line must name the bytes in the tree.
-    assert INSTALL_SCRIPT_URL in guide
-    assert f"echo '{digest}  install.sh' | sha256sum -c" in guide
-    assert "sudo bash install.sh" in guide
-    assert "--proto '=https' --tlsv1.2" in guide
+    # inline block: the digest line must name the bytes in the tree, and the
+    # three commands must be one `&&` chain so a failed digest check runs
+    # nothing when the block is pasted into an interactive shell.
+    install_block = (
+        "```bash\n"
+        "curl -fsSL --proto '=https' --tlsv1.2 -o install.sh \\\n"
+        f"  {INSTALL_SCRIPT_URL} &&\n"
+        f"echo '{digest}  install.sh' | sha256sum -c &&\n"
+        "sudo bash install.sh\n"
+        "```\n"
+    )
+    assert install_block in guide
+    assert guide.count("sudo bash install.sh") == 1
+    assert "If the digest line prints `FAILED`, nothing runs" in guide
+    assert "[Bootstrap trust](docs/AUTO_UPDATE.md#bootstrap-trust)" in guide
+    assert "sudo journalctl -u cathedral-validator-direct.service -f" in guide
+    assert (
+        ROOT / "deploy" / "validator-update" / "cathedral-validator-direct.service"
+    ).exists()
 
     assert os.access(INSTALL_SCRIPT, os.X_OK)
     assert script.startswith("#!/usr/bin/env bash\n")
@@ -359,6 +374,7 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     # The regeneration rule now names the script and the README digest pin.
     assert "regenerate `scripts/install.sh`" in maintainer
     assert "replace the digest in its\n`sha256sum -c` line" in maintainer
+    assert "Publish the script digest in the same announcement" in maintainer
     assert "regenerate the block in `README.md`" not in maintainer
 
 

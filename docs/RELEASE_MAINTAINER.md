@@ -372,7 +372,10 @@ Then pin the regenerated script on the README: replace the digest in its
 README and the script land in one commit, so `main` is always self-consistent.
 `raw.githubusercontent.com` caches for up to five minutes, so an operator who
 fetches within minutes of the merge can see one digest mismatch; a retry
-resolves it.
+resolves it. Publish the script digest in the same announcement as the
+bootstrap key fingerprint: the README is served from the same branch as the
+script, so the announcement is the only anchor an operator has that is not
+under repository write access.
 
 The bootstrap signing key digest and its fingerprint are not per-publication
 values. They change only on key rotation. Do not retype them as if they

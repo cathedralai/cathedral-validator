@@ -28,9 +28,9 @@ pinned TDX and SNP verifier programs.
 - A hotkey registered on SN39 that holds a validator permit. The validator
   refuses to start otherwise, and a permit depends on your stake relative to
   other validators.
-- Your Bittensor validator hotkey file and its public SS58 address. The file
-  must be unencrypted (the `btcli` default for hotkeys) and readable only by
-  its owner.
+- Your Bittensor validator hotkey file and its public SS58 address, the
+  `ss58Address` field inside that file. The file must be unencrypted (the
+  `btcli` default for hotkeys) and readable only by its owner.
 - A reviewed AMD SEV-SNP policy containing only measurements and TCB floors you
   trust. The template is in
   [Validator auto-update](docs/AUTO_UPDATE.md#before-installation).
@@ -72,19 +72,25 @@ address before chain access.
 Do not install or enable updater services from a source checkout. The install
 script downloads the signed bootstrap release, verifies it against the
 bootstrap signing key pinned inside the script, and installs the updater as
-root-owned files. It installs no release and enables nothing. It is 77 lines.
-Read it first if you want to.
+root-owned files. It installs no release and enables nothing. It is short.
+Read it first if you want to. The bootstrap it installs, with its issue and
+expiry times, is listed under
+[Bootstrap trust](docs/AUTO_UPDATE.md#bootstrap-trust).
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 -o install.sh \
-  https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/scripts/install.sh
-echo '2957ec3487c550adbec9cb08955364d74af14a22140f400a48f5b0c92490cf25  install.sh' | sha256sum -c
+  https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/scripts/install.sh &&
+echo '2957ec3487c550adbec9cb08955364d74af14a22140f400a48f5b0c92490cf25  install.sh' | sha256sum -c &&
 sudo bash install.sh
 ```
 
-The last line it prints is one JSON line ending in `"status":"installed"`. If
-a check fails it stops, changes nothing, and names the staging directory it
-kept for inspection.
+The last line it prints is one JSON line ending in `"status":"installed"`.
+If the digest line prints `FAILED`, nothing runs: the download is cached for
+up to five minutes after a change, so retry after five minutes, and if it
+still fails, stop and open an issue. If a check inside the script fails it
+stops, changes nothing, and names the staging directory it kept for
+inspection. `bootstrap manifest has expired` means the bootstrap is past its
+expiry and a new one is due, not that anything was tampered with.
 
 Then run the guided setup once with your hotkey file, its public address, and
 your reviewed SNP policy, and read the local status:
@@ -112,7 +118,8 @@ later finalized heads.
 
 `sudo cathedral-validator-status` is the one local summary: service health,
 signed release, update timer, and the latest recorded weight result. It does
-not replace finalized chain verification.
+not replace finalized chain verification. The service log is
+`sudo journalctl -u cathedral-validator-direct.service -f`.
 
 - `NOT_PROVEN` means success is unresolved. The next cycle resumes recovery
   before any new write.
@@ -147,8 +154,10 @@ the updater verify each release against that key before activating it. The
 hotkey goes to the unprivileged validator service only, and never to the
 updater or to Cathedral.
 
-Bootstrap signing key fingerprint. It changes only on key rotation, and you
-can compare it against a source other than this repository before you install:
+Two values are worth comparing against a source other than this repository
+before you install: the script digest in the install block above, and the
+bootstrap signing key fingerprint below. Cathedral publishes both together
+with every bootstrap. The fingerprint changes only on key rotation:
 
 ```text
 sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
