@@ -806,9 +806,9 @@ def test_tournament_recency_window_weights_the_latest_epoch(tmp_path, monkeypatc
     assert info["reason"] == "ok_tournament"
     assert info["window_epochs"] == [20, 21]
     assert info["winners"] == ["5B", "5A"]             # B (recent) ahead of A
-    # Two winners: 0.65/0.14 renormalized to sum 1.
-    assert vec[2] == pytest.approx(0.822785)           # 5B rank 1
-    assert vec[1] == pytest.approx(0.177215)           # 5A rank 2
+    # Two winners: rank 1 = 1 - S5 = 0.96, rank 2 = S5 = 0.04 (bottom-fill design).
+    assert vec[2] == pytest.approx(0.96)               # 5B rank 1
+    assert vec[1] == pytest.approx(0.04)               # 5A rank 2
 
 
 def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
@@ -817,6 +817,28 @@ def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
     assert T.WINDOW == 5 and T.WINNER_SLOTS == 5
     assert [str(w) for w in T.ROLLING_WEIGHTS] == ["0.03", "0.07", "0.15", "0.25", "0.50"]
     assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.65", "0.14", "0.10", "0.07", "0.04"]
+
+
+def test_award_shares_curve_is_the_fixed_v3_schedule():
+    # Golden values shared VERBATIM with the cathedral_distill copy of _award_shares
+    # (BOUNDARY.md fork hazard): keep this table byte-identical in both repos. Bottom
+    # ranks take fixed level shares S5..S2 from the bottom up; rank 1 takes the remainder.
+    from decimal import Decimal
+
+    from scaffold.publisher.cybergym_tournament import _award_shares
+
+    assert _award_shares(0) == []
+    assert _award_shares(1) == [Decimal("1")]
+    assert _award_shares(2) == [Decimal("0.96"), Decimal("0.04")]
+    assert _award_shares(3) == [Decimal("0.89"), Decimal("0.07"), Decimal("0.04")]
+    assert _award_shares(4) == [
+        Decimal("0.79"), Decimal("0.10"), Decimal("0.07"), Decimal("0.04"),
+    ]
+    assert _award_shares(5) == [
+        Decimal("0.65"), Decimal("0.14"), Decimal("0.10"), Decimal("0.07"), Decimal("0.04"),
+    ]
+    for n in range(1, 6):
+        assert sum(_award_shares(n), Decimal(0)) == Decimal("1")
 
 
 # --- DCAP attestation gate (distill #115 follow-on) --------------------------
