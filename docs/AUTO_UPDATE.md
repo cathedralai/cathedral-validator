@@ -135,10 +135,10 @@ Published bootstrap, sequence 2, signed 2026-09-03T00:00:04Z, valid until
 - stable metadata URL: `https://raw.githubusercontent.com/cathedralai/cathedral-validator/validator-release-channel/validator/stable.json`
 - authenticated stable minimum sequence: 2, bound metadata SHA-256 `5c1a486047b85036c701b61ecc483c3fb748bdd3922fc2df5090cb493e79f8b0`
 
-The README's install block passes the bootstrap key only through
-`--bootstrap-public-key`, its pin through `--expected-bootstrap-key-fingerprint`,
-and the replay checkpoint through `--minimum-bootstrap-sequence`.
-There is no runtime-key argument.
+The install script, `scripts/install.sh`, is pinned by digest on the README.
+It passes the bootstrap key only through `--bootstrap-public-key`, its pin
+through `--expected-bootstrap-key-fingerprint`, and the replay checkpoint
+through `--minimum-bootstrap-sequence`. There is no runtime-key argument.
 <!-- END GENERATED UPDATER BOOTSTRAP -->
 
 ## Set up and start
@@ -224,6 +224,20 @@ Resume updates:
 ```bash
 sudo rm /etc/cathedral-validator/update.pause
 ```
+
+## Journal
+
+The direct writer keeps its journal at:
+
+```text
+/var/lib/cathedral-validator/.local/state/cathedral-validator/
+  direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json
+```
+
+Never delete or replace the journal to clear an error. The service uses
+`RestartPreventExitStatus=2`, so a contradiction remains stopped for review.
+If the host reboots during an update, inspect
+`cathedral-validator-boot-reconcile.service` before taking action.
 
 ## Recovery rules
 
