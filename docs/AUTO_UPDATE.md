@@ -118,22 +118,22 @@ therefore stays usable for new hosts after later stable publications, and
 routine updates follow the monotonic signed release contract from the start.
 
 <!-- BEGIN GENERATED UPDATER BOOTSTRAP -->
-Published bootstrap, sequence 1, signed 2026-09-02T15:26:48Z, valid until
-2026-10-02T15:26:48Z, immutable release tag `validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312`:
+Published bootstrap, sequence 2, signed 2026-09-03T00:00:04Z, valid until
+2026-10-03T00:00:04Z, immutable release tag `validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e`:
 
-- bundle: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312/updater-bootstrap.tar.gz`
-  (`6436995b7c6d7e1853aa52db12675c00d495f1312264df34fe2e7b822e44983c`)
-- manifest: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312/updater-bootstrap.manifest.json`
-  (`655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312`)
-- signature: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312/updater-bootstrap.manifest.sig`
-  (`7b0aaebe67411f0e0f8d32fa5fff79a331c657022af87acf761228afa23d0c5a`)
-- bootstrap public key: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s1-655f65ceec7c4d9a0b8a7ed0389b2a4fc326d0e2958ba54bb6c6467499b5c312/bootstrap-signing-public-key.pem`
+- bundle: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e/updater-bootstrap.tar.gz`
+  (`a9c4a083f42988d1d2cbadf5daf95f7aec57fc24caa2d1acb46335fc0ce70319`)
+- manifest: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e/updater-bootstrap.manifest.json`
+  (`1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e`)
+- signature: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e/updater-bootstrap.manifest.sig`
+  (`1102f2b98f9de575479a0065033cb3ba2fa9e052d01406ce9a185d9ee20e2121`)
+- bootstrap public key: `https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s2-1a55c6c2a9a4d1a4328288e045def747a3a22ce9a742f49dca1895ca4c940e7e/bootstrap-signing-public-key.pem`
   (`390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e`)
 - bootstrap signing key fingerprint, to be pinned independently: `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013`
 - runtime release key fingerprint bound inside the signed manifest: `sha256:56a0284790edac88e6b62e8256c43900ff3a43e590e0696c62ad224b5e0766bf`
-- bootstrap sequence checkpoint: 1
+- bootstrap sequence checkpoint: 2
 - stable metadata URL: `https://raw.githubusercontent.com/cathedralai/cathedral-validator/validator-release-channel/validator/stable.json`
-- authenticated stable minimum sequence: 1, bound metadata SHA-256 `e99f8b81b377677797686d4263d3e619db03e7c950f136ced3065d5fd80ff2a5`
+- authenticated stable minimum sequence: 2, bound metadata SHA-256 `5c1a486047b85036c701b61ecc483c3fb748bdd3922fc2df5090cb493e79f8b0`
 
 The README's install block passes the bootstrap key only through
 `--bootstrap-public-key`, its pin through `--expected-bootstrap-key-fingerprint`,
