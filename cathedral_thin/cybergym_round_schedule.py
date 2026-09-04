@@ -27,6 +27,7 @@ compose-and-set at the round boundary point, else re-assert if the keep-alive in
 Everything here is a pure function of the block height and a couple of remembered block numbers,
 so the runtime loop stays trivial and testable and two validators agree on when to act.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,7 +51,9 @@ REASSERT_BLOCKS = 300
 #: (an unevaluated miner is simply not averaged — see the eval side).
 SUBMISSION_CLOSE_OFFSET = 6000
 
-if not (0 < SUBMISSION_CLOSE_OFFSET <= WEIGHT_SET_OFFSET):  # pragma: no cover - config guard
+if not (
+    0 < SUBMISSION_CLOSE_OFFSET <= WEIGHT_SET_OFFSET
+):  # pragma: no cover - config guard
     raise ValueError("submissions must close at or before the weight-set offset")
 
 if not (0 <= WEIGHT_SET_OFFSET < ROUND_BLOCKS):  # pragma: no cover - config guard
@@ -77,23 +80,28 @@ class RoundConfig:
         if not (0 <= self.weight_set_offset < self.round_blocks):
             raise ValueError("weight_set_offset must fall inside the round")
         if not (0 < self.submission_close_offset <= self.weight_set_offset):
-            raise ValueError("submissions must close at or before the weight-set offset")
+            raise ValueError(
+                "submissions must close at or before the weight-set offset"
+            )
         if self.reassert_blocks <= 0:
             raise ValueError("reassert_blocks must be positive")
 
 
 #: A short profile for end-to-end testing: same shape, ~1/100th the length, so a full
 #: submit -> evaluate -> emit pipeline runs in minutes instead of three days.
-TEST_CONFIG = RoundConfig(round_blocks=72, weight_set_offset=66,
-                          reassert_blocks=3, submission_close_offset=60)
+TEST_CONFIG = RoundConfig(
+    round_blocks=72, weight_set_offset=66, reassert_blocks=3, submission_close_offset=60
+)
 
 PRODUCTION = RoundConfig()
 
 
 class Phase(str, Enum):
-    SUBMIT = "submit"        # accepting submissions AND running agents (before the close offset)
-    DRAIN = "drain"          # submissions closed; the sandbox queue finishes running
-    EVALUATE = "evaluate"    # (of the PREVIOUS round's submissions) benchmarking + weight compose
+    SUBMIT = (
+        "submit"  # accepting submissions AND running agents (before the close offset)
+    )
+    DRAIN = "drain"  # submissions closed; the sandbox queue finishes running
+    EVALUATE = "evaluate"  # (of the PREVIOUS round's submissions) benchmarking + weight compose
 
 
 def phase(block: int, cfg: RoundConfig = PRODUCTION) -> Phase:
@@ -103,7 +111,11 @@ def phase(block: int, cfg: RoundConfig = PRODUCTION) -> Phase:
     the previous one — the pipeline is continuous, not a loop, so both are always true. This
     reports the submit-side state: accepting (before the close) or draining the run queue after.
     """
-    return Phase.SUBMIT if block_offset(block, cfg) < cfg.submission_close_offset else Phase.DRAIN
+    return (
+        Phase.SUBMIT
+        if block_offset(block, cfg) < cfg.submission_close_offset
+        else Phase.DRAIN
+    )
 
 
 def accepting_submissions(block: int, cfg: RoundConfig = PRODUCTION) -> bool:
@@ -112,9 +124,11 @@ def accepting_submissions(block: int, cfg: RoundConfig = PRODUCTION) -> bool:
 
 
 class Action(str, Enum):
-    COMPOSE_AND_SET = "compose_and_set"  # authoritative weight compose for the closed round
-    REASSERT = "reassert"                # re-set the SAME weights to stay live
-    WAIT = "wait"                        # nothing to do this block
+    COMPOSE_AND_SET = (
+        "compose_and_set"  # authoritative weight compose for the closed round
+    )
+    REASSERT = "reassert"  # re-set the SAME weights to stay live
+    WAIT = "wait"  # nothing to do this block
 
 
 def round_index(block: int, cfg: RoundConfig = PRODUCTION) -> int:
@@ -155,11 +169,15 @@ def is_weight_set_block(block: int, cfg: RoundConfig = PRODUCTION) -> bool:
 class ScheduleState:
     """What the validator remembers between blocks."""
 
-    last_set_block: int | None = None          # last block it set weights at (any kind)
-    last_composed_round: int | None = None      # last submission round it authoritatively composed
+    last_set_block: int | None = None  # last block it set weights at (any kind)
+    last_composed_round: int | None = (
+        None  # last submission round it authoritatively composed
+    )
 
 
-def next_action(block: int, state: ScheduleState, cfg: RoundConfig = PRODUCTION) -> Action:
+def next_action(
+    block: int, state: ScheduleState, cfg: RoundConfig = PRODUCTION
+) -> Action:
     """Decide what the validator should do at ``block``.
 
     COMPOSE_AND_SET once per round at ``WEIGHT_SET_OFFSET`` — but only if this round's
@@ -182,7 +200,9 @@ def next_action(block: int, state: ScheduleState, cfg: RoundConfig = PRODUCTION)
     return Action.WAIT
 
 
-def record_action(block: int, action: Action, state: ScheduleState, cfg: RoundConfig = PRODUCTION) -> ScheduleState:
+def record_action(
+    block: int, action: Action, state: ScheduleState, cfg: RoundConfig = PRODUCTION
+) -> ScheduleState:
     """The state after taking ``action`` at ``block`` — feed it back next block."""
     if action is Action.WAIT:
         return state
@@ -193,10 +213,23 @@ def record_action(block: int, action: Action, state: ScheduleState, cfg: RoundCo
 
 
 __all__ = [
-    "ROUND_BLOCKS", "WEIGHT_SET_OFFSET", "REASSERT_BLOCKS", "SUBMISSION_CLOSE_OFFSET",
-    "phase", "accepting_submissions", "RoundConfig", "TEST_CONFIG", "PRODUCTION",
-    "Phase", "Action", "ScheduleState",
-    "round_index", "round_bounds", "block_offset",
-    "submission_round_being_scored", "is_weight_set_block",
-    "next_action", "record_action",
+    "ROUND_BLOCKS",
+    "WEIGHT_SET_OFFSET",
+    "REASSERT_BLOCKS",
+    "SUBMISSION_CLOSE_OFFSET",
+    "phase",
+    "accepting_submissions",
+    "RoundConfig",
+    "TEST_CONFIG",
+    "PRODUCTION",
+    "Phase",
+    "Action",
+    "ScheduleState",
+    "round_index",
+    "round_bounds",
+    "block_offset",
+    "submission_round_being_scored",
+    "is_weight_set_block",
+    "next_action",
+    "record_action",
 ]

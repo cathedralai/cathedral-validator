@@ -22,6 +22,7 @@ Only PoCs the sandbox collected within the limit are present in a submission, so
 PoCs within the time limit" is already enforced upstream; the validator benchmarks what it is
 given and never re-runs the agent.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -31,7 +32,6 @@ from typing import Any, Callable
 
 from cathedral_thin.cybergym_round_scoring import (
     RoundBoard,
-    RoundScoringError,
     compose_round_board,
     round_score_base100,
 )
@@ -69,7 +69,9 @@ class Submission:
             raise RoundEvalError("submission needs a miner_hotkey")
         seen = [t.task_id for t in self.tasks]
         if len(seen) != len(set(seen)):
-            raise RoundEvalError("a submission benchmarks each task once; task ids repeat")
+            raise RoundEvalError(
+                "a submission benchmarks each task once; task ids repeat"
+            )
 
 
 # (task_id, poc, proof) -> True iff the PoC crashes the vulnerable build AND spares the patched
@@ -84,7 +86,7 @@ class MinerRoundResult:
     agent_digest: str
     solved: int
     total: int
-    score: Decimal                       # base-100
+    score: Decimal  # base-100
     per_task: tuple[tuple[str, bool], ...]  # (task_id, solved) for audit
     #: False when this validator did not finish benchmarking this miner (ran out of round, or the
     #: corpus would not build). It reports the miner as UNEVALUATED with score 0, and the backend
@@ -94,7 +96,9 @@ class MinerRoundResult:
 
 
 def benchmark_submission(
-    submission: Submission, benchmark: BenchmarkFn, *,
+    submission: Submission,
+    benchmark: BenchmarkFn,
+    *,
     task_ids: Sequence[str] | None = None,
     task_weights: Mapping[str, Decimal] | None = None,
 ) -> MinerRoundResult:
@@ -108,7 +112,11 @@ def benchmark_submission(
     whose benchmark RAISES counts as unsolved (a broken proof or PoC is not a solve) rather than
     aborting the miner's whole round.
     """
-    authoritative = list(task_ids) if task_ids is not None else [t.task_id for t in submission.tasks]
+    authoritative = (
+        list(task_ids)
+        if task_ids is not None
+        else [t.task_id for t in submission.tasks]
+    )
     allowed = set(authoritative)
     submitted = {t.task_id: t for t in submission.tasks if t.task_id in allowed}
     per_task: list[tuple[str, bool]] = []
@@ -136,8 +144,10 @@ def benchmark_submission(
 
 
 def evaluate_round(
-    submissions: Sequence[Submission], benchmark: BenchmarkFn,
-    *, task_ids: Sequence[str] | None = None,
+    submissions: Sequence[Submission],
+    benchmark: BenchmarkFn,
+    *,
+    task_ids: Sequence[str] | None = None,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
 ) -> dict[str, MinerRoundResult]:
@@ -166,7 +176,9 @@ def evaluate_round(
     allowed = set(task_ids) if task_ids is not None else None
     for sub in submissions:
         if sub.miner_hotkey in order:
-            raise RoundEvalError(f"two submissions for {sub.miner_hotkey}; one per miner per round")
+            raise RoundEvalError(
+                f"two submissions for {sub.miner_hotkey}; one per miner per round"
+            )
         order.append(sub.miner_hotkey)
         for tp in sub.tasks:
             if allowed is not None and tp.task_id not in allowed:
@@ -177,7 +189,9 @@ def evaluate_round(
     # How many benchmark verdicts this miner should end up with — used only to tell "finished" from
     # "ran out of time". The SCORE denominator is the authoritative set below, not this.
     submitted_count = {
-        s.miner_hotkey: sum(1 for tp in s.tasks if allowed is None or tp.task_id in allowed)
+        s.miner_hotkey: sum(
+            1 for tp in s.tasks if allowed is None or tp.task_id in allowed
+        )
         for s in submissions
     }
     denominator = list(task_ids) if task_ids is not None else None
@@ -203,28 +217,44 @@ def evaluate_round(
         complete = len(benchmarked) == submitted_count[hk]
         if not benchmarked and ran_out and submitted_count[hk]:
             # never got to this miner: abstain rather than score them zero
-            results[hk] = MinerRoundResult(hk, agent_digest[hk], 0, submitted_count[hk],
-                                           Decimal(0), (), evaluated=False)
+            results[hk] = MinerRoundResult(
+                hk,
+                agent_digest[hk],
+                0,
+                submitted_count[hk],
+                Decimal(0),
+                (),
+                evaluated=False,
+            )
             continue
         # Pad the authoritative set: a task this miner never submitted is an unsolved task, and it
         # belongs in the audit trail as one rather than silently shrinking the denominator.
         got = dict(benchmarked)
-        per_task = ([(t, got.get(t, False)) for t in denominator] if denominator is not None
-                    else benchmarked)
+        per_task = (
+            [(t, got.get(t, False)) for t in denominator]
+            if denominator is not None
+            else benchmarked
+        )
         w = task_weights or {}
         solved_w = sum((Decimal(w.get(t, 1)) for t, ok in per_task if ok), Decimal(0))
         total_w = sum((Decimal(w.get(t, 1)) for t, _ in per_task), Decimal(0))
         results[hk] = MinerRoundResult(
-            miner_hotkey=hk, agent_digest=agent_digest[hk],
-            solved=sum(1 for _, ok in per_task if ok), total=len(per_task),
-            score=round_score_base100(solved_w, total_w), per_task=tuple(per_task),
+            miner_hotkey=hk,
+            agent_digest=agent_digest[hk],
+            solved=sum(1 for _, ok in per_task if ok),
+            total=len(per_task),
+            score=round_score_base100(solved_w, total_w),
+            per_task=tuple(per_task),
             evaluated=complete,
         )
     return results
 
 
 def compose_round_weights(
-    source_epoch: int, results: Mapping[str, MinerRoundResult], *, nonce: bytes | str,
+    source_epoch: int,
+    results: Mapping[str, MinerRoundResult],
+    *,
+    nonce: bytes | str,
 ) -> RoundBoard:
     """Compose the per-round KING board from benchmarked results -> the lane weight vector.
 
@@ -240,6 +270,12 @@ def compose_round_weights(
 
 
 __all__ = [
-    "RoundEvalError", "TaskProof", "Submission", "BenchmarkFn", "MinerRoundResult",
-    "benchmark_submission", "evaluate_round", "compose_round_weights",
+    "RoundEvalError",
+    "TaskProof",
+    "Submission",
+    "BenchmarkFn",
+    "MinerRoundResult",
+    "benchmark_submission",
+    "evaluate_round",
+    "compose_round_weights",
 ]

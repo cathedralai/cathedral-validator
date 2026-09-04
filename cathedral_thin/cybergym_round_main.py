@@ -17,6 +17,7 @@ validator that silently records weights instead of setting them looks healthy wh
 zeroes it. Wiring the substrate ``set_weights`` extrinsic in place of the file sink is the only
 change going on-chain requires.
 """
+
 from __future__ import annotations
 
 import os
@@ -36,26 +37,40 @@ def main() -> int:
     if os.environ.get("CYBERGYM_ALLOW_OFFCHAIN") != "1":
         raise SystemExit(
             "this daemon RECORDS weights to a file, it does not set them on chain. "
-            "Set CYBERGYM_ALLOW_OFFCHAIN=1 to run it knowingly.")
+            "Set CYBERGYM_ALLOW_OFFCHAIN=1 to run it knowingly."
+        )
     base = os.environ.get("CYBERGYM_BACKEND", "http://127.0.0.1:8700")
     docker = os.environ.get("CYBERGYM_DOCKER", "docker")
-    sink = FileWeightSink(path=Path(os.environ.get("CYBERGYM_WEIGHTS_FILE",
-                                                  "cybergym-weights.jsonl")))
+    sink = FileWeightSink(
+        path=Path(os.environ.get("CYBERGYM_WEIGHTS_FILE", "cybergym-weights.jsonl"))
+    )
     daemon = RoundDaemon(
-        client=HttpRoundClient(base, hotkey, timeout=float(os.environ.get("CYBERGYM_HTTP_TIMEOUT", "60"))),
-        benchmark=lambda tid, poc, proof: docker_benchmark(tid, poc, proof, docker=docker),
+        client=HttpRoundClient(
+            base, hotkey, timeout=float(os.environ.get("CYBERGYM_HTTP_TIMEOUT", "60"))
+        ),
+        benchmark=lambda tid, poc, proof: docker_benchmark(
+            tid, poc, proof, docker=docker
+        ),
         sink=sink,
-        poll_seconds=float(os.environ.get("CYBERGYM_POLL_SECONDS", "2")))
+        poll_seconds=float(os.environ.get("CYBERGYM_POLL_SECONDS", "2")),
+    )
     block = daemon.sync_geometry()
-    print(f"validator {hotkey} -> {base} | block={block} geometry={daemon.cfg} "
-          f"| weights RECORDED to {sink.path}", flush=True)
+    print(
+        f"validator {hotkey} -> {base} | block={block} geometry={daemon.cfg} "
+        f"| weights RECORDED to {sink.path}",
+        flush=True,
+    )
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: daemon.stop())
     daemon.run()
-    print(f"stopped after {len(sink.sets)} weight sets; last = {sink.latest}", flush=True)
+    print(
+        f"stopped after {len(sink.sets)} weight sets; last = {sink.latest}", flush=True
+    )
     if daemon.errors:
-        print(f"{len(daemon.errors)} errored ticks, last: {daemon.errors[-1]}", flush=True)
+        print(
+            f"{len(daemon.errors)} errored ticks, last: {daemon.errors[-1]}", flush=True
+        )
     return 0
 
 

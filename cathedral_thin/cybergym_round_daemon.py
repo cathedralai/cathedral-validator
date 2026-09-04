@@ -17,6 +17,7 @@ derives one deterministically from the round id and is clearly marked as a TEST 
 every validator agree, which is what a dry run needs, and it is not adversarially safe, which is
 why production must pass a real block-hash nonce instead.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,15 +25,22 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
 from cathedral_thin.cybergym_round_client import HttpRoundClient, RoundClientError
 from cathedral_thin.cybergym_round_eval import BenchmarkFn
-from cathedral_thin.cybergym_round_runtime import Action, LaneWeights, RuntimeState, step
-from cathedral_thin.cybergym_round_schedule import RoundConfig, submission_round_being_scored
+from cathedral_thin.cybergym_round_runtime import (
+    Action,
+    LaneWeights,
+    RuntimeState,
+    step,
+)
+from cathedral_thin.cybergym_round_schedule import (
+    RoundConfig,
+    submission_round_being_scored,
+)
 
 
 def offchain_nonce(round_id: int) -> bytes:
@@ -58,11 +66,14 @@ class FileWeightSink:
     block: int = 0
 
     def __call__(self, weights: LaneWeights) -> None:
-        row = {"block": self.block, "at": time.time(),
-               "weights": {hk: str(w) for hk, w in weights.miners.items()},
-               # Recorded explicitly: the forfeited share is the sandbox lane's, and a trail that
-               # showed only the miner shares would make a full forfeit look like an empty set.
-               "burn": str(weights.burn)}
+        row = {
+            "block": self.block,
+            "at": time.time(),
+            "weights": {hk: str(w) for hk, w in weights.miners.items()},
+            # Recorded explicitly: the forfeited share is the sandbox lane's, and a trail that
+            # showed only the miner shares would make a full forfeit look like an empty set.
+            "burn": str(weights.burn),
+        }
         self.sets.append(row)
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,16 +125,24 @@ class RoundDaemon:
         """One pass: read the block, step the loop, record what happened."""
         block = self.sync_geometry()
         self.sink.block = block
+
         # Past the compose block this validator has run out of round: `step` reports the miners it
         # never reached as UNEVALUATED, which the backend excludes from the average rather than
         # averaging in a zero.
         def past_deadline() -> bool:
             return block % self.cfg.round_blocks >= self.cfg.weight_set_offset
+
         try:
             self.state, action = step(
-                block, self.state, client=self.client, benchmark=self.benchmark,
-                set_weights=self.sink, nonce_for=self.nonce_for,
-                deadline=past_deadline, cfg=self.cfg)
+                block,
+                self.state,
+                client=self.client,
+                benchmark=self.benchmark,
+                set_weights=self.sink,
+                nonce_for=self.nonce_for,
+                deadline=past_deadline,
+                cfg=self.cfg,
+            )
         except (RoundClientError, Exception) as exc:
             # A transport failure must not compose weights from an empty field — that would burn
             # the lane's emission on a hiccup. Skip the tick and keep the last weights.
@@ -142,11 +161,14 @@ class RoundDaemon:
             # a round away. Display-only, but wrong exactly where an operator looks.
             scored = submission_round_being_scored(block, self.cfg)
             if scored >= 0:
-                self.client.report_weights(scored, self.state.weights().miners,
-                                           self.state.weights().burn)
+                self.client.report_weights(
+                    scored, self.state.weights().miners, self.state.weights().burn
+                )
         return block, action
 
-    def run(self, *, until_block: int | None = None, max_seconds: float | None = None) -> None:
+    def run(
+        self, *, until_block: int | None = None, max_seconds: float | None = None
+    ) -> None:
         started = time.time()
         while not self._stop.is_set():
             block, _ = self.tick()
@@ -157,8 +179,12 @@ class RoundDaemon:
             self._stop.wait(self.poll_seconds)
 
     def start(self, **kwargs) -> threading.Thread:
-        t = threading.Thread(target=self.run, kwargs=kwargs, daemon=True,
-                             name=f"validator-{self.client.validator_hotkey}")
+        t = threading.Thread(
+            target=self.run,
+            kwargs=kwargs,
+            daemon=True,
+            name=f"validator-{self.client.validator_hotkey}",
+        )
         t.start()
         return t
 

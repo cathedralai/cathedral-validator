@@ -18,12 +18,13 @@ benchmark each performs independently is what keeps the average honest.
 Every boundary is injected — the HTTP client, the differential/corpus-rebuild, the weight setter,
 and the nonce source — so the whole loop is testable with fakes and contains no I/O of its own.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from cathedral_thin.cybergym_round_eval import (
     BenchmarkFn,
@@ -60,7 +61,9 @@ class RoundClient(Protocol):
     def fetch_submissions(self, round_id: int) -> Sequence[Submission]:
         """The closed round's submissions: each miner's PoCs + per-task rebuild proofs."""
 
-    def post_results(self, round_id: int, results: Mapping[str, MinerRoundResult]) -> None:
+    def post_results(
+        self, round_id: int, results: Mapping[str, MinerRoundResult]
+    ) -> None:
         """Report this validator's benchmark verdicts; the server averages across validators."""
 
     def fetch_average_scores(self, round_id: int) -> Mapping[str, Decimal | int | str]:
@@ -101,19 +104,26 @@ class RuntimeState:
     """What the loop carries between blocks."""
 
     schedule: ScheduleState = ScheduleState()
-    last_weights: tuple[tuple[str, str], ...] = ()   # hotkey -> share (str), for re-assertion
+    last_weights: tuple[
+        tuple[str, str], ...
+    ] = ()  # hotkey -> share (str), for re-assertion
     #: The forfeited share to re-assert. Starts at 1: before this validator has composed anything
     #: it has no opinion about any miner, and the honest assertion is that the lane forfeits — not
     #: an empty vector, which asserts nothing while looking like a healthy weight set.
     last_burn: str = "1"
-    reported_round: int | None = None                 # last submission round we benchmarked+posted
+    reported_round: int | None = None  # last submission round we benchmarked+posted
 
     def weights(self) -> LaneWeights:
-        return LaneWeights({hk: Decimal(v) for hk, v in self.last_weights}, Decimal(self.last_burn))
+        return LaneWeights(
+            {hk: Decimal(v) for hk, v in self.last_weights}, Decimal(self.last_burn)
+        )
 
 
 def benchmark_and_report(
-    round_id: int, *, client: RoundClient, benchmark: BenchmarkFn,
+    round_id: int,
+    *,
+    client: RoundClient,
+    benchmark: BenchmarkFn,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
 ) -> dict[str, MinerRoundResult]:
@@ -127,16 +137,27 @@ def benchmark_and_report(
         raise RoundRuntimeError("no submission round to benchmark yet")
     task_ids = list(client.fetch_round_tasks(round_id))
     if not task_ids:
-        raise RoundRuntimeError(f"round {round_id} published no task set to score against")
+        raise RoundRuntimeError(
+            f"round {round_id} published no task set to score against"
+        )
     submissions = list(client.fetch_submissions(round_id))
-    results = evaluate_round(submissions, benchmark, task_ids=task_ids,
-                             task_weights=task_weights, deadline=deadline)
+    results = evaluate_round(
+        submissions,
+        benchmark,
+        task_ids=task_ids,
+        task_weights=task_weights,
+        deadline=deadline,
+    )
     client.post_results(round_id, results)
     return results
 
 
 def compose_and_set(
-    round_id: int, *, client: RoundClient, set_weights: SetWeightsFn, nonce: bytes,
+    round_id: int,
+    *,
+    client: RoundClient,
+    set_weights: SetWeightsFn,
+    nonce: bytes,
 ) -> RoundBoard:
     """Fetch the server's averaged scores, compose the KING board, and set the weights on chain.
 
@@ -147,8 +168,12 @@ def compose_and_set(
     """
     scores = dict(client.fetch_average_scores(round_id)) if round_id >= 0 else {}
     board = compose_round_board(round_id, scores, nonce=nonce)
-    set_weights(LaneWeights({s.miner_hotkey: s.lane_share for s in board.standings
-                             if s.lane_share > 0}, board.lane_burn))
+    set_weights(
+        LaneWeights(
+            {s.miner_hotkey: s.lane_share for s in board.standings if s.lane_share > 0},
+            board.lane_burn,
+        )
+    )
     return board
 
 
@@ -175,28 +200,55 @@ def step(
     # 1. Benchmark + report once per evaluation round (idempotent via reported_round).
     if scored_round >= 0 and state.reported_round != scored_round:
         try:
-            benchmark_and_report(scored_round, client=client, benchmark=benchmark,
-                                 task_weights=task_weights, deadline=deadline)
+            benchmark_and_report(
+                scored_round,
+                client=client,
+                benchmark=benchmark,
+                task_weights=task_weights,
+                deadline=deadline,
+            )
             state = replace(state, reported_round=scored_round)
         except Exception as exc:  # a failed report must not stop the weight obligation
-            raise RoundRuntimeError(f"benchmark/report failed for round {scored_round}: {exc}") from exc
+            raise RoundRuntimeError(
+                f"benchmark/report failed for round {scored_round}: {exc}"
+            ) from exc
 
     # 2. Weight obligation, per the schedule.
     action = next_action(block, state.schedule, cfg)
     if action is Action.COMPOSE_AND_SET:
-        board = compose_and_set(scored_round, client=client, set_weights=set_weights,
-                                nonce=nonce_for(max(scored_round, 0)))
-        weights = tuple((s.miner_hotkey, str(s.lane_share))
-                        for s in board.standings if s.lane_share > 0)
-        state = replace(state, last_weights=weights, last_burn=str(board.lane_burn),
-                        schedule=record_action(block, action, state.schedule, cfg))
+        board = compose_and_set(
+            scored_round,
+            client=client,
+            set_weights=set_weights,
+            nonce=nonce_for(max(scored_round, 0)),
+        )
+        weights = tuple(
+            (s.miner_hotkey, str(s.lane_share))
+            for s in board.standings
+            if s.lane_share > 0
+        )
+        state = replace(
+            state,
+            last_weights=weights,
+            last_burn=str(board.lane_burn),
+            schedule=record_action(block, action, state.schedule, cfg),
+        )
     elif action is Action.REASSERT:
         set_weights(state.weights())
-        state = replace(state, schedule=record_action(block, action, state.schedule, cfg))
+        state = replace(
+            state, schedule=record_action(block, action, state.schedule, cfg)
+        )
     return state, action
 
 
 __all__ = [
-    "RoundRuntimeError", "RoundClient", "LaneWeights", "SetWeightsFn", "NonceFn", "RuntimeState",
-    "benchmark_and_report", "compose_and_set", "step",
+    "RoundRuntimeError",
+    "RoundClient",
+    "LaneWeights",
+    "SetWeightsFn",
+    "NonceFn",
+    "RuntimeState",
+    "benchmark_and_report",
+    "compose_and_set",
+    "step",
 ]

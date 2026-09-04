@@ -24,6 +24,7 @@ That rule travels in the proof (``crash_evidence``), so every validator judges a
 committed criterion instead of "any crash counts". A proof without one is refused: an unjudgeable
 task is not a solve.
 """
+
 from __future__ import annotations
 
 import os
@@ -37,8 +38,12 @@ from typing import Any, Callable
 DOCKER_TIMEOUT = 300
 #: No network, no privileges, bounded memory/pids: a PoC is hostile input from an unknown miner.
 SANDBOX_FLAGS: tuple[str, ...] = (
-    "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-    "--pids-limit=256", "--memory=4g", "--user=1000:1000",
+    "--network=none",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--pids-limit=256",
+    "--memory=4g",
+    "--user=1000:1000",
 )
 
 _SANITIZERS = ("Address", "Memory", "Thread", "Leak", "UndefinedBehavior", "HWAddress")
@@ -85,7 +90,9 @@ def parse_proof(proof: Mapping) -> TaskBuilds:
     if not vul or not fix:
         raise BenchmarkError("proof needs both a vulnerable_image and a fixed_image")
     if vul == fix:
-        raise BenchmarkError("vulnerable and fixed images are identical; no differential exists")
+        raise BenchmarkError(
+            "vulnerable and fixed images are identical; no differential exists"
+        )
     command = tuple(str(c) for c in (proof.get("command") or ("/bin/arvo",)))
     if not command:
         raise BenchmarkError("proof needs a reproduce command")
@@ -96,16 +103,23 @@ def parse_proof(proof: Mapping) -> TaskBuilds:
     if not isinstance(sanitizer, str) or sanitizer not in KNOWN_SANITIZERS:
         raise BenchmarkError(
             f"crash_evidence sanitizer {sanitizer!r} is not one this validator can detect; "
-            f"expected one of {sorted(KNOWN_SANITIZERS)}")
+            f"expected one of {sorted(KNOWN_SANITIZERS)}"
+        )
     codes = _int_set(ev.get("exit_codes"), 1, 255, "exit_codes")
     signals = _int_set(ev.get("signals"), 1, 64, "signals")
     return TaskBuilds(vul, fix, command, CrashRule(sanitizer, codes, signals))
 
 
 def _int_set(values, low: int, high: int, what: str) -> frozenset[int]:
-    if (not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values
-            or any(isinstance(v, bool) or not isinstance(v, int) or not low <= v <= high
-                   for v in values)):
+    if (
+        not isinstance(values, Sequence)
+        or isinstance(values, (str, bytes))
+        or not values
+        or any(
+            isinstance(v, bool) or not isinstance(v, int) or not low <= v <= high
+            for v in values
+        )
+    ):
         raise BenchmarkError(f"crash_evidence has invalid {what}")
     return frozenset(int(v) for v in values)
 
@@ -114,27 +128,55 @@ def is_crash(output: str, returncode: int, rule: CrashRule) -> bool:
     """Sanitizer report for THIS task's sanitizer, plus a death the task is known to die."""
     if isinstance(returncode, bool) or not isinstance(returncode, int):
         return False
-    died = (-returncode in rule.signals) if returncode < 0 else (returncode in rule.exit_codes)
+    died = (
+        (-returncode in rule.signals)
+        if returncode < 0
+        else (returncode in rule.exit_codes)
+    )
     if not died:
         return False
     report = _SANITIZER_REPORT.search(output)
-    return report is not None and report.group("sanitizer") + "Sanitizer" == rule.sanitizer
+    return (
+        report is not None and report.group("sanitizer") + "Sanitizer" == rule.sanitizer
+    )
 
 
-def run_once(image: str, command: Sequence[str], poc: bytes, rule: CrashRule, *,
-             docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
-             _run: Runner = subprocess.run) -> bool:
+def run_once(
+    image: str,
+    command: Sequence[str],
+    poc: bytes,
+    rule: CrashRule,
+    *,
+    docker: str = "docker",
+    timeout: int = DOCKER_TIMEOUT,
+    _run: Runner = subprocess.run,
+) -> bool:
     """True iff this build crashes on this PoC."""
     fd, path = tempfile.mkstemp(prefix="cgpoc-")
     name = "cgbench-" + os.path.basename(path)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(poc)
-        os.chmod(path, 0o444)  # readable by the container's unprivileged uid, never writable
+        os.chmod(
+            path, 0o444
+        )  # readable by the container's unprivileged uid, never writable
         try:
-            r = _run([docker, "run", "--rm", "--name", name, *SANDBOX_FLAGS,
-                      "-v", f"{path}:/tmp/poc:ro", image, *command],
-                     capture_output=True, timeout=timeout)
+            r = _run(
+                [
+                    docker,
+                    "run",
+                    "--rm",
+                    "--name",
+                    name,
+                    *SANDBOX_FLAGS,
+                    "-v",
+                    f"{path}:/tmp/poc:ro",
+                    image,
+                    *command,
+                ],
+                capture_output=True,
+                timeout=timeout,
+            )
         except subprocess.TimeoutExpired:
             # Under --rm the container survives the killed client, so force it down: a looping or
             # memory-bombing PoC must not linger on the validator host. A timeout is a CLEAN
@@ -153,9 +195,15 @@ def run_once(image: str, command: Sequence[str], poc: bytes, rule: CrashRule, *,
             pass
 
 
-def docker_benchmark(task_id: str, poc: bytes, proof: Mapping, *,
-                     docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
-                     _run: Runner = subprocess.run) -> bool:
+def docker_benchmark(
+    task_id: str,
+    poc: bytes,
+    proof: Mapping,
+    *,
+    docker: str = "docker",
+    timeout: int = DOCKER_TIMEOUT,
+    _run: Runner = subprocess.run,
+) -> bool:
     """The `BenchmarkFn` for production: crash on vulnerable AND clean on patched.
 
     The vulnerable build runs first and a non-crash short-circuits: most PoCs fail there, and
@@ -165,13 +213,36 @@ def docker_benchmark(task_id: str, poc: bytes, proof: Mapping, *,
     if not poc:
         return False
     builds = parse_proof(proof)
-    if not run_once(builds.vulnerable_image, builds.command, poc, builds.rule,
-                    docker=docker, timeout=timeout, _run=_run):
+    if not run_once(
+        builds.vulnerable_image,
+        builds.command,
+        poc,
+        builds.rule,
+        docker=docker,
+        timeout=timeout,
+        _run=_run,
+    ):
         return False
-    return not run_once(builds.fixed_image, builds.command, poc, builds.rule,
-                        docker=docker, timeout=timeout, _run=_run)
+    return not run_once(
+        builds.fixed_image,
+        builds.command,
+        poc,
+        builds.rule,
+        docker=docker,
+        timeout=timeout,
+        _run=_run,
+    )
 
 
-__all__ = ["BenchmarkError", "CrashRule", "TaskBuilds", "SANDBOX_FLAGS", "DOCKER_TIMEOUT",
-           "KNOWN_SANITIZERS",
-           "parse_proof", "is_crash", "run_once", "docker_benchmark"]
+__all__ = [
+    "BenchmarkError",
+    "CrashRule",
+    "TaskBuilds",
+    "SANDBOX_FLAGS",
+    "DOCKER_TIMEOUT",
+    "KNOWN_SANITIZERS",
+    "parse_proof",
+    "is_crash",
+    "run_once",
+    "docker_benchmark",
+]

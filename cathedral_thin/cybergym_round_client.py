@@ -14,6 +14,7 @@ Two decisions worth stating, because both are about not fabricating a round:
   (a miner-supplied corpus would make every PoC "solve"), so the client neither fills in a
   default nor accepts a submission whose proof is missing.
 """
+
 from __future__ import annotations
 
 import base64
@@ -48,8 +49,9 @@ class HttpRoundClient:
         url = self._url(path, **query)
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
-        req = urllib.request.Request(url, data=data, headers=headers,
-                                     method="POST" if data else "GET")
+        req = urllib.request.Request(
+            url, data=data, headers=headers, method="POST" if data else "GET"
+        )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
@@ -87,31 +89,46 @@ class HttpRoundClient:
         for row in rows:
             try:
                 tasks = tuple(
-                    TaskProof(task_id=str(t["task_id"]),
-                              poc=base64.b64decode(t["poc_b64"]),
-                              proof=t["proof"])
-                    for t in row.get("tasks", []))
-                out.append(Submission(miner_hotkey=str(row["miner_hotkey"]),
-                                      agent_digest=str(row.get("agent_digest", "")),
-                                      tasks=tasks))
+                    TaskProof(
+                        task_id=str(t["task_id"]),
+                        poc=base64.b64decode(t["poc_b64"]),
+                        proof=t["proof"],
+                    )
+                    for t in row.get("tasks", [])
+                )
+                out.append(
+                    Submission(
+                        miner_hotkey=str(row["miner_hotkey"]),
+                        agent_digest=str(row.get("agent_digest", "")),
+                        tasks=tasks,
+                    )
+                )
             except Exception as exc:
                 raise RoundClientError(f"malformed submission row: {exc}") from exc
         return out
 
-    def post_results(self, round_id: int, results: Mapping[str, MinerRoundResult]) -> None:
+    def post_results(
+        self, round_id: int, results: Mapping[str, MinerRoundResult]
+    ) -> None:
         payload = {
             "validator_hotkey": self.validator_hotkey,
             "round_id": round_id,
             "results": [
-                {"miner_hotkey": r.miner_hotkey, "score": str(r.score),
-                 "evaluated": r.evaluated, "solved": r.solved, "total": r.total}
+                {
+                    "miner_hotkey": r.miner_hotkey,
+                    "score": str(r.score),
+                    "evaluated": r.evaluated,
+                    "solved": r.solved,
+                    "total": r.total,
+                }
                 for r in results.values()
             ],
         }
         self._request("/v2/results", payload=payload)
 
-    def report_weights(self, round_id: int, weights: Mapping[str, Decimal],
-                       burn: Decimal) -> bool:
+    def report_weights(
+        self, round_id: int, weights: Mapping[str, Decimal], burn: Decimal
+    ) -> bool:
         """Tell the backend what this validator composed, for the operator dashboard.
 
         DISPLAY ONLY: it feeds no score and no average, so a backend that ignores or mangles it
@@ -119,9 +136,15 @@ class HttpRoundClient:
         because failing to report what we set must never stop us from setting it.
         """
         try:
-            self._request("/v2/weights", payload={
-                "validator_hotkey": self.validator_hotkey, "round_id": round_id,
-                "weights": {hk: str(w) for hk, w in weights.items()}, "burn": str(burn)})
+            self._request(
+                "/v2/weights",
+                payload={
+                    "validator_hotkey": self.validator_hotkey,
+                    "round_id": round_id,
+                    "weights": {hk: str(w) for hk, w in weights.items()},
+                    "burn": str(burn),
+                },
+            )
             return True
         except RoundClientError:
             return False
