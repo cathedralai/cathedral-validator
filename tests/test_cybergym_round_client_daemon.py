@@ -222,3 +222,29 @@ class TestTheDaemon:
     def test_geometry_conversion_rejects_an_incoherent_server(self):
         with pytest.raises(ValueError):
             config_from_geometry({**GEOMETRY, "weight_set_offset": 999})
+
+
+class TestTheReportedRoundIsTheRoundActuallyScored:
+    """The first compose scores round -1 — nothing — and must not be filed under round 0.
+
+    Found reading the live dashboard off the box (2026-09-04): round 0 showed a composed all-burn
+    board while its real compose was still a round away.
+    """
+
+    def test_the_first_compose_reports_nothing(self, backend):
+        sink = FileWeightSink()
+        d = RoundDaemon(HttpRoundClient(backend.base, "v1"), lambda *a: True, sink)
+        backend.block = 66                      # round 0's compose block; it scores round -1
+        d.tick()
+        assert sink.sets, "it must still SET weights (skipping lets the chain zero us)"
+        assert backend.posted == [], "but it has no scored round to report them against"
+
+    def test_a_later_compose_reports_the_round_it_scored(self, backend):
+        backend.submissions = [wire_submission("m1")]
+        backend.scores = {"m1": "100"}
+        d = RoundDaemon(HttpRoundClient(backend.base, "v1"), lambda t, p, pr: True,
+                        FileWeightSink())
+        backend.block = 72 * 2 + 66             # round 2's compose scores round 1
+        d.tick()
+        weight_posts = [p for p in backend.posted if "weights" in p]
+        assert weight_posts and weight_posts[-1]["round_id"] == 1

@@ -32,7 +32,7 @@ from typing import Callable
 from cathedral_thin.cybergym_round_client import HttpRoundClient, RoundClientError
 from cathedral_thin.cybergym_round_eval import BenchmarkFn
 from cathedral_thin.cybergym_round_runtime import Action, LaneWeights, RuntimeState, step
-from cathedral_thin.cybergym_round_schedule import RoundConfig
+from cathedral_thin.cybergym_round_schedule import RoundConfig, submission_round_being_scored
 
 
 def offchain_nonce(round_id: int) -> bytes:
@@ -134,9 +134,16 @@ class RoundDaemon:
         if action is Action.COMPOSE_AND_SET:
             # Best-effort, after the weights are already set: the operator dashboard shows whether
             # the validators agreed, and a failure to report must never affect what we set.
-            scored = max(block // self.cfg.round_blocks - 1, 0)
-            self.client.report_weights(scored, self.state.weights().miners,
-                                       self.state.weights().burn)
+            #
+            # Report against the round we actually SCORED, using the same function the runtime
+            # composes from. Clamping a negative to 0 (as this first did) files the very first
+            # compose — which scores round -1, i.e. nothing — under round 0, so the dashboard
+            # shows round 0 already composed as an all-burn board while its real compose is still
+            # a round away. Display-only, but wrong exactly where an operator looks.
+            scored = submission_round_being_scored(block, self.cfg)
+            if scored >= 0:
+                self.client.report_weights(scored, self.state.weights().miners,
+                                           self.state.weights().burn)
         return block, action
 
     def run(self, *, until_block: int | None = None, max_seconds: float | None = None) -> None:
