@@ -131,6 +131,12 @@ class RoundDaemon:
             return block, None
         if action is not Action.WAIT:
             self.actions.append((block, action.value))
+        if action is Action.COMPOSE_AND_SET:
+            # Best-effort, after the weights are already set: the operator dashboard shows whether
+            # the validators agreed, and a failure to report must never affect what we set.
+            scored = max(block // self.cfg.round_blocks - 1, 0)
+            self.client.report_weights(scored, self.state.weights().miners,
+                                       self.state.weights().burn)
         return block, action
 
     def run(self, *, until_block: int | None = None, max_seconds: float | None = None) -> None:

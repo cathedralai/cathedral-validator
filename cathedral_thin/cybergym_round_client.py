@@ -110,6 +110,22 @@ class HttpRoundClient:
         }
         self._request("/v2/results", payload=payload)
 
+    def report_weights(self, round_id: int, weights: Mapping[str, Decimal],
+                       burn: Decimal) -> bool:
+        """Tell the backend what this validator composed, for the operator dashboard.
+
+        DISPLAY ONLY: it feeds no score and no average, so a backend that ignores or mangles it
+        cannot change a payout. Best-effort by design — it returns False instead of raising,
+        because failing to report what we set must never stop us from setting it.
+        """
+        try:
+            self._request("/v2/weights", payload={
+                "validator_hotkey": self.validator_hotkey, "round_id": round_id,
+                "weights": {hk: str(w) for hk, w in weights.items()}, "burn": str(burn)})
+            return True
+        except RoundClientError:
+            return False
+
     def fetch_average_scores(self, round_id: int) -> Mapping[str, Decimal]:
         body = self._request("/v2/average", round=round_id)
         scores = body.get("scores")
