@@ -15,6 +15,7 @@ from cathedral_thin.cybergym_round_daemon import (  # noqa: E402
     FileWeightSink, RoundDaemon, config_from_geometry, offchain_nonce,
 )
 from cathedral_thin.cybergym_round_eval import MinerRoundResult  # noqa: E402
+from cathedral_thin.cybergym_round_runtime import LaneWeights  # noqa: E402
 from cathedral_thin.cybergym_round_schedule import TEST_CONFIG  # noqa: E402
 
 TASKS = ["arvo:1", "arvo:2"]
@@ -149,19 +150,20 @@ class TestTheWeightSink:
     def test_it_records_every_set_with_its_block(self, tmp_path):
         sink = FileWeightSink(path=tmp_path / "w.jsonl")
         sink.block = 66
-        sink({"m1": Decimal("0.84")})
+        sink(LaneWeights({"m1": Decimal("0.84")}, Decimal("0.16")))
         rows = [json.loads(line) for line in (tmp_path / "w.jsonl").read_text().splitlines()]
         assert rows[0]["block"] == 66 and rows[0]["weights"] == {"m1": "0.84"}
+        assert rows[0]["burn"] == "0.16", "a trail without the burn hides a forfeited lane"
 
     def test_the_latest_vector_is_the_last_one_set(self, tmp_path):
         sink = FileWeightSink(path=tmp_path / "w.jsonl")
-        sink({"m1": Decimal("1")})
-        sink({"m2": Decimal("1")})
+        sink(LaneWeights({"m1": Decimal("1")}))
+        sink(LaneWeights({"m2": Decimal("1")}))
         assert sink.latest == {"m2": "1"}
 
     def test_it_works_without_a_file(self):
         sink = FileWeightSink()
-        sink({"m1": Decimal("1")})
+        sink(LaneWeights({"m1": Decimal("1")}))
         assert sink.latest == {"m1": "1"}
 
 
@@ -195,6 +197,23 @@ class TestTheDaemon:
         d.tick()
         assert backend.posted, "the validator must report its own verdicts"
         assert sink.latest == {"m1": "0.930000", "m2": "0.07"}
+
+    def test_a_lane_with_no_qualifying_miner_forfeits_rather_than_setting_nothing(self, backend):
+        """An empty vector is not a forfeit; it is a malformed set that drops the allocation."""
+        backend.submissions = []
+        backend.scores = {}
+        sink = FileWeightSink()
+        d = RoundDaemon(HttpRoundClient(backend.base, "v1"), lambda *a: True, sink)
+        backend.block = 72 + 66
+        d.tick()
+        assert sink.latest == {} and Decimal(sink.latest_burn) == Decimal(1)
+
+    def test_before_the_first_compose_it_asserts_a_forfeit_not_an_empty_vector(self, backend):
+        sink = FileWeightSink()
+        d = RoundDaemon(HttpRoundClient(backend.base, "v1"), lambda *a: True, sink)
+        backend.block = 10          # mid-round-0: nothing to score, nothing composed yet
+        d.tick()
+        assert Decimal(sink.latest_burn) == Decimal(1)
 
     def test_the_offchain_nonce_is_shared_deterministic_and_labelled_test_only(self):
         assert offchain_nonce(7) == offchain_nonce(7) != offchain_nonce(8)

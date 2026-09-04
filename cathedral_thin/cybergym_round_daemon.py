@@ -31,7 +31,7 @@ from typing import Callable
 
 from cathedral_thin.cybergym_round_client import HttpRoundClient, RoundClientError
 from cathedral_thin.cybergym_round_eval import BenchmarkFn
-from cathedral_thin.cybergym_round_runtime import Action, RuntimeState, step
+from cathedral_thin.cybergym_round_runtime import Action, LaneWeights, RuntimeState, step
 from cathedral_thin.cybergym_round_schedule import RoundConfig
 
 
@@ -57,9 +57,12 @@ class FileWeightSink:
     sets: list[dict] = field(default_factory=list)
     block: int = 0
 
-    def __call__(self, weights: Mapping[str, Decimal]) -> None:
+    def __call__(self, weights: LaneWeights) -> None:
         row = {"block": self.block, "at": time.time(),
-               "weights": {hk: str(w) for hk, w in weights.items()}}
+               "weights": {hk: str(w) for hk, w in weights.miners.items()},
+               # Recorded explicitly: the forfeited share is the sandbox lane's, and a trail that
+               # showed only the miner shares would make a full forfeit look like an empty set.
+               "burn": str(weights.burn)}
         self.sets.append(row)
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +72,10 @@ class FileWeightSink:
     @property
     def latest(self) -> dict[str, str]:
         return self.sets[-1]["weights"] if self.sets else {}
+
+    @property
+    def latest_burn(self) -> str:
+        return self.sets[-1]["burn"] if self.sets else "1"
 
 
 def config_from_geometry(geometry: Mapping) -> RoundConfig:

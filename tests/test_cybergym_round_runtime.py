@@ -57,17 +57,24 @@ class TestComposeAndSetUsesTheServerAverage:
         # the AVERAGE, which is what makes validators converge on one number.
         c = FakeClient(averages={"a": 90, "b": 40})
         got = {}
-        board = compose_and_set(2, client=c, set_weights=lambda w: got.update(w), nonce=b"n")
+        board = compose_and_set(2, client=c, set_weights=lambda w: got.update(w.miners), nonce=b"n")
         assert c.fetched_avg_for == [2]
         assert got == {"a": Decimal("0.93"), "b": Decimal("0.07")}
         assert board.winners == ("a", "b")
 
     def test_empty_field_still_sets_weights_and_burns(self):
+        """Still set (never skip — the chain would zero us), and the forfeit must SURVIVE the set.
+
+        This test previously asserted `calls == [{}]`, which was the bug written down: an empty
+        vector is not a forfeit, and the lane's allocation went nowhere instead of to the
+        sandbox lane.
+        """
         c = FakeClient(averages={})
         calls = []
-        board = compose_and_set(2, client=c, set_weights=lambda w: calls.append(w), nonce=b"n")
+        board = compose_and_set(2, client=c, set_weights=calls.append, nonce=b"n")
         assert board.lane_burn == Decimal("1")
-        assert calls == [{}]      # still set (never skip — the chain would zero us)
+        assert len(calls) == 1
+        assert calls[0].miners == {} and calls[0].burn == Decimal("1")
 
 
 class TestStep:
@@ -88,7 +95,8 @@ class TestStep:
         c = FakeClient(submissions=[_sub("a", ["t1"])], averages={"a": 100, "b": 50})
         got = {}
         st = RuntimeState()
-        st, action = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, st, c, sw=lambda w: got.update(w))
+        st, action = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, st, c,
+                                sw=lambda w: got.update(w.miners))
         assert action is Action.COMPOSE_AND_SET
         assert got == {"a": Decimal("0.93"), "b": Decimal("0.07")}
         assert st.last_weights  # remembered for re-assertion
@@ -97,9 +105,9 @@ class TestStep:
         c = FakeClient(submissions=[], averages={"a": 100})
         seen = []
         st = RuntimeState()
-        st, _ = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, st, c, sw=lambda w: seen.append(dict(w)))
-        st, action = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET + 300, st, c,
-                                sw=lambda w: seen.append(dict(w)))
+        record = lambda w: seen.append((dict(w.miners), w.burn))
+        st, _ = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, st, c, sw=record)
+        st, action = self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET + 300, st, c, sw=record)
         assert action is Action.REASSERT
         assert seen[-1] == seen[0]      # the SAME weights re-set, per Bittensor's cadence
 
@@ -123,3 +131,33 @@ class TestDeadlineAbstains:
         assert all(r.evaluated is False for r in res.values())
         # still POSTED — the server needs to know we abstained, not just silence
         assert c.posted and c.posted[0][0] == 0
+
+
+class TestTheForfeitedShareIsNeverDropped:
+    """A lane with no qualifying miner forfeits to the sandbox lane — it does not set nothing.
+
+    Found running the daemon as a real process (2026-09-04): `compose_and_set` filtered the
+    board's standings and handed only those to the setter, so an all-burn board set an EMPTY
+    vector. The lane's allocation went nowhere instead of to the sandbox lane.
+    """
+
+    def _step(self, block, state, client, sw):
+        return step(block, state, client=client, benchmark=SOLVE_ALL, set_weights=sw,
+                    nonce_for=lambda r: b"nonce")
+
+    def test_an_empty_field_forfeits_the_whole_lane(self):
+        c = FakeClient(submissions=[], averages={}, tasks=["t1"])
+        seen = []
+        self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, RuntimeState(), c, sw=seen.append)
+        assert seen[-1].miners == {} and seen[-1].burn == Decimal(1)
+
+    def test_a_partial_field_carries_the_unearned_remainder(self):
+        c = FakeClient(submissions=[], averages={"a": 100}, tasks=["t1"])
+        seen = []
+        self._step(ROUND_BLOCKS + WEIGHT_SET_OFFSET, RuntimeState(), c, sw=seen.append)
+        assert seen[-1].total() == Decimal(1)
+
+    def test_before_any_compose_the_reassertion_is_a_full_forfeit(self):
+        """Not an empty vector, which asserts nothing while looking like a healthy set."""
+        assert RuntimeState().weights().burn == Decimal(1)
+        assert RuntimeState().weights().miners == {}

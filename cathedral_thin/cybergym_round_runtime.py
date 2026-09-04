@@ -67,8 +67,31 @@ class RoundClient(Protocol):
         """The server's averaged per-miner round scores — the input the weights are composed from."""
 
 
-#: (weights_by_hotkey) -> None. Production wraps the substrate set_weights extrinsic.
-SetWeightsFn = Callable[[Mapping[str, Decimal]], None]
+@dataclass(frozen=True)
+class LaneWeights:
+    """One round's outcome for the CyberGym lane: the miner shares AND the forfeited share.
+
+    The burn travels WITH the miner weights, in one object, because it was silently dropped when
+    it did not. `compose_and_set` filtered the board's standings and handed those to the setter,
+    so a round with no qualifying miner composed "forfeit the whole lane" and then set an EMPTY
+    vector — which is not a forfeit, it is a malformed set. The lane's allocation went nowhere
+    instead of to the sandbox lane, which is exactly the rule it was supposed to honour ("no
+    miner -> all weight to the sandbox lane").
+
+    `miners` are within-lane shares. `burn` is what no miner earned; the caller that merges the
+    two lanes redirects it to the sandbox lane. Together they sum to 1.
+    """
+
+    miners: Mapping[str, Decimal]
+    burn: Decimal = Decimal(0)
+
+    def total(self) -> Decimal:
+        return sum(self.miners.values(), Decimal(0)) + self.burn
+
+
+#: (LaneWeights) -> None. Production wraps the substrate set_weights extrinsic, redirecting
+#: `burn` to the sandbox lane. Taking the whole object is what stops the burn being dropped.
+SetWeightsFn = Callable[[LaneWeights], None]
 #: (round_id) -> the chain-anchored nonce that keys the payout-decisive tie-break.
 NonceFn = Callable[[int], bytes]
 
@@ -79,10 +102,14 @@ class RuntimeState:
 
     schedule: ScheduleState = ScheduleState()
     last_weights: tuple[tuple[str, str], ...] = ()   # hotkey -> share (str), for re-assertion
+    #: The forfeited share to re-assert. Starts at 1: before this validator has composed anything
+    #: it has no opinion about any miner, and the honest assertion is that the lane forfeits — not
+    #: an empty vector, which asserts nothing while looking like a healthy weight set.
+    last_burn: str = "1"
     reported_round: int | None = None                 # last submission round we benchmarked+posted
 
-    def weights(self) -> dict[str, Decimal]:
-        return {hk: Decimal(v) for hk, v in self.last_weights}
+    def weights(self) -> LaneWeights:
+        return LaneWeights({hk: Decimal(v) for hk, v in self.last_weights}, Decimal(self.last_burn))
 
 
 def benchmark_and_report(
@@ -113,13 +140,15 @@ def compose_and_set(
 ) -> RoundBoard:
     """Fetch the server's averaged scores, compose the KING board, and set the weights on chain.
 
-    An empty field composes an all-burn board and still sets weights (the CyberGym lane forfeits
-    its allocation, which is the "no miner -> sandbox lane" rule); it never skips the set, because
-    skipping would let the chain zero this validator.
+    An empty field composes an all-burn board and still sets weights: the CyberGym lane forfeits
+    its allocation to the sandbox lane (the "no miner -> sandbox lane" rule), carried as
+    :attr:`LaneWeights.burn`. It never skips the set, because skipping would let the chain zero
+    this validator.
     """
     scores = dict(client.fetch_average_scores(round_id)) if round_id >= 0 else {}
     board = compose_round_board(round_id, scores, nonce=nonce)
-    set_weights({s.miner_hotkey: s.lane_share for s in board.standings if s.lane_share > 0})
+    set_weights(LaneWeights({s.miner_hotkey: s.lane_share for s in board.standings
+                             if s.lane_share > 0}, board.lane_burn))
     return board
 
 
@@ -159,7 +188,7 @@ def step(
                                 nonce=nonce_for(max(scored_round, 0)))
         weights = tuple((s.miner_hotkey, str(s.lane_share))
                         for s in board.standings if s.lane_share > 0)
-        state = replace(state, last_weights=weights,
+        state = replace(state, last_weights=weights, last_burn=str(board.lane_burn),
                         schedule=record_action(block, action, state.schedule, cfg))
     elif action is Action.REASSERT:
         set_weights(state.weights())
@@ -168,6 +197,6 @@ def step(
 
 
 __all__ = [
-    "RoundRuntimeError", "RoundClient", "SetWeightsFn", "NonceFn", "RuntimeState",
+    "RoundRuntimeError", "RoundClient", "LaneWeights", "SetWeightsFn", "NonceFn", "RuntimeState",
     "benchmark_and_report", "compose_and_set", "step",
 ]
