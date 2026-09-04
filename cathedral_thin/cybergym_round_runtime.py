@@ -32,7 +32,9 @@ from cathedral_thin.cybergym_round_eval import (
     evaluate_round,
 )
 from cathedral_thin.cybergym_round_schedule import (
+    PRODUCTION,
     Action,
+    RoundConfig,
     ScheduleState,
     next_action,
     record_action,
@@ -47,6 +49,13 @@ class RoundRuntimeError(RuntimeError):
 
 class RoundClient(Protocol):
     """The backend API the validator talks to (injected; production wraps HTTP)."""
+
+    def fetch_round_tasks(self, round_id: int) -> Sequence[str]:
+        """The round's authoritative task set — what every miner is scored OUT OF.
+
+        Server-published and identical for everyone. Without it the denominator would be whatever
+        each miner chose to submit, and withholding your failures would score 100.
+        """
 
     def fetch_submissions(self, round_id: int) -> Sequence[Submission]:
         """The closed round's submissions: each miner's PoCs + per-task rebuild proofs."""
@@ -89,8 +98,12 @@ def benchmark_and_report(
     """
     if round_id < 0:
         raise RoundRuntimeError("no submission round to benchmark yet")
+    task_ids = list(client.fetch_round_tasks(round_id))
+    if not task_ids:
+        raise RoundRuntimeError(f"round {round_id} published no task set to score against")
     submissions = list(client.fetch_submissions(round_id))
-    results = evaluate_round(submissions, benchmark, task_weights=task_weights, deadline=deadline)
+    results = evaluate_round(submissions, benchmark, task_ids=task_ids,
+                             task_weights=task_weights, deadline=deadline)
     client.post_results(round_id, results)
     return results
 
@@ -120,6 +133,7 @@ def step(
     nonce_for: NonceFn,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
+    cfg: RoundConfig = PRODUCTION,
 ) -> tuple[RuntimeState, Action]:
     """Advance the loop one block. Returns the new state and the action actually taken.
 
@@ -128,7 +142,7 @@ def step(
     composed. It is deliberately separate from the schedule's weight action: benchmarking is work,
     setting weights is the chain obligation, and a slow benchmark must never delay the keep-alive.
     """
-    scored_round = submission_round_being_scored(block)
+    scored_round = submission_round_being_scored(block, cfg)
     # 1. Benchmark + report once per evaluation round (idempotent via reported_round).
     if scored_round >= 0 and state.reported_round != scored_round:
         try:
@@ -139,17 +153,17 @@ def step(
             raise RoundRuntimeError(f"benchmark/report failed for round {scored_round}: {exc}") from exc
 
     # 2. Weight obligation, per the schedule.
-    action = next_action(block, state.schedule)
+    action = next_action(block, state.schedule, cfg)
     if action is Action.COMPOSE_AND_SET:
         board = compose_and_set(scored_round, client=client, set_weights=set_weights,
                                 nonce=nonce_for(max(scored_round, 0)))
         weights = tuple((s.miner_hotkey, str(s.lane_share))
                         for s in board.standings if s.lane_share > 0)
         state = replace(state, last_weights=weights,
-                        schedule=record_action(block, action, state.schedule))
+                        schedule=record_action(block, action, state.schedule, cfg))
     elif action is Action.REASSERT:
         set_weights(state.weights())
-        state = replace(state, schedule=record_action(block, action, state.schedule))
+        state = replace(state, schedule=record_action(block, action, state.schedule, cfg))
     return state, action
 
 

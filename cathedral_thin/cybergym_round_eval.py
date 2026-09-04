@@ -94,27 +94,37 @@ class MinerRoundResult:
 
 
 def benchmark_submission(
-    submission: Submission, benchmark: BenchmarkFn, *, task_weights: Mapping[str, Decimal] | None = None,
+    submission: Submission, benchmark: BenchmarkFn, *,
+    task_ids: Sequence[str] | None = None,
+    task_weights: Mapping[str, Decimal] | None = None,
 ) -> MinerRoundResult:
     """Benchmark every PoC in a submission and score it base-100.
+
+    ``task_ids`` is the ROUND's authoritative task set and is what the score is out of. Passing it
+    is what keeps the denominator off the miner (see :func:`evaluate_round`); it defaults to the
+    submitted set only so a single-submission call in a test stays convenient.
 
     ``task_weights`` optionally difficulty-weights tasks (default: every task weight 1). A task
     whose benchmark RAISES counts as unsolved (a broken proof or PoC is not a solve) rather than
     aborting the miner's whole round.
     """
+    authoritative = list(task_ids) if task_ids is not None else [t.task_id for t in submission.tasks]
+    allowed = set(authoritative)
+    submitted = {t.task_id: t for t in submission.tasks if t.task_id in allowed}
     per_task: list[tuple[str, bool]] = []
-    solved_w = Decimal(0)
-    total_w = Decimal(0)
-    for t in submission.tasks:
-        w = Decimal(task_weights.get(t.task_id, 1)) if task_weights else Decimal(1)
-        total_w += w
+    for task_id in authoritative:
+        tp = submitted.get(task_id)
+        if tp is None:
+            per_task.append((task_id, False))  # not attempted is not solved
+            continue
         try:
-            ok = bool(benchmark(t.task_id, bytes(t.poc), t.proof))
+            ok = bool(benchmark(task_id, bytes(tp.poc), tp.proof))
         except Exception:
             ok = False
-        if ok:
-            solved_w += w
-        per_task.append((t.task_id, ok))
+        per_task.append((task_id, ok))
+    w = task_weights or {}
+    solved_w = sum((Decimal(w.get(t, 1)) for t, ok in per_task if ok), Decimal(0))
+    total_w = sum((Decimal(w.get(t, 1)) for t, _ in per_task), Decimal(0))
     return MinerRoundResult(
         miner_hotkey=submission.miner_hotkey,
         agent_digest=submission.agent_digest,
@@ -127,7 +137,8 @@ def benchmark_submission(
 
 def evaluate_round(
     submissions: Sequence[Submission], benchmark: BenchmarkFn,
-    *, task_weights: Mapping[str, Decimal] | None = None,
+    *, task_ids: Sequence[str] | None = None,
+    task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
 ) -> dict[str, MinerRoundResult]:
     """Benchmark a whole round, rebuilding each corpus ONCE and reusing it across miners.
@@ -137,6 +148,14 @@ def evaluate_round(
     prebuilt binaries is cheap. Rebuilding per miner would do 200x the container work for nothing
     and would not fit the evaluation window; grouping is what makes 200 submissions evaluable.
 
+    ``task_ids`` is the round's authoritative task set, published by the server and identical for
+    every miner. **The score is out of THAT set, never out of what a miner chose to submit.** With
+    a per-submission denominator a miner submits only the tasks it solved and scores 100 while an
+    honest miner that attempted all of them and solved five of six scores 83 — the cheat is simply
+    withholding your failures, and it wins the king slot. Scoring against the published set closes
+    it from both directions: an unsubmitted task counts unsolved, and a task the miner invented
+    that is not in the set is ignored rather than padding the numerator.
+
     ``deadline() -> True`` means the validator is out of time. Miners not yet benchmarked when it
     trips are returned UNEVALUATED (score 0, ``evaluated=False``) — the backend excludes those
     from the average, so a validator that ran out of time ABSTAINS rather than dragging a miner
@@ -144,15 +163,24 @@ def evaluate_round(
     """
     order: list[str] = []
     tasks_by_id: dict[str, list[tuple[str, TaskProof]]] = {}
+    allowed = set(task_ids) if task_ids is not None else None
     for sub in submissions:
         if sub.miner_hotkey in order:
             raise RoundEvalError(f"two submissions for {sub.miner_hotkey}; one per miner per round")
         order.append(sub.miner_hotkey)
         for tp in sub.tasks:
+            if allowed is not None and tp.task_id not in allowed:
+                continue  # not in this round's set: ignored, never scored
             tasks_by_id.setdefault(tp.task_id, []).append((sub.miner_hotkey, tp))
 
     agent_digest = {s.miner_hotkey: s.agent_digest for s in submissions}
-    total_tasks = {s.miner_hotkey: len(s.tasks) for s in submissions}
+    # How many benchmark verdicts this miner should end up with — used only to tell "finished" from
+    # "ran out of time". The SCORE denominator is the authoritative set below, not this.
+    submitted_count = {
+        s.miner_hotkey: sum(1 for tp in s.tasks if allowed is None or tp.task_id in allowed)
+        for s in submissions
+    }
+    denominator = list(task_ids) if task_ids is not None else None
     outcomes: dict[str, list[tuple[str, bool]]] = {hk: [] for hk in order}
     ran_out = False
 
@@ -171,14 +199,18 @@ def evaluate_round(
 
     results: dict[str, MinerRoundResult] = {}
     for hk in order:
-        per_task = outcomes[hk]
-        complete = len(per_task) == total_tasks[hk]
-        evaluated = complete and not (ran_out and not per_task)
-        if not per_task and ran_out:
+        benchmarked = outcomes[hk]
+        complete = len(benchmarked) == submitted_count[hk]
+        if not benchmarked and ran_out and submitted_count[hk]:
             # never got to this miner: abstain rather than score them zero
-            results[hk] = MinerRoundResult(hk, agent_digest[hk], 0, total_tasks[hk],
+            results[hk] = MinerRoundResult(hk, agent_digest[hk], 0, submitted_count[hk],
                                            Decimal(0), (), evaluated=False)
             continue
+        # Pad the authoritative set: a task this miner never submitted is an unsolved task, and it
+        # belongs in the audit trail as one rather than silently shrinking the denominator.
+        got = dict(benchmarked)
+        per_task = ([(t, got.get(t, False)) for t in denominator] if denominator is not None
+                    else benchmarked)
         w = task_weights or {}
         solved_w = sum((Decimal(w.get(t, 1)) for t, ok in per_task if ok), Decimal(0))
         total_w = sum((Decimal(w.get(t, 1)) for t, _ in per_task), Decimal(0))

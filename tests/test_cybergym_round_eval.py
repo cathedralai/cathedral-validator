@@ -8,6 +8,7 @@ from cathedral_thin.cybergym_round_eval import (
     RoundEvalError, Submission, TaskProof,
     benchmark_submission, compose_round_weights, evaluate_round,
 )
+from cathedral_thin.cybergym_round_scoring import round_score_base100
 
 def _sub(hk, solves):  # solves: {task_id: will_solve}
     return Submission(miner_hotkey=hk, agent_digest="sha256:"+hk,
@@ -143,3 +144,55 @@ class TestDeadlineAbstainsRatherThanScoringZero:
 def MinerRoundResultUneval(r):
     from dataclasses import replace
     return replace(r, evaluated=False)
+
+
+class TestTheDenominatorIsNotTheMinersToChoose:
+    """The round's published task set is what a score is out of.
+
+    Found by the end-to-end dry run (2026-09-04): a miner whose agent tripped its budget after two
+    tasks submitted only those two, both solved, and scored 100 — taking the king slot from a
+    miner that attempted all six and solved five. The cheat is withholding your failures.
+    """
+
+    TASKS = [f"arvo:{i}" for i in range(6)]
+
+    def _sub(self, hotkey, solved_tasks, *, submitted=None):
+        submitted = self.TASKS if submitted is None else submitted
+        return Submission(hotkey, "digest", tuple(
+            TaskProof(t, b"solve" if t in solved_tasks else b"miss", {}) for t in submitted))
+
+    @staticmethod
+    def _bench(task_id, poc, proof):
+        return poc == b"solve"
+
+    def test_withholding_failures_does_not_beat_attempting_everything(self):
+        honest = self._sub("honest", self.TASKS[:5])                       # 5 of 6 attempted all
+        withholder = self._sub("withholder", self.TASKS[:2], submitted=self.TASKS[:2])
+        results = evaluate_round([honest, withholder], self._bench, task_ids=self.TASKS)
+        assert results["honest"].score > results["withholder"].score
+        assert results["withholder"].score == round_score_base100(Decimal(2), Decimal(6))
+
+    def test_an_unsubmitted_task_is_scored_as_unsolved(self):
+        results = evaluate_round([self._sub("m", self.TASKS[:2], submitted=self.TASKS[:2])],
+                                 self._bench, task_ids=self.TASKS)
+        r = results["m"]
+        assert r.total == 6 and r.solved == 2
+        assert dict(r.per_task) == {t: (t in self.TASKS[:2]) for t in self.TASKS}
+
+    def test_a_task_outside_the_round_cannot_pad_the_numerator(self):
+        """Inventing tasks is the other direction of the same hole."""
+        padded = Submission("m", "d", tuple(
+            [TaskProof(t, b"solve", {}) for t in self.TASKS[:1]]
+            + [TaskProof(f"made-up:{i}", b"solve", {}) for i in range(20)]))
+        r = evaluate_round([padded], self._bench, task_ids=self.TASKS)["m"]
+        assert r.total == 6 and r.solved == 1
+
+    def test_a_miner_that_solves_the_whole_published_set_still_scores_100(self):
+        r = evaluate_round([self._sub("m", self.TASKS)], self._bench, task_ids=self.TASKS)["m"]
+        assert r.score == Decimal(100)
+
+    def test_a_validator_that_ran_out_still_abstains_rather_than_scoring_zero(self):
+        """The authoritative denominator must not turn 'I did not finish' into a real zero."""
+        results = evaluate_round([self._sub("a", self.TASKS), self._sub("b", self.TASKS)],
+                                 self._bench, task_ids=self.TASKS, deadline=lambda: True)
+        assert all(not r.evaluated for r in results.values())

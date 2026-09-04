@@ -12,11 +12,17 @@ from cathedral_thin.cybergym_round_schedule import Action, ROUND_BLOCKS, WEIGHT_
 
 
 class FakeClient:
-    def __init__(self, submissions=None, averages=None):
+    def __init__(self, submissions=None, averages=None, tasks=None):
         self._subs = submissions or []
         self._avgs = averages or {}
+        # The round's authoritative task set. Defaults to the union of what was submitted, which
+        # is what the fixtures assumed before the denominator moved off the miner.
+        self._tasks = list(tasks) if tasks is not None else sorted(
+            {tp.task_id for s in (submissions or []) for tp in s.tasks}) or ["t1"]
         self.posted = []
         self.fetched_avg_for = []
+    def fetch_round_tasks(self, round_id):
+        return self._tasks
     def fetch_submissions(self, round_id):
         return self._subs
     def post_results(self, round_id, results):
