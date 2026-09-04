@@ -108,3 +108,32 @@ class TestNextAction:
         # exactly one authoritative compose in the round; several keep-alives; never dark too long
         assert composes == 1
         assert reasserts >= 1
+
+
+# --------------------------------------------------------------------------- #
+# The agent RUNS in the submit round; submissions close early to drain the queue
+# --------------------------------------------------------------------------- #
+from cathedral_thin.cybergym_round_schedule import (  # noqa: E402
+    SUBMISSION_CLOSE_OFFSET, Phase, accepting_submissions, phase,
+)
+
+
+class TestSubmissionWindow:
+    def test_submissions_close_at_20h(self):
+        assert SUBMISSION_CLOSE_OFFSET == 6000            # 20h of a 24h/7200-block round
+        assert SUBMISSION_CLOSE_OFFSET < WEIGHT_SET_OFFSET  # closes before weights compose
+
+    def test_accepting_before_the_close_then_draining(self):
+        assert accepting_submissions(0) and accepting_submissions(5999)
+        assert not accepting_submissions(6000)
+        assert phase(5999) is Phase.SUBMIT
+        assert phase(6000) is Phase.DRAIN
+
+    def test_the_window_repeats_each_round(self):
+        assert accepting_submissions(ROUND_BLOCKS + 10)
+        assert not accepting_submissions(ROUND_BLOCKS + 6000)
+
+    def test_drain_leaves_four_hours_before_the_round_ends(self):
+        # ~1200 blocks (4h) of queue drain after the close, and the run may spill past the
+        # round end into the next one while validators start evaluating.
+        assert ROUND_BLOCKS - SUBMISSION_CLOSE_OFFSET == 1200

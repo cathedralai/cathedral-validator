@@ -3,13 +3,17 @@
 The mechanism runs in fixed rounds of ``ROUND_BLOCKS`` (24h ≈ 7200 blocks at 12s). Three rounds
 are in flight at once, offset by one each (jared's spec, 2026-09-04):
 
-    round R      SUBMIT     miners submit their agent; the backend screens it (Round-1 similarity)
-                            and runs it in the sandbox, collecting PoCs + proof.
-    round R+1    EVALUATE   validators download the PoCs + proof, rebuild each corpus and
-                            benchmark the PoC; the backend averages the per-miner scores. At
-                            ``WEIGHT_SET_OFFSET`` within R+1 the validator composes the round's
-                            authoritative weights (from round R's now-scored submissions) and
-                            sets them on chain.
+    round R      SUBMIT+RUN  miners submit their agent; the backend screens it (round-1
+                            similarity) and RUNS it in the sandbox under the run limits,
+                            generating PoCs + trajectory. Submissions
+                            CLOSE at ``SUBMISSION_CLOSE_OFFSET`` (block 6000 ~ 20h); the run
+                            queue may spill past the round end into R+1 while validators are
+                            already evaluating what finished.
+    round R+1    EVALUATE   validators rebuild each corpus ONCE and benchmark every miner's PoC
+                            against it (crash on vulnerable, clean on fixed); results are posted
+                            and the backend averages the per-miner scores over the validators
+                            that actually evaluated. At ``WEIGHT_SET_OFFSET`` the validator
+                            composes round R's weights and sets them on chain.
     round R+2    EMIT       those weights are live, so round R's miners earn emission.
 
 So a miner who submits in round R is paid in round R+2 — two rounds later.
@@ -40,13 +44,38 @@ WEIGHT_SET_OFFSET = 6600
 #: them between authoritative composes. Bittensor requirement, not a mechanism choice.
 REASSERT_BLOCKS = 300
 
+#: Submissions CLOSE at this offset in the submit round (block 6000 ~ 20h), leaving ~4h before the
+#: round ends. The agent RUNS in the submit round, so closing early gives the sandbox queue time
+#: to drain; anything still queued spills into the next round and is evaluated late or not at all
+#: (an unevaluated miner is simply not averaged — see the eval side).
+SUBMISSION_CLOSE_OFFSET = 6000
+
+if not (0 < SUBMISSION_CLOSE_OFFSET <= WEIGHT_SET_OFFSET):  # pragma: no cover - config guard
+    raise ValueError("submissions must close at or before the weight-set offset")
+
 if not (0 <= WEIGHT_SET_OFFSET < ROUND_BLOCKS):  # pragma: no cover - config guard
     raise ValueError("WEIGHT_SET_OFFSET must fall inside a round")
 
 
 class Phase(str, Enum):
-    SUBMIT = "submit"      # this round accepts submissions (they score two rounds later)
-    EVALUATE = "evaluate"  # validators benchmark last round's submissions; weights set at the offset
+    SUBMIT = "submit"        # accepting submissions AND running agents (before the close offset)
+    DRAIN = "drain"          # submissions closed; the sandbox queue finishes running
+    EVALUATE = "evaluate"    # (of the PREVIOUS round's submissions) benchmarking + weight compose
+
+
+def phase(block: int) -> Phase:
+    """The submit-side phase of the block's own round.
+
+    Every round is simultaneously the SUBMIT round for its own miners and the EVALUATE round for
+    the previous one — the pipeline is continuous, not a loop, so both are always true. This
+    reports the submit-side state: accepting (before the close) or draining the run queue after.
+    """
+    return Phase.SUBMIT if block_offset(block) < SUBMISSION_CLOSE_OFFSET else Phase.DRAIN
+
+
+def accepting_submissions(block: int) -> bool:
+    """True while this round still accepts submissions (before the close offset)."""
+    return block_offset(block) < SUBMISSION_CLOSE_OFFSET
 
 
 class Action(str, Enum):
@@ -131,7 +160,8 @@ def record_action(block: int, action: Action, state: ScheduleState) -> ScheduleS
 
 
 __all__ = [
-    "ROUND_BLOCKS", "WEIGHT_SET_OFFSET", "REASSERT_BLOCKS",
+    "ROUND_BLOCKS", "WEIGHT_SET_OFFSET", "REASSERT_BLOCKS", "SUBMISSION_CLOSE_OFFSET",
+    "phase", "accepting_submissions",
     "Phase", "Action", "ScheduleState",
     "round_index", "round_bounds", "block_offset",
     "submission_round_being_scored", "is_weight_set_block",
