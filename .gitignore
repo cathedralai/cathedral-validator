@@ -45,3 +45,4 @@ publisher.db
 
 # Local operator copies are not repository state. Keep them out of commits.
 my-validator.toml
+*-work-evidence/
