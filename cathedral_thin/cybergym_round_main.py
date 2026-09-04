@@ -9,6 +9,8 @@ Environment:
 ``CYBERGYM_WEIGHTS_FILE``        where the weight trail is written (default ./cybergym-weights.jsonl)
 ``CYBERGYM_POLL_SECONDS``        how often to step the loop (default 2)
 ``CYBERGYM_DOCKER``              docker binary (default ``docker``)
+``CYBERGYM_WALLET`` / ``_HOTKEY`` bittensor wallet + hotkey name used to SIGN score reports
+``CYBERGYM_HOTKEY_SEED``         alternative: the hotkey seed as hex (never logged, never echoed)
 ``CYBERGYM_ALLOW_OFFCHAIN``      ``1`` to acknowledge weights are RECORDED, not set on chain
 ===============================  ===========================================================
 
@@ -30,6 +32,54 @@ from cathedral_thin.cybergym_round_client import HttpRoundClient
 from cathedral_thin.cybergym_round_daemon import FileWeightSink, RoundDaemon
 
 
+def _signer(hotkey: str):
+    """Build the report signer, or None.
+
+    A score report is the payout input, so an enforcing backend refuses unsigned reports. Loads a
+    bittensor wallet by name, or falls back to a hex seed in the environment.
+
+    The seed is read straight into the keypair and never returned, printed, or put in an error
+    message: a validator seed in a log is a stolen validator.
+    """
+    seed = os.environ.get("CYBERGYM_HOTKEY_SEED", "").strip()
+    wallet_name = os.environ.get("CYBERGYM_WALLET", "").strip()
+    hotkey_name = os.environ.get("CYBERGYM_HOTKEY", "").strip()
+    keypair = None
+    if wallet_name and hotkey_name:
+        try:
+            import bittensor_wallet
+
+            keypair = bittensor_wallet.Wallet(
+                name=wallet_name, hotkey=hotkey_name
+            ).hotkey
+        except Exception as exc:
+            raise SystemExit(
+                f"could not open wallet {wallet_name}/{hotkey_name}: {exc}"
+            )
+    elif seed:
+        try:
+            from substrateinterface import Keypair
+
+            keypair = Keypair.create_from_seed(seed)
+        except Exception:
+            try:
+                from bittensor_wallet import Keypair  # type: ignore
+
+                keypair = Keypair.create_from_seed(seed)
+            except Exception as exc:
+                raise SystemExit(
+                    f"could not build a keypair from CYBERGYM_HOTKEY_SEED: {exc}"
+                )
+    if keypair is None:
+        return None
+    if getattr(keypair, "ss58_address", hotkey) != hotkey:
+        raise SystemExit(
+            "CYBERGYM_VALIDATOR_HOTKEY does not match the loaded key; signing as one hotkey while "
+            "claiming another is exactly what the backend refuses"
+        )
+    return lambda message: keypair.sign(message).hex()
+
+
 def main() -> int:
     hotkey = os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "").strip()
     if not hotkey:
@@ -44,9 +94,19 @@ def main() -> int:
     sink = FileWeightSink(
         path=Path(os.environ.get("CYBERGYM_WEIGHTS_FILE", "cybergym-weights.jsonl"))
     )
+    sign = _signer(hotkey)
+    if sign is None:
+        print(
+            "WARNING: no wallet or seed configured - score reports will be UNSIGNED and an "
+            "enforcing backend will refuse them.",
+            file=sys.stderr,
+        )
     daemon = RoundDaemon(
         client=HttpRoundClient(
-            base, hotkey, timeout=float(os.environ.get("CYBERGYM_HTTP_TIMEOUT", "60"))
+            base,
+            hotkey,
+            timeout=float(os.environ.get("CYBERGYM_HTTP_TIMEOUT", "60")),
+            sign=sign,
         ),
         benchmark=lambda tid, poc, proof: docker_benchmark(
             tid, poc, proof, docker=docker

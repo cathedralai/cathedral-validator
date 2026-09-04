@@ -248,3 +248,43 @@ class TestTheReportedRoundIsTheRoundActuallyScored:
         d.tick()
         weight_posts = [p for p in backend.posted if "weights" in p]
         assert weight_posts and weight_posts[-1]["round_id"] == 1
+
+
+class TestTheSignedMessageMatchesTheBackendByteForByte:
+    """The backend verifies a signature over ITS rendering of the report. The two repos cannot
+    import each other, so the agreement is pinned as a literal on both sides. If this changes
+    without the backend changing, every validator's reports start being rejected as forgeries.
+    """
+
+    ROWS = [{"miner_hotkey": "m2", "score": "50", "evaluated": False},
+            {"miner_hotkey": "m1", "score": "100"}]
+    EXPECTED = b'cybergym:v2:results:5V:3:[["m1","100",true],["m2","50",false]]'
+
+    def test_the_exact_bytes(self):
+        from cathedral_thin.cybergym_round_client import results_message
+        assert results_message("5V", 3, self.ROWS) == self.EXPECTED
+
+    def test_wire_order_does_not_change_what_is_signed(self):
+        from cathedral_thin.cybergym_round_client import results_message
+        assert results_message("5V", 3, list(reversed(self.ROWS))) == self.EXPECTED
+
+    def test_the_weights_message_bytes(self):
+        from cathedral_thin.cybergym_round_client import weights_message
+        assert weights_message("5V", 3, {"m1": "0.9"}, "0.1") == (
+            b'cybergym:v2:weights:5V:3:[["m1","0.9"]]:0.1')
+
+    def test_an_unsigned_client_sends_no_signature_field(self, backend):
+        """Unsigned is a real mode (a local dry run); it must not fabricate a signature."""
+        client = HttpRoundClient(backend.base, "5V")
+        client.post_results(0, {"m1": MinerRoundResult("m1", "d", 1, 1, Decimal("100"), ())})
+        assert "signature" not in backend.posted[0]
+
+    def test_a_signing_client_signs_what_the_backend_will_verify(self, backend):
+        from cathedral_thin.cybergym_round_client import results_message
+        seen = {}
+        client = HttpRoundClient(backend.base, "5V",
+                                 sign=lambda msg: seen.setdefault("msg", msg) and "sighex")
+        client.post_results(3, {"m1": MinerRoundResult("m1", "d", 1, 1, Decimal("100"), ())})
+        posted = backend.posted[0]
+        assert posted["signature"] == "sighex"
+        assert seen["msg"] == results_message("5V", 3, posted["results"])
