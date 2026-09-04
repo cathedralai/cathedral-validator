@@ -288,3 +288,41 @@ class TestTheSignedMessageMatchesTheBackendByteForByte:
         posted = backend.posted[0]
         assert posted["signature"] == "sighex"
         assert seen["msg"] == results_message("5V", 3, posted["results"])
+
+
+class TestTheClientSignsItsReads:
+    """The submission feed carries every miner's PoC bytes, so the backend gates it behind the
+    same hotkey that posts the results back. Pinned as a byte literal on both sides, like the
+    write messages: the repos cannot import each other."""
+
+    def test_the_exact_read_bytes(self):
+        from cathedral_thin.cybergym_round_client import read_message
+        assert read_message("/v2/submissions", 3, 1700) == (
+            b"cybergym:v2:read:/v2/submissions:3:1700")
+
+    def test_the_path_the_round_and_the_moment_are_all_bound(self):
+        from cathedral_thin.cybergym_round_client import read_message
+        base = read_message("/v2/submissions", 3, 1700)
+        assert base != read_message("/v2/log", 3, 1700)
+        assert base != read_message("/v2/submissions", 4, 1700)
+        assert base != read_message("/v2/submissions", 3, 1701)
+
+    def test_a_signing_client_sends_read_headers(self, backend):
+        backend.submissions = [wire_submission("m1")]
+        seen = {}
+        client = HttpRoundClient(backend.base, "5V",
+                                 sign=lambda msg: seen.setdefault("msg", msg) and "sighex")
+        client.fetch_submissions(3)
+        from cathedral_thin.cybergym_round_client import read_message
+        assert seen["msg"].startswith(b"cybergym:v2:read:/v2/submissions:3:")
+
+    def test_an_unsigned_client_sends_no_read_headers(self, backend):
+        """Unsigned is a real mode for a local dry run; it must not fabricate a signature."""
+        backend.submissions = [wire_submission("m1")]
+        HttpRoundClient(backend.base, "5V").fetch_submissions(0)   # must not raise
+
+    def test_public_reads_are_not_signed(self, backend):
+        """The clock is public; signing it would imply a gate that is not there."""
+        calls = []
+        HttpRoundClient(backend.base, "5V", sign=lambda m: calls.append(m) or "s").fetch_round()
+        assert calls == []
