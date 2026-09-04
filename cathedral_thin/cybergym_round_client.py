@@ -21,6 +21,7 @@ import base64
 import json
 import urllib.error
 import urllib.parse
+import time
 import urllib.request
 from collections.abc import Mapping, Sequence
 from typing import Callable
@@ -66,6 +67,22 @@ def results_message(
     ).encode("utf-8")
 
 
+def read_message(path: str, round_id: int, timestamp: int) -> bytes:
+    """What a validator signs to READ. Must match `read_auth.read_message` on the backend.
+
+    Binds the endpoint, the round, and the moment. The timestamp is what stops a captured header
+    being a permanent credential: a GET replays verbatim for whoever observed it.
+    """
+    return (
+        "cybergym:v2:read:"
+        + str(path)
+        + ":"
+        + str(int(round_id))
+        + ":"
+        + str(int(timestamp))
+    ).encode("utf-8")
+
+
 def weights_message(
     validator_hotkey: str, round_id: int, weights: Mapping[str, str], burn: str
 ) -> bytes:
@@ -101,10 +118,30 @@ class HttpRoundClient:
         url = f"{self.base_url.rstrip('/')}{path}"
         return f"{url}?{urllib.parse.urlencode(query)}" if query else url
 
-    def _request(self, path: str, *, payload: dict | None = None, **query) -> dict:
+    def _request(
+        self,
+        path: str,
+        *,
+        payload: dict | None = None,
+        sign_read_round: int | None = None,
+        **query,
+    ) -> dict:
         url = self._url(path, **query)
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
+        if data is None and self.sign is not None and sign_read_round is not None:
+            # The submission feed carries every miner's PoC bytes, so the backend gates it behind
+            # the same hotkey that posts the results back.
+            stamp = int(time.time())
+            headers.update(
+                {
+                    "X-Cybergym-Hotkey": self.validator_hotkey,
+                    "X-Cybergym-Timestamp": str(stamp),
+                    "X-Cybergym-Signature": self.sign(
+                        read_message(path, sign_read_round, stamp)
+                    ),
+                }
+            )
         req = urllib.request.Request(
             url, data=data, headers=headers, method="POST" if data else "GET"
         )
@@ -137,7 +174,9 @@ class HttpRoundClient:
         return [str(t) for t in tasks]
 
     def fetch_submissions(self, round_id: int) -> Sequence[Submission]:
-        body = self._request("/v2/submissions", round=round_id)
+        body = self._request(
+            "/v2/submissions", sign_read_round=round_id, round=round_id
+        )
         rows = body.get("submissions")
         if not isinstance(rows, list):
             raise RoundClientError("/v2/submissions carried no submission list")
