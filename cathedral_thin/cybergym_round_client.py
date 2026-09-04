@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from typing import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -33,6 +34,57 @@ class RoundClientError(RuntimeError):
     """The backend could not be reached or answered malformed. Always raised, never absorbed."""
 
 
+#: (message_bytes) -> signature hex. Injected: the validator holds its own hotkey, and this
+#: module must never see a seed. None means unsigned, which an enforcing backend refuses.
+SignFn = Callable[[bytes], str]
+
+
+def results_message(
+    validator_hotkey: str, round_id: int, rows: Sequence[Mapping]
+) -> bytes:
+    """The canonical bytes the backend will verify. Must match `validator_auth.results_message`.
+
+    Covers every verdict, not just the sender: signing only the hotkey would let anyone who saw
+    one report replay its signature over different scores. Sorted, so the wire order of the rows
+    cannot change what was signed.
+    """
+    items = sorted(
+        [
+            str(r["miner_hotkey"]),
+            str(Decimal(str(r.get("score", 0)))),
+            bool(r.get("evaluated", True)),
+        ]
+        for r in rows
+    )
+    return (
+        "cybergym:v2:results:"
+        + validator_hotkey
+        + ":"
+        + str(int(round_id))
+        + ":"
+        + json.dumps(items, separators=(",", ":"))
+    ).encode("utf-8")
+
+
+def weights_message(
+    validator_hotkey: str, round_id: int, weights: Mapping[str, str], burn: str
+) -> bytes:
+    body = json.dumps(
+        sorted((str(k), str(v)) for k, v in dict(weights).items()),
+        separators=(",", ":"),
+    )
+    return (
+        "cybergym:v2:weights:"
+        + validator_hotkey
+        + ":"
+        + str(int(round_id))
+        + ":"
+        + body
+        + ":"
+        + str(burn)
+    ).encode("utf-8")
+
+
 @dataclass
 class HttpRoundClient:
     """Talks the v2 round API. `base_url` points at the backend, e.g. http://host:8700"""
@@ -40,6 +92,10 @@ class HttpRoundClient:
     base_url: str
     validator_hotkey: str
     timeout: float = 30.0
+    #: Signs score reports with this validator's hotkey. Without it reports go unsigned, which an
+    #: enforcing backend refuses -- deliberately, since an unsigned score is a score anyone could
+    #: have sent.
+    sign: SignFn | None = None
 
     def _url(self, path: str, **query) -> str:
         url = f"{self.base_url.rstrip('/')}{path}"
@@ -110,20 +166,25 @@ class HttpRoundClient:
     def post_results(
         self, round_id: int, results: Mapping[str, MinerRoundResult]
     ) -> None:
+        rows = [
+            {
+                "miner_hotkey": r.miner_hotkey,
+                "score": str(r.score),
+                "evaluated": r.evaluated,
+                "solved": r.solved,
+                "total": r.total,
+            }
+            for r in results.values()
+        ]
         payload = {
             "validator_hotkey": self.validator_hotkey,
             "round_id": round_id,
-            "results": [
-                {
-                    "miner_hotkey": r.miner_hotkey,
-                    "score": str(r.score),
-                    "evaluated": r.evaluated,
-                    "solved": r.solved,
-                    "total": r.total,
-                }
-                for r in results.values()
-            ],
+            "results": rows,
         }
+        if self.sign is not None:
+            payload["signature"] = self.sign(
+                results_message(self.validator_hotkey, round_id, rows)
+            )
         self._request("/v2/results", payload=payload)
 
     def report_weights(
@@ -136,15 +197,18 @@ class HttpRoundClient:
         because failing to report what we set must never stop us from setting it.
         """
         try:
-            self._request(
-                "/v2/weights",
-                payload={
-                    "validator_hotkey": self.validator_hotkey,
-                    "round_id": round_id,
-                    "weights": {hk: str(w) for hk, w in weights.items()},
-                    "burn": str(burn),
-                },
-            )
+            rows = {hk: str(w) for hk, w in weights.items()}
+            payload = {
+                "validator_hotkey": self.validator_hotkey,
+                "round_id": round_id,
+                "weights": rows,
+                "burn": str(burn),
+            }
+            if self.sign is not None:
+                payload["signature"] = self.sign(
+                    weights_message(self.validator_hotkey, round_id, rows, str(burn))
+                )
+            self._request("/v2/weights", payload=payload)
             return True
         except RoundClientError:
             return False
