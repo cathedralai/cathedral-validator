@@ -91,3 +91,55 @@ class TestInputsFailClosed:
     def test_submission_needs_hotkey(self):
         with pytest.raises(RoundEvalError):
             Submission("", "d", ())
+
+
+# --------------------------------------------------------------------------- #
+# Throughput: one corpus build per TASK, reused across miners; deadline -> abstain
+# --------------------------------------------------------------------------- #
+from cathedral_thin.cybergym_round_eval import compose_round_weights as _crw  # noqa: E402
+
+
+class TestCorpusIsBuiltOncePerTaskNotPerMiner:
+    def test_two_hundred_miners_touch_each_task_once_for_the_build(self):
+        # 200 miners x 3 tasks = 600 PoCs but only 3 distinct corpora. The benchmark seam is
+        # called per PoC (cheap); what matters is that work is GROUPED by task so the caller
+        # rebuilds each corpus once — assert the grouping by checking call order.
+        subs = [_sub(f"m{i}", ["t1", "t2", "t3"]) for i in range(200)]
+        seen_order = []
+        def bench(task_id, poc, proof):
+            seen_order.append(task_id); return True
+        evaluate_round(subs, bench)
+        # all 200 calls for t1 come before any t2 -> one build per task, reused 200x
+        first_t2 = seen_order.index("t2")
+        assert set(seen_order[:first_t2]) == {"t1"}
+        assert seen_order.count("t1") == 200
+
+    def test_every_miner_still_scored(self):
+        subs = [_sub(f"m{i}", ["t1"]) for i in range(5)]
+        res = evaluate_round(subs, _bench({"t1": True}))
+        assert len(res) == 5 and all(r.score == Decimal("100") for r in res.values())
+
+
+class TestDeadlineAbstainsRatherThanScoringZero:
+    def test_unreached_miners_are_unevaluated_not_zero(self):
+        subs = [_sub("a", ["t1"]), _sub("b", ["t2"])]
+        # deadline trips immediately -> nobody benchmarked
+        res = evaluate_round(subs, _bench({}), deadline=lambda: True)
+        assert all(r.evaluated is False for r in res.values())
+
+    def test_unevaluated_miners_are_excluded_from_the_weights(self):
+        subs = [_sub("a", ["t1"]), _sub("b", ["t1"])]
+        res = evaluate_round(subs, _bench({"t1": True}))
+        res["b"] = MinerRoundResultUneval(res["b"])
+        board = _crw(1, res, nonce=b"n")
+        # only 'a' is evaluated -> lone winner takes the whole lane; 'b' is not in the board
+        assert board.winners == ("a",)
+
+    def test_a_completed_miner_is_evaluated(self):
+        res = evaluate_round([_sub("a", ["t1"])], _bench({"t1": True}))
+        assert res["a"].evaluated is True
+
+
+def MinerRoundResultUneval(r):
+    from dataclasses import replace
+    return replace(r, evaluated=False)
