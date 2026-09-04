@@ -108,3 +108,12 @@ class TestStep:
             def post_results(self, *a, **k): raise RuntimeError("server down")
         with pytest.raises(RoundRuntimeError):
             self._step(ROUND_BLOCKS + 5, RuntimeState(), Boom(submissions=[_sub("a", ["t1"])]))
+
+
+class TestDeadlineAbstains:
+    def test_unreached_miners_are_reported_unevaluated(self):
+        c = FakeClient(submissions=[_sub("a", ["t1"]), _sub("b", ["t2"])])
+        res = benchmark_and_report(0, client=c, benchmark=SOLVE_ALL, deadline=lambda: True)
+        assert all(r.evaluated is False for r in res.values())
+        # still POSTED — the server needs to know we abstained, not just silence
+        assert c.posted and c.posted[0][0] == 0
