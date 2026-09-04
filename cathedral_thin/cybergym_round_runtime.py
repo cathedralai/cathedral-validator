@@ -79,12 +79,18 @@ class RuntimeState:
 def benchmark_and_report(
     round_id: int, *, client: RoundClient, benchmark: BenchmarkFn,
     task_weights: Mapping[str, Decimal] | None = None,
+    deadline: Callable[[], bool] | None = None,
 ) -> dict[str, MinerRoundResult]:
-    """Benchmark every submission of a closed round and report the verdicts to the server."""
+    """Benchmark every submission of a closed round and report the verdicts to the server.
+
+    ``deadline`` (usually "am I past the compose block?") lets the run stop cleanly: miners not
+    reached are reported UNEVALUATED, which the server excludes from the average. Abstaining is
+    the honest signal — scoring them 0 would drag them down for this validator's slowness.
+    """
     if round_id < 0:
         raise RoundRuntimeError("no submission round to benchmark yet")
     submissions = list(client.fetch_submissions(round_id))
-    results = evaluate_round(submissions, benchmark, task_weights=task_weights)
+    results = evaluate_round(submissions, benchmark, task_weights=task_weights, deadline=deadline)
     client.post_results(round_id, results)
     return results
 
@@ -113,6 +119,7 @@ def step(
     set_weights: SetWeightsFn,
     nonce_for: NonceFn,
     task_weights: Mapping[str, Decimal] | None = None,
+    deadline: Callable[[], bool] | None = None,
 ) -> tuple[RuntimeState, Action]:
     """Advance the loop one block. Returns the new state and the action actually taken.
 
@@ -126,7 +133,7 @@ def step(
     if scored_round >= 0 and state.reported_round != scored_round:
         try:
             benchmark_and_report(scored_round, client=client, benchmark=benchmark,
-                                 task_weights=task_weights)
+                                 task_weights=task_weights, deadline=deadline)
             state = replace(state, reported_round=scored_round)
         except Exception as exc:  # a failed report must not stop the weight obligation
             raise RoundRuntimeError(f"benchmark/report failed for round {scored_round}: {exc}") from exc
