@@ -313,6 +313,7 @@ jobs:
         run: |
           bash -n scripts/live_validator_update_e2e.sh
           ruff check \
+            scripts/live_update_e2e_result.py \
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
@@ -327,6 +328,7 @@ jobs:
             tests/live/tampered_https_origin.py \
             tests/live/wait_updater_state.py
           ruff format --check \
+            scripts/live_update_e2e_result.py \
             cathedral_thin/independent_runtime/updater.py \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
