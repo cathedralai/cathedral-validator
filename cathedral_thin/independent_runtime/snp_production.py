@@ -55,6 +55,7 @@ class SnpGenerationPolicy:
 class SnpPolicy:
     generations: Mapping[str, SnpGenerationPolicy]
     digest: str
+    require_single_socket: bool = True
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class SnpVerificationResult:
     verifier_digest: str
     policy_digest: str
     reason: str | None = None
+    guest_policy: int | None = None
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -124,10 +126,16 @@ def load_snp_policy(path: str | Path) -> SnpPolicy:
         document = json.loads(raw, object_pairs_hook=_strict_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SnpProductionError("SNP policy is not strict JSON") from exc
-    if not isinstance(document, dict) or set(document) != {"schema", "generations"}:
+    if not isinstance(document, dict) or not {"schema", "generations"} <= set(
+        document
+    ) <= {"schema", "generations", "require_single_socket"}:
         raise SnpProductionError(
-            "SNP policy must contain exactly schema and generations"
+            "SNP policy must contain schema and generations, and may contain "
+            "require_single_socket"
         )
+    require_single_socket = document.get("require_single_socket", True)
+    if not isinstance(require_single_socket, bool):
+        raise SnpProductionError("SNP policy require_single_socket must be a boolean")
     if document["schema"] != POLICY_SCHEMA or not isinstance(
         document["generations"], dict
     ):
@@ -170,6 +178,7 @@ def load_snp_policy(path: str | Path) -> SnpPolicy:
     return SnpPolicy(
         generations=policies,
         digest="sha256:" + hashlib.sha256(raw).hexdigest(),
+        require_single_socket=require_single_socket,
     )
 
 
@@ -359,13 +368,17 @@ class SnpProductionVerifier:
                     self.policy_digest,
                     "snp_debug_or_migration_guest_refused",
                 )
-            if not guest_policy & AMD_GUEST_POLICY_SINGLE_SOCKET:
+            if (
+                self._policy.require_single_socket
+                and not guest_policy & AMD_GUEST_POLICY_SINGLE_SOCKET
+            ):
                 return SnpVerificationResult(
                     QuoteVerdict.FAIL,
                     None,
                     self.digest,
                     self.policy_digest,
                     "snp_single_socket_required",
+                    guest_policy,
                 )
             evidence = self._contract.Evidence(
                 kind=self._contract.EvidenceKind.SEV_SNP,
@@ -447,7 +460,12 @@ class SnpProductionVerifier:
                     "snp_identity_invalid",
                 )
             return SnpVerificationResult(
-                QuoteVerdict.PASS, machine_id, self.digest, self.policy_digest
+                QuoteVerdict.PASS,
+                machine_id,
+                self.digest,
+                self.policy_digest,
+                None,
+                guest_policy,
             )
         except self._contract.SnpVerifierUnavailable:
             return SnpVerificationResult(

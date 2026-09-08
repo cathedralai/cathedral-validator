@@ -23,7 +23,10 @@ For each configured endpoint, the validator:
 6. Applies the measurement allowlist and Compute's generation-aware,
    componentwise minimum-TCB check.
 7. Requires AMD guest `POLICY.SINGLE_SOCKET`, bit 20, before using CHIP_ID as
-   a hardware identity.
+   a hardware identity. The dev preview always requires it. The production
+   admission path requires it unless the owner policy sets
+   `require_single_socket: false`; see "Owner policy: require_single_socket"
+   below.
 8. Replaces CHIP_ID with a review-challenge-scoped HMAC pseudonym. Raw CHIP_ID
    and the raw report never enter the output artifact.
 9. Sends an unsigned negative probe on the same attested TLS channel. The
@@ -115,3 +118,31 @@ outcome.
 
 It does not mean the miner is registered, the endpoint is on chain, the
 validator assigned weight, or subnet emissions exist.
+
+## Owner policy: `require_single_socket`
+
+`cathedral_amd_sev_snp_policy_v1` accepts an optional top-level boolean
+`require_single_socket`. Absent means `true`, so a policy file written before
+this key existed keeps exactly its previous meaning and its previous digest.
+
+Set it to `false` only deliberately. It exists because a Linux KVM host cannot
+satisfy bit 20 on a machine with more than one socket populated: AMD 56860
+section 8.10 makes `SNP_ACTIVATE` fail for such a guest, and KVM never issues
+`SNP_ACTIVATE_EX`. A dual-socket operator therefore cannot present a
+single-socket guest at all, however honest they are.
+
+Relaxing the bit does not let one host earn more than one machine's credit.
+Every SNP command on a Linux host runs on the master PSP, so every guest on
+that host reports the same CHIP_ID, and `duplicate_hardware_indexes` zeroes
+every row whose hardware identity appears more than once. Measured on a live
+dual-socket host on 2026-09-08: two guests, one CHIP_ID, both VCEK-verified
+against the AMD chain.
+
+What is given up is the firmware-enforced guarantee that a guest's identity
+cannot change over its lifetime. On Linux the master-PSP routing gives the same
+property. On a hypervisor that routes each guest's request to the PSP of the
+socket it runs on, it does not, and such a guest could present one identity per
+socket it spans.
+
+The `guest_policy_hex` and `single_socket` fields on each machine row record
+what was actually admitted.
