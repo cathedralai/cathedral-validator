@@ -391,3 +391,165 @@ def test_unexpected_miner_triggered_contract_error_scores_only_that_miner_zero()
 
     assert result.verdict is QuoteVerdict.FAIL
     assert result.reason == "snp_verification_failed"
+
+
+def _gate_verifier(*, guest_policy: int, require_single_socket: bool):
+    """A production verifier whose only interesting input is the launch policy.
+
+    Everything after the guest-policy gate is a passing fake, so a refusal in
+    these tests can only have come from the gate itself.
+    """
+    evidence_kind = object()
+    binding_kind = object()
+    tier = object()
+    minimum = 1
+
+    @dataclass(frozen=True)
+    class ContractBinding:
+        binding_type: object
+        digest: bytes
+
+    @dataclass(frozen=True)
+    class ContractEvidence:
+        kind: object
+        quote: bytes
+        nonce: bytes
+        miner_hotkey: str
+        cert_chain: list[bytes]
+        report_data_version: int
+        channel_binding: ContractBinding
+
+    parsed = SimpleNamespace(
+        guest_policy=guest_policy,
+        vmpl=0,
+        chip_id="11" * 64,
+        tcb=SimpleNamespace(
+            current=minimum,
+            reported=minimum,
+            committed=minimum,
+            launch=minimum,
+        ),
+    )
+    contract = SimpleNamespace(
+        Evidence=ContractEvidence,
+        ChannelBinding=ContractBinding,
+        EvidenceKind=SimpleNamespace(SEV_SNP=evidence_kind),
+        ChannelBindingType=SimpleNamespace(TLS_SPKI_SHA256=binding_kind),
+        Tier=SimpleNamespace(CC_CPU_SNP=tier),
+        Policy=lambda *, allowed_measurements, min_tcb: SimpleNamespace(
+            allowed_measurements=allowed_measurements, min_tcb=min_tcb
+        ),
+        parse_snp_report=lambda _quote: parsed,
+        snp_generation=lambda _parsed: "genoa",
+        evidence_report_data=lambda _evidence, _nonce: b"r" * 64,
+        verify_snp=lambda *_args, **_kwargs: SimpleNamespace(
+            tier=tier,
+            chain_verified=True,
+            verification_status="VERIFIED",
+            chip_id="11" * 64,
+        ),
+        SnpVerifierUnavailable=RuntimeError,
+    )
+    verifier = object.__new__(SnpProductionVerifier)
+    verifier._contract = contract
+    verifier._policy = SnpPolicy(
+        generations={"genoa": SnpGenerationPolicy(frozenset({"a" * 96}), minimum)},
+        digest="sha256:" + "c" * 64,
+        require_single_socket=require_single_socket,
+    )
+    verifier._snpguest_path = "/pinned/snpguest"
+    verifier._snpguest_digest = "d" * 64
+    verifier.digest = "sha256:" + "e" * 64
+    return verifier
+
+
+def test_multi_socket_guest_is_refused_when_the_owner_policy_requires_one_socket():
+    """The gate that had no test. A dual-socket Linux host lands here."""
+    verifier = _gate_verifier(guest_policy=0x30000, require_single_socket=True)
+
+    result = verifier.verify(_snp_collected(), deadline_monotonic=time.monotonic() + 20)
+
+    assert result.verdict is QuoteVerdict.FAIL
+    assert result.reason == "snp_single_socket_required"
+    assert result.machine_id is None
+    assert result.guest_policy == 0x30000
+
+
+def test_multi_socket_guest_is_admitted_when_the_owner_policy_relaxes_the_bit():
+    verifier = _gate_verifier(guest_policy=0x30000, require_single_socket=False)
+
+    result = verifier.verify(_snp_collected(), deadline_monotonic=time.monotonic() + 20)
+
+    assert result.verdict is QuoteVerdict.PASS
+    assert result.machine_id is not None
+    assert result.guest_policy == 0x30000
+
+
+def test_relaxing_single_socket_does_not_relax_debug_or_migration_agent():
+    """Relaxing one launch-policy bit must not widen the others."""
+    for extra in (AMD_GUEST_POLICY_DEBUG, 1 << 18):
+        verifier = _gate_verifier(
+            guest_policy=0x30000 | extra, require_single_socket=False
+        )
+
+        result = verifier.verify(
+            _snp_collected(), deadline_monotonic=time.monotonic() + 20
+        )
+
+        assert result.verdict is QuoteVerdict.FAIL
+        assert result.reason == "snp_debug_or_migration_guest_refused"
+
+
+def test_single_socket_guest_is_admitted_under_either_policy():
+    for require in (True, False):
+        verifier = _gate_verifier(
+            guest_policy=0x30000 | (1 << 20), require_single_socket=require
+        )
+
+        result = verifier.verify(
+            _snp_collected(), deadline_monotonic=time.monotonic() + 20
+        )
+
+        assert result.verdict is QuoteVerdict.PASS
+
+
+def test_absent_require_single_socket_keeps_todays_behaviour_and_digest(tmp_path):
+    """Every policy file written before this change must mean exactly what it did."""
+    path = tmp_path / "snp-policy.json"
+    raw = json.dumps(_policy())
+    path.write_text(raw)
+    path.chmod(0o600)
+
+    before = load_snp_policy(path)
+    assert before.require_single_socket is True
+
+    # the digest is over the file bytes, so an untouched file keeps its digest
+    path.write_text(raw)
+    assert load_snp_policy(path).digest == before.digest
+
+
+def test_require_single_socket_is_owner_controlled_and_strictly_typed(tmp_path):
+    path = tmp_path / "snp-policy.json"
+    path.chmod(0o600) if path.exists() else None
+
+    relaxed = _policy() | {"require_single_socket": False}
+    path.write_text(json.dumps(relaxed))
+    path.chmod(0o600)
+    loaded = load_snp_policy(path)
+    assert loaded.require_single_socket is False
+
+    strict = _policy() | {"require_single_socket": True}
+    path.write_text(json.dumps(strict))
+    assert load_snp_policy(path).require_single_socket is True
+
+    # changing the flag changes the digest the validator reports
+    assert load_snp_policy(path).digest != loaded.digest
+
+    for bad in ("false", 0, 1, None, []):
+        path.write_text(json.dumps(_policy() | {"require_single_socket": bad}))
+        with pytest.raises(SnpProductionError, match="require_single_socket"):
+            load_snp_policy(path)
+
+    path.write_text(json.dumps(_policy() | {"unexpected": True}))
+    with pytest.raises(SnpProductionError, match="schema and generations"):
+        load_snp_policy(path)

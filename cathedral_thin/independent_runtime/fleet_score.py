@@ -52,7 +52,7 @@ from .multicompute import (
     duplicate_hardware_indexes,
 )
 from .qvl import TIMEOUT_SECONDS as QVL_TIMEOUT_SECONDS
-from .snp_production import SnpProductionVerifier
+from .snp_production import AMD_GUEST_POLICY_SINGLE_SOCKET, SnpProductionVerifier
 from .validator_request import (
     SignedValidatorTransport,
     fetch_worker_fleet,
@@ -355,6 +355,11 @@ def _collect_candidate(
                         "policy_digest": result.policy_digest,
                     }
                 )
+                if result.guest_policy is not None:
+                    row["guest_policy_hex"] = hex(result.guest_policy)
+                    row["single_socket"] = bool(
+                        result.guest_policy & AMD_GUEST_POLICY_SINGLE_SOCKET
+                    )
                 verdict_pass = result.verdict is QuoteVerdict.PASS
                 if verdict_pass and result.machine_id is not None:
                     machine_id = result.machine_id
