@@ -161,8 +161,28 @@ def submission_round_being_scored(block: int, cfg: RoundConfig = PRODUCTION) -> 
 
 
 def is_weight_set_block(block: int, cfg: RoundConfig = PRODUCTION) -> bool:
-    """True at the single authoritative-compose point of the round (the ``WEIGHT_SET_OFFSET``)."""
+    """True at the exact compose offset. Prefer :func:`past_weight_set_offset` for the decision.
+
+    Kept because "is this THE block" is a real question — a dashboard marking the compose point
+    wants it — but a validator must not gate a payout on observing one specific block.
+    """
     return block_offset(block, cfg) == cfg.weight_set_offset
+
+
+def past_weight_set_offset(block: int, cfg: RoundConfig = PRODUCTION) -> bool:
+    """True from the compose offset to the end of the round.
+
+    The compose used to require the offset EXACTLY, so a validator whose tick landed on 6601
+    instead of 6600 never composed that round at all: it kept re-asserting the previous round's
+    weights for a full day while a fresh set of scores sat unused. One block is not a window, and
+    everything that shifts a tick — a GC pause, a slow fetch, a restart, a benchmark run that
+    overruns — costs a round's payout.
+
+    Widening it is safe because the compose is already idempotent per round through
+    ``ScheduleState.last_composed_round``: the first tick at or after the offset composes, and
+    every later tick in that round falls through to the keep-alive.
+    """
+    return block_offset(block, cfg) >= cfg.weight_set_offset
 
 
 @dataclass(frozen=True)
@@ -180,7 +200,8 @@ def next_action(
 ) -> Action:
     """Decide what the validator should do at ``block``.
 
-    COMPOSE_AND_SET once per round at ``WEIGHT_SET_OFFSET`` — but only if this round's
+    COMPOSE_AND_SET once per round, at the first block AT OR AFTER ``WEIGHT_SET_OFFSET`` — but
+    only if this round's
     authoritative compose has not already happened (idempotent across the many blocks the loop
     sees, and across a restart that reloads ``last_composed_round``). Otherwise REASSERT when
     ``REASSERT_BLOCKS`` have elapsed since the last set, else WAIT. The compose takes precedence,
@@ -189,7 +210,7 @@ def next_action(
     if not isinstance(block, int) or block < 0:
         raise ValueError("block must be a non-negative integer")
     this_round = round_index(block, cfg)
-    if is_weight_set_block(block, cfg) and state.last_composed_round != this_round:
+    if past_weight_set_offset(block, cfg) and state.last_composed_round != this_round:
         return Action.COMPOSE_AND_SET
     if state.last_set_block is None:
         # Never set weights yet: assert immediately so the validator does not sit dark waiting
@@ -230,6 +251,7 @@ __all__ = [
     "block_offset",
     "submission_round_being_scored",
     "is_weight_set_block",
+    "past_weight_set_offset",
     "next_action",
     "record_action",
 ]

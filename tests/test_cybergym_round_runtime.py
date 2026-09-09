@@ -117,11 +117,22 @@ class TestStep:
         assert c.posted == []           # nothing to score yet
         assert action is Action.REASSERT  # but still assert weights (never sit dark)
 
-    def test_a_failing_report_raises_rather_than_silently_skipping(self):
+    def test_a_failing_report_is_recorded_and_retried_not_raised(self):
+        """This test used to assert the opposite, and the opposite was the bug (F5).
+
+        Raising out of step() aborted the tick BEFORE the weight action, so a backend the
+        validator only reads from could stop it setting weights at all — and the chain zeroes a
+        validator that goes quiet. The failure is now carried on the state, the weight obligation
+        still runs, and `reported_round` stays put so the next tick retries.
+        """
         class Boom(FakeClient):
-            def post_results(self, *a, **k): raise RuntimeError("server down")
-        with pytest.raises(RoundRuntimeError):
-            self._step(ROUND_BLOCKS + 5, RuntimeState(), Boom(submissions=[_sub("a", ["t1"])]))
+            def post_results(self, *a, **k):
+                raise RuntimeError("server down")
+
+        state, _ = self._step(ROUND_BLOCKS + 5, RuntimeState(),
+                              Boom(submissions=[_sub("a", ["t1"])]))
+        assert "server down" in (state.last_benchmark_error or "")
+        assert state.reported_round is None
 
 
 class TestDeadlineAbstains:
@@ -161,3 +172,54 @@ class TestTheForfeitedShareIsNeverDropped:
         """Not an empty vector, which asserts nothing while looking like a healthy set."""
         assert RuntimeState().weights().burn == Decimal(1)
         assert RuntimeState().weights().miners == {}
+
+
+class TestTheWeightObligationSurvivesABackendOutage:
+    """F5. Benchmarking ran before the weight action and its failure raised out of step(), so a
+    backend the validator merely READS from could stop it discharging a chain duty that has
+    nothing to do with the backend — and the chain zeroes a validator that goes quiet. The
+    module's own comment already said this must not happen."""
+
+    class BackendDown:
+        def fetch_round_tasks(self, round_id):
+            raise RuntimeError("backend unreachable")
+
+        def fetch_submissions(self, round_id):
+            raise RuntimeError("backend unreachable")
+
+        def post_results(self, round_id, results):
+            pass
+
+        def fetch_average_scores(self, round_id):
+            return {}
+
+    def _step(self, state, sets):
+        return step(7500, state, client=self.BackendDown(), benchmark=SOLVE_ALL,
+                    set_weights=sets.append, nonce_for=lambda r: b"nonce")
+
+    def test_the_keep_alive_still_goes_out(self):
+        sets = []
+        state = RuntimeState(last_weights=(("5MinerA", "0.84"),), last_burn="0.16")
+        _, action = self._step(state, sets)
+        assert action is Action.REASSERT
+        assert len(sets) == 1 and sets[0].miners["5MinerA"] == Decimal("0.84")
+
+    def test_step_does_not_raise(self):
+        self._step(RuntimeState(), [])
+
+    def test_the_failure_is_recorded_rather_than_swallowed(self):
+        state, _ = self._step(RuntimeState(), [])
+        assert "backend unreachable" in (state.last_benchmark_error or "")
+
+    def test_the_round_is_retried_next_tick(self):
+        """`reported_round` must not advance, or a transient outage costs the round its verdicts."""
+        state, _ = self._step(RuntimeState(), [])
+        assert state.reported_round is None
+
+    def test_a_successful_benchmark_clears_the_error(self):
+        client = FakeClient(submissions=[_sub("a", ["t1"])], averages={"a": 100})
+        state = RuntimeState(last_benchmark_error="an earlier outage")
+        state, _ = step(7500, state, client=client, benchmark=SOLVE_ALL,
+                        set_weights=lambda w: None, nonce_for=lambda r: b"nonce")
+        assert state.last_benchmark_error is None
+        assert state.reported_round == 0

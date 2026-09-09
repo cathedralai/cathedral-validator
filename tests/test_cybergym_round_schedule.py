@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_thin.cybergym_round_schedule import (
+    PRODUCTION,
     REASSERT_BLOCKS,
     ROUND_BLOCKS,
     WEIGHT_SET_OFFSET,
@@ -16,6 +17,7 @@ from cathedral_thin.cybergym_round_schedule import (
     ScheduleState,
     block_offset,
     is_weight_set_block,
+    past_weight_set_offset,
     next_action,
     record_action,
     round_bounds,
@@ -137,3 +139,52 @@ class TestSubmissionWindow:
         # ~1200 blocks (4h) of queue drain after the close, and the run may spill past the
         # round end into the next one while validators start evaluating.
         assert ROUND_BLOCKS - SUBMISSION_CLOSE_OFFSET == 1200
+
+
+class TestTheComposeWindowIsNotOneBlockWide:
+    """F4. The compose used to require the offset EXACTLY, so a tick landing on 6601 instead of
+    6600 meant the round was never composed at all — the validator re-asserted the previous
+    round's weights for a full day while fresh scores sat unused."""
+
+    def _state(self):
+        return ScheduleState(last_set_block=7000, last_composed_round=0)
+
+    def test_it_composes_at_the_offset(self):
+        block = PRODUCTION.round_blocks + PRODUCTION.weight_set_offset
+        assert next_action(block, self._state()) is Action.COMPOSE_AND_SET
+
+    def test_it_still_composes_a_block_late(self):
+        block = PRODUCTION.round_blocks + PRODUCTION.weight_set_offset + 1
+        assert next_action(block, self._state()) is Action.COMPOSE_AND_SET
+
+    def test_it_still_composes_much_later_in_the_round(self):
+        """A benchmark run that overruns by hours must not cost the round its payout."""
+        block = PRODUCTION.round_blocks + PRODUCTION.round_blocks - 1
+        assert next_action(block, self._state()) is Action.COMPOSE_AND_SET
+
+    def test_it_does_not_compose_before_the_offset(self):
+        block = PRODUCTION.round_blocks + PRODUCTION.weight_set_offset - 1
+        assert next_action(block, self._state()) is not Action.COMPOSE_AND_SET
+
+    def test_it_composes_only_once_per_round(self):
+        """Widening the window is only safe because the compose is idempotent."""
+        state = self._state()
+        block = PRODUCTION.round_blocks + PRODUCTION.weight_set_offset
+        first = next_action(block, state)
+        state = record_action(block, first, state)
+        assert first is Action.COMPOSE_AND_SET
+        assert next_action(block + 1, state) is not Action.COMPOSE_AND_SET
+
+    def test_a_missed_block_no_longer_loses_the_whole_round(self):
+        """The regression itself: sweep the rest of the round and find a compose."""
+        state = self._state()
+        start = PRODUCTION.round_blocks + PRODUCTION.weight_set_offset + 1
+        composed = any(next_action(b, state) is Action.COMPOSE_AND_SET
+                       for b in range(start, 2 * PRODUCTION.round_blocks))
+        assert composed
+
+    def test_the_exact_block_predicate_still_exists_for_display(self):
+        offset = PRODUCTION.weight_set_offset
+        assert is_weight_set_block(PRODUCTION.round_blocks + offset)
+        assert not is_weight_set_block(PRODUCTION.round_blocks + offset + 1)
+        assert past_weight_set_offset(PRODUCTION.round_blocks + offset + 1)

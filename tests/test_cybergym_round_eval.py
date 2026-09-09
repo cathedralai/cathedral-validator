@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 from cathedral_thin.cybergym_round_eval import (
-    RoundEvalError, Submission, TaskProof,
+    BenchmarkUnavailable, RoundEvalError, Submission, TaskProof,
     benchmark_submission, compose_round_weights, evaluate_round,
 )
 from cathedral_thin.cybergym_round_scoring import round_score_base100
@@ -196,3 +196,45 @@ class TestTheDenominatorIsNotTheMinersToChoose:
         results = evaluate_round([self._sub("a", self.TASKS), self._sub("b", self.TASKS)],
                                  self._bench, task_ids=self.TASKS, deadline=lambda: True)
         assert all(not r.evaluated for r in results.values())
+
+
+class TestAnUnrunnableDifferentialIsAnAbstentionNotAZero:
+    """F6. A dead Docker daemon or an image that never finished pulling used to score every miner
+    zero, reported as EVALUATED — so one broken validator dragged the whole field down for a fault
+    that says nothing about any miner. The deadline path already abstained; this one did not."""
+
+    TASKS = [f"t{i}" for i in range(4)]
+
+    def _subs(self):
+        return [Submission(f"5Miner{c}", "d",
+                           tuple(TaskProof(t, b"poc", {}) for t in self.TASKS))
+                for c in "AB"]
+
+    def test_a_dead_differential_makes_every_miner_abstain(self):
+        def unavailable(task_id, poc, proof):
+            raise BenchmarkUnavailable("Cannot connect to the Docker daemon")
+
+        results = evaluate_round(self._subs(), unavailable, task_ids=self.TASKS)
+        assert all(not r.evaluated for r in results.values())
+
+    def test_one_unrunnable_task_makes_that_miner_abstain(self):
+        """A partial score reported as evaluated is a number we know to be too low."""
+        def flaky(task_id, poc, proof):
+            if task_id == "t2":
+                raise BenchmarkUnavailable("image never pulled")
+            return True
+
+        results = evaluate_round(self._subs(), flaky, task_ids=self.TASKS)
+        assert all(not r.evaluated for r in results.values())
+
+    def test_a_broken_poc_is_still_the_miners_result(self):
+        """A malformed proof or PoC is not an infrastructure failure — it scores zero, evaluated."""
+        def broken(task_id, poc, proof):
+            raise ValueError("malformed proof")
+
+        results = evaluate_round(self._subs(), broken, task_ids=self.TASKS)
+        assert all(r.evaluated and r.score == 0 for r in results.values())
+
+    def test_a_working_round_is_unaffected(self):
+        results = evaluate_round(self._subs(), lambda *a: True, task_ids=self.TASKS)
+        assert all(r.evaluated and r.score == Decimal(100) for r in results.values())

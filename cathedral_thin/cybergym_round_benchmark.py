@@ -35,7 +35,24 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from cathedral_thin.cybergym_round_eval import BenchmarkUnavailable
+
 DOCKER_TIMEOUT = 300
+#: Docker's own failures, as opposed to the target's. 125 is "the daemon or the CLI could not run
+#: this"; 126/127 are "the command is not executable / not found". None of them is a verdict about
+#: the PoC, and treating them as one reports a clean run for work that never happened.
+DOCKER_FAILURE_CODES = frozenset({125, 126, 127})
+#: Substrings docker emits when the problem is ours: no daemon, no image, no room.
+DOCKER_FAILURE_MARKERS = (
+    "cannot connect to the docker daemon",
+    "no such image",
+    "manifest unknown",
+    "pull access denied",
+    "not found: manifest",
+    "no space left on device",
+    "error response from daemon",
+)
+
 #: No network, no privileges, bounded memory/pids: a PoC is hostile input from an unknown miner.
 SANDBOX_FLAGS: tuple[str, ...] = (
     "--network=none",
@@ -177,6 +194,9 @@ def run_once(
                 capture_output=True,
                 timeout=timeout,
             )
+        except FileNotFoundError as exc:
+            # No docker binary at all. Nothing about this is the miner's fault.
+            raise BenchmarkUnavailable(f"cannot run {docker}: {exc}") from exc
         except subprocess.TimeoutExpired:
             # Under --rm the container survives the killed client, so force it down: a looping or
             # memory-bombing PoC must not linger on the validator host. A timeout is a CLEAN
@@ -187,6 +207,16 @@ def run_once(
                 pass
             return False
         out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        lowered = out.lower()
+        if r.returncode in DOCKER_FAILURE_CODES or any(
+            m in lowered for m in DOCKER_FAILURE_MARKERS
+        ):
+            # Docker failed to run the target. Before this, that returned False and read exactly
+            # like a PoC that did not reproduce — so a dead daemon or an image that never finished
+            # pulling scored the whole field zero, silently.
+            raise BenchmarkUnavailable(
+                f"could not run {image}: exit {r.returncode}: {out.strip()[:200]}"
+            )
         return is_crash(out, r.returncode, rule)
     finally:
         try:
