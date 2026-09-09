@@ -41,6 +41,18 @@ class RoundEvalError(ValueError):
     """Malformed evaluation input. Fails closed."""
 
 
+class BenchmarkUnavailable(Exception):
+    """The differential could not be RUN — a dead Docker daemon, a missing image, no disk.
+
+    Distinct from a PoC that simply did not reproduce, and the distinction decides a payout. A PoC
+    that fails is the miner's result and scores zero. A differential we could not run is OUR
+    failure, and reporting it as zero states something false about the miner to their cost.
+
+    Raised by the benchmark seam; `evaluate_round` turns it into an abstention, exactly as it
+    already does for a validator that ran out of time.
+    """
+
+
 @dataclass(frozen=True)
 class TaskProof:
     """What a validator needs to rebuild ONE task's corpus and benchmark a PoC against it."""
@@ -166,6 +178,10 @@ def evaluate_round(
     it from both directions: an unsubmitted task counts unsolved, and a task the miner invented
     that is not in the set is ignored rather than padding the numerator.
 
+    A benchmark raising :class:`BenchmarkUnavailable` means the differential could not be RUN, and
+    the miner abstains for that task rather than being scored zero on it — one broken validator
+    must not drag the whole field down for a fault that says nothing about any miner.
+
     ``deadline() -> True`` means the validator is out of time. Miners not yet benchmarked when it
     trips are returned UNEVALUATED (score 0, ``evaluated=False``) — the backend excludes those
     from the average, so a validator that ran out of time ABSTAINS rather than dragging a miner
@@ -196,6 +212,8 @@ def evaluate_round(
     }
     denominator = list(task_ids) if task_ids is not None else None
     outcomes: dict[str, list[tuple[str, bool]]] = {hk: [] for hk in order}
+    #: Miners with at least one task we could not judge. Their score would understate them.
+    unjudged: set[str] = set()
     ran_out = False
 
     # One task at a time: the caller's benchmark rebuilds that task's corpus once and every
@@ -207,15 +225,24 @@ def evaluate_round(
         for hotkey, tp in tasks_by_id[task_id]:
             try:
                 ok = bool(benchmark(task_id, bytes(tp.poc), tp.proof))
+            except BenchmarkUnavailable:
+                # We could not judge this one. Record nothing: the miner ends up short of its
+                # expected verdicts and is reported UNEVALUATED below, rather than carrying a zero
+                # that says its PoC failed when we never actually ran it.
+                unjudged.add(hotkey)
+                continue
             except Exception:
+                # A broken PoC or a malformed proof IS the miner's result, and it is not a solve.
                 ok = False
             outcomes[hotkey].append((task_id, ok))
 
     results: dict[str, MinerRoundResult] = {}
     for hk in order:
         benchmarked = outcomes[hk]
-        complete = len(benchmarked) == submitted_count[hk]
-        if not benchmarked and ran_out and submitted_count[hk]:
+        # Unjudged means incomplete however many other tasks succeeded: a partial score reported
+        # as evaluated is a number we know to be too low.
+        complete = len(benchmarked) == submitted_count[hk] and hk not in unjudged
+        if not benchmarked and (ran_out or hk in unjudged) and submitted_count[hk]:
             # never got to this miner: abstain rather than score them zero
             results[hk] = MinerRoundResult(
                 hk,
@@ -271,6 +298,7 @@ def compose_round_weights(
 
 __all__ = [
     "RoundEvalError",
+    "BenchmarkUnavailable",
     "TaskProof",
     "Submission",
     "BenchmarkFn",

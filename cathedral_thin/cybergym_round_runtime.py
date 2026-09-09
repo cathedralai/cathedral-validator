@@ -112,6 +112,9 @@ class RuntimeState:
     #: an empty vector, which asserts nothing while looking like a healthy weight set.
     last_burn: str = "1"
     reported_round: int | None = None  # last submission round we benchmarked+posted
+    #: Why the last benchmark attempt failed, or None. Carried rather than raised: the weight
+    #: obligation is owed to the chain whether or not the backend answered.
+    last_benchmark_error: str | None = None
 
     def weights(self) -> LaneWeights:
         return LaneWeights(
@@ -194,7 +197,9 @@ def step(
     Benchmarking happens once per evaluation round, the first time we see a block in it and before
     the compose — so the server has this validator's verdicts to average by the time weights are
     composed. It is deliberately separate from the schedule's weight action: benchmarking is work,
-    setting weights is the chain obligation, and a slow benchmark must never delay the keep-alive.
+    setting weights is the chain obligation, and a failed or slow benchmark must never delay the
+    keep-alive. A benchmark failure is recorded on the state and the weight action still runs; the
+    round is retried on the next tick because ``reported_round`` is not advanced.
     """
     scored_round = submission_round_being_scored(block, cfg)
     # 1. Benchmark + report once per evaluation round (idempotent via reported_round).
@@ -207,11 +212,21 @@ def step(
                 task_weights=task_weights,
                 deadline=deadline,
             )
-            state = replace(state, reported_round=scored_round)
-        except Exception as exc:  # a failed report must not stop the weight obligation
-            raise RoundRuntimeError(
-                f"benchmark/report failed for round {scored_round}: {exc}"
-            ) from exc
+            state = replace(
+                state, reported_round=scored_round, last_benchmark_error=None
+            )
+        except Exception as exc:
+            # A failed report must not stop the weight obligation, and until now it did: the
+            # raise propagated out of step() before the weight action, so a backend the validator
+            # merely READS from could stop it discharging a chain duty that has nothing to do
+            # with the backend, and the chain would zero it for going quiet.
+            #
+            # `reported_round` is deliberately NOT advanced, so the next tick retries the
+            # benchmark. Only the weights go out regardless.
+            state = replace(
+                state,
+                last_benchmark_error=f"benchmark/report failed for round {scored_round}: {exc}",
+            )
 
     # 2. Weight obligation, per the schedule.
     action = next_action(block, state.schedule, cfg)

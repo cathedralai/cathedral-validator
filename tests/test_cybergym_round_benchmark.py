@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from cathedral_thin.cybergym_round_eval import BenchmarkUnavailable  # noqa: E402
 from cathedral_thin.cybergym_round_benchmark import (  # noqa: E402
     BenchmarkError, CrashRule, docker_benchmark, is_crash, parse_proof,
 )
@@ -146,3 +147,50 @@ class TestTheDifferential:
         assert any(a.endswith("/tmp/poc:ro") for a in cmd)
         for flag in ("--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
             assert flag in cmd
+
+
+class TestDockerFailingIsNotAVerdict:
+    """F6, at the seam. A dead daemon or a missing image returned False, which reads exactly like
+    a PoC that did not reproduce — so infrastructure failure scored the field zero, silently."""
+
+    def _fake(self, returncode, stderr):
+        def run(cmd, **kwargs):
+            if cmd[:2] == ["docker", "rm"]:
+                return FakeDocker._result(b"", 0)
+
+            class R:
+                stdout, stderr_, returncode_ = b"", stderr, returncode
+            r = R()
+            r.stdout, r.stderr, r.returncode = b"", stderr, returncode
+            return r
+        return run
+
+    def test_a_dead_daemon_raises(self):
+        with pytest.raises(BenchmarkUnavailable):
+            docker_benchmark("arvo:1", b"poc", PROOF,
+                             _run=self._fake(125, b"Cannot connect to the Docker daemon"))
+
+    def test_a_missing_image_raises(self):
+        """An image that never finished pulling is our failure, not the miner's."""
+        with pytest.raises(BenchmarkUnavailable):
+            docker_benchmark("arvo:1", b"poc", PROOF,
+                             _run=self._fake(125, b"Error response from daemon: manifest unknown"))
+
+    def test_a_full_disk_raises(self):
+        with pytest.raises(BenchmarkUnavailable):
+            docker_benchmark("arvo:1", b"poc", PROOF,
+                             _run=self._fake(125, b"no space left on device"))
+
+    def test_a_missing_docker_binary_raises(self):
+        def no_docker(cmd, **kwargs):
+            raise FileNotFoundError("docker")
+        with pytest.raises(BenchmarkUnavailable):
+            docker_benchmark("arvo:1", b"poc", PROOF, _run=no_docker)
+
+    def test_a_target_that_simply_does_not_crash_is_still_a_verdict(self):
+        """The distinction that matters: this one IS the miner's result."""
+        assert docker_benchmark("arvo:1", b"poc", PROOF,
+                                _run=FakeDocker(vul_crashes=False)) is False
+
+    def test_a_real_crash_is_still_a_solve(self):
+        assert docker_benchmark("arvo:1", b"poc", PROOF, _run=FakeDocker()) is True
