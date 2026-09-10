@@ -392,6 +392,12 @@ def cybergym_allocation(
     result["forfeited_fraction"] = forfeited
     result["contributing_fraction"] = float(debug.get("contributing_fraction") or 0.0)
 
+    # Was the lane IDLE (a healthy feed with nobody above zero) rather than broken? Recorded, not
+    # acted on: the share still forfeits to burn exactly as before. A redirect policy needs this
+    # distinction to exist first -- otherwise "pay compute when CyberGym is idle" also pays compute
+    # when the CyberGym feed is merely down, which is the failure mode that must keep burning.
+    result["lane_idle"] = bool(result["cybergym"].get("reason") == "idle_no_winners")
+
     if forfeited <= 0.0:
         result["status"] = "ok" if weights else "no_contribution"
         result["weights"] = dict(weights)

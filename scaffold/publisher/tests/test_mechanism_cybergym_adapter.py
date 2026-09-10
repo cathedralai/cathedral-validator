@@ -966,3 +966,35 @@ def test_require_attestation_pays_on_a_valid_receipt(tmp_path, monkeypatch):
     assert info["attestation"] == "ok"
     assert vec == {10: 8.0, 20: 4.0}          # legacy proportional pass-through, paid
     assert meta.sig_ok is True
+
+
+# --- idle lane vs broken feed ------------------------------------------------
+def test_a_fresh_report_with_no_winners_is_idle_not_a_mapping_failure(tmp_path, monkeypatch):
+    """Nobody solved anything, and the lane says so in its own words.
+
+    Until 2026-09-10 this burned as `no_uid_mapping`, the same reason a registration problem or a
+    dead feed produces, so nothing downstream could tell "the lane is idle" from "the lane is
+    broken" — and any policy that pays the idle share elsewhere would have paid it on a broken feed
+    too. No weights change here: the share still forfeits to burn.
+    """
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _report(store, epoch=1, scores={"5Alice": 0.0}, nonce="n1", dispatched_units=10.0)
+    _uid(store, "5Alice", 10)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert vec == {}
+    assert info["reason"] == "idle_no_winners"
+    assert info["winners"] == []
+    assert info["contributing"] is False
+
+
+def test_a_winner_with_no_uid_is_still_a_mapping_failure(tmp_path, monkeypatch):
+    """The other half of the distinction: someone DID solve, we just cannot pay them. That is a
+    fault, and it must keep burning even under a redirect policy."""
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _report(store, epoch=1, scores={"5Alice": 8.0}, nonce="n1", dispatched_units=10.0)
+    _uid(store, "5Alice", None)
+    vec, _, info = adapter.cybergym_score_snapshot(store, epoch=1, now=NOW)
+    assert vec == {} and info["reason"] == "no_uid_mapping"
+    assert info["winners"] == ["5Alice"]

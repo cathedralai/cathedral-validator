@@ -441,7 +441,19 @@ def _compose_tournament(
         vector[uid] = vector.get(uid, 0.0) + float(standing.lane_share)
     info["dropped_unmapped_hotkeys"] = dropped
     if not vector:
-        return _empty_result("no_uid_mapping", info, signed_at_ms=signed_at_ms, sig_ok=True)
+        # Two different things produce an empty vector, and they are not the same event:
+        #
+        #   IDLE      a fresh, authenticated, complete report in which nobody scored above zero.
+        #             The lane worked; there was simply nothing to pay. This is the N=0 case a
+        #             redirect policy would act on.
+        #   FAILURE   winners existed but none mapped to a UID (registration/mapping problem), or
+        #             the feed was stale/unauthenticated/absent (handled earlier).
+        #
+        # Both burned as `no_uid_mapping` until now, so no consumer could tell "nobody solved
+        # anything" from "the feed is broken" -- and a policy that pays compute on an idle lane
+        # would have paid it on a broken feed too. Naming them apart changes no weights today.
+        reason = "idle_no_winners" if not board.winners else "no_uid_mapping"
+        return _empty_result(reason, info, signed_at_ms=signed_at_ms, sig_ok=True)
     info["contributing"] = True
     info["reason"] = "ok_tournament"
     info["n_uids"] = len(vector)
@@ -462,8 +474,13 @@ def cybergym_score_snapshot(
     ``info`` carries the reason a vector is empty so a composing caller can
     record why the mechanism forfeited its share (and therefore why that share
     burns). Reasons: ``no_report``, ``epoch_not_available``, ``unauthenticated``,
-    ``stale``, ``empty_report``, ``no_uid_mapping``, ``table_missing``,
-    ``bad_netuid_config``, or ``ok``.
+    ``stale``, ``empty_report``, ``no_uid_mapping``, ``idle_no_winners``,
+    ``table_missing``, ``bad_netuid_config``, or ``ok``.
+
+    ``idle_no_winners`` is the only one of those that is not a fault: the feed was fresh,
+    authenticated and complete, and nobody scored above zero. Every other empty reason means the
+    lane could not be evaluated. A policy that treats an idle lane differently from a burning one
+    must key off that distinction, or it will also fire when the feed is simply down.
 
     Nothing here writes, and nothing here uses read time as a score input:
     ``signed_at_ms`` is derived from the report's authenticated ``generated_at``.
