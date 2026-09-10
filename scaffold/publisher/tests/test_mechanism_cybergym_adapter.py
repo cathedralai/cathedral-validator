@@ -777,7 +777,10 @@ def test_tournament_awards_top5_shares_when_fields_present(tmp_path, monkeypatch
     assert info["tournament"] is True and meta.sig_ok is True
     assert info["winners"] == ["5A", "5B", "5C", "5D", "5E"]  # F is 6th, no slot
     # Top-5 fixed shares, mapped to uid; the 6th miner earns nothing.
-    assert vec == pytest.approx({1: 0.65, 2: 0.14, 3: 0.10, 4: 0.07, 5: 0.04})
+    # jared's KING spec (2026-09-04): the king takes the residual, ranks 2-5 take fixed
+    # runner-up shares. The publisher paid the OLD renormalizing table until 2026-09-10 while
+    # distill had already moved, so the live lane was not paying the decided curve.
+    assert vec == pytest.approx({1: 0.84, 2: 0.07, 3: 0.03, 4: 0.03, 5: 0.03})
     assert 6 not in vec
 
 
@@ -806,9 +809,10 @@ def test_tournament_recency_window_weights_the_latest_epoch(tmp_path, monkeypatc
     assert info["reason"] == "ok_tournament"
     assert info["window_epochs"] == [20, 21]
     assert info["winners"] == ["5B", "5A"]             # B (recent) ahead of A
-    # Two winners: 0.65/0.14 renormalized to sum 1.
-    assert vec[2] == pytest.approx(0.822785)           # 5B rank 1
-    assert vec[1] == pytest.approx(0.177215)           # 5A rank 2
+    # Two winners under the KING curve: rank 2 takes its FIXED 0.07 and the king keeps the
+    # rest. A thin field concentrates on the leader instead of scaling every rank up.
+    assert vec[2] == pytest.approx(0.93)               # 5B rank 1 (king)
+    assert vec[1] == pytest.approx(0.07)               # 5A rank 2
 
 
 def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
@@ -816,7 +820,35 @@ def test_vendored_tournament_constants_match_the_mechanism(tmp_path):
     from scaffold.publisher import cybergym_tournament as T
     assert T.WINDOW == 5 and T.WINNER_SLOTS == 5
     assert [str(w) for w in T.ROLLING_WEIGHTS] == ["0.03", "0.07", "0.15", "0.25", "0.50"]
-    assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.65", "0.14", "0.10", "0.07", "0.04"]
+    assert [str(s) for s in T.RUNNER_UP_SHARES] == ["0.07", "0.03", "0.03", "0.03"]
+    # Back-compat alias: it now names the FULL-FIELD payout, king first.
+    assert [str(s) for s in T.TOURNAMENT_SHARES] == ["0.84", "0.07", "0.03", "0.03", "0.03"]
+
+
+def test_vendored_award_shares_matches_distills_king_schedule():
+    """The payout curve itself, pinned rank by rank.
+
+    The constants guard above did not catch the real drift: the publisher's vendored copy kept
+    renormalizing thin fields for six days after distill moved to the KING curve, because the two
+    tables were different constants rather than different values of one. This pins the SCHEDULE,
+    which is what actually pays, and it is the same table distill's own golden test asserts.
+    """
+    from decimal import Decimal
+
+    from scaffold.publisher import cybergym_tournament as T
+
+    def shares(n):   # compare VALUES: the king's residual carries the quantiser's trailing zeros
+        return [Decimal(s) for s in T._award_shares(n)]
+
+    assert shares(1) == [Decimal("1")]
+    assert shares(2) == [Decimal("0.93"), Decimal("0.07")]
+    assert shares(3) == [Decimal("0.90"), Decimal("0.07"), Decimal("0.03")]
+    assert shares(4) == [Decimal("0.87"), Decimal("0.07"), Decimal("0.03"), Decimal("0.03")]
+    assert shares(5) == [Decimal("0.84"), Decimal("0.07"), Decimal("0.03"), Decimal("0.03"),
+                         Decimal("0.03")]
+    assert T._award_shares(0) == []
+    for n in range(1, 6):
+        assert sum(T._award_shares(n)) == 1, "the lane must pay out in full for any field"
 
 
 # --- DCAP attestation gate (distill #115 follow-on) --------------------------
