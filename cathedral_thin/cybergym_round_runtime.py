@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from cathedral_thin.cybergym_round_eval import (
     BenchmarkFn,
@@ -60,6 +60,9 @@ class RoundClient(Protocol):
 
     def fetch_submissions(self, round_id: int) -> Sequence[Submission]:
         """The closed round's submissions: each miner's PoCs + per-task rebuild proofs."""
+
+    def fetch_solver(self) -> Mapping[str, Any]:
+        """What the backend says it enforces about the enclave that ran the agents."""
 
     def post_results(
         self, round_id: int, results: Mapping[str, MinerRoundResult]
@@ -122,6 +125,31 @@ class RuntimeState:
         )
 
 
+def approved_workload_for(client: RoundClient, *, require: bool) -> str | None:
+    """The measurement every submission must carry, read from the backend, or None to not check.
+
+    `require` is the operator saying "only credit runs from the approved solver". If the backend
+    then publishes no pin, this RAISES rather than returning None: silently not checking would
+    leave the validator believing it enforces something it does not. It equally must not refuse
+    the whole field for that — the caller records the failure and retries, which is an abstention,
+    not a mass zero, because a backend that publishes nothing is not the miners' fault.
+    """
+    if not require:
+        return None
+    doc = client.fetch_solver()
+    pin = str(doc.get("approved_workload_sha256") or "").strip().lower()
+    if (
+        not doc.get("enforced")
+        or len(pin) != 64
+        or any(c not in "0123456789abcdef" for c in pin)
+    ):
+        raise RoundRuntimeError(
+            "this validator requires the approved-solver pin, but the backend publishes none "
+            f"(/v2/solver: {dict(doc)!r}). Refusing to report rather than pretending to check."
+        )
+    return pin
+
+
 def benchmark_and_report(
     round_id: int,
     *,
@@ -129,6 +157,8 @@ def benchmark_and_report(
     benchmark: BenchmarkFn,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
+    approved_workload: str | None = None,
+    require_approved_solver: bool = False,
 ) -> dict[str, MinerRoundResult]:
     """Benchmark every submission of a closed round and report the verdicts to the server.
 
@@ -138,6 +168,11 @@ def benchmark_and_report(
     """
     if round_id < 0:
         raise RoundRuntimeError("no submission round to benchmark yet")
+    approved_workload = (
+        approved_workload_for(client, require=require_approved_solver)
+        if approved_workload is None
+        else approved_workload
+    )
     task_ids = list(client.fetch_round_tasks(round_id))
     if not task_ids:
         raise RoundRuntimeError(
@@ -150,6 +185,7 @@ def benchmark_and_report(
         task_ids=task_ids,
         task_weights=task_weights,
         deadline=deadline,
+        approved_workload=approved_workload,
     )
     client.post_results(round_id, results)
     return results
@@ -190,6 +226,7 @@ def step(
     nonce_for: NonceFn,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
+    require_approved_solver: bool = False,
     cfg: RoundConfig = PRODUCTION,
 ) -> tuple[RuntimeState, Action]:
     """Advance the loop one block. Returns the new state and the action actually taken.
@@ -211,6 +248,7 @@ def step(
                 benchmark=benchmark,
                 task_weights=task_weights,
                 deadline=deadline,
+                require_approved_solver=require_approved_solver,
             )
             state = replace(
                 state, reported_round=scored_round, last_benchmark_error=None
@@ -264,6 +302,7 @@ __all__ = [
     "NonceFn",
     "RuntimeState",
     "benchmark_and_report",
+    "approved_workload_for",
     "compose_and_set",
     "step",
 ]

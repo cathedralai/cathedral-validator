@@ -24,6 +24,7 @@ import urllib.parse
 import time
 import urllib.request
 from collections.abc import Mapping, Sequence
+from typing import Any
 from typing import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -173,6 +174,15 @@ class HttpRoundClient:
             raise RoundClientError("/v2/tasks carried no task set")
         return [str(t) for t in tasks]
 
+    def fetch_solver(self) -> Mapping[str, Any]:
+        """What the backend says it enforces about the enclave: the approved measurement, the
+        runner digest, the image. Public — no signature — because a pin only means something if
+        someone other than the backend can read it."""
+        body = self._request("/v2/solver")
+        if not isinstance(body, dict):
+            raise RoundClientError("/v2/solver did not return an object")
+        return body
+
     def fetch_submissions(self, round_id: int) -> Sequence[Submission]:
         body = self._request(
             "/v2/submissions", sign_read_round=round_id, round=round_id
@@ -191,11 +201,18 @@ class HttpRoundClient:
                     )
                     for t in row.get("tasks", [])
                 )
+                attestation = row.get("attestation")
                 out.append(
                     Submission(
                         miner_hotkey=str(row["miner_hotkey"]),
                         agent_digest=str(row.get("agent_digest", "")),
                         tasks=tasks,
+                        # The receipt for the run that produced these PoCs. Carried through so
+                        # this validator can check WHICH solver ran instead of trusting the
+                        # backend's claim to have enforced its own pin.
+                        attestation=dict(attestation)
+                        if isinstance(attestation, dict)
+                        else None,
                     )
                 )
             except Exception as exc:
