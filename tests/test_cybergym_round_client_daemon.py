@@ -31,6 +31,7 @@ class FakeBackend:
         self.submissions = submissions if submissions is not None else []
         self.scores = scores or {}
         self.tasks = tasks
+        self.solver = {"enforced": False, "approved_workload_sha256": None}
         self.broken = set(broken)
         self.posted = []
         backend = self
@@ -60,6 +61,8 @@ class FakeBackend:
                     return self._send(200, {"round_id": 0, "tasks": backend.tasks})
                 if path == "/v2/submissions":
                     return self._send(200, {"round_id": 0, "submissions": backend.submissions})
+                if path == "/v2/solver":
+                    return self._send(200, backend.solver)
                 if path == "/v2/average":
                     return self._send(200, {"round_id": 0, "scores": backend.scores})
                 return self._send(404, {"error": "nope"})
@@ -326,3 +329,31 @@ class TestTheClientSignsItsReads:
         calls = []
         HttpRoundClient(backend.base, "5V", sign=lambda m: calls.append(m) or "s").fetch_round()
         assert calls == []
+
+
+class TestTheClientCarriesTheReceipt:
+    """The submission wire gained `attestation` so a validator can check WHICH solver ran. If the
+    client dropped it, the check would pass vacuously — every miner would look unattested, or
+    (worse, if the field were merely ignored) the pin would never be applied at all."""
+
+    def test_the_attestation_survives_the_wire(self, backend):
+        att = {"receipt_id": "r1", "workload_sha256": "d1" + "6" * 62,
+               "intel_verified": True, "report_data_match": True, "payload_bound": True}
+        row = wire_submission("5A")
+        row["attestation"] = att
+        backend.submissions = [row]
+        subs = HttpRoundClient(backend.base, "v1").fetch_submissions(0)
+        assert subs[0].attestation["workload_sha256"] == att["workload_sha256"]
+
+    def test_a_submission_without_one_reads_as_None_not_as_an_error(self, backend):
+        """A run that carried no usable receipt is a verdict about the evidence, and the validator
+        decides what to do about it — the client must not refuse the whole feed over it."""
+        backend.submissions = [wire_submission("5A")]
+        subs = HttpRoundClient(backend.base, "v1").fetch_submissions(0)
+        assert subs[0].attestation is None
+
+    def test_the_published_pin_is_readable_without_a_signature(self, backend):
+        backend.solver = {"enforced": True, "approved_workload_sha256": "d1" + "6" * 62,
+                          "runner_sha256": "a" * 64, "image": "python:3.12-slim"}
+        doc = HttpRoundClient(backend.base, "v1").fetch_solver()
+        assert doc["approved_workload_sha256"] == "d1" + "6" * 62

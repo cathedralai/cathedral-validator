@@ -75,6 +75,10 @@ class Submission:
     miner_hotkey: str
     agent_digest: str
     tasks: tuple[TaskProof, ...] = field(default_factory=tuple)
+    #: The enclave receipt for the run that produced these PoCs, as the backend published it.
+    #: None means the run carried no usable receipt — which is a verdict about the evidence, not a
+    #: missing field, and this validator can decide what to do about it (see `solver_refusal`).
+    attestation: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.miner_hotkey:
@@ -105,6 +109,60 @@ class MinerRoundResult:
     #: EXCLUDES it from the average — a validator that ran out of time must not drag a miner's
     #: score down, only abstain (jared, 2026-09-04).
     evaluated: bool = True
+
+
+def solver_refusal(submission: Submission, approved_workload: str) -> str | None:
+    """Why this submission fails the approved-solver pin, or None if it passes.
+
+    The backend runs every agent itself, so its receipt is the only evidence of WHICH program
+    produced a PoC — and "we enforced the pin" is a claim the backend makes about itself. Checking
+    it here is what makes the measurement worth taking: our corpus is public bugs with published
+    reference PoCs, so an enclave run of a lookup table is as genuinely attested as an enclave run
+    of an agent that derived the crash. Only the measurement separates them.
+
+    Fails closed on every missing piece: no receipt, the wrong measurement, a hardware quote that
+    did not verify, a report that did not bind this dispatch, or a run that did not read the
+    payload the backend says it sent.
+    """
+    att = submission.attestation
+    if not att:
+        return "no attestation: nothing says which program produced these PoCs"
+    measured = str(att.get("workload_sha256") or "")
+    if not measured:
+        return "attestation carries no workload_sha256"
+    if measured.lower() != approved_workload.lower():
+        return f"measured {measured}, not the approved solver {approved_workload}"
+    if not att.get("intel_verified"):
+        return "the hardware quote did not verify"
+    if not att.get("report_data_match"):
+        return "the receipt does not bind this dispatch"
+    # Only demanded when the backend reports on it at all: an older backend omits the key, and
+    # refusing every miner over a field that does not exist would be this validator's fault, not
+    # theirs. Present-and-false is a real failure and is refused.
+    if "payload_bound" in att and not att.get("payload_bound"):
+        return "the enclave did not read the payload the backend sent"
+    return None
+
+
+def _refused_result(
+    submission: Submission, denominator: Sequence[str] | None
+) -> MinerRoundResult:
+    """A refused submission scores zero, EVALUATED — a verdict, not an abstention.
+
+    The distinction decides a payout. Abstaining says "I could not judge this", which the backend
+    excludes from the average; refusing says "I judged the evidence and it does not hold up", which
+    must count. Nothing is benchmarked: the PoCs may well crash the target, but a crash nobody can
+    attribute to an approved solver is exactly what this lane refuses to pay for.
+    """
+    tasks = list(denominator) if denominator is not None else [t.task_id for t in submission.tasks]
+    return MinerRoundResult(
+        miner_hotkey=submission.miner_hotkey,
+        agent_digest=submission.agent_digest,
+        solved=0,
+        total=len(tasks),
+        score=Decimal(0),
+        per_task=tuple((t, False) for t in tasks),
+    )
 
 
 def benchmark_submission(
@@ -162,6 +220,7 @@ def evaluate_round(
     task_ids: Sequence[str] | None = None,
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
+    approved_workload: str | None = None,
 ) -> dict[str, MinerRoundResult]:
     """Benchmark a whole round, rebuilding each corpus ONCE and reusing it across miners.
 
@@ -190,12 +249,22 @@ def evaluate_round(
     order: list[str] = []
     tasks_by_id: dict[str, list[tuple[str, TaskProof]]] = {}
     allowed = set(task_ids) if task_ids is not None else None
+    #: Submissions whose evidence does not hold up, and why. Scored zero without benchmarking:
+    #: the PoCs may well crash the target, but a crash nobody can attribute to the approved solver
+    #: is what this lane exists not to pay for.
+    refused: dict[str, str] = {}
+    by_hotkey = {s.miner_hotkey: s for s in submissions}
     for sub in submissions:
         if sub.miner_hotkey in order:
             raise RoundEvalError(
                 f"two submissions for {sub.miner_hotkey}; one per miner per round"
             )
         order.append(sub.miner_hotkey)
+        if approved_workload:
+            why = solver_refusal(sub, approved_workload)
+            if why:
+                refused[sub.miner_hotkey] = why
+                continue
         for tp in sub.tasks:
             if allowed is not None and tp.task_id not in allowed:
                 continue  # not in this round's set: ignored, never scored
@@ -238,6 +307,11 @@ def evaluate_round(
 
     results: dict[str, MinerRoundResult] = {}
     for hk in order:
+        if hk in refused:
+            # A verdict, not an abstention: "I judged the evidence and it does not hold up" must
+            # count against the miner, where "I could not judge this" must not.
+            results[hk] = _refused_result(by_hotkey[hk], denominator)
+            continue
         benchmarked = outcomes[hk]
         # Unjudged means incomplete however many other tasks succeeded: a partial score reported
         # as evaluated is a number we know to be too low.
@@ -304,6 +378,7 @@ __all__ = [
     "BenchmarkFn",
     "MinerRoundResult",
     "benchmark_submission",
+    "solver_refusal",
     "evaluate_round",
     "compose_round_weights",
 ]

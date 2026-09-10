@@ -110,6 +110,10 @@ class RoundDaemon:
     poll_seconds: float = 1.0
     state: RuntimeState = field(default_factory=RuntimeState)
     nonce_for: Callable[[int], bytes] = offchain_nonce
+    #: Only credit PoCs from a run the backend's PUBLISHED approved solver produced. Off by
+    #: default: a validator that demands a pin the backend does not publish reports nothing, and
+    #: that has to be a deliberate choice rather than a surprise on upgrade.
+    require_approved_solver: bool = False
     actions: list[tuple[int, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
@@ -141,6 +145,7 @@ class RoundDaemon:
                 set_weights=self.sink,
                 nonce_for=self.nonce_for,
                 deadline=past_deadline,
+                require_approved_solver=self.require_approved_solver,
                 cfg=self.cfg,
             )
         except (RoundClientError, Exception) as exc:

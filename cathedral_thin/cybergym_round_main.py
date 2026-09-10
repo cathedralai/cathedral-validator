@@ -113,7 +113,15 @@ def main() -> int:
         ),
         sink=sink,
         poll_seconds=float(os.environ.get("CYBERGYM_POLL_SECONDS", "2")),
+        require_approved_solver=os.environ.get("CYBERGYM_REQUIRE_APPROVED_SOLVER") == "1",
     )
+    if not daemon.require_approved_solver:
+        print(
+            "WARNING: CYBERGYM_REQUIRE_APPROVED_SOLVER is not set. This validator credits PoCs "
+            "on the backend's word about which program produced them, rather than checking the "
+            "published measurement itself (GET /v2/solver).",
+            file=sys.stderr,
+        )
     block = daemon.sync_geometry()
     print(
         f"validator {hotkey} -> {base} | block={block} geometry={daemon.cfg} "
