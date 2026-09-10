@@ -210,7 +210,9 @@ class HttpRoundClient:
                         # The receipt for the run that produced these PoCs. Carried through so
                         # this validator can check WHICH solver ran instead of trusting the
                         # backend's claim to have enforced its own pin.
-                        attestation=dict(attestation) if isinstance(attestation, dict) else None,
+                        attestation=dict(attestation)
+                        if isinstance(attestation, dict)
+                        else None,
                     )
                 )
             except Exception as exc:

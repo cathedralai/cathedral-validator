@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from cathedral_thin.cybergym_round_eval import (
     BenchmarkFn,
@@ -138,7 +138,11 @@ def approved_workload_for(client: RoundClient, *, require: bool) -> str | None:
         return None
     doc = client.fetch_solver()
     pin = str(doc.get("approved_workload_sha256") or "").strip().lower()
-    if not doc.get("enforced") or len(pin) != 64 or any(c not in "0123456789abcdef" for c in pin):
+    if (
+        not doc.get("enforced")
+        or len(pin) != 64
+        or any(c not in "0123456789abcdef" for c in pin)
+    ):
         raise RoundRuntimeError(
             "this validator requires the approved-solver pin, but the backend publishes none "
             f"(/v2/solver: {dict(doc)!r}). Refusing to report rather than pretending to check."
@@ -164,8 +168,11 @@ def benchmark_and_report(
     """
     if round_id < 0:
         raise RoundRuntimeError("no submission round to benchmark yet")
-    approved_workload = approved_workload_for(client, require=require_approved_solver) \
-        if approved_workload is None else approved_workload
+    approved_workload = (
+        approved_workload_for(client, require=require_approved_solver)
+        if approved_workload is None
+        else approved_workload
+    )
     task_ids = list(client.fetch_round_tasks(round_id))
     if not task_ids:
         raise RoundRuntimeError(

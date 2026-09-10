@@ -113,7 +113,8 @@ def main() -> int:
         ),
         sink=sink,
         poll_seconds=float(os.environ.get("CYBERGYM_POLL_SECONDS", "2")),
-        require_approved_solver=os.environ.get("CYBERGYM_REQUIRE_APPROVED_SOLVER") == "1",
+        require_approved_solver=os.environ.get("CYBERGYM_REQUIRE_APPROVED_SOLVER")
+        == "1",
     )
     if not daemon.require_approved_solver:
         print(

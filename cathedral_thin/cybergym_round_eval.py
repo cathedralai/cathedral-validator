@@ -154,7 +154,11 @@ def _refused_result(
     must count. Nothing is benchmarked: the PoCs may well crash the target, but a crash nobody can
     attribute to an approved solver is exactly what this lane refuses to pay for.
     """
-    tasks = list(denominator) if denominator is not None else [t.task_id for t in submission.tasks]
+    tasks = (
+        list(denominator)
+        if denominator is not None
+        else [t.task_id for t in submission.tasks]
+    )
     return MinerRoundResult(
         miner_hotkey=submission.miner_hotkey,
         agent_digest=submission.agent_digest,
