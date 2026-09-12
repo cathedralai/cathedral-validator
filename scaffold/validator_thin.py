@@ -3361,13 +3361,22 @@ def _validated_supply_v3_meta(
         fixed_burn = float(policy["fixed_burn_allocation"])
     except (TypeError, ValueError) as exc:
         raise wire.VectorError("validated_supply allocations must be numeric") from exc
-    if not math.isclose(tdx, 0.70, rel_tol=0.0, abs_tol=1e-12):
+    # v3 pays 70% TDX / 30% CyberGym when the CyberGym lane has winners. When the
+    # lane is idle this tick (no winners), its 30% is redirected to the compute lane,
+    # so the honest signed split is 100% TDX / 0% CyberGym. Both shapes are valid; a
+    # publisher cannot smuggle one for the other because the cybergym_lane mass is
+    # cross-checked against cybergym_allocation below (0.30 <-> a full lane, 0.0 <-> an
+    # empty lane), so 1.0/0.0 forces an empty lane and 0.70/0.30 forces a full one.
+    active = math.isclose(tdx, 0.70, rel_tol=0.0, abs_tol=1e-12) and math.isclose(
+        cyber, 0.30, rel_tol=0.0, abs_tol=1e-12
+    )
+    idle = math.isclose(tdx, 1.0, rel_tol=0.0, abs_tol=1e-12) and math.isclose(
+        cyber, 0.0, rel_tol=0.0, abs_tol=1e-12
+    )
+    if not (active or idle):
         raise wire.VectorError(
-            "validated_supply v3 Intel TDX allocation must equal 0.70"
-        )
-    if not math.isclose(cyber, 0.30, rel_tol=0.0, abs_tol=1e-12):
-        raise wire.VectorError(
-            "validated_supply v3 CyberGym allocation must equal 0.30"
+            "validated_supply v3 allocation must be 0.70/0.30 (CyberGym active) or "
+            "1.0/0.0 (CyberGym idle, redirected to compute)"
         )
     if not math.isclose(fixed_burn, 0.0, rel_tol=0.0, abs_tol=1e-12):
         raise wire.VectorError(

@@ -2436,9 +2436,19 @@ def _assert_current_dry_run_v3(submission: dict[str, Any]) -> str:
             abs_tol=1e-9,
         )
         or not _is_finite_number(intel_tdx_share)
-        or not math.isclose(float(intel_tdx_share), 0.70, rel_tol=0.0, abs_tol=1e-12)
         or not _is_finite_number(cybergym_share)
-        or not math.isclose(float(cybergym_share), 0.30, rel_tol=0.0, abs_tol=1e-12)
+        # v3 pays 0.70/0.30 (CyberGym active) or 1.0/0.0 (CyberGym idle ->
+        # redirected to compute); both are the current contract, anything else drifts.
+        or not (
+            (
+                math.isclose(float(intel_tdx_share), 0.70, rel_tol=0.0, abs_tol=1e-12)
+                and math.isclose(float(cybergym_share), 0.30, rel_tol=0.0, abs_tol=1e-12)
+            )
+            or (
+                math.isclose(float(intel_tdx_share), 1.0, rel_tol=0.0, abs_tol=1e-12)
+                and math.isclose(float(cybergym_share), 0.0, rel_tol=0.0, abs_tol=1e-12)
+            )
+        )
         or isinstance(mapping_block, bool)
         or not isinstance(mapping_block, int)
         or mapping_block <= 0
@@ -2449,7 +2459,7 @@ def _assert_current_dry_run_v3(submission: dict[str, Any]) -> str:
         or not submission.get("validator_hotkey")
     ):
         raise ReproductionError(
-            "thin result is not the v3 70/30/0 Intel TDX / CyberGym / burn split"
+            "thin result is not a valid v3 split (70/30/0 active or 100/0/0 CyberGym-idle)"
         )
     return "0.00"
 
