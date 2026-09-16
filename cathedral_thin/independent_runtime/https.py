@@ -296,6 +296,7 @@ class HttpsEvidenceTransport:
                 oversize = "work response exceeded the sat-work body bound"
             elif path in {"/v1/gpu-evidence", "/v1/gpu-work"}:
                 from cathedral.common import MAX_EVIDENCE_RESPONSE_BODY
+
                 budget = MAX_EVIDENCE_RESPONSE_BODY
                 oversize = "GPU response exceeded the composite evidence bound"
             else:

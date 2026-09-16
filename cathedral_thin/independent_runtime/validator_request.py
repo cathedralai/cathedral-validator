@@ -52,8 +52,15 @@ MAX_FLEET_RESPONSE_BYTES = 64 * 1024
 MAX_ENDPOINT_BYTES = 512
 
 _PROTECTED_PATHS = frozenset(
-    {FLEET_PATH, "/v1/evidence", "/v1/sat-work", "/v1/capabilities",
-     "/v1/gpu-capabilities", "/v1/gpu-evidence", "/v1/gpu-work"}
+    {
+        FLEET_PATH,
+        "/v1/evidence",
+        "/v1/sat-work",
+        "/v1/capabilities",
+        "/v1/gpu-capabilities",
+        "/v1/gpu-evidence",
+        "/v1/gpu-work",
+    }
 )
 _REQUEST_KEYS = frozenset(
     {
@@ -124,7 +131,11 @@ def build_validator_request_header(
 ) -> str:
     """Return standard-base64 canonical JSON signed by ``keypair.sign``."""
 
-    if network not in {"finney", "test"} or type(netuid) is not int or not 0 <= netuid <= 65535:
+    if (
+        network not in {"finney", "test"}
+        or type(netuid) is not int
+        or not 0 <= netuid <= 65535
+    ):
         raise IndependentLiveError("validator request chain context is invalid")
     validator_hotkey = _signing_hotkey(keypair)
     worker = _require_hotkey(worker_hotkey, "worker hotkey")
@@ -253,7 +264,11 @@ class SignedValidatorTransport:
             raise IndependentLiveError(
                 "signed validator access requires the hardened HTTPS transport"
             )
-        if network not in {"finney", "test"} or type(netuid) is not int or not 0 <= netuid <= 65535:
+        if (
+            network not in {"finney", "test"}
+            or type(netuid) is not int
+            or not 0 <= netuid <= 65535
+        ):
             raise IndependentLiveError("validator request chain context is invalid")
         self.network, self.netuid = network, netuid
         self.transport = transport
