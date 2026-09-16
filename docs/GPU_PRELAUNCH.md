@@ -7,7 +7,7 @@ The GPU command performs signed worker requests, admission verification, fixed C
 - Native Intel TDX plus NVIDIA composite evidence uses the sandbox's signed active GPU profile and production verifier backends. Both components, fresh nonce, worker hotkey, TLS SPKI, exact device set and completion identity must match. A valid output alone is insufficient.
 - The first G4 miner offer is eight separate Spot `g4-standard-48` VMs, each with one RTX PRO 6000 Blackwell Server Edition GPU. The physical profile is `gcp-g4-rtx-pro-6000-sev-v1`; the public bundle is `gcp-g4-rtx-pro-6000-8gpu-v1`. It is not one eight-GPU confidential VM or an interconnected GPU pod.
 - G4 accounting requires exactly eight distinct verified GPU IDs and provider instance IDs under one hotkey. Incomplete bundles and duplicate claims score zero. AMD SEV is not relabeled TDX or SNP. CPU host attestation remains unverified.
-- **Pending authorization:** selecting the distinct G4 operator-trust verifier and configuring approved operator public keys. G4 source accounting does not make that trust model active. The current native verifier cannot qualify G4 evidence.
+- G4 uses the separately selected, explicitly approved operator-trust model. An approved operator controls each guest and its unique signing key. Its endorsement binds the cloud instance, image, miner hotkey, GPU, TLS key and per-instance signing key. Fresh signed local NVIDIA-verifier and work reports are checked against those configured roots. This is operator/runtime trust, not CPU attestation or independently replayable vendor GPU evidence. Arbitrary miner root access is outside this trust model.
 - **Not proven:** real GPU hardware, authentic vendor-verifier operation, provisioning custody, mining rewards and customer-secret routing. Hardware rental and live reward activation are outside this item.
 
 ## Source acceptance
@@ -23,6 +23,14 @@ python -m pytest -q \
 ```
 
 The integration test uses the real worker TLS server, sr25519 signed access and validator HTTP transport. CUDA and hardware evidence are explicit synthetic doubles. A passing test establishes wire compatibility, not hardware qualification. The integration test skips if the sandbox test fixture is unavailable, so an acceptance run must report it passing.
+
+## Approved-operator G4 configuration
+
+Use `schema: cathedral_gpu_g4_prelaunch_v1` with exactly `enabled: true`, `network`, `netuid`, `validator_hotkey`, `units_per_device` and `trusted_operators_hex`. The last field is a map of explicitly approved operator key IDs to lowercase raw Ed25519 public-key hex. Keys are never taken from miner evidence. Use test conversion `1` only as an explicit prelaunch policy; it is not a live reward allocation.
+
+The fixed offer is eight Spot `g4-standard-48` VMs with separate GPUs, provider instance IDs, TLS identities and worker signing keys. All eight must pass fresh admission and CUDA completion. Partial bundles and every duplicate claimant score zero. Removing an operator from the config removes its trust on the next run. Endorsements and statements also expire.
+
+The operator must establish provisioning custody before issuing an endorsement. The qualifier does not issue endorsements, acquire hardware, route customer secrets or enable live rewards. The trusted guest executes the pinned local NVIDIA verifier and CUDA work; its signature is accepted only under this stated operator-control assumption.
 
 ## Native composite configuration
 
@@ -60,4 +68,4 @@ The command reads a finalized metagraph for registration and validator permit. O
 
 The producer writes atomically and strips endpoints, TLS identities, raw hardware evidence and private instance details. Worker rows aggregate into one miner/profile offer. G4 partial bundles show actual declared counts, with verification false until the full verified set exists. Public reward eligibility remains false in this prelaunch producer, even after successful work.
 
-Failed or incomplete scans publish an unavailable document, which the edge projector rejects. They never replace missing evidence with a fresh empty provider inventory. Serve the file as `application/json`; the consumer independently rejects stale data.
+A partially failed scan preserves known rows with `discovery.complete: false` and a failed-miner count. Total preflight or chain failure publishes an unavailable document, which the edge projector rejects. An incomplete scan never claims an authoritative empty inventory. Serve the file as `application/json`; the consumer independently rejects stale data.

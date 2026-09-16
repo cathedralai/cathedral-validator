@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -80,10 +81,31 @@ class GpuPrelaunchConfig:
     minimum_registry_release: int
     registry_state_path: str
     profile_ids: tuple[str, ...]
+    trusted_operators: Mapping[str, bytes] | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> "GpuPrelaunchConfig":
         data = _read_json(path)
+        if isinstance(data, dict) and data.get("schema") == "cathedral_gpu_g4_prelaunch_v1":
+            keys = {"schema", "enabled", "network", "netuid", "validator_hotkey",
+                    "units_per_device", "trusted_operators_hex"}
+            if set(data) != keys or data["enabled"] is not True:
+                raise IndependentLiveError("G4 qualification requires its explicit config")
+            if (data["network"] not in {"finney", "test"}
+                    or type(data["netuid"]) is not int or not 0 <= data["netuid"] <= 65535
+                    or type(data["units_per_device"]) is not int
+                    or not 1 <= data["units_per_device"] <= 65535):
+                raise IndependentLiveError("G4 scoring or chain context is invalid")
+            _require_hotkey(data["validator_hotkey"], "validator hotkey")
+            raw = data["trusted_operators_hex"]
+            if (not isinstance(raw, dict) or not 1 <= len(raw) <= 32
+                    or any(not isinstance(k, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", k)
+                           or not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v)
+                           for k, v in raw.items())):
+                raise IndependentLiveError("G4 requires explicit approved operator public keys")
+            return cls(data["network"], data["netuid"], data["validator_hotkey"],
+                       data["units_per_device"], "", {}, 0, "", (G4_WORKER_PROFILE_ID,),
+                       {key: bytes.fromhex(value) for key, value in raw.items()})
         keys = {"schema", "enabled", "network", "netuid", "validator_hotkey",
                 "units_per_device", "registry_path", "trusted_keys_hex",
                 "minimum_registry_release", "registry_state_path", "profile_ids"}
@@ -130,6 +152,8 @@ class GpuEndpointUnavailable(IndependentLiveError):
 class ProductionGpuVerifier:
     """Signed registry plus actual production TDX and GPU verification backends."""
     def __init__(self, config: GpuPrelaunchConfig):
+        if G4_WORKER_PROFILE_ID in config.profile_ids or config.trusted_operators is not None:
+            raise IndependentLiveError("G4 requires the distinct approved-operator verifier")
         from cathedral.gpu import gpu_profile_from_registry, gpu_verifier_from_env
         from cathedral.policy_registry import PolicyRegistryState, verify_registry
         from cathedral.verify import preflight_tdx_verifier
@@ -233,7 +257,10 @@ def _admit(origin, miner, transport, verifier, row):
         instance = verified.get("provider_instance_id")
         if not isinstance(instance, str) or not instance or len(instance) > 512:
             raise IndependentLiveError("G4 provider instance identity is not verified")
-        row["provider_instance_id"] = instance
+        fingerprint = verified.get("worker_key_digest")
+        if not isinstance(fingerprint, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None:
+            raise IndependentLiveError("G4 worker signing key identity is not verified")
+        row.update(provider_instance_id=instance, worker_key_digest=fingerprint)
     return {"profile_id": profile_id, "gpu_count": len(expected), "verified": True,
             "channel_id": binding.hex(), "device_identity_digests": expected,
             "machine_id": verified["machine_id"],
@@ -264,7 +291,8 @@ def _work(row, transport, verifier):
     if (verified["device_identity_digests"] != row["device_identity_digests"]
             or verified["machine_id"] != row["machine_id"]
             or (row["profile_id"] == G4_WORKER_PROFILE_ID
-                and verified.get("provider_instance_id") != row.get("provider_instance_id"))):
+                and (verified.get("provider_instance_id") != row.get("provider_instance_id")
+                     or verified.get("worker_key_digest") != row.get("worker_key_digest")))):
         raise IndependentLiveError("GPU completion changed admitted device or CPU identity")
     return _digest({"request": request, "output_digest": result["output_digest"],
                     "admission_digest": row["admission_digest"],
@@ -278,10 +306,12 @@ def reject_duplicate_devices(rows: list[dict]) -> None:
     channels = Counter(row["channel_id"] for row in verified)
     endpoints = Counter(row["endpoint"] for row in verified)
     instances = Counter(row["provider_instance_id"] for row in verified if row.get("provider_instance_id"))
+    keys = Counter(row["worker_key_digest"] for row in verified if row.get("worker_key_digest"))
     for row in verified:
         if (any(identities[v] > 1 for v in row["device_identity_digests"])
                 or channels[row["channel_id"]] > 1 or endpoints[row["endpoint"]] > 1
-                or (row.get("provider_instance_id") and instances[row["provider_instance_id"]] > 1)):
+                or (row.get("provider_instance_id") and instances[row["provider_instance_id"]] > 1)
+                or (row.get("worker_key_digest") and keys[row["worker_key_digest"]] > 1)):
             row.update(eligible=False, reason="duplicate_gpu_or_channel")
 
 
@@ -299,7 +329,7 @@ def qualify_gpu_round(miners: Sequence[ServingAxon], *, config: GpuPrelaunchConf
             raise IndependentLiveError("GPU round deadline exceeded before complete deduplication")
         primary = axon_origin(miner.ip, miner.port)
         def signed():
-            return SignedValidatorTransport(transport_factory(timeout=90, deadline_monotonic=deadline), keypair=keypair,
+            return SignedValidatorTransport(transport_factory(timeout=150 if config.trusted_operators is not None else 90, deadline_monotonic=deadline), keypair=keypair,
                 worker_hotkey=miner.hotkey, network=config.network, netuid=config.netuid)
         try:
             fleet = fetch_worker_fleet(primary_origin=primary, worker_hotkey=miner.hotkey,
@@ -312,9 +342,7 @@ def qualify_gpu_round(miners: Sequence[ServingAxon], *, config: GpuPrelaunchConf
                          "gpu_count": 0, "verified": None, "eligible": False,
                          "reason": "fleet_unavailable", "evidence_digest": None})
             continue
-        for endpoint in endpoints:
-            if len(rows) >= 1024:
-                raise IndependentLiveError("GPU directory scan exceeds endpoint bound")
+        def admit_endpoint(endpoint):
             if time.monotonic() >= deadline:
                 raise IndependentLiveError("GPU round deadline exceeded before complete deduplication")
             row = {"uid": miner.uid, "hotkey": miner.hotkey, "endpoint": endpoint,
@@ -324,28 +352,36 @@ def qualify_gpu_round(miners: Sequence[ServingAxon], *, config: GpuPrelaunchConf
             try:
                 row.update(_admit(endpoint, miner, transport, verifier, row))
                 row["reason"] = "work_pending"
-                transports[id(row)] = transport
             except GpuEndpointUnavailable as exc:
                 row["reason"] = "no_gpu" if exc.status == 404 and row["profile_id"] is None else "endpoint_unavailable"
             except Exception as exc:
-                # Never publish arbitrary verifier/HTTP errors or embedded secrets.
-                row["reason"] = "admission_" + (getattr(exc, "category", "failed")
-                    if getattr(exc, "category", "failed") in {"unavailable", "profile_inactive",
-                    "invalid_evidence", "gpu_policy_denied", "gpu_component_denied",
-                    "cpu_component_denied", "composite_binding_denied"} else "failed")
-            rows.append(row)
+                category = getattr(exc, "category", "failed")
+                row["reason"] = "admission_" + (category if category in {
+                    "unavailable", "profile_inactive", "invalid_evidence", "gpu_policy_denied",
+                    "gpu_component_denied", "cpu_component_denied", "composite_binding_denied"} else "failed")
+            return row, transport
+        if len(rows) + len(endpoints) > 1024:
+            raise IndependentLiveError("GPU directory scan exceeds endpoint bound")
+        concurrency = 8 if config.trusted_operators is not None else 1
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for row, transport in pool.map(admit_endpoint, endpoints):
+                rows.append(row)
+                if row["reason"] == "work_pending":
+                    transports[id(row)] = transport
     reject_duplicate_devices(rows)
-    for row in rows:
+    def work_endpoint(row):
         if row["reason"] != "work_pending":
-            continue
+            return
         if time.monotonic() >= deadline:
             row.update(eligible=False, reason="work_deadline")
-            continue
+            return
         try:
             row["evidence_digest"] = _work(row, transports[id(row)], verifier)
             row.update(eligible=True, reason="verified_work", verified_at=_utc())
         except Exception:
             row.update(eligible=False, reason="work_or_completion_failed")
+    with ThreadPoolExecutor(max_workers=8 if config.trusted_operators is not None else 1) as pool:
+        tuple(pool.map(work_endpoint, rows))
     enforce_g4_bundles(rows)
     return GpuRound(tuple(rows), _utc(), verifier.registry_digest)
 
@@ -362,6 +398,8 @@ def enforce_g4_bundles(rows: list[dict]) -> None:
                             and len(row.get("device_identity_digests", ())) == 1 for row in members)
                     and len({row.get("provider_instance_id") for row in members}) == G4_BUNDLE_SIZE
                     and all(row.get("provider_instance_id") for row in members)
+                    and len({row.get("worker_key_digest") for row in members}) == G4_BUNDLE_SIZE
+                    and all(row.get("worker_key_digest") for row in members)
                     and len({row["device_identity_digests"][0] for row in members}) == G4_BUNDLE_SIZE)
         if not complete:
             for row in members:
@@ -405,19 +443,20 @@ def direct_gpu_plan(result: GpuRound, config: GpuPrelaunchConfig,
     uids, weights = zero_burn_vector(scores, hotkeys) if any(v for _, v in scores) else ((), ())
     return {"schema": PLAN_SCHEMA, "prelaunch_only": True, "chain_write": False,
             "network": config.network, "netuid": config.netuid,
+            "discovery_complete": not any(row.get("profile_id") is None and row.get("reason") != "no_gpu" for row in result.rows),
             "scoring_policy": {"cpu_machine_units": 1, "gpu_device_units": config.units_per_device,
                                "workload_id": "cuda_i32_vector_v1"},
             "raw_scores": [list(v) for v in scores], "uids": list(uids), "weights": list(weights),
             "gpu_ids_by_uid": [[uid, sorted(ids)] for uid, ids in sorted(devices.items())],
             "verification_policy_digest": result.registry_digest,
+            "trust_model": "approved_operator_guest_cpu_unattested" if config.trusted_operators is not None else "native_tdx_gpu_composite",
             "private_customer_work": False, "evidence_digest": _digest(result.rows)}
 
 
 def provider_directory(result: GpuRound, config: GpuPrelaunchConfig, verifier: ProductionGpuVerifier):
-    # Unknown fleets/capabilities cannot truthfully become an empty inventory.
-    if any(row.get("profile_id") is None and row.get("reason") != "no_gpu" for row in result.rows):
-        return {"schema": "cathedral.gpu.providers.unavailable.v1", "observed_at": result.observed_at,
-                "reason": "incomplete_scan"}
+    # Preserve known providers while exposing failures to discover other miners.
+    failed_miners = {row["uid"] for row in result.rows
+                     if row.get("profile_id") is None and row.get("reason") != "no_gpu"}
     grouped = {}
     for row in result.rows:
         if row.get("profile_id") is not None:
@@ -430,11 +469,13 @@ def provider_directory(result: GpuRound, config: GpuPrelaunchConfig, verifier: P
         if profile_id == G4_BUNDLE_PROFILE_ID:
             count = len({v for row in rows for v in row.get("declared_device_identity_digests", ())})
             if not 1 <= count <= G4_BUNDLE_SIZE:
-                return {"schema": "cathedral.gpu.providers.unavailable.v1",
-                        "observed_at": result.observed_at, "reason": "invalid_g4_bundle_size"}
+                failed_miners.add(uid)
+                continue
             verified = (verified and len(rows) == G4_BUNDLE_SIZE and count == G4_BUNDLE_SIZE
                         and len({row.get("provider_instance_id") for row in rows}) == G4_BUNDLE_SIZE
                         and all(row.get("provider_instance_id") for row in rows)
+                        and len({row.get("worker_key_digest") for row in rows}) == G4_BUNDLE_SIZE
+                        and all(row.get("worker_key_digest") for row in rows)
                         and not any(row["reason"] == "duplicate_gpu_or_channel" for row in rows))
             work = work and verified
         else:
@@ -451,6 +492,7 @@ def provider_directory(result: GpuRound, config: GpuPrelaunchConfig, verifier: P
                           "reason": reason, "evidence_digest": _digest(material) if verified else None,
                           "verified_at": max(row["verified_at"] for row in rows) if verified else None})
     return {"schema": DIRECTORY_SCHEMA, "observed_at": result.observed_at,
+            "discovery": {"complete": not failed_miners, "failed_miners": len(failed_miners)},
             "network": config.network, "netuid": config.netuid,
             "admission": {"open": True, "reason": "Configured profiles accept qualification; live rewards are not enabled."},
             "profiles": [{"id": G4_BUNDLE_PROFILE_ID if profile.profile_id == G4_WORKER_PROFILE_ID else profile.profile_id,
@@ -538,7 +580,11 @@ def main(argv=None) -> int:
     config = None
     try:
         config = GpuPrelaunchConfig.load(args.config)
-        verifier = ProductionGpuVerifier(config)
+        if config.trusted_operators is not None:
+            from cathedral.gpu_provider import G4ProviderVerifier
+            verifier = G4ProviderVerifier(dict(config.trusted_operators))
+        else:
+            verifier = ProductionGpuVerifier(config)
         signer = AccessRequestSigner(args.request_signer_executable, config)
         import bittensor as bt
         from cathedral_thin.bt_compat import make_subtensor
