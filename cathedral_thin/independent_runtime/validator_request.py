@@ -52,7 +52,15 @@ MAX_FLEET_RESPONSE_BYTES = 64 * 1024
 MAX_ENDPOINT_BYTES = 512
 
 _PROTECTED_PATHS = frozenset(
-    {FLEET_PATH, "/v1/evidence", "/v1/sat-work", "/v1/capabilities"}
+    {
+        FLEET_PATH,
+        "/v1/evidence",
+        "/v1/sat-work",
+        "/v1/capabilities",
+        "/v1/gpu-capabilities",
+        "/v1/gpu-evidence",
+        "/v1/gpu-work",
+    }
 )
 _REQUEST_KEYS = frozenset(
     {
@@ -118,9 +126,17 @@ def build_validator_request_header(
     nonce: bytes,
     issued_at: datetime,
     expires_at: datetime,
+    network: str = NETWORK,
+    netuid: int = NETUID,
 ) -> str:
     """Return standard-base64 canonical JSON signed by ``keypair.sign``."""
 
+    if (
+        network not in {"finney", "test"}
+        or type(netuid) is not int
+        or not 0 <= netuid <= 65535
+    ):
+        raise IndependentLiveError("validator request chain context is invalid")
     validator_hotkey = _signing_hotkey(keypair)
     worker = _require_hotkey(worker_hotkey, "worker hotkey")
     if method != "POST" or path not in _PROTECTED_PATHS:
@@ -145,8 +161,8 @@ def build_validator_request_header(
         "schema": VALIDATOR_REQUEST_SCHEMA,
         "validator_hotkey": validator_hotkey,
         "worker_hotkey": worker,
-        "network": NETWORK,
-        "netuid": NETUID,
+        "network": network,
+        "netuid": netuid,
         "method": method,
         "path": path,
         "body_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
@@ -241,11 +257,20 @@ class SignedValidatorTransport:
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[int], bytes] | None = None,
         expected_spki: bytes | None = None,
+        network: str = NETWORK,
+        netuid: int = NETUID,
     ) -> None:
         if not isinstance(transport, HttpsEvidenceTransport):
             raise IndependentLiveError(
                 "signed validator access requires the hardened HTTPS transport"
             )
+        if (
+            network not in {"finney", "test"}
+            or type(netuid) is not int
+            or not 0 <= netuid <= 65535
+        ):
+            raise IndependentLiveError("validator request chain context is invalid")
+        self.network, self.netuid = network, netuid
         self.transport = transport
         self.keypair = keypair
         self.validator_hotkey = _signing_hotkey(keypair)
@@ -296,6 +321,8 @@ class SignedValidatorTransport:
             nonce=nonce,
             issued_at=issued_at,
             expires_at=expires_at,
+            network=self.network,
+            netuid=self.netuid,
         )
         answer = self.transport.post_authorized(url, body, header)
         if self.transport.last_spki != binding.digest:

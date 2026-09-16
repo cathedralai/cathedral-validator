@@ -115,10 +115,17 @@ snp-production = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
 
+# GPU qualification runs in a separate environment from snp-production/dev.
+# Do not combine these extras: their immutable sandbox contracts differ.
+gpu = [
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@08438dd842d25c901bd4a908f306390421cc7052",
+]
+
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for
 # its worker-side service and must not claim `cathedral-validator`.
 [project.scripts]
 cathedral-validator = "cathedral_thin.independent_runtime.direct_validator:main"
+cathedral-gpu-qualify = "cathedral_thin.independent_runtime.gpu_qualification:main"
 cathedral-validator-update = "cathedral_thin.independent_runtime.updater:main"
 # Legacy relay, publisher, candidate-snapshot, and one-shot writer modules stay
 # importable for tests and historical recovery. They install no operator command.
