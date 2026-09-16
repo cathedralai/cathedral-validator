@@ -1,4 +1,6 @@
 """Protocol tests use explicit hardware-free doubles, never hardware proof."""
+# Optional GPU dependency is checked before importing its protocol.
+# ruff: noqa: E402
 from __future__ import annotations
 import base64
 from dataclasses import replace
@@ -6,6 +8,7 @@ import json
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 import pytest
+pytest.importorskip("cathedral.gpu_work")
 from bittensor_wallet import Keypair
 from cathedral_thin.independent.collect import ChannelBinding
 from cathedral_thin.independent_runtime.axon import ServingAxon

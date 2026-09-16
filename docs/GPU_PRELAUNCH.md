@@ -10,19 +10,19 @@ The GPU command performs signed worker requests, admission verification, fixed C
 - G4 uses the separately selected, explicitly approved operator-trust model. An approved operator controls each guest and its unique signing key. Its endorsement binds the cloud instance, image, miner hotkey, GPU, TLS key and per-instance signing key. Fresh signed local NVIDIA-verifier and work reports are checked against those configured roots. This is operator/runtime trust, not CPU attestation or independently replayable vendor GPU evidence. Arbitrary miner root access is outside this trust model.
 - **Not proven:** real GPU hardware, authentic vendor-verifier operation, provisioning custody, mining rewards and customer-secret routing. Hardware rental and live reward activation are outside this item.
 
-## Source acceptance
+## Isolated installation and acceptance
 
-Use the matching reviewed sandbox checkout containing `cathedral/gpu_work.py`. The existing CPU production dependency deliberately remains pinned to its earlier commit. A reviewed GPU packaging decision is still required; do not change a live CPU environment to run this command.
+Install the `gpu` extra in its own environment. It pins the exact reviewed sandbox GPU contract. Do not combine `gpu` with `snp-production`, `snp-dev` or `provenance`: those roles use different immutable sandbox/compute versions. Existing CPU dependencies are unchanged.
 
 ```sh
-export PYTHONPATH="$PWD:$SANDBOX_CHECKOUT:$SANDBOX_CHECKOUT/tests"
-python -m pytest -q \
-  tests/thin/test_gpu_qualification.py \
-  tests/thin/test_independent_validator_request.py \
-  tests/integration/test_gpu_worker_wire.py
+python3 -m venv .venv-gpu
+.venv-gpu/bin/python -m pip install '.[gpu,test]'
+CATHEDRAL_GPU_PYTHON=.venv-gpu/bin/python scripts/accept_gpu_prelaunch.sh
 ```
 
-The integration test uses the real worker TLS server, sr25519 signed access and validator HTTP transport. CUDA and hardware evidence are explicit synthetic doubles. A passing test establishes wire compatibility, not hardware qualification. The integration test skips if the sandbox test fixture is unavailable, so an acceptance run must report it passing.
+The short acceptance script checks installed PEP 610 provenance against the exact `gpu` dependency, then runs the protocol, bundle, signature and real TLS tests. It also checks the installed command module. No local sandbox `PYTHONPATH` is required.
+
+The integration test uses the real worker TLS server, sr25519 signed access and validator HTTP transport. CUDA, cloud infrastructure and hardware evidence are explicit synthetic doubles. A passing test establishes protocol behavior, not hardware qualification. GPU tests skip in CPU-only environments, so the GPU acceptance run must report all tests passing with its pinned GPU dependency installed.
 
 ## Approved-operator G4 configuration
 

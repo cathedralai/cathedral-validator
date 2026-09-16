@@ -115,6 +115,12 @@ snp-production = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
 ]
 
+# GPU qualification runs in a separate environment from snp-production/dev.
+# Do not combine these extras: their immutable sandbox contracts differ.
+gpu = [
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@08438dd842d25c901bd4a908f306390421cc7052",
+]
+
 # Validator-owned entry points. Compute uses `cathedral-compute-validator` for
 # its worker-side service and must not claim `cathedral-validator`.
 [project.scripts]
