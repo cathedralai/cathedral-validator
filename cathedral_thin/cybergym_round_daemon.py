@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from cathedral_thin.cybergym_round_client import HttpRoundClient, RoundClientError
 from cathedral_thin.cybergym_round_eval import BenchmarkFn
@@ -114,6 +114,9 @@ class RoundDaemon:
     #: default: a validator that demands a pin the backend does not publish reports nothing, and
     #: that has to be a deliberate choice rather than a surprise on upgrade.
     require_approved_solver: bool = False
+    #: The producer end of the publisher's score ingest. None = record locally and go no further,
+    #: which is what an unconfigured producer should do.
+    publisher: Any = None
     actions: list[tuple[int, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
@@ -146,6 +149,7 @@ class RoundDaemon:
                 nonce_for=self.nonce_for,
                 deadline=past_deadline,
                 require_approved_solver=self.require_approved_solver,
+                publisher=self.publisher,
                 cfg=self.cfg,
             )
         except (RoundClientError, Exception) as exc:

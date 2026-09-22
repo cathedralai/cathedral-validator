@@ -30,6 +30,10 @@ from pathlib import Path
 from cathedral_thin.cybergym_round_benchmark import docker_benchmark
 from cathedral_thin.cybergym_round_client import HttpRoundClient
 from cathedral_thin.cybergym_round_daemon import FileWeightSink, RoundDaemon
+from cathedral_thin.cybergym_round_publish import (
+    PublisherConfig,
+    RoundScorePublisher,
+)
 
 
 def _signer(hotkey: str):
@@ -91,6 +95,26 @@ def main() -> int:
         )
     base = os.environ.get("CYBERGYM_BACKEND", "http://127.0.0.1:8700")
     docker = os.environ.get("CYBERGYM_DOCKER", "docker")
+    # SN39 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so this
+    # producer does not set weights: it RECORDS them locally and posts its scores to the
+    # publisher's ingest, which is what turns them into weights. Unconfigured, it records only.
+    publish_config = PublisherConfig.from_environment()
+    publisher = (
+        RoundScorePublisher(config=publish_config) if publish_config.enabled else None
+    )
+    if publisher is None:
+        print(
+            "NOTE: not publishing scores to the mechanism (missing "
+            f"{publish_config.why_disabled()}). This producer records weights locally and its "
+            "rounds never reach the chain.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"publishing round scores to {publish_config.url} as "
+            f"{publish_config.producer_hotkey}",
+            file=sys.stderr,
+        )
     sink = FileWeightSink(
         path=Path(os.environ.get("CYBERGYM_WEIGHTS_FILE", "cybergym-weights.jsonl"))
     )
@@ -115,6 +139,7 @@ def main() -> int:
         poll_seconds=float(os.environ.get("CYBERGYM_POLL_SECONDS", "2")),
         require_approved_solver=os.environ.get("CYBERGYM_REQUIRE_APPROVED_SOLVER")
         == "1",
+        publisher=publisher,
     )
     if not daemon.require_approved_solver:
         print(
