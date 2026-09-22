@@ -98,6 +98,9 @@ class LaneWeights:
 #: (LaneWeights) -> None. Production wraps the substrate set_weights extrinsic, redirecting
 #: `burn` to the sandbox lane. Taking the whole object is what stops the burn being dropped.
 SetWeightsFn = Callable[[LaneWeights], None]
+#: The denominator sent with published scores. The publisher computes 100 * solved / dispatched,
+#: and a round average is already base-100, so 100 is the value that passes it through unchanged.
+PUBLISHED_SCORE_DENOMINATOR = 100.0
 #: (round_id) -> the chain-anchored nonce that keys the payout-decisive tie-break.
 NonceFn = Callable[[int], bytes]
 
@@ -197,13 +200,25 @@ def compose_and_set(
     client: RoundClient,
     set_weights: SetWeightsFn,
     nonce: bytes,
+    publisher: Any = None,
 ) -> RoundBoard:
-    """Fetch the server's averaged scores, compose the KING board, and set the weights on chain.
+    """Fetch the server's averaged scores, compose the KING board, record it, and publish it.
 
-    An empty field composes an all-burn board and still sets weights: the CyberGym lane forfeits
-    its allocation to the sandbox lane (the "no miner -> sandbox lane" rule), carried as
-    :attr:`LaneWeights.burn`. It never skips the set, because skipping would let the chain zero
-    this validator.
+    An empty field composes an all-burn board and still records: the CyberGym lane forfeits its
+    allocation to the sandbox lane (the "no miner -> sandbox lane" rule), carried as
+    :attr:`LaneWeights.burn`. It never skips, because skipping would let the chain zero this
+    validator.
+
+    `set_weights` is a RECORDER here, not a chain call, and that is correct rather than temporary:
+    SN39 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so a producer
+    broadcasting its own would be a second writer for the same subnet from the same hotkey. What
+    turns these scores into weights is `publisher` -- the producer end of the publisher's score
+    ingest. Without one configured, the round is recorded locally and goes no further, which is
+    exactly what an unconfigured producer should do.
+
+    Publishing failure does NOT fail the compose: the local trail is already written, and the
+    board is the same board whether or not the intake accepted it. It is raised to the caller,
+    which records it and retries the round rather than losing it.
     """
     scores = dict(client.fetch_average_scores(round_id)) if round_id >= 0 else {}
     board = compose_round_board(round_id, scores, nonce=nonce)
@@ -213,6 +228,21 @@ def compose_and_set(
             board.lane_burn,
         )
     )
+    if publisher is not None and round_id >= 0:
+        # The SCORES, not the composed shares: the publisher runs the tournament itself, over one
+        # round (cathedral-validator #242), so sending shares would compose them twice.
+        #
+        # `dispatched_units` is the DENOMINATOR the publisher divides by --
+        # `epoch_score_base100` computes 100 * solved / dispatched. A round average is ALREADY
+        # base-100, so the denominator that leaves it untouched is 100, and any other value
+        # silently rescales every miner. It also clamps solved > dispatched, which is why a
+        # smaller denominator would flatten the whole field to 100 rather than merely rescale it.
+        publisher.publish(
+            round_id,
+            scores,
+            nonce=nonce.hex() if isinstance(nonce, bytes) else str(nonce),
+            dispatched_units=PUBLISHED_SCORE_DENOMINATOR,
+        )
     return board
 
 
@@ -227,6 +257,7 @@ def step(
     task_weights: Mapping[str, Decimal] | None = None,
     deadline: Callable[[], bool] | None = None,
     require_approved_solver: bool = False,
+    publisher: Any = None,
     cfg: RoundConfig = PRODUCTION,
 ) -> tuple[RuntimeState, Action]:
     """Advance the loop one block. Returns the new state and the action actually taken.
@@ -274,6 +305,7 @@ def step(
             client=client,
             set_weights=set_weights,
             nonce=nonce_for(max(scored_round, 0)),
+            publisher=publisher,
         )
         weights = tuple(
             (s.miner_hotkey, str(s.lane_share))
