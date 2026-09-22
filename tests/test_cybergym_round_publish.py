@@ -232,3 +232,28 @@ class TestTheProducerPathIsWiredEndToEnd:
         assert "publisher" in inspect.signature(RoundDaemon).parameters
         source = inspect.getsource(RoundDaemon.tick)
         assert "publisher=self.publisher" in source, "the daemon must pass it to step()"
+
+
+class TestTheTwoCurvesInThisRepoAgree:
+    """There are three copies of the payout curve — distill's, the publisher's vendored copy, and
+    the validator's own `cybergym_round_scoring`. Two of them live in THIS repo, and nothing
+    compared them: the validator composes its local board with one and the publisher pays with the
+    other, so a drift would have the recorded board disagree with the actual payout and neither
+    side would look wrong. (Exactly how the KING curve itself drifted for six days in September,
+    caught in #239.)"""
+
+    def test_the_share_schedules_are_identical(self):
+        pytest.importorskip("scaffold.publisher.cybergym_tournament")
+        from scaffold.publisher.cybergym_tournament import _award_shares as vendored
+        from cathedral_thin.cybergym_round_scoring import award_shares as local
+
+        for n in range(0, 8):
+            assert [str(x) for x in local(n)] == [str(x) for x in vendored(n)], f"n={n}"
+
+    def test_the_runner_up_constants_are_identical(self):
+        pytest.importorskip("scaffold.publisher.cybergym_tournament")
+        from scaffold.publisher import cybergym_tournament as vendored
+        from cathedral_thin import cybergym_round_scoring as local
+
+        assert local.RUNNER_UP_SHARES == vendored.RUNNER_UP_SHARES
+        assert local.WINNER_SLOTS == vendored.WINNER_SLOTS
