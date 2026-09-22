@@ -796,23 +796,39 @@ def test_report_without_fields_keeps_legacy_passthrough(tmp_path, monkeypatch):
     assert vec == {1: 2.0, 2: 1.0}                     # raw units, verbatim
 
 
-def test_tournament_recency_window_weights_the_latest_epoch(tmp_path, monkeypatch):
+def test_only_the_newest_round_is_scored(tmp_path, monkeypatch):
+    """Single round, not a rolling window (jared, 2026-09-04, reconfirmed 2026-09-22).
+
+    This asserted the opposite — that an epoch-old result still earned a share, scaled by a 0.25
+    recency weight. That belonged to the v1 mechanism, where every epoch scored the same standing
+    corpus. The v2 lane draws a FRESH random corpus each round, so a share for a previous round
+    pays a miner for tasks nobody is being asked to solve any more, and lets one strong round
+    carry a miner through later rounds it did not win.
+    """
     _env(monkeypatch)
     store = _store(tmp_path)
-    # A solved everything an epoch ago; B solved everything now. Latest carries the
-    # 0.50 weight, the prior epoch only 0.25, so B outranks A on recency.
     _report(store, epoch=20, scores={"5A": 10.0}, nonce="n20", dispatched_units=10.0)
     _report(store, epoch=21, scores={"5B": 10.0}, nonce="n21", dispatched_units=10.0)
     _uid(store, "5A", 1)
     _uid(store, "5B", 2)
     vec, meta, info = adapter.cybergym_score_snapshot(store, now=NOW)
     assert info["reason"] == "ok_tournament"
-    assert info["window_epochs"] == [20, 21]
-    assert info["winners"] == ["5B", "5A"]             # B (recent) ahead of A
-    # Two winners under the KING curve: rank 2 takes its FIXED 0.07 and the king keeps the
-    # rest. A thin field concentrates on the leader instead of scaling every rank up.
-    assert vec[2] == pytest.approx(0.93)               # 5B rank 1 (king)
-    assert vec[1] == pytest.approx(0.07)               # 5A rank 2
+    assert info["window_epochs"] == [21], "the previous round is not part of this round's board"
+    assert info["winners"] == ["5B"], "5A won round 20; round 21 is not round 20"
+    assert vec == pytest.approx({2: 1.0}), "a lone winner takes the whole lane"
+
+
+def test_a_miner_absent_from_the_newest_round_earns_nothing(tmp_path, monkeypatch):
+    """The other half of single-round scoring, and the reason it is the honest rule: a miner that
+    does not compete this round is not paid this round."""
+    _env(monkeypatch)
+    store = _store(tmp_path)
+    _report(store, epoch=30, scores={"5A": 10.0, "5B": 10.0}, nonce="n30", dispatched_units=10.0)
+    _report(store, epoch=31, scores={"5B": 10.0}, nonce="n31", dispatched_units=10.0)
+    _uid(store, "5A", 1)
+    _uid(store, "5B", 2)
+    vec, _, info = adapter.cybergym_score_snapshot(store, now=NOW)
+    assert info["winners"] == ["5B"] and 1 not in vec
 
 
 def test_vendored_tournament_constants_match_the_mechanism(tmp_path):

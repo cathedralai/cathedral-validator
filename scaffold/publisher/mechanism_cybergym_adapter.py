@@ -278,15 +278,20 @@ def _report_rows(store: Store, *, report_id: str) -> dict[str, float]:
     return out
 
 
-# --- CyberGym tournament composition (top-5 rank, 5-epoch recency) ------------
+# --- CyberGym tournament composition (top-5 rank, SINGLE round) ---------------
 #
 # When the newest report carries the optional `nonce` + `dispatched_units`, the
-# lane is awarded by the rank tournament (`cybergym_tournament`) over the last
-# WINDOW epochs, replacing the single-epoch proportional pass-through. This is a
-# DELIBERATE relaxation of the "reads EXACTLY ONE report / no epoch mixing" rule
-# above — but only for the tournament path, which is a pure function of the last
-# ≤5 *authenticated* reports (each still verified), the disclosed nonce, and
-# source_epoch, so every validator derives byte-identical standings.
+# lane is awarded by the rank tournament (`cybergym_tournament`) over THAT ROUND
+# ALONE, replacing the single-epoch proportional pass-through. It is a pure
+# function of one authenticated report, its disclosed nonce and its source_epoch,
+# so every validator derives byte-identical standings — and it keeps the "reads
+# EXACTLY ONE report / no epoch mixing" rule above rather than relaxing it, which
+# the earlier 5-epoch recency window did.
+#
+# Single round is the mechanism, not a simplification (jared, 2026-09-04,
+# reconfirmed 2026-09-22): the v2 lane draws a FRESH random corpus every round,
+# so a share earned on a previous round's corpus pays for tasks nobody is being
+# asked to solve any more.
 
 def _empty_result(reason: str, info: dict, *, signed_at_ms: int = 0, sig_ok: bool = False):
     """Module-level empty (vector, meta, info) for the tournament helpers."""
@@ -300,6 +305,9 @@ def _empty_result(reason: str, info: dict, *, signed_at_ms: int = 0, sig_ok: boo
     )
 
 
+# Unused since the lane moved to single-round scoring. Kept because it is the only reader of the
+# historical report table and the natural tool for an operator query or a future audit view;
+# deleting it would make "what did the previous rounds look like" a new piece of work.
 def _prior_complete_reports(
     store: Store, *, network: str, netuid: int, before_epoch: int, n: int
 ) -> list[dict]:
@@ -393,37 +401,32 @@ def _compose_tournament(
     store: Store, *, network: str, netuid: int, newest: dict,
     signed_at_ms: int, info: dict,
 ):
-    """Top-5 rank-tournament vector over the recency window ending at ``newest``.
+    """Top-5 rank-tournament vector over the NEWEST ROUND ALONE.
 
     ``newest`` is the already-verified newest report (carrying ``nonce`` +
-    ``dispatched_units``). Reads the preceding ≤``WINDOW-1`` complete reports,
-    base-100s each epoch, ranks by rolling total, and awards the CyberGym lane
-    shares via ``cybergym_tournament.build_scoreboard`` — read-only throughout.
+    ``dispatched_units``). Its scores are base-100'd and ranked, and the lane
+    shares come from ``cybergym_tournament.build_round_scoreboard`` — read-only
+    throughout.
+
+    Single round, not a rolling window (jared, 2026-09-04 and confirmed
+    2026-09-22). The v2 lane draws a FRESH random corpus every round and pays
+    the king of that round; blending five epochs would pay a miner for tasks it
+    is no longer being asked to solve, and would let a strong early round carry
+    a miner through later rounds it did not win. The recency window belonged to
+    the v1 mechanism, where every epoch scored the same standing corpus.
     """
     newest_epoch = int(newest["source_epoch"])
-    prior = _prior_complete_reports(
-        store, network=network, netuid=netuid, before_epoch=newest_epoch,
-        n=cybergym_tournament.WINDOW - 1,
-    )
-    # oldest -> latest; the newest carries the 0.50 recency weight.
-    window = [d for d in (_verified_doc(store, r) for r in reversed(prior)) if d is not None]
-    window.append(newest)
-    per_epoch = [_epoch_base100(doc) for doc in window]
-
-    miners = sorted({hk for scores in per_epoch for hk in scores})
-    per_miner_scores = {
-        hk: [scores.get(hk, Decimal(0)) for scores in per_epoch] for hk in miners
-    }
+    round_scores = _epoch_base100(newest)
     try:
-        board = cybergym_tournament.build_scoreboard(
-            newest_epoch, per_miner_scores, nonce=newest["nonce"],
+        board = cybergym_tournament.build_round_scoreboard(
+            newest_epoch, round_scores, nonce=newest["nonce"],
         )
     except cybergym_tournament.TournamentError as exc:
         info["tournament_detail"] = str(exc)
         return _empty_result("tournament_error", info, signed_at_ms=signed_at_ms, sig_ok=True)
 
     info["tournament"] = True
-    info["window_epochs"] = [int(d["source_epoch"]) for d in window]
+    info["window_epochs"] = [newest_epoch]
     info["winners"] = list(board.winners)
     info["lane_burn"] = str(board.lane_burn)
     info["tiebreak_nonce"] = board.tiebreak_nonce
@@ -634,9 +637,9 @@ def cybergym_score_snapshot(
         return _empty(exc.reason, signed_at_ms=signed_at_ms, sig_ok=False)
     info["verified"] = True
 
-    # Tournament path: when the producer emits the optional recency-window inputs
+    # Tournament path: when the producer emits the optional tournament inputs
     # (`nonce` + `dispatched_units`), award the lane by the top-5 rank tournament
-    # over the last WINDOW epochs instead of the single-epoch proportional split.
+    # over THIS ROUND alone instead of the single-epoch proportional split.
     # A report without them keeps the original behaviour exactly (below).
     newest_doc = verified["document"]
 
