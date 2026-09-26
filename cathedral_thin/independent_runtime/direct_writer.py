@@ -722,9 +722,11 @@ class DirectWeightWriter:
         # excludes the validator's own UID). A shorter vector passes the pool
         # and fails at dispatch, which halts the writer, so it is refused here;
         # a vector that meets the rule is signed whatever MinAllowedWeights is.
-        # MinAllowedWeights above SubnetworkN demands every registered UID,
-        # which a writer that excludes itself cannot meet: that refusal is the
-        # chain's rule, not a stricter one.
+        # The plan names only registered UIDs other than the validator's own,
+        # so it is always shorter than SubnetworkN and the cap never changes
+        # the decision, only the requirement the refusal reports: with
+        # MinAllowedWeights above SubnetworkN the chain demands every
+        # registered UID, which a writer that excludes itself cannot meet.
         required_weights = min(subnet_n, min_allowed)
         if len(plan.wire_uids) < required_weights:
             raise DirectValidatorError(

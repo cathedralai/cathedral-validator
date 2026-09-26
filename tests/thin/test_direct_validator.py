@@ -959,6 +959,36 @@ def test_min_allowed_weights_refuses_a_vector_the_chain_fails_at_dispatch(
     assert not instance.state_path.exists()
 
 
+def test_min_allowed_weights_counts_signed_weights_not_scored_miners(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Three miners are scored but only two have a verified machine, so only two
+    # reach the signed vector. The chain counts the weights it is sent, not the
+    # miners the validator looked at, so MinAllowedWeights 3 must refuse.
+    miners = serving_miners(19, 20, 21)
+    planned = plan(
+        miners=miners,
+        rows=tuple(
+            machine_row("1", uid=miner.uid, hotkey=miner.hotkey) for miner in miners[:2]
+        ),
+    )
+    assert len(planned.uid_hotkeys) == 3
+    assert planned.wire_uids == (19, 20)
+    instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
+    subtensor.min_allowed = 3
+
+    with pytest.raises(
+        DirectValidatorError,
+        match=r"has 2 weights but the chain requires at least 3 "
+        r"\(MinAllowedWeights 3, SubnetworkN 22\)",
+    ):
+        submit_before_deadline(instance, planned)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
 def test_min_allowed_weights_above_subnet_size_demands_every_uid(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1001,6 +1031,39 @@ def test_legacy_max_weights_limit_storage_does_not_refuse(
     assert subtensor.max_weight_limit_reads == 0
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert "max_weight_limit" not in state["last_attempt"]["intent"]["eligibility"]
+
+
+def test_pending_intent_journaled_before_the_rule_change_still_recovers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # An operator can upgrade while an intent signed by the previous release is
+    # still pending. That journal's eligibility record carries
+    # `max_weight_limit` and no `subnetwork_n`. Recovery must accept it as
+    # written and confirm it without signing or broadcasting again.
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    subtensor.substrate.raise_after_include = True
+    with pytest.raises(DirectSubmissionAmbiguous, match="recover, never retry"):
+        submit_before_deadline(instance, planned)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    pending = state["pending"]
+    eligibility = pending["intent"]["eligibility"]
+    del eligibility["subnetwork_n"]
+    eligibility["max_weight_limit"] = 1.0
+    pending["attempt_id"] = writer_runtime._attempt_id(
+        pending["identity"], pending["intent"]
+    )
+    instance.state_path.write_text(json.dumps(state), encoding="ascii")
+
+    receipt = instance.recover()
+
+    assert receipt is not None
+    assert receipt.status == STATUS_RECOVERED
+    assert receipt.attempt_id == pending["attempt_id"]
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["intent"]["eligibility"] == eligibility
 
 
 @pytest.mark.parametrize(
