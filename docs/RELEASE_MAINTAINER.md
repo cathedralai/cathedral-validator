@@ -408,3 +408,10 @@ Never add a caller-supplied runtime key to the install command.
 
 Do not publish a bootstrap guide before that host test passes. Do not claim a
 runtime release updates the bootstrap layer.
+
+## Renew before expiry
+
+Signed channel metadata lives at most 14 days and the bootstrap at most 90.
+Hosts refuse either one once it expires. The daily `release expiry alarm`
+workflow fails from five days before any of them expires. The copy-paste
+renewal steps are in [Renew the validator release channel](RENEW_RELEASE_CHANNEL.md).
