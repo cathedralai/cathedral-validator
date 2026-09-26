@@ -2291,7 +2291,7 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "Type=notify" in direct
     assert "NotifyAccess=main" in direct
     assert "Restart=on-failure" in direct
-    assert "RestartPreventExitStatus=2" in direct
+    assert "\nRestartPreventExitStatus=2 3\n" in direct
     assert "TimeoutStartSec=120s" in direct
     assert "LoadCredential=validator-hotkey:" in direct
     assert "\nCondition" not in direct

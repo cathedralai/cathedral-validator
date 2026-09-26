@@ -127,6 +127,12 @@ not replace finalized chain verification. The service log is
   mortal era without finalized inclusion. Recurring operation then moves on.
 - `CONTRADICTION_STOPPED` is a deliberate terminal stop. Inspect the journal
   and finalized chain state before taking action.
+- `FINALIZED_FAILED_STOPPED` means a weight write was included in a finalized
+  block and failed on chain. The validator stops and stays stopped. Clear it
+  only with `cathedral-validator record-failed-write`, which proves the
+  failure from finalized chain state before it records anything, then start
+  the service. The exact steps are in
+  [Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write).
 
 Never delete or replace the journal to clear an error. The journal location,
 pause and resume, and the recovery rules are in

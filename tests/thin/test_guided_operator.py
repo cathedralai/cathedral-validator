@@ -352,9 +352,10 @@ def test_setup_rerun_refuses_inactive_committed_writer_before_mutation(
 ) -> None:
     """A committed installation whose writer is not running fails closed.
 
-    Setup cannot tell a reboot, an operator stop, and a contradiction stop
-    that ``RestartPreventExitStatus=2`` keeps stopped apart. None of them may
-    be cleared by starting the writer, and the completion marker changes
+    Setup cannot tell a reboot, an operator stop, and a contradiction or
+    failed-write stop that ``RestartPreventExitStatus=2 3`` keeps stopped
+    apart. None of them may be cleared by starting the writer, and the
+    completion marker changes
     nothing: the first-install updater starts the writer before it returns,
     so an absent marker only proves setup was interrupted afterwards.
     """
@@ -1134,3 +1135,240 @@ def test_status_confirmation_freshness_boundary(monkeypatch, tmp_path: Path) -> 
         status.time, "time", lambda: recorded + status.MAX_CONFIRMED_AGE_SECONDS + 1
     )
     assert status.collect(runner=_runner([]))["result"] == "NOT_PROVEN"
+
+
+_INSPECT = "Inspect the local service and durable state before changing configuration."
+
+
+def _inactive_direct_runner(calls: list[list[str]]):
+    def run(command, **_kwargs):
+        calls.append(command)
+        stopped = command[1] == "is-active" and command[-1] == status.DIRECT_UNIT
+        return SimpleNamespace(returncode=3 if stopped else 0)
+
+    return run
+
+
+def _failed_write_pending(document: dict) -> dict:
+    last = document["last_attempt"]
+    return {
+        "attempt_id": last["attempt_id"],
+        "phase": "finalized_failed",
+        "identity": last["identity"],
+        "intent": last["intent"],
+        "receipt": None,
+        "error": None,
+    }
+
+
+def _rebound(pending: dict, **intent_changes) -> dict:
+    """Change the intent and recompute a matching attempt id."""
+
+    intent = {**pending["intent"], **intent_changes}
+    identity = pending["identity"]
+    return {
+        **pending,
+        "intent": intent,
+        "attempt_id": status._attempt_id(identity, intent),
+    }
+
+
+def _journal_document() -> tuple[Path, dict]:
+    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    return journal, json.loads(journal.read_text())
+
+
+@pytest.mark.parametrize("service_active", [True, False], ids=["active", "stopped"])
+def test_status_names_a_failed_write_stop_and_the_command_that_clears_it(
+    monkeypatch, tmp_path: Path, service_active: bool
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = _failed_write_pending(document)
+    journal.write_text(json.dumps(document))
+    calls: list[list[str]] = []
+    runner = _runner(calls) if service_active else _inactive_direct_runner(calls)
+
+    report = status.collect(runner=runner)
+
+    assert report["service_active"] is service_active
+    assert report["result"] == "FINALIZED_FAILED_STOPPED"
+    assert "`cathedral-validator record-failed-write`" in report["action"]
+    assert "Failed weight write" in report["action"]
+    assert report["direct"]["pending"] is True
+    assert report["direct"]["pending_phase"] == "finalized_failed"
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_reports_other_pending_phases_without_a_stop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = {**_failed_write_pending(document), "phase": "ambiguous"}
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"].startswith("Wait for recovery")
+    assert report["direct"]["pending_phase"] == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda pending: {**pending, "attempt_id": "sha256:" + "0" * 64},
+        lambda pending: _rebound(pending, validator_hotkey=OTHER_HOTKEY),
+        lambda pending: {**pending, "extra": None},
+        lambda pending: {
+            **pending,
+            "identity": [],
+            "attempt_id": status._attempt_id([], pending["intent"]),
+        },
+        lambda pending: {**pending, "intent": []},
+        lambda pending: {**pending, "phase": "Finalized_Failed"},
+        lambda pending: {**pending, "phase": HOTKEY},
+        lambda pending: {**pending, "phase": None},
+    ],
+    ids=[
+        "attempt-id",
+        "foreign-signer",
+        "extra-field",
+        "identity-not-object",
+        "intent-not-object",
+        "phase-case",
+        "phase-hotkey",
+        "phase-missing",
+    ],
+)
+def test_status_refuses_an_unproven_failed_write_stop(
+    monkeypatch, tmp_path: Path, mutation
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = mutation(_failed_write_pending(document))
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
+    assert HOTKEY not in json.dumps(report)
+
+
+def _record_failed_write(document: dict) -> dict:
+    last = document["last_attempt"]
+    last["status"] = "FINALIZED_FAILED"
+    last["receipt"].update(
+        {"status": "FINALIZED_FAILED", "recovered": True, "confirmation_heads": []}
+    )
+    last["failure"] = {
+        "block_number": last["receipt"]["block_number"],
+        "block_hash": last["receipt"]["block_hash"],
+        "extrinsic_index": 2,
+        "dispatch_error": {
+            "type": "Module",
+            "pallet_index": 7,
+            "error_index": 15,
+            "name": "NeuronNoValidatorPermit",
+            "docs": [],
+        },
+        "finalized_head": [140, "0x" + "2" * 64],
+        "pending_phase": "finalized_failed",
+        "pending_receipt": None,
+        "pending_error": None,
+    }
+    return document
+
+
+def test_status_accepts_a_recorded_failed_write_without_reporting_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    journal.write_text(json.dumps(_record_failed_write(document)))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"].startswith("Wait for recovery")
+    assert report["direct"]["pending"] is False
+    assert report["direct"]["pending_phase"] is None
+    assert report["direct"]["last_result"] == "FINALIZED_FAILED"
+    assert report["direct"]["block_number"] == 123
+
+
+def _both(field: str, value):
+    def change(last: dict) -> None:
+        last["receipt"][field] = value
+        last["failure"][field] = value
+
+    return change
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda last: last.pop("failure"),
+        _both("block_number", 123.0),
+        _both("block_number", 200),
+        _both("block_hash", None),
+        _both("block_hash", "0x" + "z" * 64),
+        lambda last: last["receipt"].update({"recovered": False}),
+        lambda last: last["receipt"].update(
+            {"confirmation_heads": [[123, "0x" + "e" * 64]]}
+        ),
+        lambda last: last.update({"failure": []}),
+        lambda last: last["failure"].update({"block_number": 124}),
+        lambda last: last["failure"].update({"block_hash": "0x" + "3" * 64}),
+        lambda last: last["failure"].update({"extrinsic_index": -1}),
+        lambda last: last["failure"].update({"dispatch_error": "BadOrigin"}),
+        lambda last: last["failure"].update({"pending_phase": "ambiguous"}),
+    ],
+    ids=[
+        "no-failure",
+        "float-block",
+        "block-outside-era",
+        "no-block-hash",
+        "bad-block-hash",
+        "not-recovered",
+        "confirmation-heads",
+        "failure-not-object",
+        "failure-block-number",
+        "failure-block-hash",
+        "extrinsic-index",
+        "dispatch-error",
+        "pending-phase",
+    ],
+)
+def test_status_requires_a_complete_failed_write_record(
+    monkeypatch, tmp_path: Path, mutation
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document = _record_failed_write(document)
+    mutation(document["last_attempt"])
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_refuses_a_failure_record_on_a_confirmed_attempt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["last_attempt"]["failure"] = _record_failed_write(
+        json.loads(journal.read_text())
+    )["last_attempt"]["failure"]
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
