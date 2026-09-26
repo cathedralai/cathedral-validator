@@ -10,11 +10,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from async_substrate_interface.errors import (
+    StateDiscardedError,
+    SubstrateRequestException,
+)
+from async_substrate_interface.sync_substrate import SubstrateInterface
+from async_substrate_interface.types import RuntimeCache
+from bittensor.core.subtensor import Subtensor
 from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    MORTAL_PERIOD_BLOCKS,
+    NETUID,
     W,
 )
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
@@ -62,6 +70,9 @@ ANCHOR_HASH = "0x" + "a" * 64
 FRESH_HASH = "0x" + "b" * 64
 EXTRINSIC_HASH = "0x" + "c" * 64
 INCLUSION_HASH = "0x" + "d" * 64
+SECOND_EXTRINSIC_HASH = "0x" + "e" * 64
+ORPHAN_HASH = "0x" + "f" * 64
+REPORTED_HASH = "0x" + "9" * 64
 MINER_ONE_AXON = ServingAxon(19, MINER_ONE, "1.1.1.1", 8081)
 MINER_TWO_AXON = ServingAxon(20, MINER_TWO, "8.8.8.8", 8081)
 _Q32 = 1 << 32
@@ -293,6 +304,7 @@ def test_cycle_with_only_unroutable_miners_refuses_without_writer_submit() -> No
                 qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
             ),
             writer=writer_object,
+            report_recovery=no_expired_recovery,
         )
 
 
@@ -545,7 +557,8 @@ class Extrinsic:
 
 
 class Signed:
-    extrinsic_hash = EXTRINSIC_HASH
+    def __init__(self, extrinsic_hash: str = EXTRINSIC_HASH) -> None:
+        self.extrinsic_hash = extrinsic_hash
 
 
 class ExecutionReceipt:
@@ -567,6 +580,38 @@ class WriterSubstrate:
         self.submission_flags: list[tuple[bool, bool]] = []
         self.expected_uids = [19]
         self.expected_weights = [W]
+        # The finalized head the writer signs at, the account's next index,
+        # and the hash the next signature gets.
+        self.sign_head = ANCHOR_NUMBER + 1
+        self.nonce = 4
+        self.extrinsic_hash = EXTRINSIC_HASH
+        self.included_hash = EXTRINSIC_HASH
+        self.signed: list[tuple[int, int]] = []
+        self.broadcast: list[str] = []
+        # The best head the node validates a broadcast against; by default it
+        # sits on the finalized sign head, as with no finality lag.
+        self.best_number = ANCHOR_NUMBER + 1
+        self.best_reads = 0
+        # The pinned client's number-to-hash map. get_block_hash below is the
+        # library's own cached lookup over it; rpc_request is the node.
+        self.runtime_cache = RuntimeCache()
+        # Blocks the node served as best head and then reorged out. With
+        # best_orphaned, signing initializes the runtime at the best head by
+        # number while the node still serves the orphan there, so the client
+        # caches the orphan for that height.
+        self.orphans: dict[int, str] = {}
+        self.serving_orphans = False
+        self.best_orphaned = False
+        # The node drops bytes that never land, and the library's watch then
+        # raises, exactly as for a dropped or invalid subscription.
+        self.drop_after_broadcast = False
+        # The node reports the bytes finalized, yet finalized history never
+        # holds them, and the finalized head reaches the era's last block.
+        self.report_finalized_without_inclusion = False
+        # Model a client that the direct validator already bounded.
+        self.retry_timeout = writer_runtime.DIRECT_RPC_RETRY_TIMEOUT_SECONDS
+        self.max_retries = writer_runtime.DIRECT_RPC_MAX_RETRIES
+        self.waits_seen: dict[str, tuple[float, int]] = {}
 
     def block_hash(self, block: int) -> str:
         if block == 0:
@@ -579,13 +624,26 @@ class WriterSubstrate:
             return INCLUSION_HASH
         return "0x" + f"{block:064x}"
 
-    def get_block_hash(self, block: int) -> str:
-        return self.block_hash(block)
+    # The pinned client's cached lookup, run as is: its number-to-hash map,
+    # then a memo of the node's chain_getBlockHash answers.
+    get_block_hash = SubstrateInterface.get_block_hash
+    _get_block_hash = SubstrateInterface._get_block_hash
+
+    def rpc_request(self, method: str, params: list[object]) -> dict[str, object]:
+        # The node, answering from its canonical chain once any fork is gone.
+        assert method == "chain_getBlockHash"
+        (block,) = params
+        if self.serving_orphans and block in self.orphans:
+            return {"jsonrpc": "2.0", "result": self.orphans[block]}
+        return {"jsonrpc": "2.0", "result": self.block_hash(block)}
 
     def get_chain_finalised_head(self) -> str:
         return self.block_hash(self.finalized_number)
 
-    def get_block_number(self, block_hash: str) -> int:
+    def get_block_number(self, block_hash: str | None) -> int:
+        if block_hash is None:
+            self.best_reads += 1
+            return self.best_number
         for block in range(0, self.finalized_number + 1):
             if self.block_hash(block) == block_hash:
                 return block
@@ -593,33 +651,53 @@ class WriterSubstrate:
 
     def get_account_next_index(self, hotkey: str) -> int:
         assert hotkey == VALIDATOR
-        return 4
+        return self.nonce
 
     def create_signed_extrinsic(self, *, call, keypair, nonce, era):
         assert call == "direct-call"
         assert keypair.ss58_address == VALIDATOR
-        assert nonce == 4
+        assert nonce == self.nonce
         assert era == {
-            "period": SN39_MORTAL_PERIOD_BLOCKS,
-            "current": ANCHOR_NUMBER + 1,
+            "period": MORTAL_PERIOD_BLOCKS,
+            "current": self.sign_head,
         }
         self.sign_calls += 1
-        return Signed()
+        self.signed.append((era["current"], nonce))
+        self.waits_seen["sign"] = (self.retry_timeout, self.max_retries)
+        if self.best_orphaned:
+            self.orphans[self.best_number] = ORPHAN_HASH
+            self.serving_orphans = True
+            self.get_block_hash(self.best_number)
+            self.serving_orphans = False
+        return Signed(self.extrinsic_hash)
 
     def submit_extrinsic(
         self, signed, *, wait_for_inclusion: bool, wait_for_finalization: bool
     ):
         assert isinstance(signed, Signed)
         self.submit_calls += 1
+        self.broadcast.append(signed.extrinsic_hash)
         self.submission_flags.append((wait_for_inclusion, wait_for_finalization))
+        self.waits_seen["submit"] = (self.retry_timeout, self.max_retries)
         if self.raise_without_include:
             raise TimeoutError("response lost")
+        if self.drop_after_broadcast:
+            raise SubstrateRequestException("Subscription 1 dropped: {'dropped': None}")
+        if self.report_finalized_without_inclusion:
+            self.finalized_number = self.sign_head + MORTAL_PERIOD_BLOCKS - 1
+            return SimpleNamespace(
+                extrinsic_hash=signed.extrinsic_hash, block_hash=REPORTED_HASH
+            )
         self.included = True
+        self.included_hash = signed.extrinsic_hash
         if self.raise_after_include:
             raise TimeoutError("response lost after inclusion")
-        return Signed()
+        return Signed(signed.extrinsic_hash)
 
     def get_block(self, *, block_hash: str) -> dict[str, object]:
+        if block_hash in self.orphans.values():
+            # The node still serves the orphan, which never held this write.
+            return {"extrinsics": []}
         block_number = self.get_block_number(block_hash)
         if not self.included or block_number != self.inclusion_block:
             return {"extrinsics": []}
@@ -640,7 +718,8 @@ class WriterSubstrate:
                                 {"name": "version_key", "value": 10005000},
                             ],
                         },
-                    }
+                    },
+                    extrinsic_hash=self.included_hash,
                 )
             ]
         }
@@ -649,18 +728,18 @@ class WriterSubstrate:
         self, block_hash: str, extrinsic_hash: str
     ) -> ExecutionReceipt:
         assert block_hash == INCLUSION_HASH
-        assert extrinsic_hash == EXTRINSIC_HASH
+        assert extrinsic_hash == self.included_hash
         return ExecutionReceipt()
 
     def query(self, *, module, storage_function, params, block_hash):
         assert module == "SubtensorModule"
         if storage_function == "StakeThreshold":
             assert params == []
-            assert block_hash == FRESH_HASH
+            assert block_hash == self.block_hash(self.sign_head)
             return self.owner.stake_threshold
         if storage_function == "WeightsVersionKey":
             assert params == [39]
-            assert block_hash == FRESH_HASH
+            assert block_hash == self.block_hash(self.sign_head)
             return 0
         assert storage_function == "Weights"
         assert params[1] == 7
@@ -692,9 +771,21 @@ class WriterSubtensor:
         # `MaxWeightsLimit` storage, which the chain itself never consults.
         self.stored_max_weight_limit = 1.0
         self.max_weight_limit_reads = 0
+        self.eligibility_blocks: list[int] = []
+        self.metagraph_reads: list[tuple[int, str]] = []
+
+    # bittensor's by-number lookup and its memo, run as is: every read that
+    # names only a block, the metagraph included, resolves it here.
+    get_block_hash = Subtensor.get_block_hash
+    _get_block_hash = Subtensor._get_block_hash
 
     def metagraph(self, netuid: int, *, block: int) -> Metagraph:
         assert netuid == 39
+        block_hash = self.get_block_hash(block)
+        self.metagraph_reads.append((block, block_hash))
+        if block_hash in self.substrate.orphans.values():
+            # A pruning node discards a reorged-out block's state.
+            raise StateDiscardedError(block_hash)
         miners = self.miners
         if self.remap_after is not None and block >= self.remap_after:
             miners = tuple(
@@ -704,7 +795,7 @@ class WriterSubtensor:
         if self.extra_miner_after is not None and block >= self.extra_miner_after:
             miners = (*miners, MINER_TWO_AXON)
         result = Metagraph(block, miners=miners)
-        if block == ANCHOR_NUMBER + 1:
+        if block == self.substrate.sign_head:
             result.last_update[0] = block - self.blocks_since
         if self.truthy_permit_at is not None and block >= self.truthy_permit_at:
             result.validator_permit[0] = 1
@@ -733,28 +824,29 @@ class WriterSubtensor:
         )
 
     def weights_rate_limit(self, netuid: int, *, block: int) -> int:
-        assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
+        assert (netuid, block) == (NETUID, self.substrate.sign_head)
+        self.eligibility_blocks.append(block)
         return self.rate_limit
 
     def blocks_since_last_update(self, netuid: int, uid: int, *, block: int) -> int:
-        assert (netuid, uid, block) == (39, 7, ANCHOR_NUMBER + 1)
+        assert (netuid, uid, block) == (NETUID, 7, self.substrate.sign_head)
         return self.blocks_since
 
     def min_allowed_weights(self, *, netuid: int, block: int) -> int:
-        assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
+        assert (netuid, block) == (NETUID, self.substrate.sign_head)
         return self.min_allowed
 
     def max_weight_limit(self, *, netuid: int, block: int) -> float:
-        assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
+        assert (netuid, block) == (NETUID, self.substrate.sign_head)
         self.max_weight_limit_reads += 1
         return self.stored_max_weight_limit
 
     def commit_reveal_enabled(self, *, netuid: int, block: int) -> bool:
-        assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
+        assert (netuid, block) == (NETUID, self.substrate.sign_head)
         return False
 
     def get_mechanism_count(self, netuid: int, *, block: int) -> int:
-        assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
+        assert (netuid, block) == (NETUID, self.substrate.sign_head)
         return 1
 
 
@@ -773,12 +865,17 @@ def writer(
     instance = DirectWeightWriter(
         subtensor=subtensor,
         keypair=FakeKeypair(),
-        snapshot_reader=lambda _subtensor, _keypair: snapshot(
-            ANCHOR_NUMBER + 1, miners=miners
+        snapshot_reader=lambda _subtensor, _keypair: replace(
+            snapshot(subtensor.substrate.sign_head, miners=miners),
+            block_hash=subtensor.substrate.block_hash(subtensor.substrate.sign_head),
         ),
         call_builder=lambda _kwargs: "direct-call",
     )
     return instance, subtensor, selected
+
+
+def no_expired_recovery(event: dict[str, object]) -> None:
+    pytest.fail(f"cycle reported an unexpected expired recovery: {event}")
 
 
 def submit_before_deadline(instance: DirectWeightWriter, planned: DirectWeightPlan):
@@ -1219,6 +1316,211 @@ def test_call_builder_deadline_is_rechecked_immediately_before_signing(
     assert not instance.state_path.exists()
 
 
+SIGN_HEAD = ANCHOR_NUMBER + 1
+LAST_BROADCAST_HEAD = (
+    SIGN_HEAD + MORTAL_PERIOD_BLOCKS - writer_runtime.BROADCAST_ERA_MARGIN_BLOCKS - 1
+)
+TOO_FEW_BLOCKS = (
+    f"leaves fewer than {writer_runtime.BROADCAST_ERA_MARGIN_BLOCKS} blocks"
+)
+
+
+def test_era_guard_keeps_every_write_with_two_inclusion_blocks_left() -> None:
+    # A refusal now costs the same single interval as an expiry, so only a
+    # write left with one block of its era, or none, is refused.
+    era_last_block = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    assert writer_runtime.BROADCAST_ERA_MARGIN_BLOCKS == 2
+    assert era_last_block - LAST_BROADCAST_HEAD == 2
+
+
+@pytest.mark.parametrize(
+    ("best_head", "message"),
+    (
+        (LAST_BROADCAST_HEAD + 1, TOO_FEW_BLOCKS),
+        (SIGN_HEAD + MORTAL_PERIOD_BLOCKS, TOO_FEW_BLOCKS),
+        (SIGN_HEAD - 1, "behind the signed era anchor"),
+    ),
+)
+def test_nearly_expired_signature_is_dropped_before_journal_or_broadcast(
+    tmp_path: Path, monkeypatch, best_head: int, message: str
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.best_number = best_head
+
+    with pytest.raises(DirectValidatorError, match=message) as raised:
+        submit_before_deadline(instance, planned)
+
+    assert not isinstance(raised.value, DirectSubmissionAmbiguous)
+    assert substrate.sign_calls == 1, "the signature existed only in memory"
+    assert substrate.best_reads == 1
+    assert substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+    assert instance.recover() is None
+
+    # Nothing was journaled, so the next cycle signs and writes as usual.
+    substrate.best_number = LAST_BROADCAST_HEAD
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert substrate.sign_calls == 2
+    assert substrate.submit_calls == 1
+
+
+def test_best_head_rpc_failure_refuses_before_journal_or_broadcast(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    original = substrate.get_block_number
+
+    def lose_best_head(block_hash):
+        if block_hash is None:
+            raise ConnectionError("best head RPC disconnected")
+        return original(block_hash)
+
+    monkeypatch.setattr(substrate, "get_block_number", lose_best_head)
+    with pytest.raises(
+        DirectValidatorError, match="best head is unavailable before broadcast"
+    ) as raised:
+        submit_before_deadline(instance, planned)
+
+    assert not isinstance(raised.value, DirectSubmissionAmbiguous)
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("stalled", "stage", "best_reads"),
+    (
+        ("create_signed_extrinsic", "signing", 0),
+        ("get_block_number", "best-head RPC", 1),
+    ),
+)
+def test_post_sign_stall_expires_the_deadline_before_journaling(
+    tmp_path: Path, monkeypatch, stalled: str, stage: str, best_reads: int
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    now = [100.0]
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+    original = getattr(substrate, stalled)
+
+    def stall(*args, **kwargs):
+        # Signing makes its own chain calls after the last check before it,
+        # and the best-head read follows; either can hang past the deadline.
+        value = original(*args, **kwargs)
+        now[0] = 221.0
+        return value
+
+    monkeypatch.setattr(substrate, stalled, stall)
+    with pytest.raises(DirectValidatorError, match=f"expired during {stage}$"):
+        instance.submit(planned, cycle_deadline_monotonic=220.0)
+
+    assert substrate.sign_calls == 1
+    assert substrate.best_reads == best_reads
+    assert substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+@pytest.mark.parametrize("response_lost", (False, True))
+def test_only_the_broadcast_watch_gets_the_library_waits(
+    tmp_path: Path, monkeypatch, response_lost: bool
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.raise_without_include = response_lost
+    bounded = (
+        writer_runtime.DIRECT_RPC_RETRY_TIMEOUT_SECONDS,
+        writer_runtime.DIRECT_RPC_MAX_RETRIES,
+    )
+
+    if response_lost:
+        with pytest.raises(DirectSubmissionAmbiguous):
+            submit_before_deadline(instance, planned)
+    else:
+        assert submit_before_deadline(instance, planned).status == STATUS_CONFIRMED
+
+    assert substrate.waits_seen == {
+        "sign": bounded,
+        "submit": (
+            writer_runtime.BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS,
+            writer_runtime.BROADCAST_WATCH_MAX_RETRIES,
+        ),
+    }
+    assert (substrate.retry_timeout, substrate.max_retries) == bounded
+
+
+def test_rpc_bound_caps_each_call_of_the_pinned_substrate_client() -> None:
+    from async_substrate_interface.errors import MaxRetriesExceeded
+    from async_substrate_interface.sync_substrate import SubstrateInterface
+
+    client = SubstrateInterface("ws://127.0.0.1:9", _mock=True)
+    waits: list[float] = []
+    sends: list[str] = []
+
+    class SilentSocket:
+        def send(self, payload: str) -> None:
+            sends.append(payload)
+
+        def recv(self, *, timeout: float, decode: bool) -> bytes:
+            waits.append(timeout)
+            raise TimeoutError
+
+    client.connect = lambda init=False: SilentSocket()
+    writer_runtime.bound_rpc_waits(SimpleNamespace(substrate=client))
+
+    with pytest.raises(MaxRetriesExceeded):
+        client.get_block_number(None)
+
+    assert waits == [writer_runtime.DIRECT_RPC_RETRY_TIMEOUT_SECONDS] * (
+        writer_runtime.DIRECT_RPC_MAX_RETRIES
+    )
+    assert len(sends) == writer_runtime.DIRECT_RPC_MAX_RETRIES
+    # Every wait of one silent call plus its reconnect (the websocket open
+    # timeout) stays well inside a single mortal era.
+    assert sum(waits) + 10.0 < MORTAL_PERIOD_BLOCKS * 12.0 / 2
+
+
+def test_broadcast_watch_keeps_the_pinned_client_defaults() -> None:
+    import inspect
+
+    from async_substrate_interface.sync_substrate import SubstrateInterface
+
+    parameters = inspect.signature(SubstrateInterface.__init__).parameters
+    assert parameters["retry_timeout"].default == (
+        writer_runtime.BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS
+    )
+    assert parameters["max_retries"].default == (
+        writer_runtime.BROADCAST_WATCH_MAX_RETRIES
+    )
+
+
+def test_broadcast_watch_leaves_a_client_without_wait_knobs_alone() -> None:
+    client = SimpleNamespace()
+
+    with writer_runtime._broadcast_watch_waits(client):
+        assert vars(client) == {}
+    assert vars(client) == {}
+
+
+@pytest.mark.parametrize(
+    "subtensor",
+    (
+        object(),
+        SimpleNamespace(substrate=object()),
+        SimpleNamespace(substrate=SimpleNamespace(retry_timeout=60.0)),
+        SimpleNamespace(
+            substrate=SimpleNamespace(retry_timeout=60.0, max_retries=True)
+        ),
+    ),
+)
+def test_rpc_bound_refuses_a_client_it_cannot_bound(subtensor) -> None:
+    with pytest.raises(DirectValidatorError, match="to bound"):
+        writer_runtime.bound_rpc_waits(subtensor)
+
+
 def test_inclusion_waits_for_two_later_heads_then_recovers_without_resubmit(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1248,18 +1550,18 @@ def test_submit_confirmation_hash_rpc_failure_keeps_recoverable_pending_intent(
 ) -> None:
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     substrate = subtensor.substrate
-    original = substrate.get_block_hash
+    original = substrate.rpc_request
     reads = 0
 
-    def fail_during_confirmation(block: int) -> str:
+    def fail_during_confirmation(method: str, params: list[object]):
         nonlocal reads
-        if block == substrate.inclusion_block + 1:
+        if params == [substrate.inclusion_block + 1]:
             reads += 1
             if reads == 2:
                 raise ConnectionError("confirmation RPC disconnected")
-        return original(block)
+        return original(method, params)
 
-    monkeypatch.setattr(substrate, "get_block_hash", fail_during_confirmation)
+    monkeypatch.setattr(substrate, "rpc_request", fail_during_confirmation)
     with pytest.raises(
         DirectSubmissionAmbiguous, match="confirmation block 103 hash is unavailable"
     ):
@@ -1269,7 +1571,7 @@ def test_submit_confirmation_hash_rpc_failure_keeps_recoverable_pending_intent(
     assert substrate.sign_calls == 1
     assert substrate.submit_calls == 1
 
-    monkeypatch.setattr(substrate, "get_block_hash", original)
+    monkeypatch.setattr(substrate, "rpc_request", original)
     receipt = instance.recover()
 
     assert receipt is not None and receipt.status == STATUS_RECOVERED
@@ -1491,18 +1793,18 @@ def test_recovery_confirmation_hash_rpc_failure_stays_recoverable_without_resign
     substrate.raise_after_include = True
     with pytest.raises(DirectSubmissionAmbiguous):
         submit_before_deadline(instance, planned)
-    original = substrate.get_block_hash
+    original = substrate.rpc_request
     reads = 0
 
-    def fail_during_confirmation(block: int) -> str:
+    def fail_during_confirmation(method: str, params: list[object]):
         nonlocal reads
-        if block == substrate.inclusion_block + 1:
+        if params == [substrate.inclusion_block + 1]:
             reads += 1
             if reads == 2:
                 raise BrokenPipeError("confirmation RPC pipe closed")
-        return original(block)
+        return original(method, params)
 
-    monkeypatch.setattr(substrate, "get_block_hash", fail_during_confirmation)
+    monkeypatch.setattr(substrate, "rpc_request", fail_during_confirmation)
     with pytest.raises(
         DirectSubmissionAmbiguous, match="confirmation block 103 hash is unavailable"
     ):
@@ -1512,7 +1814,7 @@ def test_recovery_confirmation_hash_rpc_failure_stays_recoverable_without_resign
     assert substrate.sign_calls == 1
     assert substrate.submit_calls == 1
 
-    monkeypatch.setattr(substrate, "get_block_hash", original)
+    monkeypatch.setattr(substrate, "rpc_request", original)
     receipt = instance.recover()
 
     assert receipt is not None and receipt.status == STATUS_RECOVERED
@@ -1535,12 +1837,170 @@ def test_unresolved_timeout_is_fenced_until_the_mortal_era_expires(
     assert subtensor.substrate.sign_calls == 1
     assert subtensor.substrate.submit_calls == 1
 
-    subtensor.substrate.finalized_number = (
-        ANCHOR_NUMBER + 1 + SN39_MORTAL_PERIOD_BLOCKS - 1
-    )
+    subtensor.substrate.finalized_number = ANCHOR_NUMBER + 1 + MORTAL_PERIOD_BLOCKS - 1
     receipt = instance.recover()
     assert receipt is not None
     assert receipt.status == STATUS_EXPIRED
+
+
+def test_dropped_broadcast_is_fenced_until_recovery_proves_expiry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.drop_after_broadcast = True
+
+    # The library's watch raises when the node drops bytes that never land,
+    # so a real expiry is not closed inside submit(): it stays fenced.
+    with pytest.raises(DirectSubmissionAmbiguous, match="recover, never retry"):
+        submit_before_deadline(instance, planned)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == "ambiguous"
+    assert state["pending"]["error"] == "SubstrateRequestException"
+    with pytest.raises(DirectSubmissionAmbiguous, match="unresolved"):
+        instance.recover()
+
+    substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    receipt = instance.recover()
+
+    assert receipt is not None and receipt.status == STATUS_EXPIRED
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
+
+
+def test_reported_finalization_absent_from_history_is_journaled_expired(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    instance, subtensor, planned = writer(tmp_path / "submit", monkeypatch)
+    subtensor.substrate.report_finalized_without_inclusion = True
+
+    with caplog.at_level("WARNING", logger=writer_runtime.__name__):
+        receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_EXPIRED
+    assert receipt.block_hash is None and receipt.block_number is None
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["status"] == STATUS_EXPIRED
+    assert instance.recover() is None, "the next cycle has nothing to recover"
+    [warning] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == writer_runtime.__name__
+    ]
+    assert REPORTED_HASH in warning and EXTRINSIC_HASH in warning
+
+    # It is exactly the record recovery writes for the same intent a cycle
+    # later, after a dropped broadcast had been fenced as ambiguous.
+    recovering, recovering_subtensor, _planned = writer(
+        tmp_path / "recover", monkeypatch, planned=planned
+    )
+    recovering_subtensor.substrate.drop_after_broadcast = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(recovering, planned)
+    recovering_subtensor.substrate.finalized_number = (
+        SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    )
+
+    assert recovering.recover() == receipt
+    assert json.loads(recovering.state_path.read_text(encoding="ascii")) == state
+
+
+@pytest.mark.parametrize("path", ("submit", "recover"))
+def test_era_scan_and_confirmation_ignore_a_cached_orphan_sign_head(
+    tmp_path: Path, monkeypatch, path: str
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    inclusion = substrate.inclusion_block
+    # The best head seen while signing is later reorged out, and the write
+    # lands in the canonical block that replaced it at the same height.
+    substrate.best_number = inclusion
+    substrate.best_orphaned = True
+    now = [1000.0]
+    monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        writer_runtime.time,
+        "sleep",
+        lambda delay: now.__setitem__(0, now[0] + delay),
+    )
+
+    if path == "submit":
+        receipt = instance.submit(planned, cycle_deadline_monotonic=now[0] + 600.0)
+        assert receipt.status == STATUS_CONFIRMED
+    else:
+        substrate.raise_after_include = True
+        with pytest.raises(DirectSubmissionAmbiguous):
+            instance.submit(planned, cycle_deadline_monotonic=now[0] + 600.0)
+        substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+        # Any by-number read of that height puts the orphan in bittensor's
+        # memo as well as the client's map.
+        assert subtensor.get_block_hash(inclusion) == ORPHAN_HASH
+        receipt = instance.recover()
+        assert receipt is not None and receipt.status == STATUS_RECOVERED
+
+    assert substrate.orphans == {inclusion: ORPHAN_HASH}
+    assert receipt.block_number == inclusion
+    assert receipt.block_hash == INCLUSION_HASH
+    assert substrate.submit_calls == 1
+    # The confirmation's metagraph names its block by number, yet it read the
+    # canonical block, never the orphan whose state the node discarded.
+    assert (inclusion, INCLUSION_HASH) in subtensor.metagraph_reads
+    assert ORPHAN_HASH not in {read for _block, read in subtensor.metagraph_reads}
+    # The correction sticks for every later by-number read of that height,
+    # even once the client's map has evicted it and asks its memo again.
+    assert subtensor.get_block_hash(inclusion) == INCLUSION_HASH
+    substrate.runtime_cache.blocks.cache.pop(inclusion)
+    assert substrate.get_block_hash(inclusion) == INCLUSION_HASH
+
+
+def test_uncorrected_cached_orphan_is_corrected_by_the_next_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    inclusion = substrate.inclusion_block
+    substrate.best_number = inclusion
+    substrate.best_orphaned = True
+    substrate.raise_after_include = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(instance, planned)
+    substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    assert subtensor.get_block_hash(inclusion) == ORPHAN_HASH
+
+    # For one cycle the client's map drops the correction of that height.
+    add_item = substrate.runtime_cache.add_item
+    dropped: list[dict[str, object]] = []
+
+    def drop_the_correction(**kwargs: object) -> None:
+        if kwargs == {"block": inclusion, "block_hash": INCLUSION_HASH}:
+            dropped.append(kwargs)
+            return
+        add_item(**kwargs)
+
+    monkeypatch.setattr(substrate.runtime_cache, "add_item", drop_the_correction)
+    with pytest.raises(DirectSubmissionAmbiguous, match="not canonical"):
+        instance.recover()
+
+    assert dropped == [{"block": inclusion, "block_hash": INCLUSION_HASH}]
+    assert inclusion not in {block for block, _read in subtensor.metagraph_reads}
+    pending = json.loads(instance.state_path.read_text(encoding="ascii"))["pending"]
+    assert pending is not None
+
+    # The next cycle recovers the same pending write, corrects the cache, and
+    # resolves it: the stale entry cannot keep it ambiguous.
+    monkeypatch.setattr(substrate.runtime_cache, "add_item", add_item)
+    receipt = instance.recover()
+
+    assert receipt is not None and receipt.status == STATUS_RECOVERED
+    assert receipt.attempt_id == pending["attempt_id"]
+    assert receipt.block_hash == INCLUSION_HASH
+    assert (inclusion, INCLUSION_HASH) in subtensor.metagraph_reads
+    assert ORPHAN_HASH not in {read for _block, read in subtensor.metagraph_reads}
+    assert substrate.sign_calls == 1
+    assert substrate.submit_calls == 1
 
 
 def test_recovery_refuses_a_mutated_exact_signed_intent(
@@ -1687,9 +2147,160 @@ def test_cycle_recovers_before_collecting_or_signing(monkeypatch) -> None:
         keypair=FakeKeypair(),
         verifier_adapter=object(),
         writer=writer_object,
+        report_recovery=lambda _event: pytest.fail("a confirmed recovery fell through"),
     )
 
     assert result["status"] == STATUS_RECOVERED
+
+
+@pytest.mark.parametrize("fresh_anchor", ("newer", "expired_attempt"))
+def test_cycle_recovers_an_expired_intent_then_signs_a_fresh_write(
+    tmp_path: Path, monkeypatch, fresh_anchor: str
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.drop_after_broadcast = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(instance, planned)
+
+    # One interval later the dropped intent's era has passed. The fresh cycle
+    # reads a newer anchor and signs at a newer finalized head; the account's
+    # next index has moved on too, so a nonce copied from the journal would
+    # be stale.
+    era_end = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    substrate.drop_after_broadcast = False
+    substrate.finalized_number = era_end + 2
+    substrate.sign_head = substrate.best_number = era_end + 2
+    substrate.nonce = 5
+    substrate.extrinsic_hash = SECOND_EXTRINSIC_HASH
+    substrate.inclusion_block = era_end + 3
+    anchor = (
+        replace(snapshot(era_end + 1), block_hash=substrate.block_hash(era_end + 1))
+        if fresh_anchor == "newer"
+        else snapshot(ANCHOR_NUMBER)
+    )
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: anchor
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: round_result(machine_row("fresh")),
+    )
+
+    def finalize_after_broadcast(_delay: float) -> None:
+        substrate.finalized_number = substrate.inclusion_block + 2
+
+    monkeypatch.setattr(writer_runtime.time, "sleep", finalize_after_broadcast)
+    reports: list[dict[str, object]] = []
+
+    def cycle() -> dict[str, object]:
+        return run_direct_cycle(
+            subtensor=subtensor,
+            keypair=FakeKeypair(),
+            verifier_adapter=SimpleNamespace(
+                qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+            ),
+            writer=instance,
+            report_recovery=reports.append,
+        )
+
+    if fresh_anchor == "newer":
+        result = cycle()
+    else:
+        with pytest.raises(DirectValidatorError, match="already attempted"):
+            cycle()
+
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert reports == [
+        {
+            "status": STATUS_EXPIRED,
+            "recovery": {
+                "status": STATUS_EXPIRED,
+                "attempt_id": reports[0]["recovery"]["attempt_id"],
+                "extrinsic_hash": EXTRINSIC_HASH,
+                "block_hash": None,
+                "block_number": None,
+                "recovered": True,
+                "confirmation_heads": [],
+            },
+        }
+    ]
+    # The dropped bytes were never signed again nor sent again.
+    assert substrate.broadcast.count(EXTRINSIC_HASH) == 1
+    if fresh_anchor == "expired_attempt":
+        # The expired attempt still fences its own anchor: nothing new signed.
+        assert substrate.signed == [(SIGN_HEAD, 4)]
+        assert state["pending"] is None
+        assert state["last_attempt"]["status"] == STATUS_EXPIRED
+        return
+
+    assert result["status"] == STATUS_CONFIRMED
+    assert result["receipt"]["extrinsic_hash"] == SECOND_EXTRINSIC_HASH
+    assert result["receipt"]["block_number"] == substrate.inclusion_block
+    assert substrate.signed == [(SIGN_HEAD, 4), (era_end + 2, 5)]
+    assert subtensor.eligibility_blocks == [SIGN_HEAD, era_end + 2]
+    assert substrate.broadcast == [EXTRINSIC_HASH, SECOND_EXTRINSIC_HASH]
+    assert state["pending"] is None
+    assert state["last_attempt"]["status"] == STATUS_CONFIRMED
+    assert state["last_attempt"]["identity"]["anchor"]["block_number"] == (era_end + 1)
+    assert state["last_attempt"]["intent"]["era_reference_block"] == era_end + 2
+    assert state["last_attempt"]["intent"]["nonce"] == 5
+
+
+def test_cycle_requires_a_reporter_for_an_expired_recovery() -> None:
+    import inspect
+
+    for function in (run_direct_cycle, runtime._run_direct_cycle_unlocked):
+        parameter = inspect.signature(function).parameters["report_recovery"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+
+
+def test_cycle_reports_an_expired_submission_without_telemetry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    expired = DirectSubmissionReceipt(
+        status=STATUS_EXPIRED,
+        attempt_id="sha256:" + "1" * 64,
+        extrinsic_hash=EXTRINSIC_HASH,
+        block_hash=None,
+        block_number=None,
+        recovered=True,
+    )
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: snapshot()
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: round_result(machine_row("1")),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_telemetry_candidate",
+        lambda **_kwargs: pytest.fail("telemetry built for an unwritten plan"),
+    )
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(
+            recover=lambda: None, submit=lambda _plan, **_kwargs: expired
+        ),
+        telemetry_sink=spool,
+        report_recovery=no_expired_recovery,
+    )
+
+    assert result["status"] == STATUS_EXPIRED
+    assert result["receipt"] == expired.as_document()
+    assert "telemetry" not in result
+    assert not spool.path.exists()
+    assert not runtime.PendingTelemetryStore(spool).path.exists()
 
 
 def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
@@ -1733,6 +2344,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
             qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
         ),
         writer=writer_object,
+        report_recovery=no_expired_recovery,
     )
 
     assert seen_axons == [miners]
@@ -1794,6 +2406,7 @@ def test_cycle_lock_covers_recovery_collection_and_submission(monkeypatch) -> No
             recover=recover,
             submit=submit,
         ),
+        report_recovery=no_expired_recovery,
     )
 
     assert result["status"] == STATUS_CONFIRMED
@@ -1841,6 +2454,7 @@ def test_telemetry_failure_never_prevents_a_finalized_weight_write(
         ),
         writer=writer_object,
         telemetry_sink=TelemetrySpool(tmp_path / "telemetry" / "events.jsonl"),
+        report_recovery=no_expired_recovery,
     )
 
     assert submitted and submitted[0].raw_scores == ((19, 1),)
@@ -1944,6 +2558,7 @@ def test_existing_pending_telemetry_waits_for_fresh_finalized_write(
             )[-1],
         ),
         telemetry_sink=spool,
+        report_recovery=no_expired_recovery,
     )
 
     assert order == [
@@ -2030,6 +2645,7 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
                 submit=ambiguous_submit,
             ),
             telemetry_sink=spool,
+            report_recovery=no_expired_recovery,
         )
 
     pending_path = spool.path.with_name("pending.json")
@@ -2154,6 +2770,7 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
             submit=lambda _plan, **_kwargs: current_receipt,
         ),
         telemetry_sink=spool,
+        report_recovery=no_expired_recovery,
     )
 
     events = [json.loads(line) for line in spool.path.read_text().splitlines()]
@@ -2239,6 +2856,7 @@ def test_prior_pending_ambiguity_never_overwrites_another_telemetry_plan(
                 ),
             ),
             telemetry_sink=spool,
+            report_recovery=no_expired_recovery,
         )
 
     assert pending.path.read_bytes() == pending_before
@@ -2304,6 +2922,7 @@ def test_recovered_receipt_refuses_a_different_pending_telemetry_plan(
             recover=lambda: recovered_receipt,
         ),
         telemetry_sink=spool,
+        report_recovery=no_expired_recovery,
     )
 
     assert result["status"] == STATUS_RECOVERED
@@ -2326,6 +2945,7 @@ def test_cycle_refuses_an_adapter_with_another_qvl_pin(monkeypatch) -> None:
             keypair=FakeKeypair(),
             verifier_adapter=SimpleNamespace(qvl_digest="0" * 64),
             writer=writer_object,
+            report_recovery=no_expired_recovery,
         )
 
 
@@ -2359,6 +2979,7 @@ def test_snapshot_and_scoring_share_one_end_to_end_presign_deadline(
                 qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
             ),
             writer=writer_object,
+            report_recovery=no_expired_recovery,
         )
     assert submitted == []
 
@@ -2394,6 +3015,7 @@ def test_evidence_elapsed_excludes_writer_chain_wait(monkeypatch) -> None:
             qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
         ),
         writer=SimpleNamespace(recover=lambda: None, submit=submit),
+        report_recovery=no_expired_recovery,
     )
 
     assert deadlines == [220.0]
@@ -2530,7 +3152,13 @@ def _stub_cli_runtime(monkeypatch, events):
         "make_wallet",
         lambda *_args, **_kwargs: SimpleNamespace(hotkey=FakeKeypair()),
     )
-    monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "make_subtensor",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            substrate=SimpleNamespace(retry_timeout=60.0, max_retries=5)
+        ),
+    )
     monkeypatch.setattr(
         writer_runtime,
         "DirectWeightWriter",
@@ -2638,6 +3266,110 @@ def test_cli_recovers_journal_before_reporting_ready(monkeypatch) -> None:
         == 0
     )
     assert order == ["recover", "ready"]
+
+
+def test_cli_bounds_rpc_waits_on_the_constructed_client_before_recovery(
+    monkeypatch,
+) -> None:
+    _stub_cli_runtime(monkeypatch, [{"status": STATUS_CONFIRMED}])
+    client = SimpleNamespace(
+        substrate=SimpleNamespace(retry_timeout=60.0, max_retries=5)
+    )
+    monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: client)
+    seen: list[tuple[float, int]] = []
+
+    def build_writer(*, subtensor, keypair):
+        assert subtensor is client
+        return SimpleNamespace(
+            recover=lambda: seen.append(
+                (subtensor.substrate.retry_timeout, subtensor.substrate.max_retries)
+            )
+        )
+
+    monkeypatch.setattr(writer_runtime, "DirectWeightWriter", build_writer)
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 0
+    )
+    assert seen == [
+        (
+            writer_runtime.DIRECT_RPC_RETRY_TIMEOUT_SECONDS,
+            writer_runtime.DIRECT_RPC_MAX_RETRIES,
+        )
+    ]
+
+
+def test_cli_refuses_a_chain_client_it_cannot_bound_before_recovery(
+    monkeypatch,
+) -> None:
+    _stub_cli_runtime(monkeypatch, [])
+    monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        writer_runtime,
+        "DirectWeightWriter",
+        lambda **_kwargs: pytest.fail("writer built on an unbounded client"),
+    )
+
+    with pytest.raises(SystemExit, match="chain client refused"):
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+
+
+def test_cli_prints_an_expired_recovery_then_the_same_cycles_fresh_write(
+    monkeypatch, capsys
+) -> None:
+    _stub_cli_runtime(monkeypatch, [])
+
+    def cycle(**kwargs):
+        kwargs["report_recovery"](
+            {"status": STATUS_EXPIRED, "recovery": {"status": STATUS_EXPIRED}}
+        )
+        return {"status": STATUS_CONFIRMED}
+
+    monkeypatch.setattr(runtime, "run_direct_cycle", cycle)
+
+    assert (
+        runtime.main(
+            [
+                "--qvl",
+                "/reviewed/qvl",
+                "--snp-policy",
+                "/reviewed/snp-policy.json",
+                "--snpguest",
+                "/reviewed/snpguest",
+                f"--expected-hotkey={VALIDATOR}",
+                "--once",
+                "--confirm-direct-write",
+            ]
+        )
+        == 0
+    )
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [line["status"] for line in lines] == [STATUS_EXPIRED, STATUS_CONFIRMED]
 
 
 def test_cli_startup_recovery_contradiction_stops_before_ready(
@@ -3071,9 +3803,13 @@ def test_recurring_cli_reports_missing_eligibility_and_keeps_checking(
     # Drive the real cycle so the event comes from the finalized snapshot
     # itself, not from a hand-built exception.
     monkeypatch.setattr(runtime, "run_direct_cycle", run_direct_cycle)
-    monkeypatch.setattr(
-        runtime, "make_subtensor", lambda *_args, **_kwargs: SnapshotSubtensor(graph)
-    )
+    chain = SnapshotSubtensor(graph)
+    # `main()` bounds the client's RPC waits before recovery, so this client
+    # carries the library's two settings on a substrate of its own.
+    chain.substrate = SnapshotSubstrate()
+    chain.substrate.retry_timeout = 60.0
+    chain.substrate.max_retries = 5
+    monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: chain)
     monkeypatch.setattr(runtime.time, "sleep", sleep)
 
     with _notify_server(tmp_path, monkeypatch) as server:
@@ -3175,7 +3911,7 @@ def test_response_deadlines_are_observational_and_below_the_mortal_window() -> N
     assert DISCOVERY_RESPONSE_DEADLINE_SECONDS == 60.0
     assert MINER_RESPONSE_DEADLINE_SECONDS == 90.0
     assert FULL_CYCLE_RESPONSE_DEADLINE_SECONDS == 120.0
-    assert FULL_CYCLE_RESPONSE_DEADLINE_SECONDS < SN39_MORTAL_PERIOD_BLOCKS * 12.0
+    assert FULL_CYCLE_RESPONSE_DEADLINE_SECONDS < MORTAL_PERIOD_BLOCKS * 12.0
 
 
 def test_direct_runtime_has_no_relay_publisher_or_cybergym_dependency() -> None:
