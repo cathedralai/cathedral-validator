@@ -429,8 +429,14 @@ def _run_direct_cycle_unlocked(
     cycle_started = time.monotonic()
     cycle_deadline = cycle_started + FULL_CYCLE_RESPONSE_DEADLINE_SECONDS
     snapshot = finalized_serving_miners_snapshot(subtensor, keypair, netuid)
+    if snapshot.netuid != netuid:
+        raise DirectValidatorError(
+            "finalized snapshot was read on another netuid than this cycle"
+        )
     if time.monotonic() >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired during discovery")
+    # Miners are challenged for the subnet whose metagraph named them, which
+    # the checks above have tied to this cycle and to its writer.
     result = score_multicompute_round(
         axons=snapshot.miners,
         keypair=keypair,
@@ -438,7 +444,7 @@ def _run_direct_cycle_unlocked(
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
         cycle_deadline_monotonic=cycle_deadline,
-        netuid=netuid,
+        netuid=snapshot.netuid,
     )
     plan = build_direct_plan(snapshot, result)
     evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
@@ -610,6 +616,16 @@ def run_direct_cycle(
     ``main`` always passes the value it resolved.
     """
 
+    netuid = require_netuid(netuid)
+    # The writer would refuse this cycle's plan anyway, but only after every
+    # miner had been challenged on behalf of the wrong subnet. Refuse before
+    # recovery, discovery, or any signed request instead. Like the cycle lock,
+    # a test double may omit the attribute; the installed writer always has it.
+    writer_netuid = getattr(writer, "netuid", netuid)
+    if isinstance(writer_netuid, bool) or writer_netuid != netuid:
+        raise DirectValidatorError(
+            "direct writer signs for another netuid than this cycle"
+        )
     lock = getattr(writer, "cycle_locked", None)
     context = lock() if callable(lock) else nullcontext()
     with context:

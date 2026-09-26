@@ -639,6 +639,11 @@ def score_multicompute_round(
     direct validator always passes the netuid its snapshot was read on.
     """
 
+    # Not direct_contract.require_netuid: that module imports the submission
+    # builder, which this write-free scorer's preview callers must never load.
+    # The check cannot be left to the signed transports either. In a bounded
+    # round their refusal is caught per miner, so a bad netuid would quietly
+    # zero every miner instead of halting the round.
     if (
         isinstance(netuid, bool)
         or not isinstance(netuid, int)

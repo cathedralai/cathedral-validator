@@ -26,9 +26,15 @@ import pytest
 from bittensor.utils import get_mechid_storage_index
 from bittensor_wallet import Keypair
 
+from cathedral_thin.independent.compute import (
+    ComputeAdapter,
+    QuoteIdentityVerdict,
+    QuoteVerdict,
+)
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
     FINNEY_GENESIS_HASH,
+    INTEL_COLLATERAL,
     MAX_NETUID,
     MAX_WEIGHT_LIMIT,
     MECID,
@@ -843,6 +849,186 @@ def test_pending_telemetry_is_bound_to_its_spool_netuid(
     assert not other.path.exists()
 
 
+# Full cycle ------------------------------------------------------------------
+
+
+class _PlatformVerifier:
+    """QVL double that passes every quote with one stable platform identity."""
+
+    def verify(self, quote, *, expected_report_data):
+        del quote, expected_report_data
+        return QuoteVerdict.PASS
+
+    def verify_with_identity(
+        self, quote, *, expected_report_data, deadline_monotonic=None
+    ):
+        del quote, expected_report_data, deadline_monotonic
+        return QuoteIdentityVerdict(
+            QuoteVerdict.PASS, "tdx-platform-sha256:" + "1" * 64, True
+        )
+
+
+def _direct_adapter() -> ComputeAdapter:
+    return ComputeAdapter(
+        _PlatformVerifier(),
+        collateral_base_url=INTEL_COLLATERAL,
+        qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST,
+    )
+
+
+@NETUIDS
+def test_cycle_reads_challenges_and_writes_on_one_netuid(
+    tmp_path: Path, monkeypatch, netuid: int
+) -> None:
+    """One cycle through the real scoring round and the real writer.
+
+    The chain answers for one subnet only, and every signed miner request
+    records the netuid it was built for. A cycle that dropped its netuid on the
+    way to the snapshot or to the scoring round fails the "next" case.
+    """
+
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    chain = SubnetChain(netuid)
+    root = f"https://{MINER.ip}:{MINER.port}"
+    requests: list[tuple[str, int]] = []
+
+    def collect(
+        *,
+        evidence_url,
+        sat_url,
+        hotkey,
+        validator_ss58,
+        keypair,
+        netuid,
+        deadline_monotonic,
+    ):
+        del evidence_url, sat_url, validator_ss58, keypair, deadline_monotonic
+        requests.append(("evidence", netuid))
+        return {
+            "hotkey": hotkey,
+            "sat_url": root + "/v1/sat-work",
+            "collected": _runtime_collected(hotkey, marker=1, spki=b"a" * 32),
+        }
+
+    def fleet(*, primary_origin, worker_hotkey, transport):
+        requests.append(("fleet", transport.netuid))
+        return FleetDiscovery(worker_hotkey, (primary_origin,), False)
+
+    def units(*, anchor_hash, collected, sat_url, keypair, netuid, deadline_monotonic):
+        del anchor_hash, collected, sat_url, keypair, deadline_monotonic
+        requests.append(("sat", netuid))
+        # The chain finalizes one more block while the miner is being scored.
+        chain.finalized = FRESH
+        return 20
+
+    monkeypatch.setattr(fleet_score, "HttpsEvidenceTransport", _NoNetworkHttps)
+    monkeypatch.setattr(fleet_score, "_try_collect", collect)
+    monkeypatch.setattr(fleet_score, "fetch_worker_fleet", fleet)
+    monkeypatch.setattr(fleet_score, "_units_after_quote", units)
+    writer = DirectWeightWriter(
+        subtensor=chain,
+        keypair=VALIDATOR,
+        call_builder=chain.build_call,
+        netuid=netuid,
+    )
+
+    event = runtime.run_direct_cycle(
+        subtensor=chain,
+        keypair=VALIDATOR,
+        verifier_adapter=_direct_adapter(),
+        writer=writer,
+        netuid=netuid,
+    )
+
+    assert event["status"] == STATUS_CONFIRMED
+    assert event["wire_uids"] == [MINER.uid]
+    assert requests == [("evidence", netuid), ("fleet", netuid), ("sat", netuid)]
+    assert chain.reads and set(chain.reads) == {netuid}
+    assert chain.signed_kwargs["netuid"] == netuid
+
+
+@NETUIDS
+def test_cycle_refuses_a_writer_for_another_netuid_before_recovery_or_any_miner(
+    tmp_path: Path, monkeypatch, netuid: int
+) -> None:
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        runtime,
+        "finalized_serving_miners_snapshot",
+        lambda *_args: pytest.fail("the chain was read for a mismatched writer"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: pytest.fail("miners were challenged for a mismatched writer"),
+    )
+    installed = DirectWeightWriter(
+        subtensor=object(), keypair=VALIDATOR, netuid=netuid + 1
+    )
+    double = SimpleNamespace(
+        netuid=netuid + 1,
+        recover=lambda: pytest.fail("recovery ran for a mismatched writer"),
+    )
+
+    for writer in (installed, double):
+        with pytest.raises(
+            DirectValidatorError, match="another netuid than this cycle"
+        ):
+            runtime.run_direct_cycle(
+                subtensor=object(),
+                keypair=VALIDATOR,
+                verifier_adapter=_direct_adapter(),
+                writer=writer,
+                netuid=netuid,
+            )
+    assert not installed.state_path.parent.exists()
+
+
+def test_cycle_refuses_a_writer_whose_netuid_is_a_bool() -> None:
+    writer = SimpleNamespace(
+        netuid=True, recover=lambda: pytest.fail("recovery ran for a bool netuid")
+    )
+
+    with pytest.raises(DirectValidatorError, match="another netuid than this cycle"):
+        runtime.run_direct_cycle(
+            subtensor=object(),
+            keypair=VALIDATOR,
+            verifier_adapter=_direct_adapter(),
+            writer=writer,
+            netuid=int(True),
+        )
+
+
+@NETUIDS
+def test_cycle_refuses_a_snapshot_from_another_netuid_before_any_miner(
+    monkeypatch, netuid: int
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "finalized_serving_miners_snapshot",
+        lambda *_args: _snapshot(netuid + 1),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: pytest.fail("miners were challenged for another netuid"),
+    )
+    writer = SimpleNamespace(
+        netuid=netuid,
+        recover=lambda: None,
+        submit=lambda *_args, **_kwargs: pytest.fail("a foreign plan reached submit"),
+    )
+
+    with pytest.raises(DirectValidatorError, match="snapshot was read on another"):
+        runtime.run_direct_cycle(
+            subtensor=object(),
+            keypair=VALIDATOR,
+            verifier_adapter=_direct_adapter(),
+            writer=writer,
+            netuid=netuid,
+        )
+
+
 # Command line ----------------------------------------------------------------
 
 
@@ -1012,3 +1198,20 @@ def test_refused_netuid_exits_with_the_restartable_status_not_the_argparse_one()
 
     assert completed.returncode == 1, completed.stderr
     assert "non-default netuids arrive with a later release" in completed.stderr
+
+
+def test_telemetry_arguments_file_warns_against_carrying_the_netuid() -> None:
+    """That file reaches the command line even after a rollback to a runtime
+    that would exit 2 on the flag, so it must never carry it."""
+
+    example = (ROOT / "deploy/validator-update/direct-telemetry.env.example").read_text(
+        encoding="utf-8"
+    )
+    lines = example.splitlines()
+    settings = [line for line in lines if line and not line.startswith("#")]
+    assert len(settings) == 1
+    assert settings[0].startswith("CATHEDRAL_VALIDATOR_TELEMETRY_ARGS=")
+    assert "--netuid" not in settings[0]
+    comments = " ".join(line.lstrip("# ") for line in lines if line.startswith("#"))
+    assert "Never add --netuid here" in comments
+    assert "status 2" in comments
