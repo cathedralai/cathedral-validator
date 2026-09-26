@@ -33,7 +33,12 @@ What breaks:
 
 The alarm `scripts/check_release_expiry.py` reads all three from where hosts and
 the installer read them. It fails from 5 days before any expiry. It runs daily in
-`.github/workflows/release-expiry.yml`.
+`.github/workflows/release-expiry.yml`. While it fails, a second job keeps one
+open issue, "Release channel expiry alarm", assigned to the key holder (the
+repository variable `RELEASE_EXPIRY_ASSIGNEE`, default `wallscaler`), and adds a
+comment each failing day, so GitHub emails the assignee. It closes the issue
+when the check passes again. That job checks out nothing and holds only
+`issues: write`.
 
 ## Machines, keys, and files
 
@@ -450,9 +455,11 @@ clean host (V-02's test). **[Unverified]** live.
 
 ## Staying ahead
 
-- The alarm fails daily from 5 days before any expiry. Metadata lives at most
-  14 days, so re-sign both channels with case (a) about once a week. Rebuild
-  the bootstrap with case (c) before its own expiry.
+- The alarm fails daily from 5 days before any expiry, and emails the assignee
+  through the alarm issue. Metadata lives at most 14 days, so re-sign both
+  channels with case (a) before each record expires. The bootstrap is signed
+  for 30 days (`--lifetime-seconds 2592000`, the owner's choice; the limit is
+  90), so rebuild it with case (c) every month.
 - `sudo cathedral-validator-status` shows the installed channel's expiry under
   `release_metadata` and prints a `warning:` within 5 days
   (`docs/AUTO_UPDATE.md`, "Check it"). It ships in the bootstrap

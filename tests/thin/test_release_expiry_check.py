@@ -331,12 +331,30 @@ def test_limits_match_the_updater_and_the_installer() -> None:
 
 def test_daily_workflow_is_read_only_and_runs_the_five_day_check() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release-expiry.yml").read_text()
+    check, notify = workflow.split("\n  notify:\n", 1)
     assert '\non:\n  schedule:\n    - cron: "17 6 * * *"\n' in workflow
     assert "  workflow_dispatch:\n" in workflow
-    assert "\npermissions:\n  contents: read\n\n" in workflow
-    assert workflow.count("permissions:") == 1
-    assert "write" not in workflow
+    assert "\npermissions:\n  contents: read\n\n" in check
+    assert check.count("permissions:") == 1
+    assert "write" not in check
     assert "secrets." not in workflow
-    assert "persist-credentials: false" in workflow
-    assert "run: python3 scripts/check_release_expiry.py --warn-days 5\n" in workflow
+    assert "persist-credentials: false" in check
+    assert "python3 scripts/check_release_expiry.py --warn-days 5 >" in check
+    assert 'exit "$status"' in check
     assert "pull_request" not in workflow
+
+
+def test_notify_job_only_manages_the_alarm_issue() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-expiry.yml").read_text()
+    notify = workflow.split("\n  notify:\n", 1)[1]
+    # The only write permission in the workflow is issues, and only here.
+    assert workflow.count("write") == 1
+    assert "    permissions:\n      issues: write\n" in notify
+    # It runs no repository code and holds no secret beyond the job token.
+    for forbidden in ("checkout", "python", "scripts/", "secrets.", "contents:"):
+        assert forbidden not in notify
+    assert "needs: expiry" in notify
+    # Untrusted text reaches the shell only through the environment.
+    assert "REPORT: ${{ needs.expiry.outputs.report }}" in notify
+    assert "${{ needs.expiry.outputs.report }}" not in notify.split("steps:", 1)[1]
+    assert "gh issue create" in notify and "gh issue close" in notify
