@@ -2,7 +2,8 @@
 
 The signed extrinsic hash, nonce, era, exact call, and evidence identity reach
 disk before broadcast.  A restart with a pending intent only searches finalized
-blocks for that hash.  Recovery never signs and never resubmits.
+blocks for that hash.  Recovery never signs and never resubmits.  A signature
+too close to the end of its mortal era is dropped before it reaches disk.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import stat
@@ -28,8 +30,8 @@ from cathedral_thin.independent.constants import (
     MAX_WEIGHT_LIMIT,
     MECID,
     MIN_ALLOWED_WEIGHTS,
+    MORTAL_PERIOD_BLOCKS,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
@@ -63,7 +65,44 @@ CONFIRMATION_POLL_SECONDS = 2.0
 # cycle. Together with CONFIRMATION_WAIT_SECONDS this stays far below the
 # cycle interval. Nothing is resubmitted while waiting.
 FINALIZED_HISTORY_WAIT_SECONDS = 90.0
+# Blocks of the mortal era a signed write must still have when it leaves this
+# process. The node checks a transaction as if it were in the block after its
+# best head and accepts it only while that block is inside the era, so a
+# write checked at best head B can land in at most era_end - 1 - B blocks.
+# The margin is deliberately small. A refused write and a write that expires
+# unincluded cost the same single interval: nothing is pending after a
+# refusal, and an expired intent is resolved by the next cycle's recovery,
+# which then writes fresh weights in that same cycle. So refusing is worth it
+# only where inclusion is unlikely. With one block left, the write has one
+# author slot and must be sent and gossiped before that block is built. With
+# two or more it usually lands in the next block. The era is anchored on the
+# finalized head, so the best head already runs the finality lag plus a block
+# or two ahead of it: a wider margin would refuse every write under a steady
+# lag of ten or so blocks while most of those writes would have landed.
+BROADCAST_ERA_MARGIN_BLOCKS = 2
+# Per-message wait and send count for every chain RPC the direct validator
+# makes. The pinned async-substrate-interface defaults are 60 s and 5 sends,
+# and each silent wait reconnects and re-sends, so one hung call could hold a
+# cycle for about five minutes: longer than the whole mortal era, and after
+# the last cooperative pre-sign deadline check. Two sends of 20 s plus one
+# reconnect cap a single call below a minute (about four blocks). Every other
+# call here is a read whose answer is one message; even the heaviest, the
+# metagraph runtime call, normally arrives within a second or so.
+DIRECT_RPC_RETRY_TIMEOUT_SECONDS = 20.0
+DIRECT_RPC_MAX_RETRIES = 2
+# The broadcast watch is the one call that is not a single-response read.
+# After inBlock the node stays silent until that block is finalized, which is
+# chain finality rather than RPC latency and often exceeds 20 s, and a
+# silent watch is re-sent as a new submission of the same bytes that the node
+# refuses as already known or outdated. A short wait there would turn ordinary
+# writes into ambiguities, so the watch alone keeps the library's own
+# defaults, exactly as before the bound above. A long watch delays only this
+# cycle's receipt; it cannot change whether or when the bytes are included.
+BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS = 60.0
+BROADCAST_WATCH_MAX_RETRIES = 5
+_RPC_WAIT_FIELDS = ("retry_timeout", "max_retries")
 _CHAIN_HASH_HEX = frozenset("0123456789abcdef")
+_LOG = logging.getLogger(__name__)
 _LOCAL_LOCKS_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _STATUS_EXTRINSIC_FINALIZED = "EXTRINSIC_FINALIZED"
@@ -95,6 +134,110 @@ def _presign_deadline(value: object) -> float:
 def _require_presign_time(deadline: float, *, stage: str) -> None:
     if time.monotonic() >= deadline:
         raise DirectValidatorError(f"pre-sign deadline expired during {stage}")
+
+
+def bound_rpc_waits(subtensor: Any) -> None:
+    """Cap every later RPC on this chain client well inside one mortal era.
+
+    The pinned client reads ``retry_timeout`` and ``max_retries`` as plain
+    attributes on every request. A client without them is refused: assigning
+    them anyway would add attributes nothing reads and silently leave every
+    call unbounded.
+    """
+
+    substrate = getattr(subtensor, "substrate", None)
+    for name in _RPC_WAIT_FIELDS:
+        value = getattr(substrate, name, None)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise DirectValidatorError(f"chain client has no {name} to bound")
+    substrate.retry_timeout = DIRECT_RPC_RETRY_TIMEOUT_SECONDS
+    substrate.max_retries = DIRECT_RPC_MAX_RETRIES
+
+
+def _uncached_block_hash(substrate: Any, block_number: int) -> object:
+    """Ask the node for the canonical hash at one height, bypassing caches.
+
+    The pinned client remembers every number-to-hash lookup for the life of
+    the process, and signing makes it remember an unfinalized one:
+    ``create_signed_extrinsic`` initializes its runtime at the best head by
+    number. If that block is later reorged out, a cached lookup keeps naming
+    the orphan. A scan of the era would then miss a write that landed in the
+    canonical block at that height, and could record it as expired or leave
+    it unresolved, and a confirmation would see a false contradiction. Every
+    height of finalized history the writer proves anything from is therefore
+    read straight from the node, and a read that can only name a height is
+    preceded by ``_correct_cached_block_hash``.
+    """
+
+    response = substrate.rpc_request("chain_getBlockHash", [block_number])
+    return response.get("result") if isinstance(response, Mapping) else None
+
+
+def _cached_block_hash(subtensor: Any, block_number: int) -> str | None:
+    """Return the hash a read that names only a block number would use."""
+
+    try:
+        return _canonical_hash(
+            subtensor.get_block_hash(block_number), label="cached block"
+        )
+    except DirectSubmissionAmbiguous:
+        return None
+
+
+def _correct_cached_block_hash(
+    subtensor: Any, block_number: int, canonical: str
+) -> None:
+    """Make reads that name only a block number resolve to the canonical block.
+
+    The metagraph takes a block number, not a hash. bittensor resolves it
+    through its own memo of lookups, then the client's number-to-hash map,
+    which has a memo of node answers behind it, and all three last for the
+    process. If the block signing cached at this height was reorged out, the
+    metagraph reads the orphan. Once the height is finalized a pruning node
+    has discarded the orphan's state, so that read fails on every later
+    recovery of the same pending write, until the process restarts.
+
+    A differing entry is therefore overwritten with the canonical hash and
+    both memos are cleared, so the next lookup reads the corrected map or
+    asks the node again. The lookup is then read back. Only a client that
+    still names another block leaves the confirmation ambiguous, and every
+    later recovery makes the same correction again.
+    """
+
+    if _cached_block_hash(subtensor, block_number) == canonical:
+        return
+    substrate = subtensor.substrate
+    runtime_cache = getattr(substrate, "runtime_cache", None)
+    add_item = getattr(runtime_cache, "add_item", None)
+    if callable(add_item):
+        add_item(block=block_number, block_hash=canonical)
+    for client in (substrate, subtensor):
+        memo = getattr(client, "_get_block_hash", None)
+        clear = getattr(memo, "cache_clear", None)
+        if callable(clear):
+            clear()
+    if _cached_block_hash(subtensor, block_number) != canonical:
+        raise DirectSubmissionAmbiguous(
+            f"client cache for finalized block {block_number} still names "
+            "a block that is not canonical"
+        )
+
+
+@contextmanager
+def _broadcast_watch_waits(substrate: Any) -> Iterator[None]:
+    """Give only the finalization watch the library's waits, then restore."""
+
+    previous = tuple(getattr(substrate, name, None) for name in _RPC_WAIT_FIELDS)
+    if None in previous:
+        # A client without these knobs never had a bound to widen.
+        yield
+        return
+    substrate.retry_timeout = BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS
+    substrate.max_retries = BROADCAST_WATCH_MAX_RETRIES
+    try:
+        yield
+    finally:
+        substrate.retry_timeout, substrate.max_retries = previous
 
 
 def _canonical_hash(value: object, *, label: str) -> str:
@@ -546,7 +689,7 @@ class DirectWeightWriter:
         fresh_miners = fresh.miner_by_uid()
         if (
             fresh.block_number < anchor.block_number
-            or fresh.block_number - anchor.block_number >= SN39_MORTAL_PERIOD_BLOCKS
+            or fresh.block_number - anchor.block_number >= MORTAL_PERIOD_BLOCKS
             or fresh.validator_uid != anchor.validator_uid
             or fresh.validator_hotkey != anchor.validator_hotkey
             or fresh.miners != anchor.miners
@@ -708,7 +851,7 @@ class DirectWeightWriter:
             raise DirectValidatorError(
                 "validator last update and cooldown distance disagree"
             )
-        if rate_limit < SN39_MORTAL_PERIOD_BLOCKS:
+        if rate_limit < MORTAL_PERIOD_BLOCKS:
             raise DirectValidatorError("SN39 cooldown is shorter than the mortal era")
         if blocks_since < rate_limit:
             raise DirectValidatorError(
@@ -742,6 +885,45 @@ class DirectWeightWriter:
             "validator_stake_rao": validator_stake,
             "stake_threshold_rao": stake_threshold,
         }
+
+    def _require_broadcast_window(
+        self,
+        substrate: Any,
+        *,
+        era_reference: int,
+        presign_deadline: float,
+    ) -> None:
+        """Refuse to journal or broadcast a signature that can no longer land.
+
+        The era is anchored on the finalized sign head, and signing itself
+        makes chain calls (runtime, genesis and birth-block lookups) after the
+        last cooperative deadline check. So the deadline is checked again and
+        the best head the node validates against is read. A refusal here comes
+        before the intent is journaled: the signature is dropped from memory,
+        no node has seen it, and the next cycle signs a fresh plan.
+        """
+
+        _require_presign_time(presign_deadline, stage="signing")
+        try:
+            best = _nonnegative_int(substrate.get_block_number(None), label="best head")
+        except DirectValidatorError:
+            raise
+        except Exception as exc:
+            raise DirectValidatorError(
+                "best head is unavailable before broadcast"
+            ) from exc
+        _require_presign_time(presign_deadline, stage="best-head RPC")
+        if best < era_reference:
+            # A node behind the sign head recomputes an older birth block, so
+            # it would reject the signature outright.
+            raise DirectValidatorError(
+                f"best head {best} is behind the signed era anchor {era_reference}"
+            )
+        if best >= era_reference + MORTAL_PERIOD_BLOCKS - BROADCAST_ERA_MARGIN_BLOCKS:
+            raise DirectValidatorError(
+                f"best head {best} leaves fewer than {BROADCAST_ERA_MARGIN_BLOCKS} "
+                f"blocks of the era signed at {era_reference}"
+            )
 
     def _last_anchor(self, state: Mapping[str, Any]) -> int | None:
         last = state.get("last_attempt")
@@ -911,9 +1093,12 @@ class DirectWeightWriter:
     ) -> None:
         try:
             canonical = _canonical_hash(
-                self.subtensor.substrate.get_block_hash(block_number),
+                _uncached_block_hash(self.subtensor.substrate, block_number),
                 label="confirmation block",
             )
+            # The metagraph names its block by number only, so the client's
+            # cached lookup of this height must name the canonical block too.
+            _correct_cached_block_hash(self.subtensor, block_number, canonical)
             metagraph = self.subtensor.metagraph(NETUID, block=block_number)
             metagraph_block = int(getattr(metagraph, "block", -1))
             uids = [int(value) for value in list(metagraph.uids)]
@@ -1009,7 +1194,9 @@ class DirectWeightWriter:
         proven: list[tuple[int, str]] = []
         for block_number in block_numbers:
             try:
-                raw_block_hash = self.subtensor.substrate.get_block_hash(block_number)
+                raw_block_hash = _uncached_block_hash(
+                    self.subtensor.substrate, block_number
+                )
             except Exception as exc:
                 raise DirectSubmissionAmbiguous(
                     f"confirmation block {block_number} hash is unavailable"
@@ -1109,7 +1296,7 @@ class DirectWeightWriter:
             isinstance(era_reference, bool)
             or not isinstance(era_reference, int)
             or era_reference <= 0
-            or period != SN39_MORTAL_PERIOD_BLOCKS
+            or period != MORTAL_PERIOD_BLOCKS
             or kwargs != expected_kwargs
         ):
             raise DirectSubmissionContradiction("pending signed intent is invalid")
@@ -1128,7 +1315,8 @@ class DirectWeightWriter:
                 continue
             try:
                 block_hash = _canonical_hash(
-                    substrate.get_block_hash(block_number), label="recovery block"
+                    _uncached_block_hash(substrate, block_number),
+                    label="recovery block",
                 )
                 block = substrate.get_block(block_hash=block_hash)
             except Exception as exc:
@@ -1265,7 +1453,17 @@ class DirectWeightWriter:
         *,
         cycle_deadline_monotonic: float,
     ) -> DirectSubmissionReceipt:
-        """Persist one signed intent, broadcast once, and prove stored finality."""
+        """Persist one signed intent, broadcast once, and prove stored finality.
+
+        The pinned client returns from a finalization watch only when the node
+        reports the extrinsic finalized; a write the node drops or refuses
+        raises, and is journaled ambiguous for the next cycle's recovery. If a
+        reported finalization is contradicted by finalized history, which
+        proves the hash absent from its whole mortal era, the journal records
+        the same terminal receipt recovery would and that
+        ``EXPIRED_WITHOUT_INCLUSION`` receipt is returned: nothing was written
+        and no pending intent remains.
+        """
 
         presign_deadline = _presign_deadline(cycle_deadline_monotonic)
         _require_presign_time(presign_deadline, stage="writer entry")
@@ -1313,7 +1511,7 @@ class DirectWeightWriter:
                     keypair=self.keypair,
                     nonce=nonce,
                     era={
-                        "period": SN39_MORTAL_PERIOD_BLOCKS,
+                        "period": MORTAL_PERIOD_BLOCKS,
                         "current": fresh.block_number,
                     },
                 )
@@ -1329,6 +1527,11 @@ class DirectWeightWriter:
                 raise DirectValidatorError(
                     "direct extrinsic could not be signed"
                 ) from exc
+            self._require_broadcast_window(
+                substrate,
+                era_reference=fresh.block_number,
+                presign_deadline=presign_deadline,
+            )
 
             identity = plan.identity()
             intent = {
@@ -1336,7 +1539,7 @@ class DirectWeightWriter:
                 "validator_hotkey": plan.snapshot.validator_hotkey,
                 "nonce": nonce,
                 "era_reference_block": fresh.block_number,
-                "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+                "mortal_period_blocks": MORTAL_PERIOD_BLOCKS,
                 "kwargs": kwargs,
                 "eligibility": eligibility,
             }
@@ -1353,11 +1556,12 @@ class DirectWeightWriter:
             self._write_state(state)
 
             try:
-                response = substrate.submit_extrinsic(
-                    signed,
-                    wait_for_inclusion=True,
-                    wait_for_finalization=True,
-                )
+                with _broadcast_watch_waits(substrate):
+                    response = substrate.submit_extrinsic(
+                        signed,
+                        wait_for_inclusion=True,
+                        wait_for_finalization=True,
+                    )
                 response_hash = getattr(response, "extrinsic_hash", None)
                 if (
                     response_hash is not None
@@ -1412,6 +1616,32 @@ class DirectWeightWriter:
                     self._write_state(state)
                     raise
                 return self._finish(state, pending, confirmed)
+            if status == "expired" and located is not None:
+                # The watch returned, so the node reported these bytes
+                # finalized, yet _locate read every block of the era from the
+                # node, uncached, without this hash and saw the finalized head
+                # reach the era's last block: the same proof recover() acts
+                # on. The chain, not the report, is authoritative, and no node
+                # can include the bytes any more, so record the terminal
+                # receipt now rather than an ambiguity for the next cycle. The
+                # reported block is logged because a node that reports
+                # finality for a block the chain does not hold needs a look.
+                try:
+                    reported = _canonical_hash(
+                        getattr(response, "block_hash", None),
+                        label="reported finalization block",
+                    )
+                except DirectSubmissionAmbiguous:
+                    reported = "an unusable block hash"
+                _LOG.warning(
+                    "node reported extrinsic %s finalized in %s, but finalized "
+                    "history holds no such inclusion in its mortal era; "
+                    "recording %s",
+                    extrinsic_hash,
+                    reported,
+                    STATUS_EXPIRED,
+                )
+                return self._finish(state, pending, located)
             if status == "failed":
                 pending["phase"] = "finalized_failed"
                 state["pending"] = pending
@@ -1432,7 +1662,12 @@ __all__ = [
     "DirectSubmissionContradiction",
     "DirectSubmissionReceipt",
     "DirectWeightWriter",
+    "BROADCAST_ERA_MARGIN_BLOCKS",
+    "BROADCAST_WATCH_MAX_RETRIES",
+    "BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS",
     "CONFIRMATION_WAIT_SECONDS",
+    "DIRECT_RPC_MAX_RETRIES",
+    "DIRECT_RPC_RETRY_TIMEOUT_SECONDS",
     "FINALIZED_HISTORY_WAIT_SECONDS",
     "DIRECT_STATE_ROOT",
     "DIRECT_STATE_SCOPE",
@@ -1440,6 +1675,7 @@ __all__ = [
     "STATUS_CONFIRMED",
     "STATUS_EXPIRED",
     "STATUS_RECOVERED",
+    "bound_rpc_waits",
     "canonical_state_path",
     "cycle_lock_path_for_state",
 ]

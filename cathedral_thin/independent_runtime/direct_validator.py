@@ -19,7 +19,7 @@ import socket
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import bittensor as bt
 
@@ -102,6 +102,12 @@ def _notify_ready() -> None:
             )
     except OSError as exc:
         raise SystemExit("systemd readiness notification failed") from exc
+
+
+def _print_event(event: dict[str, Any]) -> None:
+    """Write one cycle event as its own line of the operator stream."""
+
+    print(json.dumps(event, sort_keys=True, default=str), flush=True)
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -395,22 +401,37 @@ def _run_direct_cycle_unlocked(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
-    """Recover first, otherwise derive and submit at most one fresh vector."""
+    """Recover first, otherwise derive and submit at most one fresh vector.
+
+    A recovery that proves the pending hash expired without inclusion wrote
+    nothing and leaves no pending intent, so this cycle goes on to score and
+    submit instead of spending a whole interval on bookkeeping. Its event goes
+    to ``report_recovery`` first, so it is still reported on its own even when
+    the fresh cycle then fails. The reporter is required: a caller that could
+    omit it would silently lose that event. Every other recovery outcome ends
+    the cycle exactly as before.
+    """
+
+    from .direct_writer import STATUS_EXPIRED
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
     )
     recovered = writer.recover()
     if recovered is not None:
-        return _recovered_cycle_event(
+        recovery_event = _recovered_cycle_event(
             recovered=recovered,
             writer=writer,
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
+        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+            return recovery_event
+        report_recovery(recovery_event)
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -482,6 +503,11 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if getattr(receipt, "status", None) == STATUS_EXPIRED:
+        # The writer proved these bytes can never land and nothing was
+        # written, so there is no finalized receipt for telemetry; a prior
+        # pending candidate keeps waiting for the next confirmed write.
+        return event
     reconciled_event_id: str | None = None
     if pending_telemetry is not None:
         try:
@@ -583,6 +609,7 @@ def run_direct_cycle(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
@@ -600,6 +627,7 @@ def run_direct_cycle(
             keypair=keypair,
             verifier_adapter=verifier_adapter,
             writer=writer,
+            report_recovery=report_recovery,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
         )
@@ -693,7 +721,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         DirectWeightWriter,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        bound_rpc_waits,
     )
+
+    try:
+        bound_rpc_waits(subtensor)
+    except DirectValidatorError as exc:
+        raise SystemExit(f"direct validator chain client refused: {exc}") from exc
 
     writer = DirectWeightWriter(
         subtensor=subtensor,
@@ -807,6 +841,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     writer=writer,
                     snp_verifier=snp_verifier,
                     telemetry_sink=telemetry_sink,
+                    report_recovery=_print_event,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionContradiction as exc:
