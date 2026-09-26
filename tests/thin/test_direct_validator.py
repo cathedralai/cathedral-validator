@@ -10,7 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from async_substrate_interface.errors import SubstrateRequestException
+from async_substrate_interface.errors import (
+    StateDiscardedError,
+    SubstrateRequestException,
+)
+from async_substrate_interface.sync_substrate import SubstrateInterface
+from async_substrate_interface.types import RuntimeCache
+from bittensor.core.subtensor import Subtensor
 from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import (
@@ -536,10 +542,15 @@ class WriterSubstrate:
         # sits on the finalized sign head, as with no finality lag.
         self.best_number = ANCHOR_NUMBER + 1
         self.best_reads = 0
-        # Number-to-hash lookups the client has cached. Signing initializes
-        # the runtime at the best head by number, so with best_orphaned it
-        # caches that height as the block later reorged out.
-        self.stale_cached: dict[int, str] = {}
+        # The pinned client's number-to-hash map. get_block_hash below is the
+        # library's own cached lookup over it; rpc_request is the node.
+        self.runtime_cache = RuntimeCache()
+        # Blocks the node served as best head and then reorged out. With
+        # best_orphaned, signing initializes the runtime at the best head by
+        # number while the node still serves the orphan there, so the client
+        # caches the orphan for that height.
+        self.orphans: dict[int, str] = {}
+        self.serving_orphans = False
         self.best_orphaned = False
         # The node drops bytes that never land, and the library's watch then
         # raises, exactly as for a dropped or invalid subscription.
@@ -563,14 +574,17 @@ class WriterSubstrate:
             return INCLUSION_HASH
         return "0x" + f"{block:064x}"
 
-    def get_block_hash(self, block: int) -> str:
-        # The client's cached lookup.
-        return self.stale_cached.get(block) or self.block_hash(block)
+    # The pinned client's cached lookup, run as is: its number-to-hash map,
+    # then a memo of the node's chain_getBlockHash answers.
+    get_block_hash = SubstrateInterface.get_block_hash
+    _get_block_hash = SubstrateInterface._get_block_hash
 
     def rpc_request(self, method: str, params: list[object]) -> dict[str, object]:
-        # The uncached lookup, answered by the node's canonical chain.
+        # The node, answering from its canonical chain once any fork is gone.
         assert method == "chain_getBlockHash"
         (block,) = params
+        if self.serving_orphans and block in self.orphans:
+            return {"jsonrpc": "2.0", "result": self.orphans[block]}
         return {"jsonrpc": "2.0", "result": self.block_hash(block)}
 
     def get_chain_finalised_head(self) -> str:
@@ -601,7 +615,10 @@ class WriterSubstrate:
         self.signed.append((era["current"], nonce))
         self.waits_seen["sign"] = (self.retry_timeout, self.max_retries)
         if self.best_orphaned:
-            self.stale_cached[self.best_number] = ORPHAN_HASH
+            self.orphans[self.best_number] = ORPHAN_HASH
+            self.serving_orphans = True
+            self.get_block_hash(self.best_number)
+            self.serving_orphans = False
         return Signed(self.extrinsic_hash)
 
     def submit_extrinsic(
@@ -628,7 +645,7 @@ class WriterSubstrate:
         return Signed(signed.extrinsic_hash)
 
     def get_block(self, *, block_hash: str) -> dict[str, object]:
-        if block_hash in self.stale_cached.values():
+        if block_hash in self.orphans.values():
             # The node still serves the orphan, which never held this write.
             return {"extrinsics": []}
         block_number = self.get_block_number(block_hash)
@@ -700,9 +717,20 @@ class WriterSubtensor:
         self.validator_stake = 10_000
         self.stake_threshold = 1_000
         self.eligibility_blocks: list[int] = []
+        self.metagraph_reads: list[tuple[int, str]] = []
+
+    # bittensor's by-number lookup and its memo, run as is: every read that
+    # names only a block, the metagraph included, resolves it here.
+    get_block_hash = Subtensor.get_block_hash
+    _get_block_hash = Subtensor._get_block_hash
 
     def metagraph(self, netuid: int, *, block: int) -> Metagraph:
         assert netuid == 39
+        block_hash = self.get_block_hash(block)
+        self.metagraph_reads.append((block, block_hash))
+        if block_hash in self.substrate.orphans.values():
+            # A pruning node discards a reorged-out block's state.
+            raise StateDiscardedError(block_hash)
         miners = self.miners
         if self.remap_after is not None and block >= self.remap_after:
             miners = tuple(
@@ -1618,9 +1646,10 @@ def test_era_scan_and_confirmation_ignore_a_cached_orphan_sign_head(
 ) -> None:
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     substrate = subtensor.substrate
+    inclusion = substrate.inclusion_block
     # The best head seen while signing is later reorged out, and the write
     # lands in the canonical block that replaced it at the same height.
-    substrate.best_number = substrate.inclusion_block
+    substrate.best_number = inclusion
     substrate.best_orphaned = True
     now = [1000.0]
     monkeypatch.setattr(writer_runtime.time, "monotonic", lambda: now[0])
@@ -1638,13 +1667,71 @@ def test_era_scan_and_confirmation_ignore_a_cached_orphan_sign_head(
         with pytest.raises(DirectSubmissionAmbiguous):
             instance.submit(planned, cycle_deadline_monotonic=now[0] + 600.0)
         substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+        # Any by-number read of that height puts the orphan in bittensor's
+        # memo as well as the client's map.
+        assert subtensor.get_block_hash(inclusion) == ORPHAN_HASH
         receipt = instance.recover()
         assert receipt is not None and receipt.status == STATUS_RECOVERED
 
-    assert substrate.stale_cached == {substrate.inclusion_block: ORPHAN_HASH}
-    assert substrate.get_block_hash(substrate.inclusion_block) == ORPHAN_HASH
-    assert receipt.block_number == substrate.inclusion_block
+    assert substrate.orphans == {inclusion: ORPHAN_HASH}
+    assert receipt.block_number == inclusion
     assert receipt.block_hash == INCLUSION_HASH
+    assert substrate.submit_calls == 1
+    # The confirmation's metagraph names its block by number, yet it read the
+    # canonical block, never the orphan whose state the node discarded.
+    assert (inclusion, INCLUSION_HASH) in subtensor.metagraph_reads
+    assert ORPHAN_HASH not in {read for _block, read in subtensor.metagraph_reads}
+    # The correction sticks for every later by-number read of that height,
+    # even once the client's map has evicted it and asks its memo again.
+    assert subtensor.get_block_hash(inclusion) == INCLUSION_HASH
+    substrate.runtime_cache.blocks.cache.pop(inclusion)
+    assert substrate.get_block_hash(inclusion) == INCLUSION_HASH
+
+
+def test_uncorrected_cached_orphan_is_corrected_by_the_next_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    inclusion = substrate.inclusion_block
+    substrate.best_number = inclusion
+    substrate.best_orphaned = True
+    substrate.raise_after_include = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(instance, planned)
+    substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+    assert subtensor.get_block_hash(inclusion) == ORPHAN_HASH
+
+    # For one cycle the client's map drops the correction of that height.
+    add_item = substrate.runtime_cache.add_item
+    dropped: list[dict[str, object]] = []
+
+    def drop_the_correction(**kwargs: object) -> None:
+        if kwargs == {"block": inclusion, "block_hash": INCLUSION_HASH}:
+            dropped.append(kwargs)
+            return
+        add_item(**kwargs)
+
+    monkeypatch.setattr(substrate.runtime_cache, "add_item", drop_the_correction)
+    with pytest.raises(DirectSubmissionAmbiguous, match="not canonical"):
+        instance.recover()
+
+    assert dropped == [{"block": inclusion, "block_hash": INCLUSION_HASH}]
+    assert inclusion not in {block for block, _read in subtensor.metagraph_reads}
+    pending = json.loads(instance.state_path.read_text(encoding="ascii"))["pending"]
+    assert pending is not None
+
+    # The next cycle recovers the same pending write, corrects the cache, and
+    # resolves it: the stale entry cannot keep it ambiguous.
+    monkeypatch.setattr(substrate.runtime_cache, "add_item", add_item)
+    receipt = instance.recover()
+
+    assert receipt is not None and receipt.status == STATUS_RECOVERED
+    assert receipt.attempt_id == pending["attempt_id"]
+    assert receipt.block_hash == INCLUSION_HASH
+    assert (inclusion, INCLUSION_HASH) in subtensor.metagraph_reads
+    assert ORPHAN_HASH not in {read for _block, read in subtensor.metagraph_reads}
+    assert substrate.sign_calls == 1
     assert substrate.submit_calls == 1
 
 

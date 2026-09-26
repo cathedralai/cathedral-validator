@@ -165,11 +165,62 @@ def _uncached_block_hash(substrate: Any, block_number: int) -> object:
     canonical block at that height, and could record it as expired or leave
     it unresolved, and a confirmation would see a false contradiction. Every
     height of finalized history the writer proves anything from is therefore
-    read straight from the node.
+    read straight from the node, and a read that can only name a height is
+    preceded by ``_correct_cached_block_hash``.
     """
 
     response = substrate.rpc_request("chain_getBlockHash", [block_number])
     return response.get("result") if isinstance(response, Mapping) else None
+
+
+def _cached_block_hash(subtensor: Any, block_number: int) -> str | None:
+    """Return the hash a read that names only a block number would use."""
+
+    try:
+        return _canonical_hash(
+            subtensor.get_block_hash(block_number), label="cached block"
+        )
+    except DirectSubmissionAmbiguous:
+        return None
+
+
+def _correct_cached_block_hash(
+    subtensor: Any, block_number: int, canonical: str
+) -> None:
+    """Make reads that name only a block number resolve to the canonical block.
+
+    The metagraph takes a block number, not a hash. bittensor resolves it
+    through its own memo of lookups, then the client's number-to-hash map,
+    which has a memo of node answers behind it, and all three last for the
+    process. If the block signing cached at this height was reorged out, the
+    metagraph reads the orphan. Once the height is finalized a pruning node
+    has discarded the orphan's state, so that read fails on every later
+    recovery of the same pending write, until the process restarts.
+
+    A differing entry is therefore overwritten with the canonical hash and
+    both memos are cleared, so the next lookup reads the corrected map or
+    asks the node again. The lookup is then read back. Only a client that
+    still names another block leaves the confirmation ambiguous, and every
+    later recovery makes the same correction again.
+    """
+
+    if _cached_block_hash(subtensor, block_number) == canonical:
+        return
+    substrate = subtensor.substrate
+    runtime_cache = getattr(substrate, "runtime_cache", None)
+    add_item = getattr(runtime_cache, "add_item", None)
+    if callable(add_item):
+        add_item(block=block_number, block_hash=canonical)
+    for client in (substrate, subtensor):
+        memo = getattr(client, "_get_block_hash", None)
+        clear = getattr(memo, "cache_clear", None)
+        if callable(clear):
+            clear()
+    if _cached_block_hash(subtensor, block_number) != canonical:
+        raise DirectSubmissionAmbiguous(
+            f"client cache for finalized block {block_number} still names "
+            "a block that is not canonical"
+        )
 
 
 @contextmanager
@@ -1045,6 +1096,9 @@ class DirectWeightWriter:
                 _uncached_block_hash(self.subtensor.substrate, block_number),
                 label="confirmation block",
             )
+            # The metagraph names its block by number only, so the client's
+            # cached lookup of this height must name the canonical block too.
+            _correct_cached_block_hash(self.subtensor, block_number, canonical)
             metagraph = self.subtensor.metagraph(NETUID, block=block_number)
             metagraph_block = int(getattr(metagraph, "block", -1))
             uids = [int(value) for value in list(metagraph.uids)]
