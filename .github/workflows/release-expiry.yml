@@ -1,0 +1,31 @@
+name: release expiry alarm
+
+# Validators refuse expired signed release metadata and new installs refuse an
+# expired bootstrap manifest. Nothing renews either automatically, so this
+# fails every day from five days before any of them expires until a key holder
+# renews it (docs/RENEW_RELEASE_CHANNEL.md).
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-expiry-alarm
+  cancel-in-progress: false
+
+jobs:
+  expiry:
+    name: Signed release metadata and bootstrap expiry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Fail when anything expires within 5 days
+        run: python3 scripts/check_release_expiry.py --warn-days 5
