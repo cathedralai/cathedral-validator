@@ -329,6 +329,7 @@ jobs:
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
+            scripts/check_release_expiry.py \
             tests/release_smoke/run_real_validator.py \
             tests/live/cathedral_no_chain_readiness.py \
             tests/live/tampered_https_origin.py \
@@ -343,6 +344,7 @@ jobs:
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
+            scripts/check_release_expiry.py \
             tests/release_smoke/run_real_validator.py \
             tests/live/cathedral_no_chain_readiness.py \
             tests/live/tampered_https_origin.py \

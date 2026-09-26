@@ -19,6 +19,11 @@ from typing import Any, Callable, Sequence
 ETC = Path("/etc/cathedral-validator")
 INSTALL_ROOT = Path("/opt/cathedral-validator")
 UPDATER_STATE = Path("/var/lib/cathedral-validator-update/state.json")
+# The exact signed record the updater last verified. Its expiry is reported
+# only when its digest matches the committed channel record in UPDATER_STATE.
+UPDATER_VERIFIED_METADATA = Path(
+    "/var/lib/cathedral-validator-update/verified-metadata.json"
+)
 DIRECT_SCOPE = Path(
     "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0"
 )
@@ -26,6 +31,8 @@ DIRECT_UNIT = "cathedral-validator-direct.service"
 STABLE_TIMER = "cathedral-validator-update.timer"
 MAX_STATE_BYTES = 1024 * 1024
 MAX_CONFIRMED_AGE_SECONDS = 60 * 60
+MAX_RELEASE_METADATA_BYTES = 131_072
+RELEASE_METADATA_WARNING_SECONDS = 5 * 24 * 60 * 60
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _BASE58_VALUES = {character: index for index, character in enumerate(_BASE58_ALPHABET)}
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -311,6 +318,81 @@ def _updater_summary() -> dict[str, Any]:
     }
 
 
+def _release_metadata_summary(now_unix: int) -> dict[str, Any]:
+    """Report when the installed channel's signed release metadata expires.
+
+    The validator keeps running its installed release after this expiry, but
+    the updater refuses every update until the maintainers re-sign the
+    channel. The expiry comes from the exact record the updater verified, and
+    only when that record is the one committed in the updater state.
+    """
+
+    unknown: dict[str, Any] = {"state": "UNKNOWN"}
+    try:
+        document = _json_state(UPDATER_STATE, maximum=MAX_STATE_BYTES)
+        raw = _read_controlled_file(
+            UPDATER_VERIFIED_METADATA, maximum=MAX_RELEASE_METADATA_BYTES
+        )
+        envelope = json.loads(raw.decode("ascii"), object_pairs_hook=_strict_object)
+    except (StatusUnavailable, UnicodeDecodeError, json.JSONDecodeError):
+        return unknown
+    channel = document.get("selected_channel")
+    channels = document.get("channels")
+    record = channels.get(channel) if isinstance(channels, dict) else None
+    signed = envelope.get("signed") if isinstance(envelope, dict) else None
+    if (
+        channel not in {"stable", "canary"}
+        or not isinstance(record, dict)
+        or record.get("metadata_sha256") != hashlib.sha256(raw).hexdigest()
+        or not isinstance(signed, dict)
+        or signed.get("channel") != channel
+    ):
+        return unknown
+    sequence = signed.get("sequence")
+    expires = signed.get("expires_unix")
+    if (
+        isinstance(sequence, bool)
+        or sequence != record.get("sequence")
+        or isinstance(expires, bool)
+        or not isinstance(expires, int)
+        or expires < 1
+    ):
+        return unknown
+    remaining = expires - now_unix
+    if remaining <= 0:
+        state = "EXPIRED"
+    elif remaining <= RELEASE_METADATA_WARNING_SECONDS:
+        state = "EXPIRES_SOON"
+    else:
+        state = "VALID"
+    return {
+        "state": state,
+        "channel": channel,
+        "sequence": sequence,
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires)),
+        "expires_in_seconds": remaining,
+    }
+
+
+def _release_metadata_warning(summary: dict[str, Any]) -> str | None:
+    state = summary.get("state")
+    if state == "EXPIRED":
+        return (
+            f"Signed {summary['channel']} release metadata expired at "
+            f"{summary['expires_at']}. This validator keeps running its installed "
+            "release, but the updater refuses every update until the maintainers "
+            "re-sign the channel."
+        )
+    if state == "EXPIRES_SOON":
+        return (
+            f"Signed {summary['channel']} release metadata expires at "
+            f"{summary['expires_at']}, within "
+            f"{RELEASE_METADATA_WARNING_SECONDS // 86_400} days. After that the updater "
+            "refuses every update until the maintainers re-sign the channel."
+        )
+    return None
+
+
 def _nonnegative_int(value: object) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value >= 0
 
@@ -550,8 +632,12 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
         "stable_timer_active": _systemd_state(runner, "is-active", STABLE_TIMER),
         "stable_timer_enabled": _systemd_state(runner, "is-enabled", STABLE_TIMER),
         "release": _current_release(),
+        "release_metadata": _release_metadata_summary(int(time.time())),
         "evidence": "local process and durable state only. This does not prove current chain inclusion.",
     }
+    warning = _release_metadata_warning(report["release_metadata"])
+    if warning is not None:
+        report["warning"] = warning
     try:
         identity = _identity()
         report["updater"] = _updater_summary()
@@ -643,11 +729,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         for key in (
             "result",
+            "warning",
             "service_active",
             "stable_timer_active",
             "stable_timer_enabled",
             "release",
             "updater",
+            "release_metadata",
             "direct",
             "eligibility",
             "action",

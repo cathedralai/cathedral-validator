@@ -2824,3 +2824,65 @@ def test_offline_builder_is_deterministic_and_promotes_exact_canary(
     )
     assert stable.archive_sha256 == canary.archive_sha256
     assert stable.promoted_canary_metadata_sha256 == canary.metadata_sha256
+
+
+def test_updater_keeps_the_verified_record_for_status_without_depending_on_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    tree = _tree_digest(tmp_path, archive)
+    first = _canary_metadata(private, sequence=1, archive=archive, tree=tree)
+    renewed = _canary_metadata(private, sequence=2, archive=archive, tree=tree)
+    journal = tmp_path / "journal" / "state.json"
+    _journal(journal)
+    restarts: list[tuple[str, ...]] = []
+    updater = _updater(
+        tmp_path, journal=journal, metadata=first, archive=archive, restarts=restarts
+    )
+    verified = tmp_path / "state" / updater_module.VERIFIED_METADATA_FILE
+
+    def committed() -> str:
+        state = json.loads((tmp_path / "state" / "state.json").read_text())
+        return state["channels"]["canary"]["metadata_sha256"]
+
+    assert _update(updater, private, channel="canary", sequence=1) == "ACTIVATED"
+    assert verified.read_bytes() == first
+    assert stat.S_IMODE(verified.stat().st_mode) == 0o600
+    assert hashlib.sha256(verified.read_bytes()).hexdigest() == committed()
+
+    updater.fetcher = lambda url, _maximum: renewed if url.endswith(".json") else b""
+    assert _update(updater, private, channel="canary", sequence=2) == "ADVANCED"
+    assert verified.read_bytes() == renewed
+    assert hashlib.sha256(renewed).hexdigest() == committed()
+
+    # Expired metadata is refused before anything is written, so status keeps
+    # reporting the committed record, which is now also expired.
+    expired = _canary_metadata(
+        private,
+        sequence=3,
+        archive=archive,
+        tree=tree,
+        issued=NOW - 7200,
+        expires=NOW - 60,
+    )
+    updater.fetcher = lambda url, _maximum: expired if url.endswith(".json") else b""
+    with pytest.raises(UpdateRefused, match="has expired"):
+        _update(updater, private, channel="canary", sequence=2)
+    assert verified.read_bytes() == renewed
+
+    # The status copy is informational: a failed write never blocks an update.
+    third = _canary_metadata(private, sequence=3, archive=archive, tree=tree)
+    updater.fetcher = lambda url, _maximum: third if url.endswith(".json") else b""
+    original_mkstemp = updater_module.tempfile.mkstemp
+
+    def refuse_status_copy(*args, **kwargs):
+        if kwargs.get("prefix") == ".verified-metadata.":
+            raise OSError("disk full")
+        return original_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(updater_module.tempfile, "mkstemp", refuse_status_copy)
+    assert _update(updater, private, channel="canary", sequence=3) == "ADVANCED"
+    assert verified.read_bytes() == renewed
+    assert hashlib.sha256(third).hexdigest() == committed()
+    assert not list((tmp_path / "state").glob(".verified-metadata.*"))

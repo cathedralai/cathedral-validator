@@ -180,6 +180,15 @@ The result separates local service health, signed release state, updater state,
 and the latest recorded weight result. A locally confirmed record does not by
 itself prove current finalized chain state.
 
+`release_metadata` shows when the installed channel's signed metadata expires.
+Its state is `VALID`, `EXPIRES_SOON` (within 5 days), `EXPIRED`, or `UNKNOWN`
+(the updater has not yet recorded a verified copy of the committed record).
+A `warning:` line appears under the result for the two expiry states. The
+validator keeps running its installed release after expiry, but the updater
+refuses every update until the maintainers re-sign the channel. Only the
+maintainers can fix it. The field ships with the signed bootstrap, so a host
+shows it only after it installs a bootstrap that carries it.
+
 The updater reports one of these normal results:
 
 - `CATHEDRAL_VALIDATOR_UPDATE_ACTIVATED`: a new archive became active.
