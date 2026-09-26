@@ -33,6 +33,25 @@ _CHAIN_HASH = re.compile(r"0x[0-9a-f]{64}")
 _ATTEMPT_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _FINALIZED_RESULTS = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
 _TERMINAL_RESULTS = _FINALIZED_RESULTS | {"EXPIRED_WITHOUT_INCLUSION"}
+_ELIGIBILITY_RESULTS = frozenset({"NO_PERMIT", "NOT_REGISTERED"})
+_ELIGIBILITY_STATUS = re.compile(
+    r"(NO_PERMIT|NOT_REGISTERED) hotkey=([1-9A-HJ-NP-Za-km-z]{1,64})"
+    r" block=(0|[1-9][0-9]{0,18})"
+)
+_ELIGIBILITY_ACTIONS = {
+    "NO_PERMIT": (
+        "The hotkey is registered but held no validator permit at the block shown, "
+        "so nothing was written. The validator keeps checking every cycle and "
+        "writes once the chain grants a permit at an epoch; a permit depends on "
+        "stake. Do not restart it or delete its journal."
+    ),
+    "NOT_REGISTERED": (
+        "The hotkey was not registered on the subnet at the block shown, so nothing "
+        "was written. Register it and stake for a permit; the validator keeps "
+        "checking every cycle. Do not restart it or delete its journal."
+    ),
+}
+MAX_STATUS_TEXT_LENGTH = 4096
 ROOT_UID = 0
 
 
@@ -166,6 +185,51 @@ def _systemd_state(runner: Runner, verb: str, unit: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
+
+
+def _systemd_status_text(runner: Runner) -> str | None:
+    try:
+        result = runner(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=StatusText",
+                "--value",
+                DIRECT_UNIT,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = getattr(result, "stdout", None)
+    if (
+        result.returncode != 0
+        or not isinstance(output, str)
+        or len(output) > MAX_STATUS_TEXT_LENGTH
+    ):
+        return None
+    return output.removesuffix("\n")
+
+
+def _eligibility_summary(runner: Runner, identity: str) -> dict[str, Any] | None:
+    """Read why a running validator is not writing, from its systemd status line.
+
+    The validator overwrites the line every cycle, so it describes only the
+    latest cycle. A line that claims an eligibility state must parse exactly
+    and name the configured hotkey; anything else is refused rather than shown
+    as a reason the operator might act on.
+    """
+
+    text = _systemd_status_text(runner)
+    if text is None or text.split(" ", 1)[0] not in _ELIGIBILITY_RESULTS:
+        return None
+    match = _ELIGIBILITY_STATUS.fullmatch(text)
+    if match is None or match.group(2) != identity:
+        raise StatusUnavailable("validator eligibility status is invalid")
+    return {"status": match.group(1), "block_number": int(match.group(3))}
 
 
 def _current_release() -> str | None:
@@ -443,6 +507,11 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
             or direct_after != report["direct"]
         ):
             raise StatusUnavailable("release and signed updater state disagree")
+        # A stopped unit's status line is left over from its last run, so it
+        # is read only while the validator is running.
+        eligibility = (
+            _eligibility_summary(runner, identity) if report["service_active"] else None
+        )
     except StatusUnavailable:
         report["result"] = "NOT_PROVEN"
         report["action"] = (
@@ -455,11 +524,24 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
         0,
         int(time.time()) - direct.pop("recorded_unix"),
     )
+    if eligibility is not None:
+        report["eligibility"] = eligibility
     if not report["service_active"]:
         report["result"] = "NEEDS_REVIEW"
         report["action"] = (
             "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
         )
+    elif (
+        eligibility is not None
+        and not updater["pending_recovery"]
+        and not direct["pending"]
+    ):
+        # The latest cycle found the hotkey unable to write. That outranks an
+        # older confirmed row, which may predate a lost permit, while pending
+        # recovery still comes first because it tells the operator what not
+        # to touch.
+        report["result"] = eligibility["status"]
+        report["action"] = _ELIGIBILITY_ACTIONS[eligibility["status"]]
     elif (
         report["stable_timer_active"]
         and report["stable_timer_enabled"]
@@ -500,6 +582,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "release",
             "updater",
             "direct",
+            "eligibility",
             "action",
             "evidence",
         ):

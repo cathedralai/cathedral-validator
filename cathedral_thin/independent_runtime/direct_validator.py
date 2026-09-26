@@ -65,6 +65,9 @@ from .telemetry import (
 )
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
+STATUS_NO_PERMIT = "NO_PERMIT"
+STATUS_NOT_REGISTERED = "NOT_REGISTERED"
+_CYCLE_STATUS_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -85,15 +88,19 @@ def _expected_hotkey(value: object) -> str:
     return value
 
 
+def _notify_address() -> str | None:
+    notify_socket = os.environ.get("NOTIFY_SOCKET")
+    if not notify_socket:
+        return None
+    return "\0" + notify_socket[1:] if notify_socket.startswith("@") else notify_socket
+
+
 def _notify_ready() -> None:
     """Tell systemd initialization finished before any cycle or chain write."""
 
-    notify_socket = os.environ.get("NOTIFY_SOCKET")
-    if not notify_socket:
+    address = _notify_address()
+    if address is None:
         return
-    address = (
-        "\0" + notify_socket[1:] if notify_socket.startswith("@") else notify_socket
-    )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
             client.connect(address)
@@ -102,6 +109,59 @@ def _notify_ready() -> None:
             )
     except OSError as exc:
         raise SystemExit("systemd readiness notification failed") from exc
+
+
+def _cycle_status_text(event: dict[str, Any]) -> str:
+    """Return the one-line systemd status for the latest cycle event.
+
+    The local status tool reads this line to tell an operator why a running
+    validator is not writing. Eligibility states carry the hotkey and block so
+    the tool can bind them to the configured identity; every other state is the
+    bare status word, and anything unexpected collapses to ``NOT_PROVEN``.
+    """
+
+    status = event.get("status")
+    if status in {STATUS_NO_PERMIT, STATUS_NOT_REGISTERED}:
+        hotkey = event.get("hotkey")
+        block_number = event.get("block_number")
+        if (
+            isinstance(hotkey, str)
+            and 1 <= len(hotkey) <= 64
+            and hotkey.isascii()
+            and hotkey.isalnum()
+            and type(block_number) is int
+            and block_number >= 0
+        ):
+            return f"{status} hotkey={hotkey} block={block_number}"
+        return "NOT_PROVEN"
+    if (
+        isinstance(status, str)
+        and 1 <= len(status) <= 64
+        and set(status) <= _CYCLE_STATUS_WORD
+    ):
+        return status
+    return "NOT_PROVEN"
+
+
+def _notify_cycle_status(event: dict[str, Any]) -> None:
+    """Publish the latest cycle outcome as the unit's systemd status line.
+
+    Every cycle overwrites the line, so a permit granted at a later epoch
+    clears an earlier ``NO_PERMIT``. The line is an operator projection like
+    telemetry: the journal and the chain stay authoritative, so a failed
+    datagram is ignored rather than allowed to stop a validator that can write.
+    """
+
+    address = _notify_address()
+    if address is None:
+        return
+    try:
+        payload = ("STATUS=" + _cycle_status_text(event)).encode("ascii")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.connect(address)
+            client.sendall(payload)
+    except (OSError, UnicodeEncodeError):
+        pass
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -125,6 +185,43 @@ def _metagraph_block(metagraph: Any) -> int:
     return value
 
 
+class ValidatorNotEligible(DirectValidatorError):
+    """The validator's own hotkey cannot set weights at this finalized block.
+
+    This is chain state, not a local fault. Registration can happen at any
+    time and a permit is granted at an epoch once stake qualifies, so the
+    recurring loop reports it and checks again next cycle. Exiting instead
+    would either leave the unit stopped, so a later permit is never used, or
+    become a systemd restart loop.
+    """
+
+    def __init__(
+        self,
+        status: str,
+        message: str,
+        *,
+        hotkey: str,
+        block_number: int,
+        block_hash: str,
+    ) -> None:
+        if status not in {STATUS_NO_PERMIT, STATUS_NOT_REGISTERED}:
+            raise ValueError("validator eligibility status is unknown")
+        super().__init__(message)
+        self.status = status
+        self.hotkey = hotkey
+        self.block_number = block_number
+        self.block_hash = block_hash
+
+    def event(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "error": str(self),
+            "hotkey": self.hotkey,
+            "block_number": self.block_number,
+            "block_hash": self.block_hash,
+        }
+
+
 def finalized_serving_miners_snapshot(
     subtensor: Any,
     keypair: Any,
@@ -144,7 +241,13 @@ def finalized_serving_miners_snapshot(
     validator_hotkey = str(getattr(keypair, "ss58_address", ""))
     validator_uid = view.hotkey_to_uid.get(validator_hotkey)
     if isinstance(validator_uid, bool) or not isinstance(validator_uid, int):
-        raise DirectValidatorError("validator hotkey is not registered on SN39")
+        raise ValidatorNotEligible(
+            STATUS_NOT_REGISTERED,
+            "validator hotkey is not registered on this subnet",
+            hotkey=validator_hotkey,
+            block_number=block_number,
+            block_hash=block_hash,
+        )
     try:
         uids = [int(value) for value in list(metagraph.uids)]
         permits = list(metagraph.validator_permit)
@@ -158,7 +261,13 @@ def finalized_serving_miners_snapshot(
         _strict_bool(value, label="finalized validator permit") for value in permits
     )
     if strict_permits[uids.index(validator_uid)] is not True:
-        raise DirectValidatorError("validator hotkey lacks a finalized permit")
+        raise ValidatorNotEligible(
+            STATUS_NO_PERMIT,
+            "validator hotkey lacks a finalized permit",
+            hotkey=validator_hotkey,
+            block_number=block_number,
+            block_hash=block_hash,
+        )
     validator_uids = {
         uid for uid, permit in zip(uids, strict_permits) if permit is True
     }
@@ -818,29 +927,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     flush=True,
                 )
                 return 2
+            except ValidatorNotEligible as exc:
+                # A missing registration or permit is the chain's answer, not
+                # a fault, so it gets its own status instead of NOT_PROVEN and
+                # the loop keeps checking at the normal pace.
+                event = exc.event()
+                print(json.dumps(event, sort_keys=True), flush=True)
+                if options.once:
+                    return 2
             except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
-                print(
-                    json.dumps(
-                        {"status": "NOT_PROVEN", "error": str(exc)},
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+                event = {"status": "NOT_PROVEN", "error": str(exc)}
+                print(json.dumps(event, sort_keys=True), flush=True)
                 if options.once:
                     return 2
             except Exception as exc:
-                print(
-                    json.dumps(
-                        {
-                            "status": "NOT_PROVEN",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+                event = {
+                    "status": "NOT_PROVEN",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                print(json.dumps(event, sort_keys=True), flush=True)
                 if options.once:
                     return 2
+            _notify_cycle_status(event)
             if options.once:
                 return (
                     0
@@ -855,6 +963,9 @@ __all__ = [
     "DirectValidatorError",
     "DirectWeightPlan",
     "FinalizedMetagraphSnapshot",
+    "STATUS_NOT_REGISTERED",
+    "STATUS_NO_PERMIT",
+    "ValidatorNotEligible",
     "build_direct_plan",
     "finalized_serving_miners_snapshot",
     "main",

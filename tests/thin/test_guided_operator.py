@@ -1134,3 +1134,149 @@ def test_status_confirmation_freshness_boundary(monkeypatch, tmp_path: Path) -> 
         status.time, "time", lambda: recorded + status.MAX_CONFIRMED_AGE_SECONDS + 1
     )
     assert status.collect(runner=_runner([]))["result"] == "NOT_PROVEN"
+
+
+def _status_line_runner(
+    status_text: str,
+    *,
+    service_active: bool = True,
+    calls: list[list[str]] | None = None,
+):
+    """Model systemd with the direct unit's latest per-cycle status line."""
+
+    def run(command, **_kwargs):
+        if calls is not None:
+            calls.append(command)
+        if command[1] == "show":
+            return SimpleNamespace(returncode=0, stdout=f"{status_text}\n")
+        if command[1] == "is-active" and command[-1] == status.DIRECT_UNIT:
+            return SimpleNamespace(returncode=0 if service_active else 3)
+        return SimpleNamespace(returncode=0)
+
+    return run
+
+
+def _idle_journal() -> None:
+    _write(
+        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        json.dumps(
+            {
+                "schema": "cathedral_direct_validator_state_v1",
+                "pending": None,
+                "last_attempt": None,
+            }
+        ),
+    )
+
+
+@pytest.mark.parametrize("state", ["NO_PERMIT", "NOT_REGISTERED"])
+def test_status_names_why_a_new_validator_writes_nothing(
+    monkeypatch, tmp_path: Path, state: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    _idle_journal()
+    calls: list[list[str]] = []
+
+    report = status.collect(
+        runner=_status_line_runner(f"{state} hotkey={HOTKEY} block=4321", calls=calls)
+    )
+
+    assert report["result"] == state
+    assert report["eligibility"] == {"status": state, "block_number": 4321}
+    assert "keeps checking every cycle" in report["action"]
+    assert report["direct"]["last_result"] is None
+    assert HOTKEY not in json.dumps(report)
+    assert [
+        "/usr/bin/systemctl",
+        "show",
+        "--property=StatusText",
+        "--value",
+        status.DIRECT_UNIT,
+    ] in calls
+
+
+def test_status_prefers_the_latest_no_permit_over_an_older_confirmation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+
+    report = status.collect(
+        runner=_status_line_runner(f"NO_PERMIT hotkey={HOTKEY} block=4321")
+    )
+
+    assert report["direct"]["last_result"] == "CONFIRMED"
+    assert report["result"] == "NO_PERMIT"
+
+
+@pytest.mark.parametrize(
+    "status_text",
+    (
+        "",
+        "initialized; waiting for the next direct cycle",
+        "CONFIRMED",
+        "NOT_PROVEN",
+    ),
+)
+def test_status_with_a_permit_is_unchanged_by_ordinary_status_lines(
+    monkeypatch, tmp_path: Path, status_text: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+
+    report = status.collect(runner=_status_line_runner(status_text))
+
+    assert report["result"] == "OPERATING_CONFIRMED"
+    assert "eligibility" not in report
+
+
+@pytest.mark.parametrize(
+    "template",
+    (
+        "NO_PERMIT",
+        "NO_PERMIT hotkey={other} block=4321",
+        "NO_PERMIT hotkey={own} block=04321",
+        "NOT_REGISTERED hotkey={own} block=4321 extra",
+        "NOT_REGISTERED hotkey={own} block=-1",
+    ),
+)
+def test_status_refuses_a_malformed_or_foreign_eligibility_line(
+    monkeypatch, tmp_path: Path, template: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    status_text = template.format(own=HOTKEY, other=OTHER_HOTKEY)
+
+    report = status.collect(runner=_status_line_runner(status_text))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert "eligibility" not in report
+    assert OTHER_HOTKEY not in json.dumps(report)
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_eligibility_never_hides_a_stopped_service_or_pending_recovery(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    line = f"NO_PERMIT hotkey={HOTKEY} block=4321"
+    calls: list[list[str]] = []
+
+    stopped = status.collect(
+        runner=_status_line_runner(line, service_active=False, calls=calls)
+    )
+
+    assert stopped["result"] == "NEEDS_REVIEW"
+    assert all(command[1] != "show" for command in calls)
+
+    _write(
+        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        json.dumps(
+            {
+                "schema": "cathedral_direct_validator_state_v1",
+                "pending": {},
+                "last_attempt": None,
+            }
+        ),
+    )
+    pending = status.collect(runner=_status_line_runner(line))
+
+    assert pending["result"] == "NOT_PROVEN"
+    assert pending["action"].startswith("Wait for recovery")

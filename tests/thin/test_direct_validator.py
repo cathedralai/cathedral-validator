@@ -307,6 +307,56 @@ def test_finalized_snapshot_refuses_no_serving_miners_or_missing_permit() -> Non
         finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
 
 
+def test_finalized_snapshot_names_a_missing_permit_with_hotkey_and_block() -> None:
+    no_permit = Metagraph()
+    no_permit.validator_permit[0] = False
+
+    with pytest.raises(runtime.ValidatorNotEligible) as caught:
+        finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
+
+    assert caught.value.event() == {
+        "status": "NO_PERMIT",
+        "error": "validator hotkey lacks a finalized permit",
+        "hotkey": VALIDATOR,
+        "block_number": ANCHOR_NUMBER,
+        "block_hash": ANCHOR_HASH,
+    }
+
+
+def test_finalized_snapshot_names_an_unregistered_hotkey_with_hotkey_and_block() -> (
+    None
+):
+    unregistered = Metagraph()
+    unregistered.hotkeys[0] = OTHER_VALIDATOR
+
+    with pytest.raises(runtime.ValidatorNotEligible) as caught:
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(unregistered), FakeKeypair()
+        )
+
+    assert isinstance(caught.value, DirectValidatorError)
+    assert caught.value.event() == {
+        "status": "NOT_REGISTERED",
+        "error": "validator hotkey is not registered on this subnet",
+        "hotkey": VALIDATOR,
+        "block_number": ANCHOR_NUMBER,
+        "block_hash": ANCHOR_HASH,
+    }
+
+
+def test_finalized_snapshot_keeps_generic_refusal_for_inconsistent_permit_rows() -> (
+    None
+):
+    # Only a clean chain answer is an eligibility state. Malformed rows stay
+    # an ordinary refusal so they are never shown as "wait for a permit".
+    graph = Metagraph()
+    graph.validator_permit.pop()
+
+    with pytest.raises(DirectValidatorError, match="rows are inconsistent") as caught:
+        finalized_serving_miners_snapshot(SnapshotSubtensor(graph), FakeKeypair())
+    assert not isinstance(caught.value, runtime.ValidatorNotEligible)
+
+
 def test_finalized_snapshot_refuses_a_truthy_non_boolean_permit() -> None:
     graph = Metagraph()
     graph.validator_permit[0] = 1
@@ -2735,6 +2785,172 @@ def test_recurring_cli_stops_on_submission_contradiction(monkeypatch) -> None:
         == 2
     )
     assert events == [{"status": "later"}]
+
+
+_CLI_ARGUMENTS = [
+    "--qvl",
+    "/reviewed/qvl",
+    "--snp-policy",
+    "/reviewed/snp-policy.json",
+    "--snpguest",
+    "/reviewed/snpguest",
+    f"--expected-hotkey={VALIDATOR}",
+    "--confirm-direct-write",
+]
+_READY_DATAGRAM = b"READY=1\nSTATUS=initialized; waiting for the next direct cycle"
+
+
+@contextmanager
+def _notify_server(tmp_path: Path, monkeypatch):
+    notify_path = Path("/tmp") / f"cv-cycle-notify-{id(tmp_path):x}.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as server:
+            server.bind(str(notify_path))
+            monkeypatch.setenv("NOTIFY_SOCKET", str(notify_path))
+            yield server
+    finally:
+        notify_path.unlink(missing_ok=True)
+
+
+def _received(server: socket.socket) -> list[bytes]:
+    server.setblocking(False)
+    datagrams: list[bytes] = []
+    while True:
+        try:
+            datagrams.append(server.recv(512))
+        except BlockingIOError:
+            return datagrams
+
+
+def _not_eligible(status: str) -> runtime.ValidatorNotEligible:
+    return runtime.ValidatorNotEligible(
+        status,
+        f"validator hotkey is {status}",
+        hotkey=VALIDATOR,
+        block_number=ANCHOR_NUMBER,
+        block_hash=ANCHOR_HASH,
+    )
+
+
+def test_recurring_cli_reports_missing_eligibility_and_keeps_checking(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    class StopLoop(BaseException):
+        pass
+
+    graph = Metagraph()
+    graph.validator_permit[0] = False
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            graph.hotkeys[0] = OTHER_VALIDATOR
+            return
+        raise StopLoop()
+
+    _stub_cli_runtime(monkeypatch, [])
+    # Drive the real cycle so the event comes from the finalized snapshot
+    # itself, not from a hand-built exception.
+    monkeypatch.setattr(runtime, "run_direct_cycle", run_direct_cycle)
+    monkeypatch.setattr(
+        runtime, "make_subtensor", lambda *_args, **_kwargs: SnapshotSubtensor(graph)
+    )
+    monkeypatch.setattr(runtime.time, "sleep", sleep)
+
+    with _notify_server(tmp_path, monkeypatch) as server:
+        with pytest.raises(StopLoop):
+            runtime.main(_CLI_ARGUMENTS)
+        datagrams = _received(server)
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events == [
+        {
+            "status": "NO_PERMIT",
+            "error": "validator hotkey lacks a finalized permit",
+            "hotkey": VALIDATOR,
+            "block_number": ANCHOR_NUMBER,
+            "block_hash": ANCHOR_HASH,
+        },
+        {
+            "status": "NOT_REGISTERED",
+            "error": "validator hotkey is not registered on this subnet",
+            "hotkey": VALIDATOR,
+            "block_number": ANCHOR_NUMBER,
+            "block_hash": ANCHOR_HASH,
+        },
+    ]
+    # Neither state exits: the process waits a full interval and checks again.
+    assert sleeps == [runtime.DEFAULT_INTERVAL_SECONDS] * 2
+    assert datagrams == [
+        _READY_DATAGRAM,
+        f"STATUS=NO_PERMIT hotkey={VALIDATOR} block={ANCHOR_NUMBER}".encode(),
+        f"STATUS=NOT_REGISTERED hotkey={VALIDATOR} block={ANCHOR_NUMBER}".encode(),
+    ]
+
+
+def test_recurring_cli_status_line_follows_every_cycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class StopLoop(BaseException):
+        pass
+
+    events = [
+        _not_eligible("NO_PERMIT"),
+        ChainClientError("finalized head unavailable"),
+        {"status": STATUS_CONFIRMED},
+        StopLoop(),
+    ]
+    _stub_cli_runtime(monkeypatch, events)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    with _notify_server(tmp_path, monkeypatch) as server:
+        with pytest.raises(StopLoop):
+            runtime.main(_CLI_ARGUMENTS)
+        datagrams = _received(server)
+
+    # A later permit must clear NO_PERMIT, or the status tool would keep
+    # reporting a validator that now writes as one that cannot.
+    assert datagrams == [
+        _READY_DATAGRAM,
+        f"STATUS=NO_PERMIT hotkey={VALIDATOR} block={ANCHOR_NUMBER}".encode(),
+        b"STATUS=NOT_PROVEN",
+        b"STATUS=CONFIRMED",
+    ]
+    assert events == []
+
+
+@pytest.mark.parametrize("status", ["NO_PERMIT", "NOT_REGISTERED"])
+def test_cli_once_reports_missing_eligibility_as_nonzero(
+    monkeypatch, capsys, status
+) -> None:
+    _stub_cli_runtime(monkeypatch, [_not_eligible(status)])
+
+    assert runtime.main([*_CLI_ARGUMENTS, "--once"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == status
+
+
+def test_cycle_status_line_is_one_safe_word_and_never_stops_the_loop(
+    monkeypatch,
+) -> None:
+    assert runtime._cycle_status_text({"status": STATUS_RECOVERED}) == STATUS_RECOVERED
+    assert runtime._cycle_status_text({"status": "READY=1\nX"}) == "NOT_PROVEN"
+    assert runtime._cycle_status_text({"status": None}) == "NOT_PROVEN"
+    assert (
+        runtime._cycle_status_text(
+            {"status": "NO_PERMIT", "hotkey": "5Va\nREADY=1", "block_number": 1}
+        )
+        == "NOT_PROVEN"
+    )
+    assert (
+        runtime._cycle_status_text(
+            {"status": "NO_PERMIT", "hotkey": VALIDATOR, "block_number": True}
+        )
+        == "NOT_PROVEN"
+    )
+
+    monkeypatch.setenv("NOTIFY_SOCKET", "/nonexistent/cathedral-notify.sock")
+    runtime._notify_cycle_status({"status": STATUS_CONFIRMED})
 
 
 def test_response_deadlines_are_observational_and_below_the_mortal_window() -> None:
