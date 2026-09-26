@@ -28,7 +28,9 @@ VERSION_KEY = 10005000
 TEMPO_BLOCKS = 360
 # Transaction mortality, in blocks, measured from the SIGNED head -- not from
 # the anchor. Mixing the two makes the extrinsic dead on arrival.
-SN39_MORTAL_PERIOD_BLOCKS = 16
+MORTAL_PERIOD_BLOCKS = 16
+# Historical name kept for existing importers; new code uses the name above.
+SN39_MORTAL_PERIOD_BLOCKS = MORTAL_PERIOD_BLOCKS
 
 # Chain contract values that must hold at the anchor. `max_weight_limit` must
 # be exactly 1.0: any smaller cap makes a legal burn-heavy vector overweight.
@@ -202,6 +204,7 @@ __all__ = [
     "MAX_WEIGHT_LIMIT",
     "MECID",
     "MIN_ALLOWED_WEIGHTS",
+    "MORTAL_PERIOD_BLOCKS",
     "NETUID",
     "POLICY_BUNDLE_SCHEMA",
     "POLICY_KEY_IDS",

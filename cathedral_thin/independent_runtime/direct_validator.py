@@ -401,17 +401,19 @@ def _run_direct_cycle_unlocked(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
-    report_recovery: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
     A recovery that proves the pending hash expired without inclusion wrote
     nothing and leaves no pending intent, so this cycle goes on to score and
     submit instead of spending a whole interval on bookkeeping. Its event goes
-    to ``report_recovery`` first, so it is still reported on its own. Every
-    other recovery outcome ends the cycle exactly as before.
+    to ``report_recovery`` first, so it is still reported on its own even when
+    the fresh cycle then fails. The reporter is required: a caller that could
+    omit it would silently lose that event. Every other recovery outcome ends
+    the cycle exactly as before.
     """
 
     from .direct_writer import STATUS_EXPIRED
@@ -429,8 +431,7 @@ def _run_direct_cycle_unlocked(
         )
         if getattr(recovered, "status", None) != STATUS_EXPIRED:
             return recovery_event
-        if report_recovery is not None:
-            report_recovery(recovery_event)
+        report_recovery(recovery_event)
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -608,9 +609,9 @@ def run_direct_cycle(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
-    report_recovery: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -626,9 +627,9 @@ def run_direct_cycle(
             keypair=keypair,
             verifier_adapter=verifier_adapter,
             writer=writer,
+            report_recovery=report_recovery,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
-            report_recovery=report_recovery,
         )
 
 
