@@ -352,9 +352,10 @@ def test_setup_rerun_refuses_inactive_committed_writer_before_mutation(
 ) -> None:
     """A committed installation whose writer is not running fails closed.
 
-    Setup cannot tell a reboot, an operator stop, and a contradiction stop
-    that ``RestartPreventExitStatus=2`` keeps stopped apart. None of them may
-    be cleared by starting the writer, and the completion marker changes
+    Setup cannot tell a reboot, an operator stop, and a contradiction or
+    failed-write stop that ``RestartPreventExitStatus=2 3`` keeps stopped
+    apart. None of them may be cleared by starting the writer, and the
+    completion marker changes
     nothing: the first-install updater starts the writer before it returns,
     so an absent marker only proves setup was interrupted afterwards.
     """
@@ -888,6 +889,9 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(status, "ETC", etc)
     monkeypatch.setattr(status, "INSTALL_ROOT", install)
     monkeypatch.setattr(status, "UPDATER_STATE", state)
+    monkeypatch.setattr(
+        status, "UPDATER_VERIFIED_METADATA", state.with_name("verified-metadata.json")
+    )
     monkeypatch.setattr(status, "DIRECT_SCOPE", scope)
     monkeypatch.setattr(status, "ROOT_UID", os.geteuid())
     monkeypatch.setattr(
@@ -1134,3 +1138,571 @@ def test_status_confirmation_freshness_boundary(monkeypatch, tmp_path: Path) -> 
         status.time, "time", lambda: recorded + status.MAX_CONFIRMED_AGE_SECONDS + 1
     )
     assert status.collect(runner=_runner([]))["result"] == "NOT_PROVEN"
+
+
+def _status_line_runner(
+    status_text: str,
+    *,
+    service_active: bool = True,
+    calls: list[list[str]] | None = None,
+):
+    """Model systemd with the direct unit's latest per-cycle status line."""
+
+    def run(command, **_kwargs):
+        if calls is not None:
+            calls.append(command)
+        if command[1] == "show":
+            return SimpleNamespace(returncode=0, stdout=f"{status_text}\n")
+        if command[1] == "is-active" and command[-1] == status.DIRECT_UNIT:
+            return SimpleNamespace(returncode=0 if service_active else 3)
+        return SimpleNamespace(returncode=0)
+
+    return run
+
+
+def _idle_journal() -> None:
+    _write(
+        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        json.dumps(
+            {
+                "schema": "cathedral_direct_validator_state_v1",
+                "pending": None,
+                "last_attempt": None,
+            }
+        ),
+    )
+
+
+@pytest.mark.parametrize("state", ["NO_PERMIT", "NOT_REGISTERED"])
+def test_status_names_why_a_new_validator_writes_nothing(
+    monkeypatch, tmp_path: Path, state: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    _idle_journal()
+    calls: list[list[str]] = []
+
+    report = status.collect(
+        runner=_status_line_runner(f"{state} hotkey={HOTKEY} block=4321", calls=calls)
+    )
+
+    assert report["result"] == state
+    assert report["eligibility"] == {"status": state, "block_number": 4321}
+    assert "keeps checking every cycle" in report["action"]
+    assert report["direct"]["last_result"] is None
+    assert HOTKEY not in json.dumps(report)
+    assert [
+        "/usr/bin/systemctl",
+        "show",
+        "--property=StatusText",
+        "--value",
+        status.DIRECT_UNIT,
+    ] in calls
+
+
+def test_status_prefers_the_latest_no_permit_over_an_older_confirmation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+
+    report = status.collect(
+        runner=_status_line_runner(f"NO_PERMIT hotkey={HOTKEY} block=4321")
+    )
+
+    assert report["direct"]["last_result"] == "CONFIRMED"
+    assert report["result"] == "NO_PERMIT"
+
+
+@pytest.mark.parametrize(
+    "status_text",
+    (
+        "",
+        "initialized; waiting for the next direct cycle",
+        "CONFIRMED",
+        "NOT_PROVEN",
+    ),
+)
+def test_status_with_a_permit_is_unchanged_by_ordinary_status_lines(
+    monkeypatch, tmp_path: Path, status_text: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+
+    report = status.collect(runner=_status_line_runner(status_text))
+
+    assert report["result"] == "OPERATING_CONFIRMED"
+    assert "eligibility" not in report
+
+
+@pytest.mark.parametrize(
+    "template",
+    (
+        "NO_PERMIT",
+        "NO_PERMIT hotkey={other} block=4321",
+        "NO_PERMIT hotkey={own} block=04321",
+        "NOT_REGISTERED hotkey={own} block=4321 extra",
+        "NOT_REGISTERED hotkey={own} block=-1",
+    ),
+)
+def test_status_refuses_a_malformed_or_foreign_eligibility_line(
+    monkeypatch, tmp_path: Path, template: str
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    status_text = template.format(own=HOTKEY, other=OTHER_HOTKEY)
+
+    report = status.collect(runner=_status_line_runner(status_text))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert "eligibility" not in report
+    assert OTHER_HOTKEY not in json.dumps(report)
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_eligibility_never_hides_a_stopped_service_or_pending_recovery(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    line = f"NO_PERMIT hotkey={HOTKEY} block=4321"
+    calls: list[list[str]] = []
+
+    stopped = status.collect(
+        runner=_status_line_runner(line, service_active=False, calls=calls)
+    )
+
+    assert stopped["result"] == "NEEDS_REVIEW"
+    assert all(command[1] != "show" for command in calls)
+
+    # The status tool names a pending intent's phase, and one without a valid
+    # phase is sent to "Inspect", so the pending intent here carries one.
+    _write(
+        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        json.dumps(
+            {
+                "schema": "cathedral_direct_validator_state_v1",
+                "pending": {"phase": "ambiguous"},
+                "last_attempt": None,
+            }
+        ),
+    )
+    pending = status.collect(runner=_status_line_runner(line))
+
+    assert pending["result"] == "NOT_PROVEN"
+    assert pending["action"].startswith("Wait for recovery")
+
+
+_INSPECT = "Inspect the local service and durable state before changing configuration."
+
+
+def _inactive_direct_runner(calls: list[list[str]]):
+    def run(command, **_kwargs):
+        calls.append(command)
+        stopped = command[1] == "is-active" and command[-1] == status.DIRECT_UNIT
+        return SimpleNamespace(returncode=3 if stopped else 0)
+
+    return run
+
+
+def _failed_write_pending(document: dict) -> dict:
+    last = document["last_attempt"]
+    return {
+        "attempt_id": last["attempt_id"],
+        "phase": "finalized_failed",
+        "identity": last["identity"],
+        "intent": last["intent"],
+        "receipt": None,
+        "error": None,
+    }
+
+
+def _rebound(pending: dict, **intent_changes) -> dict:
+    """Change the intent and recompute a matching attempt id."""
+
+    intent = {**pending["intent"], **intent_changes}
+    identity = pending["identity"]
+    return {
+        **pending,
+        "intent": intent,
+        "attempt_id": status._attempt_id(identity, intent),
+    }
+
+
+def _journal_document() -> tuple[Path, dict]:
+    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    return journal, json.loads(journal.read_text())
+
+
+@pytest.mark.parametrize("service_active", [True, False], ids=["active", "stopped"])
+def test_status_names_a_failed_write_stop_and_the_command_that_clears_it(
+    monkeypatch, tmp_path: Path, service_active: bool
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = _failed_write_pending(document)
+    journal.write_text(json.dumps(document))
+    calls: list[list[str]] = []
+    runner = _runner(calls) if service_active else _inactive_direct_runner(calls)
+
+    report = status.collect(runner=runner)
+
+    assert report["service_active"] is service_active
+    assert report["result"] == "FINALIZED_FAILED_STOPPED"
+    assert "`cathedral-validator record-failed-write`" in report["action"]
+    assert "Failed weight write" in report["action"]
+    assert report["direct"]["pending"] is True
+    assert report["direct"]["pending_phase"] == "finalized_failed"
+    assert HOTKEY not in json.dumps(report)
+
+
+@pytest.mark.parametrize("state", ["NO_PERMIT", "NOT_REGISTERED"])
+def test_status_failed_write_stop_outranks_an_eligibility_line(
+    monkeypatch, tmp_path: Path, state: str
+) -> None:
+    """A pending failed write wins over NO_PERMIT and NOT_REGISTERED.
+
+    Only the record command clears the stop, so an eligibility line from the
+    running unit must not replace the action that names it. The line is still
+    reported, as it is when pending recovery outranks it.
+    """
+
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = _failed_write_pending(document)
+    journal.write_text(json.dumps(document))
+    calls: list[list[str]] = []
+
+    report = status.collect(
+        runner=_status_line_runner(f"{state} hotkey={HOTKEY} block=4321", calls=calls)
+    )
+
+    assert report["service_active"] is True
+    assert report["result"] == "FINALIZED_FAILED_STOPPED"
+    assert report["action"] == status._FINALIZED_FAILED_ACTION
+    assert report["eligibility"] == {"status": state, "block_number": 4321}
+    assert report["direct"]["pending_phase"] == "finalized_failed"
+    assert any(command[1] == "show" for command in calls)
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_reports_other_pending_phases_without_a_stop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = {**_failed_write_pending(document), "phase": "ambiguous"}
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"].startswith("Wait for recovery")
+    assert report["direct"]["pending_phase"] == "ambiguous"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda pending: {**pending, "attempt_id": "sha256:" + "0" * 64},
+        lambda pending: _rebound(pending, validator_hotkey=OTHER_HOTKEY),
+        lambda pending: {**pending, "extra": None},
+        lambda pending: {
+            **pending,
+            "identity": [],
+            "attempt_id": status._attempt_id([], pending["intent"]),
+        },
+        lambda pending: {**pending, "intent": []},
+        lambda pending: {**pending, "phase": "Finalized_Failed"},
+        lambda pending: {**pending, "phase": HOTKEY},
+        lambda pending: {**pending, "phase": None},
+    ],
+    ids=[
+        "attempt-id",
+        "foreign-signer",
+        "extra-field",
+        "identity-not-object",
+        "intent-not-object",
+        "phase-case",
+        "phase-hotkey",
+        "phase-missing",
+    ],
+)
+def test_status_refuses_an_unproven_failed_write_stop(
+    monkeypatch, tmp_path: Path, mutation
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["pending"] = mutation(_failed_write_pending(document))
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
+    assert HOTKEY not in json.dumps(report)
+
+
+def _record_failed_write(document: dict) -> dict:
+    last = document["last_attempt"]
+    last["status"] = "FINALIZED_FAILED"
+    last["receipt"].update(
+        {"status": "FINALIZED_FAILED", "recovered": True, "confirmation_heads": []}
+    )
+    last["failure"] = {
+        "block_number": last["receipt"]["block_number"],
+        "block_hash": last["receipt"]["block_hash"],
+        "extrinsic_index": 2,
+        "dispatch_error": {
+            "type": "Module",
+            "pallet_index": 7,
+            "error_index": 15,
+            "name": "NeuronNoValidatorPermit",
+            "docs": [],
+        },
+        "finalized_head": [140, "0x" + "2" * 64],
+        "pending_phase": "finalized_failed",
+        "pending_receipt": None,
+        "pending_error": None,
+    }
+    return document
+
+
+def test_status_accepts_a_recorded_failed_write_without_reporting_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    journal.write_text(json.dumps(_record_failed_write(document)))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"].startswith("Wait for recovery")
+    assert report["direct"]["pending"] is False
+    assert report["direct"]["pending_phase"] is None
+    assert report["direct"]["last_result"] == "FINALIZED_FAILED"
+    assert report["direct"]["block_number"] == 123
+
+
+def _both(field: str, value):
+    def change(last: dict) -> None:
+        last["receipt"][field] = value
+        last["failure"][field] = value
+
+    return change
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda last: last.pop("failure"),
+        _both("block_number", 123.0),
+        _both("block_number", 200),
+        _both("block_hash", None),
+        _both("block_hash", "0x" + "z" * 64),
+        lambda last: last["receipt"].update({"recovered": False}),
+        lambda last: last["receipt"].update(
+            {"confirmation_heads": [[123, "0x" + "e" * 64]]}
+        ),
+        lambda last: last.update({"failure": []}),
+        lambda last: last["failure"].update({"block_number": 124}),
+        lambda last: last["failure"].update({"block_hash": "0x" + "3" * 64}),
+        lambda last: last["failure"].update({"extrinsic_index": -1}),
+        lambda last: last["failure"].update({"dispatch_error": "BadOrigin"}),
+        lambda last: last["failure"].update({"pending_phase": "ambiguous"}),
+    ],
+    ids=[
+        "no-failure",
+        "float-block",
+        "block-outside-era",
+        "no-block-hash",
+        "bad-block-hash",
+        "not-recovered",
+        "confirmation-heads",
+        "failure-not-object",
+        "failure-block-number",
+        "failure-block-hash",
+        "extrinsic-index",
+        "dispatch-error",
+        "pending-phase",
+    ],
+)
+def test_status_requires_a_complete_failed_write_record(
+    monkeypatch, tmp_path: Path, mutation
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document = _record_failed_write(document)
+    mutation(document["last_attempt"])
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_refuses_a_failure_record_on_a_confirmed_attempt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    journal, document = _journal_document()
+    document["last_attempt"]["failure"] = _record_failed_write(
+        json.loads(journal.read_text())
+    )["last_attempt"]["failure"]
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["result"] == "NOT_PROVEN"
+    assert report["action"] == _INSPECT
+
+
+def _bind_verified_metadata(*, expires_unix: int, sequence: int = 7) -> bytes:
+    """Write the record the updater verified and commit its digest in state."""
+
+    raw = (
+        json.dumps(
+            {
+                "signed": {
+                    "schema": "cathedral_validator_release_v1",
+                    "channel": "stable",
+                    "sequence": sequence,
+                    "issued_unix": expires_unix - 7 * 86_400,
+                    "expires_unix": expires_unix,
+                    "release": {},
+                },
+                "signature": "AAAA",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+    _write(status.UPDATER_VERIFIED_METADATA, raw)
+    state = json.loads(status.UPDATER_STATE.read_text())
+    state["channels"]["stable"]["metadata_sha256"] = hashlib.sha256(raw).hexdigest()
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("remaining", "state", "warned"),
+    (
+        (10 * 86_400, "VALID", False),
+        (5 * 86_400 + 1, "VALID", False),
+        (5 * 86_400, "EXPIRES_SOON", True),
+        (0, "EXPIRED", True),
+        (-86_400, "EXPIRED", True),
+    ),
+)
+def test_status_reports_installed_channel_metadata_expiry(
+    monkeypatch, tmp_path: Path, remaining: int, state: str, warned: bool
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    now = int(status.time.time())
+    _bind_verified_metadata(expires_unix=now + remaining)
+    monkeypatch.setattr(status.time, "time", lambda: now)
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["release_metadata"] == {
+        "state": state,
+        "channel": "stable",
+        "sequence": 7,
+        "expires_at": status.time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", status.time.gmtime(now + remaining)
+        ),
+        "expires_in_seconds": remaining,
+    }
+    # Expiry is a warning. It never changes what the writer result proves.
+    assert report["result"] == "OPERATING_CONFIRMED"
+    assert ("warning" in report) is warned
+    if warned:
+        assert report["release_metadata"]["expires_at"] in report["warning"]
+        assert "re-sign the channel" in report["warning"]
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_metadata_expiry_is_unknown_unless_bound_to_committed_record(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+    now = int(status.time.time())
+    raw = _bind_verified_metadata(expires_unix=now - 1)
+    # A verified record that was never committed, such as one whose
+    # activation rolled back, does not describe the installed channel.
+    state = json.loads(status.UPDATER_STATE.read_text())
+    state["channels"]["stable"]["metadata_sha256"] = "d" * 64
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    report = status.collect(runner=_runner([]))
+    assert report["release_metadata"] == {"state": "UNKNOWN"}
+    assert "warning" not in report
+
+    _bind_verified_metadata(expires_unix=now - 1, sequence=8)
+    state = json.loads(status.UPDATER_STATE.read_text())
+    assert state["channels"]["stable"]["sequence"] == 7
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+    _write(status.UPDATER_VERIFIED_METADATA, raw, mode=0o644)
+    state["channels"]["stable"]["metadata_sha256"] = hashlib.sha256(raw).hexdigest()
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+
+def test_status_text_output_puts_the_expiry_warning_under_the_result(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(status.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        status,
+        "collect",
+        lambda: {
+            "result": "OPERATING_CONFIRMED",
+            "warning": "Signed stable release metadata expired at X.",
+            "release_metadata": {"state": "EXPIRED"},
+            "action": "No action required.",
+        },
+    )
+    assert status.main([]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == [
+        "result: OPERATING_CONFIRMED",
+        "warning: Signed stable release metadata expired at X.",
+    ]
+    assert "release_metadata: {'state': 'EXPIRED'}" in lines
+
+
+def test_status_keeps_every_field_when_a_failed_write_meets_no_permit_and_expiry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The three status additions coexist in one report.
+
+    A pending failed write decides the result and action, the eligibility
+    line is still reported, and the metadata expiry adds its field and
+    warning without changing either.
+    """
+
+    _status_paths(monkeypatch, tmp_path)
+    now = int(status.time.time())
+    _bind_verified_metadata(expires_unix=now + 86_400)
+    monkeypatch.setattr(status.time, "time", lambda: now)
+    journal, document = _journal_document()
+    document["pending"] = _failed_write_pending(document)
+    journal.write_text(json.dumps(document))
+
+    report = status.collect(
+        runner=_status_line_runner(f"NO_PERMIT hotkey={HOTKEY} block=4321")
+    )
+
+    assert report["result"] == "FINALIZED_FAILED_STOPPED"
+    assert report["action"] == status._FINALIZED_FAILED_ACTION
+    assert report["eligibility"] == {"status": "NO_PERMIT", "block_number": 4321}
+    assert report["release_metadata"]["state"] == "EXPIRES_SOON"
+    assert report["warning"].startswith("Signed stable release metadata")
+    assert HOTKEY not in json.dumps(report)

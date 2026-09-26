@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from cathedral_thin.independent.constants import W
+from cathedral_thin.independent.constants import NETUID, W
 
 from .direct_contract import DirectSubmissionReceipt, DirectWeightPlan
 from .preview_io import canonical_document_bytes
@@ -71,6 +71,7 @@ def _sign_telemetry_event(
     document: Mapping[str, Any],
     *,
     keypair: Any,
+    netuid: int,
 ) -> dict[str, Any]:
     event = dict(document)
     validator = event.get("validator")
@@ -92,7 +93,7 @@ def _sign_telemetry_event(
         "algorithm": "sr25519",
         "value_base64": base64.b64encode(signature).decode("ascii"),
     }
-    return validate_public_telemetry_event(event)
+    return validate_public_telemetry_event(event, netuid=netuid)
 
 
 def _verify_telemetry_signature(document: Mapping[str, Any]) -> None:
@@ -263,7 +264,7 @@ def _build_telemetry_snapshot_base(
         "schema": TELEMETRY_SCHEMA,
         "observed_at": observed,
         "network": "finney",
-        "netuid": 39,
+        "netuid": plan.netuid,
         "validator": {
             "uid": plan.snapshot.validator_uid,
             "hotkey": plan.snapshot.validator_hotkey,
@@ -308,7 +309,7 @@ def build_telemetry_snapshot(
         observed_at=observed_at,
     )
     event["event_id"] = _expected_event_id(event)
-    return _sign_telemetry_event(event, keypair=keypair)
+    return _sign_telemetry_event(event, keypair=keypair, netuid=plan.netuid)
 
 
 def build_telemetry_candidate(
@@ -342,8 +343,14 @@ def finalize_telemetry_candidate(
     receipt: DirectSubmissionReceipt,
     *,
     keypair: Any,
+    netuid: int = NETUID,
 ) -> dict[str, Any]:
-    """Bind durable sanitized round facts to one finalized chain receipt."""
+    """Bind durable sanitized round facts to one finalized chain receipt.
+
+    ``netuid`` is the subnet the signed event must name. The default is the
+    compiled netuid for callers that predate the setting; the pending store
+    passes its spool's netuid.
+    """
 
     if not isinstance(candidate, Mapping) or set(candidate) != {
         "schema",
@@ -372,11 +379,20 @@ def finalize_telemetry_candidate(
         },
     }
     event["event_id"] = _expected_event_id(event)
-    return _sign_telemetry_event(event, keypair=keypair)
+    return _sign_telemetry_event(event, keypair=keypair, netuid=netuid)
 
 
-def validate_public_telemetry_event(document: Mapping[str, Any]) -> dict[str, Any]:
-    """Refuse unknown fields before a separate process exports the event."""
+def validate_public_telemetry_event(
+    document: Mapping[str, Any],
+    *,
+    netuid: int = NETUID,
+) -> dict[str, Any]:
+    """Refuse unknown fields before a separate process exports the event.
+
+    ``netuid`` is the only subnet an accepted event may name. The default is
+    the compiled netuid, which the separate exporter still relies on; the
+    validator passes the netuid it runs on.
+    """
 
     if not isinstance(document, Mapping):
         raise TelemetryError("telemetry event is not an object")
@@ -395,10 +411,15 @@ def validate_public_telemetry_event(document: Mapping[str, Any]) -> dict[str, An
         "signature",
     }:
         raise TelemetryError("telemetry event fields are not public-safe")
+    observed_netuid = document.get("netuid")
     if (
         document.get("schema") != TELEMETRY_SCHEMA
         or document.get("network") != "finney"
-        or document.get("netuid") != 39
+        or isinstance(netuid, bool)
+        or not isinstance(netuid, int)
+        or isinstance(observed_netuid, bool)
+        or not isinstance(observed_netuid, int)
+        or observed_netuid != netuid
         or document.get("burn_weight") != 0
         or document.get("event_id") != _expected_event_id(document)
     ):
@@ -570,8 +591,8 @@ def _secure_parent(path: Path, *, reader_gid: int | None = None) -> None:
         raise TelemetryError("telemetry parent is not owner-only")
 
 
-def _event_line(event: Mapping[str, Any]) -> bytes:
-    body = _canonical_json_bytes(validate_public_telemetry_event(event))
+def _event_line(event: Mapping[str, Any], *, netuid: int) -> bytes:
+    body = _canonical_json_bytes(validate_public_telemetry_event(event, netuid=netuid))
     if len(body) > MAX_TELEMETRY_EVENT_BYTES:
         raise TelemetryError("telemetry event is too large")
     return body + b"\n"
@@ -587,14 +608,26 @@ def _bounded_history(existing: bytes, line: bytes) -> bytes:
 
 
 class TelemetrySpool:
-    """Owner-only bounded JSONL history, written atomically per cycle."""
+    """Owner-only bounded JSONL history, written atomically per cycle.
 
-    def __init__(self, path: Path, *, reader_gid: int | None = None) -> None:
+    ``netuid`` is the only subnet an event in this spool may name. The default
+    is the compiled netuid for callers that predate the setting; the
+    validator's entry point passes the netuid it runs on.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        reader_gid: int | None = None,
+        netuid: int = NETUID,
+    ) -> None:
         self.path = path
         self.reader_gid = reader_gid
+        self.netuid = netuid
 
     def append(self, event: Mapping[str, Any]) -> None:
-        line = _event_line(event)
+        line = _event_line(event, netuid=self.netuid)
         _secure_parent(self.path, reader_gid=self.reader_gid)
         existing = b""
         if self.path.exists():
@@ -691,6 +724,10 @@ class PendingTelemetryStore:
     ) -> None:
         if not isinstance(plan, DirectWeightPlan):
             raise TelemetryError("pending telemetry requires a direct weight plan")
+        if plan.netuid != self.spool.netuid:
+            # Refuse before persisting, so a candidate this spool could never
+            # accept is not left behind for startup recovery to retry.
+            raise TelemetryError("pending telemetry plan names another netuid")
         if receipt is not None and (
             not isinstance(receipt, DirectSubmissionReceipt)
             or receipt.status not in FINALIZED_SUBMISSION_STATUSES
@@ -857,6 +894,7 @@ class PendingTelemetryStore:
             document["candidate"],
             receipt,
             keypair=keypair,
+            netuid=self.spool.netuid,
         )
         self.spool.append(event)
         self.clear()

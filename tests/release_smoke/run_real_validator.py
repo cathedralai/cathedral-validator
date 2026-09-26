@@ -93,7 +93,9 @@ def main() -> int:
         runtime.make_wallet = lambda *_args, **_kwargs: SimpleNamespace(
             hotkey=_Hotkey()
         )
-        runtime.make_subtensor = lambda *_args, **_kwargs: object()
+        runtime.make_subtensor = lambda *_args, **_kwargs: SimpleNamespace(
+            substrate=SimpleNamespace(retry_timeout=60.0, max_retries=5)
+        )
         writer_runtime.DirectWeightWriter = lambda **_kwargs: _Writer()
         runtime.run_direct_cycle = lambda **_kwargs: {
             "status": writer_runtime.STATUS_CONFIRMED

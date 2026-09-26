@@ -69,6 +69,13 @@ That file enables exactly `--telemetry-spool /var/lib/cathedral-validator-teleme
 `--telemetry-reader-group cathedral-telemetry`. It contains no network
 credential.
 
+Add nothing else to that file. The direct unit expands it, unquoted, onto the
+validator's command line. In particular, never put `--netuid` there. A runtime
+from before that flag existed rejects it and exits with status 2, and the unit
+never restarts after status 2. An update rollback reinstalls exactly such an
+older runtime, so the validator would stay stopped until the file was fixed by
+hand.
+
 Edit `/etc/cathedral-validator-telemetry/export.env` and set the exact private
 collector URL. Install each issued token from a root-only staging path:
 

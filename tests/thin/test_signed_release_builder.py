@@ -17,6 +17,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 from cathedral_thin.independent_runtime.updater import (
+    MAX_METADATA_LIFETIME_SECONDS,
+    UpdateRefused,
+    enforce_monotonic_release,
     extract_release_archive,
     parse_release_metadata,
     release_tree_sha256,
@@ -763,3 +766,187 @@ def test_direct_service_executes_only_verifiers_from_current_release() -> None:
     assert "CATHEDRAL_VALIDATOR_QVL" not in service
     assert "CATHEDRAL_SNPGUEST" not in service
     assert "/usr/local/lib/cathedral-validator" not in service
+
+
+def _publisher() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[2]
+    return runpy.run_path(
+        str(root / "deploy" / "validator-update" / "publish_github_channel.py")
+    )
+
+
+def _artifact(release: Any) -> tuple[str, str, str, str, str]:
+    return (
+        release.version,
+        release.archive_url,
+        release.archive_sha256,
+        release.tree_sha256,
+        release.entrypoint,
+    )
+
+
+def test_expired_channel_renews_without_rebuild_within_updater_limits(
+    tmp_path: Path,
+) -> None:
+    """Case (a) of docs/RENEW_RELEASE_CHANNEL.md, end to end offline.
+
+    Both published records have expired. The retained archive is re-signed
+    as a higher canary sequence with `resign-canary`, then that canary is
+    promoted to a higher stable sequence. No artifact digest changes, and the
+    installed updater's own verifier accepts both records at the longest
+    lifetime it allows.
+    """
+
+    builder = _builder()
+    private = Ed25519PrivateKey.generate()
+    public_key = tmp_path / "runtime-release-public-key.pem"
+    public_key.write_bytes(
+        private.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    public_key.chmod(0o444)
+    long_ago = NOW - 20 * 24 * 60 * 60
+    archive, canary_old = _build(
+        builder, tmp_path, private, name="published", sequence=4, issued_unix=long_ago
+    )
+    stable_old = tmp_path / "stable-3.json"
+    builder["promote_stable"](
+        canary_metadata=canary_old,
+        metadata_out=stable_old,
+        sequence=3,
+        private_key=private,
+        issued_unix=long_ago,
+        lifetime_seconds=3600,
+        enforce_content_addressed=True,
+    )
+    for path, channel in ((canary_old, "canary"), (stable_old, "stable")):
+        with pytest.raises(UpdateRefused, match="has expired"):
+            parse_release_metadata(
+                path.read_bytes(),
+                channel=channel,
+                public_key=private.public_key(),
+                now_unix=NOW,
+            )
+
+    lifetime = MAX_METADATA_LIFETIME_SECONDS
+    canary_new = tmp_path / "canary-5.json"
+    resign = {
+        "current_canary_metadata": canary_old,
+        "retained_metadata": canary_old,
+        "retained_archive": archive,
+        "metadata_out": canary_new,
+        "private_key": private,
+        "issued_unix": NOW,
+    }
+    builder["resign_canary"](sequence=5, lifetime_seconds=lifetime, **resign)
+    stable_new = tmp_path / "stable-4.json"
+    builder["promote_stable"](
+        canary_metadata=canary_new,
+        metadata_out=stable_new,
+        sequence=4,
+        private_key=private,
+        issued_unix=NOW,
+        lifetime_seconds=lifetime,
+        enforce_content_addressed=True,
+    )
+
+    old_canary = _release(canary_old, private)
+    old_stable = _release(stable_old, private, channel="stable")
+    last_valid = NOW + lifetime - 1
+    renewed_canary = parse_release_metadata(
+        canary_new.read_bytes(),
+        channel="canary",
+        public_key=private.public_key(),
+        now_unix=last_valid,
+    )
+    renewed_stable = parse_release_metadata(
+        stable_new.read_bytes(),
+        channel="stable",
+        public_key=private.public_key(),
+        now_unix=last_valid,
+    )
+    assert _artifact(renewed_canary) == _artifact(old_canary)
+    assert _artifact(renewed_stable) == _artifact(old_stable)
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == (
+        renewed_stable.archive_sha256
+    )
+    assert (renewed_canary.sequence, renewed_stable.sequence) == (5, 4)
+    assert renewed_stable.promoted_canary_sequence == 5
+    assert (
+        renewed_stable.promoted_canary_metadata_sha256 == renewed_canary.metadata_sha256
+    )
+    for renewed in (renewed_canary, renewed_stable):
+        assert renewed.expires_unix - renewed.issued_unix == lifetime
+    for path, channel in ((canary_new, "canary"), (stable_new, "stable")):
+        with pytest.raises(UpdateRefused, match="has expired"):
+            parse_release_metadata(
+                path.read_bytes(),
+                channel=channel,
+                public_key=private.public_key(),
+                now_unix=NOW + lifetime,
+            )
+
+    # A host still holding the expired record advances to the renewed one.
+    for old, renewed in ((old_canary, renewed_canary), (old_stable, renewed_stable)):
+        state = {
+            "channels": {
+                renewed.channel: {
+                    "sequence": old.sequence,
+                    "archive_sha256": old.archive_sha256,
+                    "signed_sha256": old.signed_sha256,
+                    "metadata_sha256": old.metadata_sha256,
+                }
+            }
+        }
+        enforce_monotonic_release(state, renewed)
+
+    # The publisher's no-write validation accepts the renewed records only.
+    publisher = _publisher()
+    for path in (canary_new, stable_new):
+        publication = publisher["validate_publication"](
+            metadata_path=path,
+            archive_path=archive,
+            public_key_path=public_key,
+            now_unix=NOW,
+        )
+        assert publication.archive_sha256 == old_canary.archive_sha256
+    with pytest.raises(UpdateRefused, match="has expired"):
+        publisher["validate_publication"](
+            metadata_path=stable_old,
+            archive_path=archive,
+            public_key_path=public_key,
+            now_unix=NOW,
+        )
+
+    # The limits hold: no longer lifetime, no reused canary sequence, and a
+    # stable record that does not advance is refused by the host.
+    with pytest.raises(builder["UpdateRefused"], match="outside 60 seconds to 14"):
+        builder["resign_canary"](sequence=6, lifetime_seconds=lifetime + 1, **resign)
+    with pytest.raises(builder["UpdateRefused"], match="must exceed"):
+        builder["resign_canary"](sequence=4, lifetime_seconds=lifetime, **resign)
+    same_sequence = tmp_path / "stable-3-again.json"
+    builder["promote_stable"](
+        canary_metadata=canary_new,
+        metadata_out=same_sequence,
+        sequence=3,
+        private_key=private,
+        issued_unix=NOW,
+        lifetime_seconds=lifetime,
+        enforce_content_addressed=True,
+    )
+    with pytest.raises(UpdateRefused, match="equivocates at an existing sequence"):
+        enforce_monotonic_release(
+            {
+                "channels": {
+                    "stable": {
+                        "sequence": old_stable.sequence,
+                        "archive_sha256": old_stable.archive_sha256,
+                        "signed_sha256": old_stable.signed_sha256,
+                        "metadata_sha256": old_stable.metadata_sha256,
+                    }
+                }
+            },
+            _release(same_sequence, private, channel="stable"),
+        )

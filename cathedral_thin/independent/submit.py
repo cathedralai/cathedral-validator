@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .compose import STATUS_BROADCAST_BLOCKED, ComposeResult
-from .constants import INDEPENDENT_STATE_FILE, MAX_DESTS, MECID, NETUID, VERSION_KEY, W
+from .constants import (
+    INDEPENDENT_STATE_FILE,
+    MAX_DESTS,
+    MAX_NETUID,
+    MECID,
+    NETUID,
+    VERSION_KEY,
+    W,
+)
 from .errors import BroadcastBlocked, BroadcastDisabled, HamiltonError
 from .journal import write_journal
 
@@ -49,6 +57,15 @@ def _validate_vector(dests: Sequence[int], weights: Sequence[int]) -> None:
         raise HamiltonError(f"weights sum to {sum(weights)}, not {W}")
 
 
+def _is_netuid(value: object) -> bool:
+    """A netuid is a plain u16 integer; a bool is an int but never a netuid."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 <= value <= MAX_NETUID
+    )
+
+
 def build_mechanism_weights_kwargs(
     *,
     dests: Sequence[int],
@@ -56,11 +73,24 @@ def build_mechanism_weights_kwargs(
     netuid: int = NETUID,
     mecid: int = MECID,
     version_key: int = VERSION_KEY,
+    expected_netuid: int = NETUID,
 ) -> dict[str, Any]:
-    """The keyword arguments for one ``set_mechanism_weights`` call."""
+    """The keyword arguments for one ``set_mechanism_weights`` call.
+
+    ``netuid`` is the subnet the call names; ``expected_netuid`` is the subnet
+    the caller signs for. They are separate arguments so a writer can pass the
+    netuid a plan was read at next to its own, and a plan read on another
+    subnet is refused here instead of being signed. Both default to the
+    compiled netuid, so the composer and canary lineages, which pass neither,
+    stay pinned exactly as before.
+    """
     _validate_vector(dests, weights)
-    if netuid != NETUID:
-        raise BroadcastDisabled(f"this lineage composes for netuid {NETUID} only")
+    if not _is_netuid(expected_netuid):
+        raise BroadcastDisabled("the expected netuid is not a u16 integer")
+    if not _is_netuid(netuid) or netuid != expected_netuid:
+        raise BroadcastDisabled(
+            f"this lineage composes for netuid {expected_netuid} only"
+        )
     if mecid != MECID:
         raise BroadcastDisabled(f"this lineage composes for mecid {MECID} only")
     if version_key != VERSION_KEY:
