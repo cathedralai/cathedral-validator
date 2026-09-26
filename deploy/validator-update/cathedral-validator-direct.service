@@ -32,8 +32,16 @@ StateDirectoryMode=0700
 ExecStartPre=/usr/bin/install -d -m 0700 /run/cathedral-validator-wallet/validator/hotkeys
 ExecStartPre=/usr/bin/install -m 0400 ${CREDENTIALS_DIRECTORY}/validator-hotkey /run/cathedral-validator-wallet/validator/hotkeys/default
 ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator --network=finney --wallet-name=validator --wallet-hotkey=default --wallet-path=/run/cathedral-validator-wallet --expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY} --qvl=/opt/cathedral-validator/current/bin/cathedral-tdx-verifier --snp-policy=${CATHEDRAL_SNP_POLICY} --snpguest=/opt/cathedral-validator/current/bin/snpguest --interval-seconds=${CATHEDRAL_VALIDATOR_INTERVAL_SECONDS} --confirm-direct-write $CATHEDRAL_VALIDATOR_TELEMETRY_ARGS
+# Exit 2 is a journal contradiction (CONTRADICTION_STOPPED). Exit 3 is a weight
+# write included in a finalized block whose dispatch failed
+# (FINALIZED_FAILED_STOPPED); only `cathedral-validator record-failed-write`
+# clears it. Neither restarts. The Environment= line below tells the validator
+# that this unit keeps exit 3 stopped; without it the validator uses exit 2
+# for that stop too. The bootstrap ships no alert unit, so there is no
+# OnFailure= here; docs/AUTO_UPDATE.md shows the operator drop-in.
 Restart=on-failure
-RestartPreventExitStatus=2
+RestartPreventExitStatus=2 3
+Environment=CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE=3
 RestartSec=15s
 TimeoutStartSec=120s
 TimeoutStopSec=150s

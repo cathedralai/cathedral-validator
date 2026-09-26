@@ -16,10 +16,11 @@ import json
 import math
 import os
 import socket
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import bittensor as bt
 
@@ -65,6 +66,18 @@ from .telemetry import (
 )
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
+# Exit codes of a deliberate stop. The unit's RestartPreventExitStatus= lists
+# both, so systemd never restarts either one.
+EXIT_CONTRADICTION_STOPPED = 2
+# The exact signed weight call was included in a finalized block and its
+# dispatch failed. Only the record-failed-write command clears it.
+EXIT_FINALIZED_FAILED_STOPPED = 3
+# The unit sets this to "3" to declare that it keeps exit 3 stopped. A unit
+# from an older bootstrap keeps only exit 2 stopped and would restart exit 3
+# every RestartSec, so without the declaration this stop exits 2 as well.
+FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
+STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
+RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -102,6 +115,35 @@ def _notify_ready() -> None:
             )
     except OSError as exc:
         raise SystemExit("systemd readiness notification failed") from exc
+
+
+def _print_event(event: dict[str, Any]) -> None:
+    """Write one cycle event as its own line of the operator stream."""
+
+    print(json.dumps(event, sort_keys=True, default=str), flush=True)
+
+
+def _stop_on_finalized_failure(exc: BaseException) -> int:
+    """Report a failed on-chain write and name the only command that clears it."""
+
+    print(
+        json.dumps(
+            {
+                "status": STATUS_FINALIZED_FAILED_STOPPED,
+                "error": str(exc),
+                "action": (
+                    "prove and record it with `cathedral-validator "
+                    f"{RECORD_FAILED_WRITE_COMMAND}`, then start the service; "
+                    "see docs/AUTO_UPDATE.md"
+                ),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if os.environ.get(FAILED_WRITE_EXIT_CODE_ENV) == str(EXIT_FINALIZED_FAILED_STOPPED):
+        return EXIT_FINALIZED_FAILED_STOPPED
+    return EXIT_CONTRADICTION_STOPPED
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -395,22 +437,37 @@ def _run_direct_cycle_unlocked(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
-    """Recover first, otherwise derive and submit at most one fresh vector."""
+    """Recover first, otherwise derive and submit at most one fresh vector.
+
+    A recovery that proves the pending hash expired without inclusion wrote
+    nothing and leaves no pending intent, so this cycle goes on to score and
+    submit instead of spending a whole interval on bookkeeping. Its event goes
+    to ``report_recovery`` first, so it is still reported on its own even when
+    the fresh cycle then fails. The reporter is required: a caller that could
+    omit it would silently lose that event. Every other recovery outcome ends
+    the cycle exactly as before.
+    """
+
+    from .direct_writer import STATUS_EXPIRED
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
     )
     recovered = writer.recover()
     if recovered is not None:
-        return _recovered_cycle_event(
+        recovery_event = _recovered_cycle_event(
             recovered=recovered,
             writer=writer,
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
+        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+            return recovery_event
+        report_recovery(recovery_event)
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
@@ -482,6 +539,11 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if getattr(receipt, "status", None) == STATUS_EXPIRED:
+        # The writer proved these bytes can never land and nothing was
+        # written, so there is no finalized receipt for telemetry; a prior
+        # pending candidate keeps waiting for the next confirmed write.
+        return event
     reconciled_event_id: str | None = None
     if pending_telemetry is not None:
         try:
@@ -583,6 +645,7 @@ def run_direct_cycle(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
@@ -600,14 +663,29 @@ def run_direct_cycle(
             keypair=keypair,
             verifier_adapter=verifier_adapter,
             writer=writer,
+            report_recovery=report_recovery,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
         )
 
 
+def _add_network_argument(parser: argparse.ArgumentParser) -> None:
+    """The one --network option, shared with the record-failed-write command."""
+
+    parser.add_argument("--network", default="finney")
+
+
+def _pinned_network(value: object) -> str:
+    """Refuse any network the direct validator is not pinned to."""
+
+    if value != "finney":
+        raise SystemExit("direct validator is pinned to the Finney network")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
-    parser.add_argument("--network", default="finney")
+    _add_network_argument(parser)
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
@@ -649,11 +727,17 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    options = _parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
+        # The operator's recovery command ships in the same signed release
+        # entrypoint. It loads no key and never signs or broadcasts.
+        from .failed_write_recovery import main as record_failed_write
+
+        return record_failed_write(arguments[1:])
+    options = _parser().parse_args(arguments)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
-    if options.network != "finney":
-        raise SystemExit("direct validator is pinned to the Finney network")
+    _pinned_network(options.network)
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -690,10 +774,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .direct_writer import (
         DirectSubmissionAmbiguous,
         DirectSubmissionContradiction,
+        DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        bound_rpc_waits,
     )
+
+    try:
+        bound_rpc_waits(subtensor)
+    except DirectValidatorError as exc:
+        raise SystemExit(f"direct validator chain client refused: {exc}") from exc
 
     writer = DirectWeightWriter(
         subtensor=subtensor,
@@ -726,6 +817,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         startup_ambiguity: DirectSubmissionAmbiguous | None = None
         try:
             startup_recovery = writer.recover()
+        except DirectSubmissionFinalizedFailure as exc:
+            return _stop_on_finalized_failure(exc)
         except DirectSubmissionContradiction as exc:
             print(
                 json.dumps(
@@ -734,7 +827,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            return 2
+            return EXIT_CONTRADICTION_STOPPED
         except DirectSubmissionAmbiguous as exc:
             startup_recovery = None
             startup_ambiguity = exc
@@ -807,8 +900,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     writer=writer,
                     snp_verifier=snp_verifier,
                     telemetry_sink=telemetry_sink,
+                    report_recovery=_print_event,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
+            except DirectSubmissionFinalizedFailure as exc:
+                return _stop_on_finalized_failure(exc)
             except DirectSubmissionContradiction as exc:
                 print(
                     json.dumps(
@@ -817,7 +913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     flush=True,
                 )
-                return 2
+                return EXIT_CONTRADICTION_STOPPED
             except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
                 print(
                     json.dumps(
@@ -852,6 +948,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "DIRECT_PLAN_SCHEMA",
+    "EXIT_CONTRADICTION_STOPPED",
+    "EXIT_FINALIZED_FAILED_STOPPED",
+    "FAILED_WRITE_EXIT_CODE_ENV",
+    "RECORD_FAILED_WRITE_COMMAND",
+    "STATUS_FINALIZED_FAILED_STOPPED",
     "DirectValidatorError",
     "DirectWeightPlan",
     "FinalizedMetagraphSnapshot",

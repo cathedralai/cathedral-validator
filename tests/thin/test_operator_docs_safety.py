@@ -85,6 +85,9 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "`NOT_PROVEN` means success is unresolved" in guide
     assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide
     assert "`CONTRADICTION_STOPPED`" in guide
+    assert "`FINALIZED_FAILED_STOPPED` means" in guide
+    assert "`cathedral-validator record-failed-write`" in guide
+    assert "[Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write)" in guide
     assert "Never delete or replace the journal" in guide
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
     assert "Do not install or enable updater services from a source checkout" in words
@@ -339,7 +342,22 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     assert (
         "direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json" in guide
     )
-    assert "`RestartPreventExitStatus=2`" in guide
+    assert "`RestartPreventExitStatus=2 3`" in guide
+    # The one command that clears a failed on-chain write, run as the service
+    # user with the service's HOME, from the signed release entrypoint.
+    assert "\n## Failed weight write\n" in guide
+    assert "--uid=cathedral-validator --gid=cathedral-validator" in guide
+    assert "--setenv=HOME=/var/lib/cathedral-validator" in guide
+    assert (
+        "/opt/cathedral-validator/current/bin/cathedral-validator "
+        "record-failed-write" in guide
+    )
+    assert "`FINALIZED_FAILED_RECORDED`" in guide
+    assert "`RECORD_REFUSED`" in guide
+    assert "`RECORD_RETRY_WITH_ARCHIVE` (exit code 75) is not a refusal" in guide
+    assert "--archive-endpoint=wss://" in guide
+    assert "--network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58" in guide
+    assert "OnFailure=YOUR-ALERT.service" in guide
     assert "cathedral-validator-boot-reconcile.service" in guide
     assert "Never delete or replace the journal" in guide
     assert "--archive-out-dir" not in guide
