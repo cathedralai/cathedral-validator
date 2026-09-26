@@ -888,6 +888,9 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(status, "ETC", etc)
     monkeypatch.setattr(status, "INSTALL_ROOT", install)
     monkeypatch.setattr(status, "UPDATER_STATE", state)
+    monkeypatch.setattr(
+        status, "UPDATER_VERIFIED_METADATA", state.with_name("verified-metadata.json")
+    )
     monkeypatch.setattr(status, "DIRECT_SCOPE", scope)
     monkeypatch.setattr(status, "ROOT_UID", os.geteuid())
     monkeypatch.setattr(
@@ -1134,3 +1137,126 @@ def test_status_confirmation_freshness_boundary(monkeypatch, tmp_path: Path) -> 
         status.time, "time", lambda: recorded + status.MAX_CONFIRMED_AGE_SECONDS + 1
     )
     assert status.collect(runner=_runner([]))["result"] == "NOT_PROVEN"
+
+
+def _bind_verified_metadata(*, expires_unix: int, sequence: int = 7) -> bytes:
+    """Write the record the updater verified and commit its digest in state."""
+
+    raw = (
+        json.dumps(
+            {
+                "signed": {
+                    "schema": "cathedral_validator_release_v1",
+                    "channel": "stable",
+                    "sequence": sequence,
+                    "issued_unix": expires_unix - 7 * 86_400,
+                    "expires_unix": expires_unix,
+                    "release": {},
+                },
+                "signature": "AAAA",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+    _write(status.UPDATER_VERIFIED_METADATA, raw)
+    state = json.loads(status.UPDATER_STATE.read_text())
+    state["channels"]["stable"]["metadata_sha256"] = hashlib.sha256(raw).hexdigest()
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("remaining", "state", "warned"),
+    (
+        (10 * 86_400, "VALID", False),
+        (5 * 86_400 + 1, "VALID", False),
+        (5 * 86_400, "EXPIRES_SOON", True),
+        (0, "EXPIRED", True),
+        (-86_400, "EXPIRED", True),
+    ),
+)
+def test_status_reports_installed_channel_metadata_expiry(
+    monkeypatch, tmp_path: Path, remaining: int, state: str, warned: bool
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    now = int(status.time.time())
+    _bind_verified_metadata(expires_unix=now + remaining)
+    monkeypatch.setattr(status.time, "time", lambda: now)
+
+    report = status.collect(runner=_runner([]))
+
+    assert report["release_metadata"] == {
+        "state": state,
+        "channel": "stable",
+        "sequence": 7,
+        "expires_at": status.time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", status.time.gmtime(now + remaining)
+        ),
+        "expires_in_seconds": remaining,
+    }
+    # Expiry is a warning. It never changes what the writer result proves.
+    assert report["result"] == "OPERATING_CONFIRMED"
+    assert ("warning" in report) is warned
+    if warned:
+        assert report["release_metadata"]["expires_at"] in report["warning"]
+        assert "re-sign the channel" in report["warning"]
+    assert HOTKEY not in json.dumps(report)
+
+
+def test_status_metadata_expiry_is_unknown_unless_bound_to_committed_record(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _status_paths(monkeypatch, tmp_path)
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+    now = int(status.time.time())
+    raw = _bind_verified_metadata(expires_unix=now - 1)
+    # A verified record that was never committed, such as one whose
+    # activation rolled back, does not describe the installed channel.
+    state = json.loads(status.UPDATER_STATE.read_text())
+    state["channels"]["stable"]["metadata_sha256"] = "d" * 64
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    report = status.collect(runner=_runner([]))
+    assert report["release_metadata"] == {"state": "UNKNOWN"}
+    assert "warning" not in report
+
+    _bind_verified_metadata(expires_unix=now - 1, sequence=8)
+    state = json.loads(status.UPDATER_STATE.read_text())
+    assert state["channels"]["stable"]["sequence"] == 7
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+    _write(status.UPDATER_VERIFIED_METADATA, raw, mode=0o644)
+    state["channels"]["stable"]["metadata_sha256"] = hashlib.sha256(raw).hexdigest()
+    status.UPDATER_STATE.write_text(json.dumps(state))
+    assert status.collect(runner=_runner([]))["release_metadata"] == {
+        "state": "UNKNOWN"
+    }
+
+
+def test_status_text_output_puts_the_expiry_warning_under_the_result(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(status.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        status,
+        "collect",
+        lambda: {
+            "result": "OPERATING_CONFIRMED",
+            "warning": "Signed stable release metadata expired at X.",
+            "release_metadata": {"state": "EXPIRED"},
+            "action": "No action required.",
+        },
+    )
+    assert status.main([]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == [
+        "result: OPERATING_CONFIRMED",
+        "warning: Signed stable release metadata expired at X.",
+    ]
+    assert "release_metadata: {'state': 'EXPIRED'}" in lines

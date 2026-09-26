@@ -788,6 +788,41 @@ def _write_update_state(root: Path, state: Mapping[str, Any]) -> None:
                 pass
 
 
+VERIFIED_METADATA_FILE = "verified-metadata.json"
+
+
+def _write_verified_metadata(root: Path, raw: bytes) -> None:
+    """Keep the exact signed record this updater last verified, for status.
+
+    ``cathedral-validator-status`` reports the expiry of the installed
+    channel's signed metadata from this file. It uses the bytes only when their
+    digest equals the committed channel record in ``state.json``. The updater
+    never reads this file, so it is not an input to any update decision, and a
+    failed write never blocks an update.
+    """
+
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            dir=root, prefix=".verified-metadata.", suffix=".tmp"
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, root / VERIFIED_METADATA_FILE)
+        temporary = None
+    except OSError:
+        pass
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def _bind_selected_channel(state: Mapping[str, Any], *, channel: str) -> dict[str, Any]:
     selected = state.get("selected_channel")
     if selected is not None and selected != channel:
@@ -1990,6 +2025,7 @@ class SignedReleaseUpdater:
                     "bound by the signed bootstrap"
                 )
             enforce_monotonic_release(state, release)
+            _write_verified_metadata(self.state_root, metadata)
             target = _release_target(release.archive_sha256)
             if rescue_pending is not None:
                 pending_record = rescue_pending["record"]
