@@ -14,6 +14,7 @@ from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
+    NETUID,
     SN39_MORTAL_PERIOD_BLOCKS,
     W,
 )
@@ -175,6 +176,7 @@ def snapshot(
             "unroutable": 0,
             "unusable_ip": 0,
         },
+        netuid=NETUID,
     )
 
 

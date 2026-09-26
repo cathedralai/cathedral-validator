@@ -23,6 +23,9 @@ H = 10**12
 W = 65535
 
 NETUID = 39
+# The chain stores a netuid as a u16. A configured value outside this bound can
+# never name a subnet, so every place that accepts one refuses it outright.
+MAX_NETUID = 2**16 - 1
 MECID = 0
 VERSION_KEY = 10005000
 TEMPO_BLOCKS = 360
@@ -197,6 +200,7 @@ __all__ = [
     "INTEL_PCS_HOSTS",
     "LINEAGE",
     "MAX_DESTS",
+    "MAX_NETUID",
     "MAX_POLICY_BUNDLE_BYTES",
     "MAX_POLICY_SIGNATURES",
     "MAX_WEIGHT_LIMIT",

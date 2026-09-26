@@ -25,7 +25,7 @@ import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.compute import ComputeAdapter
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .axon import (
     AXON_SKIP_REASONS,
@@ -40,6 +40,7 @@ from .direct_contract import (
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
+    require_netuid,
     zero_burn_vector,
 )
 from .errors import IndependentLiveError
@@ -128,13 +129,21 @@ def _metagraph_block(metagraph: Any) -> int:
 def finalized_serving_miners_snapshot(
     subtensor: Any,
     keypair: Any,
+    netuid: int = NETUID,
 ) -> FinalizedMetagraphSnapshot:
-    """Read every serving non-validator miner at one finalized head."""
+    """Read every serving non-validator miner at one finalized head.
 
+    The snapshot records ``netuid``, so the plan, writer, and telemetry built
+    from it name the subnet that was actually read. The default is the compiled
+    netuid for callers that predate the setting; the validator's entry point
+    always passes the value it resolved.
+    """
+
+    netuid = require_netuid(netuid)
     observed_genesis_hash(subtensor)
     block_number, block_hash = finalized_head(subtensor)
     try:
-        metagraph = subtensor.metagraph(NETUID, block=block_number)
+        metagraph = subtensor.metagraph(netuid, block=block_number)
     except Exception as exc:
         raise DirectValidatorError("finalized SN39 metagraph is unavailable") from exc
     if _metagraph_block(metagraph) != block_number:
@@ -184,6 +193,7 @@ def finalized_serving_miners_snapshot(
         validator_hotkey=validator_hotkey,
         miners=miners,
         skipped_axons=dict(scan.skipped),
+        netuid=netuid,
     )
 
 
@@ -395,6 +405,7 @@ def _run_direct_cycle_unlocked(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    netuid: int,
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
@@ -417,9 +428,15 @@ def _run_direct_cycle_unlocked(
         )
     cycle_started = time.monotonic()
     cycle_deadline = cycle_started + FULL_CYCLE_RESPONSE_DEADLINE_SECONDS
-    snapshot = finalized_serving_miners_snapshot(subtensor, keypair)
+    snapshot = finalized_serving_miners_snapshot(subtensor, keypair, netuid)
+    if snapshot.netuid != netuid:
+        raise DirectValidatorError(
+            "finalized snapshot was read on another netuid than this cycle"
+        )
     if time.monotonic() >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired during discovery")
+    # Miners are challenged for the subnet whose metagraph named them, which
+    # the checks above have tied to this cycle and to its writer.
     result = score_multicompute_round(
         axons=snapshot.miners,
         keypair=keypair,
@@ -427,6 +444,7 @@ def _run_direct_cycle_unlocked(
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
         cycle_deadline_monotonic=cycle_deadline,
+        netuid=snapshot.netuid,
     )
     plan = build_direct_plan(snapshot, result)
     evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
@@ -585,13 +603,29 @@ def run_direct_cycle(
     writer: Any,
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
+    netuid: int = NETUID,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
     Test doubles without a cycle lock remain usable, while the installed
     ``DirectWeightWriter`` always supplies the per-signer flock.
+
+    ``netuid`` is the subnet this cycle reads, challenges on behalf of, and
+    hands to the writer, which refuses a plan for any subnet but its own. The
+    default is the compiled netuid for callers that predate the setting;
+    ``main`` always passes the value it resolved.
     """
 
+    netuid = require_netuid(netuid)
+    # The writer would refuse this cycle's plan anyway, but only after every
+    # miner had been challenged on behalf of the wrong subnet. Refuse before
+    # recovery, discovery, or any signed request instead. Like the cycle lock,
+    # a test double may omit the attribute; the installed writer always has it.
+    writer_netuid = getattr(writer, "netuid", netuid)
+    if isinstance(writer_netuid, bool) or writer_netuid != netuid:
+        raise DirectValidatorError(
+            "direct writer signs for another netuid than this cycle"
+        )
     lock = getattr(writer, "cycle_locked", None)
     context = lock() if callable(lock) else nullcontext()
     with context:
@@ -600,6 +634,7 @@ def run_direct_cycle(
             keypair=keypair,
             verifier_adapter=verifier_adapter,
             writer=writer,
+            netuid=netuid,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
         )
@@ -608,6 +643,15 @@ def run_direct_cycle(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
     parser.add_argument("--network", default="finney")
+    parser.add_argument(
+        "--netuid",
+        action="append",
+        metavar="NETUID",
+        help=(
+            "subnet to validate; this release accepts only the netuid it was "
+            "built for, which is also what omitting the flag selects"
+        ),
+    )
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
@@ -648,12 +692,54 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configured_netuid(values: Sequence[str] | None) -> int:
+    """Resolve ``--netuid`` for a release that runs only its compiled netuid.
+
+    An absent flag behaves exactly as before the flag existed. A value is
+    parsed here rather than by argparse because an argparse error exits with
+    status 2, which the unit's ``RestartPreventExitStatus=2`` never restarts.
+    Every refusal below is a ``SystemExit`` message, status 1, like the other
+    configuration refusals in ``main``.
+
+    Any value other than the compiled netuid is refused for now. The updater
+    and the status tool still spell out the journal directory for the compiled
+    netuid, and the updater's cycle lock sits beside that journal. A writer on
+    another netuid would journal and lock where neither of them looks, so an
+    update could activate in the middle of a signing cycle.
+    """
+
+    if values is None:
+        return NETUID
+    if len(values) != 1:
+        # argparse would silently keep the last one, and the unit still expands
+        # a free-form argument variable after the managed flags.
+        raise SystemExit("--netuid may be given only once")
+    value = values[0]
+    if (
+        not value.isascii()
+        or not value.isdigit()
+        or str(int(value)) != value
+        or int(value) > MAX_NETUID
+    ):
+        raise SystemExit("--netuid must be a canonical decimal u16 integer")
+    netuid = int(value)
+    if netuid != NETUID:
+        raise SystemExit(
+            f"--netuid {netuid} is not the netuid this release was built for "
+            f"({NETUID}); non-default netuids arrive with a later release, "
+            "because the updater and status tool still locate the journal "
+            "and cycle lock by the built-in value"
+        )
+    return netuid
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     if options.network != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
+    netuid = _configured_netuid(options.netuid)
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -698,6 +784,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     writer = DirectWeightWriter(
         subtensor=subtensor,
         keypair=keypair,
+        netuid=netuid,
     )
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
@@ -715,6 +802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         telemetry_sink = TelemetrySpool(
             options.telemetry_spool,
             reader_gid=reader_gid,
+            netuid=netuid,
         )
     process_lock = getattr(writer, "process_locked", None)
     process_context = process_lock() if callable(process_lock) else nullcontext()
@@ -807,6 +895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     writer=writer,
                     snp_verifier=snp_verifier,
                     telemetry_sink=telemetry_sink,
+                    netuid=netuid,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionContradiction as exc:

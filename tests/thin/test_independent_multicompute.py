@@ -411,8 +411,8 @@ def test_runtime_attests_chain_axon_before_trusting_fleet_and_scores_two(monkeyp
         second: _runtime_collected(BOB, marker=2, spki=b"b" * 32),
     }
 
-    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair):
-        del validator_ss58, sat_url, keypair
+    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair, netuid):
+        del validator_ss58, sat_url, keypair, netuid
         endpoint = evidence_url.removesuffix("/v1/evidence")
         events.append(f"evidence:{endpoint}")
         return {
@@ -428,8 +428,8 @@ def test_runtime_attests_chain_axon_before_trusting_fleet_and_scores_two(monkeyp
         events.append("fleet")
         return FleetDiscovery(BOB, (primary_origin, second), False)
 
-    def units(*, anchor_hash, collected, sat_url, keypair):
-        del anchor_hash, sat_url
+    def units(*, anchor_hash, collected, sat_url, keypair, netuid):
+        del anchor_hash, sat_url, netuid
         del keypair
         return 20
 
@@ -687,8 +687,8 @@ def test_dead_set_scheduling_rotates_from_the_finalized_anchor(monkeypatch):
 def test_unverified_root_never_authorizes_its_fleet(monkeypatch):
     called = False
 
-    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair):
-        del evidence_url, validator_ss58, sat_url, keypair
+    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair, netuid):
+        del evidence_url, validator_ss58, sat_url, keypair, netuid
         return {
             "hotkey": hotkey,
             "sat_url": "https://1.1.1.1:8081/v1/sat-work",
@@ -752,8 +752,8 @@ def test_missing_verifier_identity_capability_blocks_before_any_miner_request(
 
 
 def test_one_missing_identity_does_not_poison_another_verified_uid(monkeypatch):
-    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair):
-        del validator_ss58, sat_url, keypair
+    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair, netuid):
+        del validator_ss58, sat_url, keypair, netuid
         marker = 1 if hotkey == BOB else 255
         spki = b"a" * 32 if hotkey == BOB else b"b" * 32
         endpoint = evidence_url.removesuffix("/v1/evidence")
@@ -810,8 +810,8 @@ def test_verified_root_with_failed_fleet_cannot_hide_global_duplicate(
     }
     sat_calls: list[str] = []
 
-    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair):
-        del validator_ss58, sat_url, keypair
+    def collect(*, evidence_url, sat_url, hotkey, validator_ss58, keypair, netuid):
+        del validator_ss58, sat_url, keypair, netuid
         endpoint = evidence_url.removesuffix("/v1/evidence")
         assert endpoint == endpoint_by_hotkey[hotkey]
         return {
@@ -830,8 +830,8 @@ def test_verified_root_with_failed_fleet_cannot_hide_global_duplicate(
             raise IndependentLiveError(fleet_failure)
         return FleetDiscovery(worker_hotkey, (primary_origin,), True)
 
-    def units(*, anchor_hash, collected, sat_url, keypair):
-        del anchor_hash, collected, keypair
+    def units(*, anchor_hash, collected, sat_url, keypair, netuid):
+        del anchor_hash, collected, keypair, netuid
         sat_calls.append(sat_url)
         return 20
 
