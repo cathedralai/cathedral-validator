@@ -294,10 +294,10 @@ broadcasts. It:
    never clears a write that the validator's own recovery can still resolve;
 3. reads finalized chain state only. It checks the pinned Finney genesis. It
    requires the write's whole mortal era to be finalized. It requires the
-   signed hash, as the exact journaled call, in exactly one block of that era.
-   For that extrinsic index in that block it requires exactly one
-   `System.ExtrinsicFailed` event, no success, and one
-   `TransactionFeePaid` whose payer is the journaled signer;
+   signed hash, as the exact journaled call from the journaled hotkey, in
+   exactly one block of that era. The hash covers the whole signed extrinsic,
+   signature included. For that extrinsic index in that block it requires
+   exactly one `System.ExtrinsicFailed` event and no success;
 4. only then moves the write to the journal's last attempt as
    `FINALIZED_FAILED`. The record keeps the signed intent and adds the block
    hash, the extrinsic index and the decoded dispatch error. An error the

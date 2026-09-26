@@ -3515,6 +3515,7 @@ FAILED_ERROR_INDEX = 15
 FAILED_ERROR_NAME = "NeuronNoValidatorPermit"
 FAILED_ERROR_DOCS = ["The validator has no permit."]
 OTHER_GENESIS_HASH = "0x" + "7" * 64
+VALIDATOR_COLDKEY = "5ValidatorColdkey"
 VALIDATOR_ARGS = [
     "--qvl",
     "/reviewed/qvl",
@@ -3628,7 +3629,10 @@ class FailedWriteSubstrate(WriterSubstrate):
         self.missing_hashes: set[int] = set()
         self.malformed_hashes: set[int] = set()
         self.runtime_error: Exception | None = None
-        self.fee_payers: list[object] = [VALIDATOR]
+        # Subtensor charges this call to the hotkey's owning coldkey, so the
+        # fee event names the coldkey, not the signer.
+        self.fee_payers: list[object] = [VALIDATOR_COLDKEY]
+        self.signer_address = VALIDATOR
         self.events_mode = "list"
         self.extra_events: list[object] = []
         self.genesis = FINNEY_GENESIS_HASH
@@ -3679,6 +3683,10 @@ class FailedWriteSubstrate(WriterSubstrate):
             (weight_call,) = super().get_block(
                 block_hash=self.block_hash(self.inclusion_block)
             )["extrinsics"]
+            weight_call = Extrinsic(
+                {**weight_call.value, "address": self.signer_address},
+                extrinsic_hash=weight_call.extrinsic_hash,
+            )
             extrinsics = [
                 Extrinsic(
                     {"call": {"call_module": "Timestamp", "call_function": "set"}},
@@ -4064,9 +4072,7 @@ def _mutate_substrate(substrate: FailedWriteSubstrate, mutation: str) -> None:
             "extra_events",
             [{"extrinsic_idx": WEIGHT_CALL_INDEX, "event": []}],
         ),
-        "fee_paid_by_another": ("fee_payers", [OTHER_VALIDATOR]),
-        "no_fee_paid": ("fee_payers", []),
-        "fee_paid_twice": ("fee_payers", [VALIDATOR, VALIDATOR]),
+        "signed_by_another": ("signer_address", OTHER_VALIDATOR),
         # The node cannot serve the history the proof needs.
         "genesis_unreadable": ("failing_hashes", {0}),
         "hash_rpc_error": ("failing_hashes", {ERA_END}),
@@ -4113,9 +4119,7 @@ def _mutate_substrate(substrate: FailedWriteSubstrate, mutation: str) -> None:
         ("events_not_list", "has no readable events"),
         ("event_not_mapping", "an event record is not readable"),
         ("extrinsic_event_not_mapping", "an extrinsic event is not readable"),
-        ("fee_paid_by_another", "not paid for by the journaled signer"),
-        ("no_fee_paid", "not paid for by the journaled signer"),
-        ("fee_paid_twice", "not paid for by the journaled signer"),
+        ("signed_by_another", "different chain call"),
     ],
 )
 def test_record_refuses_unless_finalized_history_proves_the_failure(
@@ -4125,6 +4129,29 @@ def test_record_refuses_unless_finalized_history_proves_the_failure(
     _mutate_substrate(subtensor.substrate, mutation)
 
     assert_record_refused(instance, subtensor, message)
+
+
+@pytest.mark.parametrize(
+    "fee_payers",
+    ([], [VALIDATOR_COLDKEY], [OTHER_VALIDATOR], [VALIDATOR]),
+    ids=("absent", "coldkey", "another_account", "signer"),
+)
+def test_the_fee_event_never_decides_the_record(
+    tmp_path: Path, monkeypatch, fee_payers: list[str]
+) -> None:
+    # The fee event names whoever paid: the hotkey's coldkey on today's
+    # subtensor, the signer on a runtime without that rule, or nothing at all.
+    # The signer is bound by the signed bytes' hash and the decoded address
+    # instead, so this event neither proves nor refuses a record.
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.fee_payers = fee_payers
+
+    record = instance.record_finalized_failure()
+
+    assert record["extrinsic_index"] == WEIGHT_CALL_INDEX
+    assert record["dispatch_error"]["name"] == FAILED_ERROR_NAME
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["last_attempt"]["status"] == STATUS_FINALIZED_FAILED
 
 
 @pytest.mark.parametrize(

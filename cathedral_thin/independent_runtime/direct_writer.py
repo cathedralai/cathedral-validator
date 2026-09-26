@@ -1785,7 +1785,6 @@ class DirectWeightWriter:
                 f"mortal era {era_reference}-{era_end} is not finalized "
                 f"(finalized head {finalized_number})"
             )
-        signer = intent["validator_hotkey"]
         matches: list[tuple[int, str, int]] = []
         for block_number in range(era_reference, era_reference + period):
             block_hash = self._history_block_hash(substrate, block_number)
@@ -1814,6 +1813,12 @@ class DirectWeightWriter:
                 raw_hash = getattr(item, "extrinsic_hash", None)
                 if _canonical_hash(raw_hash, label="era extrinsic") != extrinsic_hash:
                     continue
+                # The signer is bound twice. The journaled hash is blake2b-256 of
+                # the whole signed extrinsic, address and signature included,
+                # on both sides (scalecodec 0.5.0 GenericExtrinsic.extrinsic_hash,
+                # ``types.c:65655-65656``; signed bytes built at
+                # ``sync_substrate.py:2407-2436``). And the decoded call must
+                # name the journaled hotkey as its address (``_exact_call``).
                 if not self._exact_call(observed, intent):
                     raise FailedWriteRecordRefused(
                         "signed hash resolved to a different chain call"
@@ -1838,7 +1843,6 @@ class DirectWeightWriter:
                 f"finalized block {block_number} has no readable events"
             )
         outcomes: list[tuple[bool, object]] = []
-        fee_payers: list[object] = []
         # The pinned client returns the decoded records as plain mappings
         # (``sync_substrate.py:1563-1582``).
         for event_record in events:
@@ -1849,16 +1853,19 @@ class DirectWeightWriter:
             event = event_record.get("event")
             if not isinstance(event, Mapping):
                 raise FailedWriteRecordRefused("an extrinsic event is not readable")
+            # TransactionFeePaid is deliberately not used to bind the signer:
+            # its ``who`` is the fee payer, and subtensor charges this call to
+            # the signing hotkey's owning coldkey (subtensor ``main`` c004ceb
+            # and ``mainnet`` d3f40e4: ``runtime/src/fee_filters.rs:18``,
+            # ``runtime/src/transaction_payment_wrapper.rs`` validate at
+            # ``:280-301`` on main, ``:264-287`` on mainnet;
+            # ``pallet_transaction_payment`` ``lib.rs:951-954, 960-978`` at the
+            # pinned polkadot-sdk ``cacb431``).
             kind = (event.get("module_id"), event.get("event_id"))
-            attributes = event.get("attributes")
             if kind == ("System", "ExtrinsicSuccess"):
                 outcomes.append((True, None))
             elif kind == ("System", "ExtrinsicFailed"):
-                outcomes.append((False, attributes))
-            elif kind == ("TransactionPayment", "TransactionFeePaid"):
-                fee_payers.append(
-                    attributes.get("who") if isinstance(attributes, Mapping) else None
-                )
+                outcomes.append((False, event.get("attributes")))
         if any(succeeded for succeeded, _attributes in outcomes):
             raise FailedWriteRecordRefused(
                 f"extrinsic {block_number}-{index} dispatch succeeded"
@@ -1867,13 +1874,6 @@ class DirectWeightWriter:
             raise FailedWriteRecordRefused(
                 f"extrinsic {block_number}-{index} has {len(outcomes)} "
                 "ExtrinsicFailed events, not one"
-            )
-        # The transaction-payment pallet names the account that signed and
-        # paid for this extrinsic; it must be the journaled signer.
-        if fee_payers != [signer]:
-            raise FailedWriteRecordRefused(
-                f"extrinsic {block_number}-{index} was not paid for by the "
-                "journaled signer"
             )
         runtime = self._history(
             f"runtime of finalized block {block_number}",
