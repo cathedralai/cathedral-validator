@@ -456,7 +456,7 @@ def _deadline_row(
 
 
 class _FleetProgress:
-    """The machines of one discovered fleet which finished inside the deadline.
+    """What one scheduled miner proved inside the discovery deadline.
 
     A miner's fleet is probed one machine after another, so a fleet which
     declares more endpoints than fit in the discovery window runs into the
@@ -465,19 +465,21 @@ class _FleetProgress:
     nothing.
 
     The worker thread records a machine only after its evidence and its
-    verification have both finished.  The record refuses a machine which
-    arrives after the deadline, and refuses everything once the scheduler has
-    closed it.  The scheduler closes it when the deadline has passed, whether
-    or not the worker has returned, so a late worker can neither add a machine
-    nor change one already recorded: rows are copied on the way in and again on
-    the way out.
+    verification have both finished, and records a live-step error when one
+    ends the miner.  The record refuses anything which arrives after the
+    deadline, and refuses everything once it is closed.  The scheduler closes it
+    when the deadline has passed, whether or not the worker has returned, so a
+    late worker can neither add a machine or an error nor change what is
+    already recorded: rows are copied on the way in and again on the way out.
     """
 
-    def __init__(self, deadline_monotonic: float | None) -> None:
+    def __init__(self, axon: ServingAxon, deadline_monotonic: float | None) -> None:
+        self._axon = axon
         self._deadline_monotonic = deadline_monotonic
         self._lock = threading.Lock()
         self._closed = False
-        self._axon: ServingAxon | None = None
+        self._failure: str | None = None
+        self._started = False
         self._anchor_hash = ""
         self._fleet_row: dict[str, Any] = {}
         self._endpoints: tuple[str, ...] = ()
@@ -486,15 +488,18 @@ class _FleetProgress:
     def _accepting(self) -> bool:
         # Finishing exactly at the deadline is in time: the same rule the
         # scheduler applies to a whole miner result.
-        return not self._closed and (
-            self._deadline_monotonic is None
-            or time.monotonic() <= self._deadline_monotonic
+        return (
+            not self._closed
+            and self._failure is None
+            and (
+                self._deadline_monotonic is None
+                or time.monotonic() <= self._deadline_monotonic
+            )
         )
 
     def start(
         self,
         *,
-        axon: ServingAxon,
         anchor_hash: str,
         fleet_row: dict[str, Any],
         endpoints: Sequence[str],
@@ -503,9 +508,9 @@ class _FleetProgress:
         """Open the record with a verified chain axon and its fleet list."""
 
         with self._lock:
-            if self._axon is not None or not self._accepting():
+            if self._started or not self._accepting():
                 return False
-            self._axon = axon
+            self._started = True
             self._anchor_hash = anchor_hash
             self._fleet_row = _copy_row(fleet_row)
             self._endpoints = tuple(endpoints)
@@ -516,24 +521,40 @@ class _FleetProgress:
         """Keep one finished machine unless its time has already run out."""
 
         with self._lock:
-            if self._axon is None or not self._accepting():
+            if not self._started or not self._accepting():
                 return False
             self._machines.append(_copy_machine(machine))
             return True
 
-    def close(self) -> _MinerEvidence | None:
-        """Refuse any further machine and return what finished in time.
+    def fail(self, reason: str) -> bool:
+        """Zero the whole miner for a live-step error raised in time.
 
-        ``None`` means the chain axon and its fleet list were not both proven
-        before the deadline, so the miner contributes nothing.  Every declared
-        endpoint without a recorded machine gets a zero-unit deadline row.
+        An error which arrives after the deadline is a late result like any
+        other and is refused; the machines recorded in time then stand.
+        """
+
+        with self._lock:
+            if not self._accepting():
+                return False
+            self._failure = reason
+            return True
+
+    def close(self) -> _MinerEvidence:
+        """Refuse anything further and return what was proven in time.
+
+        Closing twice returns the same content.  A miner whose chain axon and
+        fleet list were not both recorded in time contributes nothing, as does a
+        miner whose worker failed in time.  Otherwise every declared endpoint
+        without a recorded machine gets a zero-unit deadline row.
         """
 
         with self._lock:
             self._closed = True
             axon = self._axon
-            if axon is None:
-                return None
+            if self._failure is not None:
+                return _deadline_miner_evidence(axon, self._failure)
+            if not self._started:
+                return _deadline_miner_evidence(axon, DISCOVERY_DEADLINE_REASON)
             rows: list[dict[str, Any]] = []
             observations: list[MachineWorkObservation] = []
             collected_by_key: dict[tuple[int, str], CollectedEvidence] = {}
@@ -579,17 +600,6 @@ class _FleetProgress:
             time.monotonic(),
             snp_infra_count,
         )
-
-
-def _closed_miner_evidence(
-    axon: ServingAxon, progress: _FleetProgress
-) -> _MinerEvidence:
-    """What one miner proved before the deadline, once its time has run out."""
-
-    evidence = progress.close()
-    if evidence is None:
-        return _deadline_miner_evidence(axon, DISCOVERY_DEADLINE_REASON)
-    return evidence
 
 
 def _collect_miner_evidence(
@@ -725,16 +735,15 @@ def _collect_miner_evidence(
         "phase_timings_ms": {"fleet": fleet_ms},
     }
     if progress is None:
-        progress = _FleetProgress(deadline_monotonic)
+        progress = _FleetProgress(axon, deadline_monotonic)
     if not progress.start(
-        axon=axon,
         anchor_hash=anchor_hash,
         fleet_row=fleet_row,
         endpoints=fleet.endpoints,
         root=(root_row, root_observation, root_collected, root_pass),
     ):
         # The chain axon or its fleet list finished after the deadline.
-        return _closed_miner_evidence(axon, progress)
+        return progress.close()
     for endpoint in fleet.endpoints[1:]:
         if _deadline_expired(deadline_monotonic):
             break
@@ -752,7 +761,27 @@ def _collect_miner_evidence(
             # This machine finished after the deadline, or the scheduler has
             # already closed the record; neither it nor any later one counts.
             break
-    return _closed_miner_evidence(axon, progress)
+    return progress.close()
+
+
+def _collect_bounded_miner_evidence(
+    *, progress: _FleetProgress, **kwargs: Any
+) -> _MinerEvidence:
+    """Run one scheduled miner and settle a live-step error by when it arose.
+
+    An ``IndependentLiveError`` which reaches the miner's record at or before
+    the discovery deadline zeroes the miner with that error as its reason, as
+    such an error always has.  One which arrives later is refused like any
+    other late result, so the machines recorded in time stand.  Either way the
+    outcome is fixed in the record on this worker's own timeline, not by when
+    the scheduler happens to look at this worker.
+    """
+
+    try:
+        return _collect_miner_evidence(progress=progress, **kwargs)
+    except IndependentLiveError as exc:
+        progress.fail(f"{type(exc).__name__}: {exc}")
+        return progress.close()
 
 
 def _deadline_miner_evidence(axon: ServingAxon, reason: str) -> _MinerEvidence:
@@ -882,11 +911,11 @@ def score_multicompute_round(
                 return False
             axon = scheduled_axons[next_axon_index]
             next_axon_index += 1
-            progress = _FleetProgress(discovery_deadline)
+            progress = _FleetProgress(axon, discovery_deadline)
             progress_by_uid[axon.uid] = progress
             future_axons[
                 bounded_executor.submit(
-                    _collect_miner_evidence,
+                    _collect_bounded_miner_evidence,
                     axon=axon,
                     keypair=keypair,
                     validator_ss58=validator_ss58,
@@ -916,17 +945,13 @@ def score_multicompute_round(
                 axon = future_axons.pop(future)
                 try:
                     result = future.result()
-                except IndependentLiveError as exc:
-                    result = _deadline_miner_evidence(
-                        axon, f"{type(exc).__name__}: {exc}"
-                    )
                 except Exception as exc:
                     unexpected = exc
                     continue
                 if result.finished_monotonic > discovery_deadline:
                     # The worker ran past the deadline.  Keep only what it had
-                    # finished in time, never its late machines.
-                    result = _closed_miner_evidence(axon, progress_by_uid[axon.uid])
+                    # recorded in time, never its late machines.
+                    result = progress_by_uid[axon.uid].close()
                 miner_results[axon.uid] = result
                 completed_slots += 1
             if unexpected is not None:
@@ -938,12 +963,11 @@ def score_multicompute_round(
 
         for future, axon in future_axons.items():
             # A worker still running now cannot be trusted to finish in time,
-            # so its in-flight machine is excluded.  The machines it recorded
-            # before the deadline are not.
+            # so its in-flight machine is excluded.  What it recorded before
+            # the deadline stands: its finished machines, or a live-step error
+            # which zeroes the miner.
             future.cancel()
-            miner_results[axon.uid] = _closed_miner_evidence(
-                axon, progress_by_uid[axon.uid]
-            )
+            miner_results[axon.uid] = progress_by_uid[axon.uid].close()
         for axon in scheduled_axons[next_axon_index:]:
             miner_results[axon.uid] = _deadline_miner_evidence(
                 axon, DISCOVERY_DEADLINE_REASON
