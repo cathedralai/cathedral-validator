@@ -30,10 +30,15 @@ TEMPO_BLOCKS = 360
 # the anchor. Mixing the two makes the extrinsic dead on arrival.
 SN39_MORTAL_PERIOD_BLOCKS = 16
 
-# Chain contract values that must hold at the anchor. `max_weight_limit` must
-# be exactly 1.0: any smaller cap makes a legal burn-heavy vector overweight.
+# Launch pins the independent launcher config and the UID30 launch and state
+# readers still compare exactly. They are stricter than the chain, which only
+# requires a vector of min(SubnetworkN, MinAllowedWeights) weights and never
+# reads the `MaxWeightsLimit` storage (its cap is a constant u16::MAX). The
+# direct writer checks the chain's own rule against the vector it signs and
+# uses neither pin.
 MIN_ALLOWED_WEIGHTS = 1
 MAX_WEIGHT_LIMIT = 1.0
+# Chain contract value that must hold at the anchor.
 COMMIT_REVEAL_ENABLED = False
 # Intel's public PCS collateral root used by every TDX QVL adapter. Keeping it
 # here lets read-only proof modules avoid importing the live runner.
