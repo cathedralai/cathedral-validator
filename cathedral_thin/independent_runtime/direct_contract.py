@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from cathedral_thin.independent.constants import W
+from cathedral_thin.independent.constants import MAX_NETUID, W
 from cathedral_thin.independent.submit import build_mechanism_weights_kwargs
 
 from .axon import ServingAxon
@@ -16,6 +16,21 @@ DIRECT_PLAN_SCHEMA = "cathedral_direct_validator_plan_v1"
 
 class DirectValidatorError(IndependentLiveError):
     """The direct path refused before a chain result became ambiguous."""
+
+
+def require_netuid(value: object) -> int:
+    """Return ``value`` if it can name a subnet, or refuse.
+
+    Every layer of the direct path that receives a netuid checks it here, so a
+    bool, a string, or an out-of-range integer never reaches a chain read, a
+    journal path, or a signed call.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DirectValidatorError("netuid is not an integer")
+    if not 0 <= value <= MAX_NETUID:
+        raise DirectValidatorError("netuid is outside the u16 range")
+    return value
 
 
 def zero_burn_vector(
@@ -69,7 +84,11 @@ def zero_burn_vector(
 
 @dataclass(frozen=True)
 class FinalizedMetagraphSnapshot:
-    """Validator and serving-miner identities read at one finalized head."""
+    """Validator and serving-miner identities read at one finalized head.
+
+    ``netuid`` records the subnet whose metagraph was read, so every later
+    step takes it from the snapshot rather than from a module constant.
+    """
 
     block_number: int
     block_hash: str
@@ -77,8 +96,13 @@ class FinalizedMetagraphSnapshot:
     validator_hotkey: str
     miners: tuple[ServingAxon, ...]
     skipped_axons: Mapping[str, int]
+    netuid: int
 
     def identity(self) -> dict[str, object]:
+        # The netuid is deliberately absent. A plan's identity already binds it
+        # through the call kwargs, and leaving the anchor document unchanged
+        # keeps every journalled identity and evidence digest for the compiled
+        # netuid byte-identical to what earlier releases wrote.
         return {
             "block_number": self.block_number,
             "block_hash": self.block_hash,
@@ -114,10 +138,18 @@ class DirectWeightPlan:
     wire_uids: tuple[int, ...]
     wire_weights: tuple[int, ...]
 
+    @property
+    def netuid(self) -> int:
+        """The subnet this vector is for: the one its anchor was read on."""
+
+        return self.snapshot.netuid
+
     def kwargs(self) -> dict[str, Any]:
         return build_mechanism_weights_kwargs(
             dests=self.wire_uids,
             weights=self.wire_weights,
+            netuid=self.netuid,
+            expected_netuid=self.netuid,
         )
 
     def identity(self) -> dict[str, object]:
@@ -166,5 +198,6 @@ __all__ = [
     "DirectValidatorError",
     "DirectWeightPlan",
     "FinalizedMetagraphSnapshot",
+    "require_netuid",
     "zero_burn_vector",
 ]

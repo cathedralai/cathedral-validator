@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from bittensor_wallet import Keypair
 
+from cathedral_thin.independent.constants import NETUID
 from cathedral_thin.independent_runtime.axon import ServingAxon
 from cathedral_thin.independent_runtime.direct_contract import (
     DirectSubmissionReceipt,
@@ -47,6 +48,7 @@ def _plan() -> DirectWeightPlan:
             ServingAxon(42, SNP_MINER_KEYPAIR.ss58_address, "8.8.8.8", 8081),
         ),
         skipped_axons={},
+        netuid=NETUID,
     )
     return DirectWeightPlan(
         snapshot=snapshot,
@@ -218,6 +220,7 @@ def test_python_generated_wire_fixture_stays_collector_compatible() -> None:
             validator_hotkey=validator.ss58_address,
             miners=(ServingAxon(41, miner, "1.1.1.1", 8081),),
             skipped_axons={},
+            netuid=NETUID,
         ),
         qvl_digest="fixture",
         evidence_digest="sha256:" + "b" * 64,

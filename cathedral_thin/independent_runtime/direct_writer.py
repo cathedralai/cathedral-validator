@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -42,6 +43,7 @@ from .direct_contract import (
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
+    require_netuid,
     zero_burn_vector,
 )
 from .preview_io import canonical_document_bytes
@@ -53,7 +55,6 @@ STATUS_RECOVERED = "RECOVERED_CONFIRMED"
 STATUS_EXPIRED = "EXPIRED_WITHOUT_INCLUSION"
 MAX_STATE_BYTES = 1_048_576
 DIRECT_STATE_ROOT = Path.home() / ".local/state/cathedral-validator/direct-writer"
-DIRECT_STATE_SCOPE = "finney-sn39-mechanism-0"
 CONFIRMATION_WAIT_SECONDS = 60.0
 CONFIRMATION_POLL_SECONDS = 2.0
 # Bound for re-reading finalized history after the node reported the
@@ -249,20 +250,37 @@ def _subtensor_max_upscale_to_u16(weights: tuple[int, ...]) -> tuple[int, ...]:
     )
 
 
-def _read_fresh_snapshot(subtensor: Any, keypair: Any) -> FinalizedMetagraphSnapshot:
+def _read_fresh_snapshot(
+    subtensor: Any, keypair: Any, *, netuid: int
+) -> FinalizedMetagraphSnapshot:
     # Keep the writer's contract module independent of the collection runtime.
     from .direct_validator import finalized_serving_miners_snapshot
 
-    return finalized_serving_miners_snapshot(subtensor, keypair)
+    return finalized_serving_miners_snapshot(subtensor, keypair, netuid)
 
 
-def canonical_state_path(keypair: Any) -> Path:
-    """Return the one operational journal path for this Finney SN39 signer."""
+def direct_state_scope(netuid: int) -> str:
+    """Return the journal directory that scopes one subnet's mechanism writes.
+
+    For the compiled netuid this is byte-identical to the scope every earlier
+    release wrote, which is where existing hosts keep their journal and where
+    the updater and status tool, which still spell it out, look for it.
+    """
+
+    return f"finney-sn{require_netuid(netuid)}-mechanism-{MECID}"
+
+
+def canonical_state_path(keypair: Any, *, netuid: int = NETUID) -> Path:
+    """Return the one operational journal path for this Finney signer and netuid.
+
+    The default is the compiled netuid for callers that predate the setting;
+    the validator's entry point always passes the value it resolved.
+    """
 
     hotkey = str(getattr(keypair, "ss58_address", ""))
     if not hotkey or not hotkey.isascii() or not hotkey.isalnum() or len(hotkey) > 64:
         raise DirectValidatorError("direct writer hotkey is not path-safe")
-    return DIRECT_STATE_ROOT / DIRECT_STATE_SCOPE / hotkey / "state.json"
+    return DIRECT_STATE_ROOT / direct_state_scope(netuid) / hotkey / "state.json"
 
 
 def cycle_lock_path_for_state(state_path: Path) -> Path:
@@ -279,7 +297,13 @@ def cycle_lock_path_for_state(state_path: Path) -> Path:
 
 
 class DirectWeightWriter:
-    """One in-process writer. The journal is its sole retry authority."""
+    """One in-process writer. The journal is its sole retry authority.
+
+    ``netuid`` is the one subnet this writer signs for. It scopes the journal,
+    every pre-sign chain read, and the exact call, and a plan read on any other
+    subnet is refused. The default is the compiled netuid for callers that
+    predate the setting; the validator's entry point always passes it.
+    """
 
     def __init__(
         self,
@@ -288,11 +312,15 @@ class DirectWeightWriter:
         keypair: Any,
         snapshot_reader: Callable[[Any, Any], FinalizedMetagraphSnapshot] | None = None,
         call_builder: Callable[[Mapping[str, Any]], Any] | None = None,
+        netuid: int = NETUID,
     ) -> None:
         self.subtensor = subtensor
         self.keypair = keypair
-        self.state_path = canonical_state_path(keypair)
-        self.snapshot_reader = snapshot_reader or _read_fresh_snapshot
+        self.netuid = require_netuid(netuid)
+        self.state_path = canonical_state_path(keypair, netuid=self.netuid)
+        self.snapshot_reader = snapshot_reader or partial(
+            _read_fresh_snapshot, netuid=self.netuid
+        )
         self.call_builder = call_builder or self._build_call
 
     def _prepare_parent(self) -> None:
@@ -477,12 +505,25 @@ class DirectWeightWriter:
     def _validate_plan(self, plan: DirectWeightPlan) -> dict[str, Any]:
         if not isinstance(plan, DirectWeightPlan):
             raise DirectValidatorError("direct writer requires a DirectWeightPlan")
+        if (
+            isinstance(plan.netuid, bool)
+            or not isinstance(plan.netuid, int)
+            or plan.netuid != self.netuid
+        ):
+            raise DirectValidatorError(
+                "direct plan was read on another netuid than this writer signs for"
+            )
         kwargs = plan.kwargs()
+        # The submit layer repeats the comparison: the plan's netuid is the
+        # call's, and this writer's is the only one it may sign for.
         expected = build_mechanism_weights_kwargs(
-            dests=list(plan.wire_uids), weights=list(plan.wire_weights)
+            dests=list(plan.wire_uids),
+            weights=list(plan.wire_weights),
+            netuid=plan.netuid,
+            expected_netuid=self.netuid,
         )
         if kwargs != expected or kwargs != {
-            "netuid": NETUID,
+            "netuid": self.netuid,
             "mecid": MECID,
             "dests": list(plan.wire_uids),
             "weights": list(plan.wire_weights),
@@ -542,6 +583,10 @@ class DirectWeightWriter:
     ) -> None:
         _require_presign_time(presign_deadline, stage="freshness preflight")
         anchor = plan.snapshot
+        if fresh.netuid != anchor.netuid:
+            raise DirectValidatorError(
+                "fresh snapshot was read on another netuid than the plan"
+            )
         anchor_miners = anchor.miner_by_uid()
         fresh_miners = fresh.miner_by_uid()
         if (
@@ -579,37 +624,39 @@ class DirectWeightWriter:
         try:
             _require_presign_time(presign_deadline, stage="eligibility preflight")
             rate_limit = _nonnegative_int(
-                self.subtensor.weights_rate_limit(NETUID, block=block),
+                self.subtensor.weights_rate_limit(self.netuid, block=block),
                 label="SN39 weight cooldown",
             )
             _require_presign_time(presign_deadline, stage="weight cooldown RPC")
             blocks_since = _nonnegative_int(
                 self.subtensor.blocks_since_last_update(
-                    NETUID, fresh.validator_uid, block=block
+                    self.netuid, fresh.validator_uid, block=block
                 ),
                 label="validator blocks since last update",
             )
             _require_presign_time(presign_deadline, stage="last-update RPC")
             min_allowed = _nonnegative_int(
-                self.subtensor.min_allowed_weights(netuid=NETUID, block=block),
+                self.subtensor.min_allowed_weights(netuid=self.netuid, block=block),
                 label="SN39 minimum allowed weights",
             )
             _require_presign_time(presign_deadline, stage="minimum-weights RPC")
             max_weight = float(
-                _raw_value(self.subtensor.max_weight_limit(netuid=NETUID, block=block))
+                _raw_value(
+                    self.subtensor.max_weight_limit(netuid=self.netuid, block=block)
+                )
             )
             _require_presign_time(presign_deadline, stage="maximum-weight RPC")
             commit_reveal = _strict_bool(
-                self.subtensor.commit_reveal_enabled(netuid=NETUID, block=block),
+                self.subtensor.commit_reveal_enabled(netuid=self.netuid, block=block),
                 label="SN39 commit-reveal state",
             )
             _require_presign_time(presign_deadline, stage="commit-reveal RPC")
             mechanism_count = _nonnegative_int(
-                self.subtensor.get_mechanism_count(NETUID, block=block),
+                self.subtensor.get_mechanism_count(self.netuid, block=block),
                 label="SN39 mechanism count",
             )
             _require_presign_time(presign_deadline, stage="mechanism-count RPC")
-            metagraph = self.subtensor.metagraph(NETUID, block=block)
+            metagraph = self.subtensor.metagraph(self.netuid, block=block)
             _require_presign_time(presign_deadline, stage="eligibility metagraph RPC")
             if (
                 _nonnegative_int(
@@ -628,7 +675,7 @@ class DirectWeightWriter:
                 _nonnegative_int(int(value), label="validator last update")
                 for value in list(metagraph.last_update)
             ]
-            info = self.subtensor.get_metagraph_info(NETUID, MECID, block=block)
+            info = self.subtensor.get_metagraph_info(self.netuid, MECID, block=block)
             _require_presign_time(presign_deadline, stage="metagraph-info RPC")
             if info is None or int(getattr(info, "block", -1)) != block:
                 raise DirectValidatorError(
@@ -654,7 +701,7 @@ class DirectWeightWriter:
                 self.subtensor.substrate.query(
                     module="SubtensorModule",
                     storage_function="WeightsVersionKey",
-                    params=[NETUID],
+                    params=[self.netuid],
                     block_hash=fresh.block_hash,
                 ),
                 label="SN39 weight version",
@@ -885,7 +932,10 @@ class DirectWeightWriter:
             )
         try:
             expected_kwargs = build_mechanism_weights_kwargs(
-                dests=dests, weights=weights
+                dests=dests,
+                weights=weights,
+                netuid=self.netuid,
+                expected_netuid=self.netuid,
             )
         except Exception as exc:
             raise DirectSubmissionContradiction(
@@ -914,7 +964,7 @@ class DirectWeightWriter:
                 self.subtensor.substrate.get_block_hash(block_number),
                 label="confirmation block",
             )
-            metagraph = self.subtensor.metagraph(NETUID, block=block_number)
+            metagraph = self.subtensor.metagraph(self.netuid, block=block_number)
             metagraph_block = int(getattr(metagraph, "block", -1))
             uids = [int(value) for value in list(metagraph.uids)]
             hotkeys = [str(value) for value in list(metagraph.hotkeys)]
@@ -925,7 +975,7 @@ class DirectWeightWriter:
             stored = self.subtensor.substrate.query(
                 module="SubtensorModule",
                 storage_function="Weights",
-                params=[get_mechid_storage_index(NETUID, MECID), validator_uid],
+                params=[get_mechid_storage_index(self.netuid, MECID), validator_uid],
                 block_hash=block_hash,
             )
             stored_rows = _stored_weight_rows(stored)
@@ -1097,9 +1147,13 @@ class DirectWeightWriter:
         if not isinstance(kwargs, Mapping):
             raise DirectSubmissionContradiction("pending signed kwargs are invalid")
         try:
+            # Rebuilt for this writer's netuid, so an intent signed for any
+            # other subnet is a contradiction here, never a call to look for.
             expected_kwargs = build_mechanism_weights_kwargs(
                 dests=list(kwargs.get("dests", ())),
                 weights=list(kwargs.get("weights", ())),
+                netuid=self.netuid,
+                expected_netuid=self.netuid,
             )
         except Exception as exc:
             raise DirectSubmissionContradiction(
@@ -1435,11 +1489,11 @@ __all__ = [
     "CONFIRMATION_WAIT_SECONDS",
     "FINALIZED_HISTORY_WAIT_SECONDS",
     "DIRECT_STATE_ROOT",
-    "DIRECT_STATE_SCOPE",
     "STATE_SCHEMA",
     "STATUS_CONFIRMED",
     "STATUS_EXPIRED",
     "STATUS_RECOVERED",
     "canonical_state_path",
     "cycle_lock_path_for_state",
+    "direct_state_scope",
 ]
