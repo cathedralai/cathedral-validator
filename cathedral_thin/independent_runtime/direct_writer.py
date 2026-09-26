@@ -31,6 +31,7 @@ from bittensor.utils import get_mechid_storage_index
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
+    FINNEY_GENESIS_HASH,
     MAX_WEIGHT_LIMIT,
     MECID,
     MIN_ALLOWED_WEIGHTS,
@@ -140,6 +141,23 @@ class DirectSubmissionFinalizedFailure(DirectSubmissionContradiction):
 
 class FailedWriteRecordRefused(DirectValidatorError):
     """The failed-write record was refused and the journal is unchanged."""
+
+
+class FailedWriteHistoryUnreadable(DirectValidatorError):
+    """The node could not serve the history the proof needs; nothing changed.
+
+    This is not a refusal. A node that prunes state, or an RPC that fails,
+    proves nothing either way, so the same command may be retried, for
+    example against an archive node.
+    """
+
+
+class _Undecodable(ValueError):
+    """A dispatch error that cannot be named; it is then recorded raw."""
+
+
+# Bound on a raw dispatch error kept in the journal when it cannot be named.
+MAX_RAW_DISPATCH_ERROR_CHARS = 1024
 
 
 def _presign_deadline(value: object) -> float:
@@ -416,7 +434,7 @@ def _subtensor_max_upscale_to_u16(weights: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def _plain_detail(value: object) -> object:
-    """Copy one decoded dispatch-error detail as JSON data, or refuse."""
+    """Copy one decoded dispatch-error detail as JSON data."""
 
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -424,7 +442,7 @@ def _plain_detail(value: object) -> object:
         return [_plain_detail(item) for item in value]
     if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
         return {key: _plain_detail(item) for key, item in value.items()}
-    raise FailedWriteRecordRefused("dispatch error detail is not plain data")
+    raise _Undecodable("dispatch error detail is not plain data")
 
 
 def _module_error_index(value: object) -> int:
@@ -432,7 +450,9 @@ def _module_error_index(value: object) -> int:
 
     Newer runtimes encode ``ModuleError.error`` as ``[u8; 4]``, whose first
     byte is the index; the pinned client reads it the same way
-    (``async_substrate_interface/utils/receipt.py:99-101``).
+    (``async_substrate_interface/utils/receipt.py:99-101``). The metadata
+    indexes errors like a list, so a bool or negative index would name the
+    wrong error; any other unusable index fails the lookup and stays raw.
     """
 
     if isinstance(value, str):
@@ -442,40 +462,55 @@ def _module_error_index(value: object) -> int:
             or not text.startswith("0x")
             or any(character not in _CHAIN_HASH_HEX for character in text[2:])
         ):
-            raise FailedWriteRecordRefused("dispatch module error bytes are invalid")
+            raise _Undecodable("dispatch module error bytes are invalid")
         return int(text[2:4], 16)
     if isinstance(value, (list, tuple)) and len(value) == 4:
         value = value[0]
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
-        raise FailedWriteRecordRefused("dispatch module error index is invalid")
+    if isinstance(value, bool) or value < 0:
+        raise _Undecodable("dispatch module error index is invalid")
     return value
 
 
 def _decoded_dispatch_error(attributes: object, metadata: Any) -> dict[str, Any]:
-    """Name one ``ExtrinsicFailed`` dispatch error, or refuse.
+    """Name one proven ``ExtrinsicFailed`` dispatch error, or keep it raw.
+
+    The failure itself is already proven by the event, so an error that
+    cannot be named is recorded as it came from the node, never refused.
+    """
+
+    error = (
+        attributes.get("dispatch_error") if isinstance(attributes, Mapping) else None
+    )
+    try:
+        return _named_dispatch_error(error, metadata)
+    except Exception:
+        try:
+            raw = _plain_detail(error)
+        except _Undecodable:
+            raw = repr(error)[:MAX_RAW_DISPATCH_ERROR_CHARS]
+        return {"type": "Undecoded", "raw": raw}
+
+
+def _named_dispatch_error(error: object, metadata: Any) -> dict[str, Any]:
+    """Name a dispatch error, or raise.
 
     A module error is named from the runtime metadata of its own block, as
     the pinned client names it (``sync_substrate.py:282-292``). Any other
     ``DispatchError`` variant keeps its variant name and plain detail.
     """
 
-    error = (
-        attributes.get("dispatch_error") if isinstance(attributes, Mapping) else None
-    )
     if isinstance(error, Mapping) and set(error) == {"Module"}:
         body = error["Module"]
-        if isinstance(body, (list, tuple)) and len(body) == 2:
+        if isinstance(body, (list, tuple)):
             pallet_index, raw_error = body
         elif isinstance(body, Mapping) and "index" in body and "error" in body:
             pallet_index, raw_error = body["index"], body["error"]
         else:
-            raise FailedWriteRecordRefused("dispatch module error is malformed")
-        if (
-            isinstance(pallet_index, bool)
-            or not isinstance(pallet_index, int)
-            or not 0 <= pallet_index <= 255
-        ):
-            raise FailedWriteRecordRefused("dispatch module index is invalid")
+            raise _Undecodable("dispatch module error is malformed")
+        # The metadata matches a pallet by equality, so True or 7.0 would
+        # name another pallet's error or this one's under a wrong index.
+        if isinstance(pallet_index, bool) or not isinstance(pallet_index, int):
+            raise _Undecodable("dispatch module index is invalid")
         error_index = _module_error_index(raw_error)
         named = metadata.get_module_error(
             module_index=pallet_index, error_index=error_index
@@ -483,9 +518,7 @@ def _decoded_dispatch_error(attributes: object, metadata: Any) -> dict[str, Any]
         name = getattr(named, "name", None)
         docs = getattr(named, "docs", None)
         if not isinstance(name, str) or not name:
-            raise FailedWriteRecordRefused(
-                "dispatch module error is not named by its block's runtime"
-            )
+            raise _Undecodable("dispatch module error is not named by its runtime")
         return {
             "type": "Module",
             "pallet_index": pallet_index,
@@ -497,11 +530,12 @@ def _decoded_dispatch_error(attributes: object, metadata: Any) -> dict[str, Any]
         }
     if isinstance(error, str) and error:
         return {"type": "System", "name": error, "detail": None}
-    if isinstance(error, Mapping) and len(error) == 1:
+    if isinstance(error, Mapping):
+        # Exactly one variant; anything else fails to unpack and stays raw.
         ((name, detail),) = error.items()
         if isinstance(name, str) and name:
             return {"type": "System", "name": name, "detail": _plain_detail(detail)}
-    raise FailedWriteRecordRefused("dispatch error is not decodable")
+    raise _Undecodable("dispatch error is not decodable")
 
 
 def _read_fresh_snapshot(subtensor: Any, keypair: Any) -> FinalizedMetagraphSnapshot:
@@ -1587,8 +1621,9 @@ class DirectWeightWriter:
                     )
                 )
                 stack.enter_context(self._locked())
-            except DirectValidatorError as exc:
-                raise FailedWriteRecordRefused(str(exc)) from exc
+            except (DirectValidatorError, OSError) as exc:
+                # A busy lock, or a lock or directory this user cannot open.
+                raise FailedWriteRecordRefused(f"{type(exc).__name__}: {exc}") from exc
             yield
 
     def record_finalized_failure(self) -> dict[str, Any]:
@@ -1606,16 +1641,26 @@ class DirectWeightWriter:
         record's own phase, receipt and error kept beside the proof. Its
         anchor keeps fencing reuse, and the next write reads a fresh nonce
         from the chain. Every refusal leaves the journal unchanged.
+
+        A node that cannot serve that history raises
+        ``FailedWriteHistoryUnreadable`` instead of a refusal, also with the
+        journal unchanged.
         """
 
-        if self.state_path.is_symlink() or not self.state_path.is_file():
+        try:
+            missing = self.state_path.is_symlink() or not self.state_path.is_file()
+        except OSError as exc:
+            raise FailedWriteRecordRefused(
+                f"direct writer journal is not accessible: {exc}"
+            ) from exc
+        if missing:
             raise FailedWriteRecordRefused(
                 "no direct writer journal exists at the canonical path"
             )
         with self._record_locks():
             try:
                 state, record = self._proven_failure_record()
-            except FailedWriteRecordRefused:
+            except (FailedWriteRecordRefused, FailedWriteHistoryUnreadable):
                 raise
             except Exception as exc:
                 raise FailedWriteRecordRefused(f"{type(exc).__name__}: {exc}") from exc
@@ -1681,6 +1726,30 @@ class DirectWeightWriter:
         }
         return state, record
 
+    @staticmethod
+    def _history(label: str, read: Callable[..., Any], *args: Any, **kwargs: Any):
+        """Run one node read the proof needs; a failed read proves nothing."""
+
+        try:
+            return read(*args, **kwargs)
+        except Exception as exc:
+            raise FailedWriteHistoryUnreadable(
+                f"{label}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def _history_block_hash(self, substrate: Any, block_number: int) -> str:
+        raw = self._history(
+            f"hash of block {block_number}",
+            _uncached_block_hash,
+            substrate,
+            block_number,
+        )
+        if raw is None:
+            raise FailedWriteHistoryUnreadable(
+                f"node has no hash for block {block_number}"
+            )
+        return _canonical_hash(raw, label=f"block {block_number} hash")
+
     def _prove_finalized_failure(
         self,
         intent: Mapping[str, Any],
@@ -1691,29 +1760,44 @@ class DirectWeightWriter:
     ) -> dict[str, Any]:
         """Read the failed inclusion from finalized blocks, or refuse.
 
-        Every height is read uncached, as recovery reads it. The whole era must
-        be finalized, so the scan covers every block the signature could ever
+        Every node read goes through ``_history``: an RPC error, discarded
+        state or a missing block proves nothing and is reported as unreadable
+        history, not as a refusal. What the node does serve is checked. Every
+        height is read uncached, as recovery reads it. The whole era must be
+        finalized, so the scan covers every block the signature could ever
         land in. An extrinsic's position in its block's list is the
         ``extrinsic_idx`` of its events, as the pinned client pairs them
         (``sync_substrate.py:157, 201``), and the error is named from the
         runtime of that block.
         """
 
-        observed_genesis_hash(self.subtensor)
-        finalized_number, finalized_hash = finalized_head(self.subtensor)
+        substrate = self.subtensor.substrate
+        if self._history_block_hash(substrate, 0) != FINNEY_GENESIS_HASH:
+            raise FailedWriteRecordRefused(
+                "the node's chain is not the pinned Finney genesis"
+            )
+        finalized_number, finalized_hash = self._history(
+            "finalized head", finalized_head, self.subtensor
+        )
         era_end = era_reference + period - 1
         if finalized_number < era_end:
             raise FailedWriteRecordRefused(
                 f"mortal era {era_reference}-{era_end} is not finalized "
                 f"(finalized head {finalized_number})"
             )
-        substrate = self.subtensor.substrate
+        signer = intent["validator_hotkey"]
         matches: list[tuple[int, str, int]] = []
         for block_number in range(era_reference, era_reference + period):
-            block_hash = _canonical_hash(
-                _uncached_block_hash(substrate, block_number), label="era block"
+            block_hash = self._history_block_hash(substrate, block_number)
+            block = self._history(
+                f"finalized block {block_number}",
+                substrate.get_block,
+                block_hash=block_hash,
             )
-            block = substrate.get_block(block_hash=block_hash)
+            if block is None:
+                raise FailedWriteHistoryUnreadable(
+                    f"node does not hold finalized block {block_number}"
+                )
             extrinsics = block.get("extrinsics") if isinstance(block, Mapping) else None
             if not isinstance(extrinsics, (list, tuple)):
                 raise FailedWriteRecordRefused(
@@ -1744,12 +1828,17 @@ class DirectWeightWriter:
                 "signed hash appears more than once in its finalized era"
             )
         block_number, block_hash, index = matches[0]
-        events = substrate.get_events(block_hash=block_hash)
+        events = self._history(
+            f"events of finalized block {block_number}",
+            substrate.get_events,
+            block_hash=block_hash,
+        )
         if not isinstance(events, (list, tuple)):
             raise FailedWriteRecordRefused(
                 f"finalized block {block_number} has no readable events"
             )
         outcomes: list[tuple[bool, object]] = []
+        fee_payers: list[object] = []
         # The pinned client returns the decoded records as plain mappings
         # (``sync_substrate.py:1563-1582``).
         for event_record in events:
@@ -1761,10 +1850,15 @@ class DirectWeightWriter:
             if not isinstance(event, Mapping):
                 raise FailedWriteRecordRefused("an extrinsic event is not readable")
             kind = (event.get("module_id"), event.get("event_id"))
+            attributes = event.get("attributes")
             if kind == ("System", "ExtrinsicSuccess"):
                 outcomes.append((True, None))
             elif kind == ("System", "ExtrinsicFailed"):
-                outcomes.append((False, event.get("attributes")))
+                outcomes.append((False, attributes))
+            elif kind == ("TransactionPayment", "TransactionFeePaid"):
+                fee_payers.append(
+                    attributes.get("who") if isinstance(attributes, Mapping) else None
+                )
         if any(succeeded for succeeded, _attributes in outcomes):
             raise FailedWriteRecordRefused(
                 f"extrinsic {block_number}-{index} dispatch succeeded"
@@ -1774,12 +1868,25 @@ class DirectWeightWriter:
                 f"extrinsic {block_number}-{index} has {len(outcomes)} "
                 "ExtrinsicFailed events, not one"
             )
-        runtime = substrate.init_runtime(block_hash=block_hash)
+        # The transaction-payment pallet names the account that signed and
+        # paid for this extrinsic; it must be the journaled signer.
+        if fee_payers != [signer]:
+            raise FailedWriteRecordRefused(
+                f"extrinsic {block_number}-{index} was not paid for by the "
+                "journaled signer"
+            )
+        runtime = self._history(
+            f"runtime of finalized block {block_number}",
+            substrate.init_runtime,
+            block_hash=block_hash,
+        )
         return {
             "block_number": block_number,
             "block_hash": block_hash,
             "extrinsic_index": index,
-            "dispatch_error": _decoded_dispatch_error(outcomes[0][1], runtime.metadata),
+            "dispatch_error": _decoded_dispatch_error(
+                outcomes[0][1], getattr(runtime, "metadata", None)
+            ),
             "finalized_head": [finalized_number, finalized_hash],
         }
 
@@ -1999,6 +2106,7 @@ __all__ = [
     "DirectSubmissionFinalizedFailure",
     "DirectSubmissionReceipt",
     "DirectWeightWriter",
+    "FailedWriteHistoryUnreadable",
     "FailedWriteRecordRefused",
     "BROADCAST_ERA_MARGIN_BLOCKS",
     "BROADCAST_WATCH_MAX_RETRIES",

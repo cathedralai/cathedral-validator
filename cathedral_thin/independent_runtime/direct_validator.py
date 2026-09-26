@@ -669,9 +669,23 @@ def run_direct_cycle(
         )
 
 
+def _add_network_argument(parser: argparse.ArgumentParser) -> None:
+    """The one --network option, shared with the record-failed-write command."""
+
+    parser.add_argument("--network", default="finney")
+
+
+def _pinned_network(value: object) -> str:
+    """Refuse any network the direct validator is not pinned to."""
+
+    if value != "finney":
+        raise SystemExit("direct validator is pinned to the Finney network")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
-    parser.add_argument("--network", default="finney")
+    _add_network_argument(parser)
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
@@ -723,8 +737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
-    if options.network != "finney":
-        raise SystemExit("direct validator is pinned to the Finney network")
+    _pinned_network(options.network)
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)

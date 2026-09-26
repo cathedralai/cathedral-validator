@@ -266,6 +266,9 @@ keeps only exit code 2 stopped and does not set it, so under that unit the
 validator stops a failed write with exit code 2. The service log line still
 names `FINALIZED_FAILED_STOPPED`, and the same command clears it. The status
 tool from that older bootstrap reports the stopped service as `NEEDS_REVIEW`.
+After a record, that older status tool reads the new last attempt as invalid.
+It shows `NOT_PROVEN` with the "Inspect" action until the next confirmed write
+replaces the record, about one interval after the service starts again.
 
 Clear a `FINALIZED_FAILED_STOPPED` stop with this command, never by editing
 the journal. It runs as the validator's service user while the validator is
@@ -278,10 +281,12 @@ sudo systemd-run --pipe --wait --collect \
   --setenv=HOME=/var/lib/cathedral-validator \
   --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
-  --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
 ```
 
-The command loads no key, and never signs or broadcasts. It:
+`--network` takes the same value as the unit's `ExecStart` and is checked the
+same way the validator checks it. The command loads no key, and never signs or
+broadcasts. It:
 
 1. refuses unless the validator process, the cycle lock it shares with the
    updater, and the journal lock are all free;
@@ -290,23 +295,51 @@ The command loads no key, and never signs or broadcasts. It:
 3. reads finalized chain state only. It checks the pinned Finney genesis. It
    requires the write's whole mortal era to be finalized. It requires the
    signed hash, as the exact journaled call, in exactly one block of that era.
-   It requires exactly one `System.ExtrinsicFailed` event, and no success, for
-   that extrinsic index in that block;
+   For that extrinsic index in that block it requires exactly one
+   `System.ExtrinsicFailed` event, no success, and one
+   `TransactionFeePaid` whose payer is the journaled signer;
 4. only then moves the write to the journal's last attempt as
    `FINALIZED_FAILED`. The record keeps the signed intent and adds the block
-   hash, the extrinsic index and the decoded dispatch error. The command
-   prints `FINALIZED_FAILED_RECORDED` with those values and exits with code 0.
+   hash, the extrinsic index and the decoded dispatch error. An error the
+   block's runtime cannot name is kept as the node sent it
+   (`"type": "Undecoded"`). The command prints `FINALIZED_FAILED_RECORDED`
+   with those values and exits with code 0.
 
 `RECORD_REFUSED` (exit code 1) names the check that failed and changes nothing.
 
-- A busy lock means the validator or an update is still running. Run the
-  command again once neither is.
-- An era that is not finalized yet is finalized a minute or two later. Run the
-  command again then.
+- A busy lock, or a lock or journal this user cannot open, means the command
+  ran as the wrong user or while the validator or an update is still running.
+  Run it again as shown once neither is running.
+- The write's era is finalized about 3 to 4 minutes after the write was
+  signed. Before that, the command refuses; run it again then.
 - `journal has no pending intent` means there is nothing to clear.
-- Any other refusal means finalized chain state does not show a failed
-  dispatch of that exact write. Keep the service stopped, do not edit the
-  journal, and open an issue with the output.
+- `dispatch succeeded` means the write landed and succeeded. Start the
+  service: its recovery reads the write again and confirms it. If it stops
+  again with the same error, keep it stopped and open an issue.
+- Any other refusal means finalized chain state shows something other than a
+  failed dispatch of that exact write. Keep the service stopped, do not edit
+  the journal, and open an issue with the output.
+
+`RECORD_RETRY_WITH_ARCHIVE` (exit code 75) is not a refusal and changes
+nothing. The node could not serve the history the proof needs: an RPC failed,
+or the node no longer holds the inclusion block's state. A node that prunes
+state keeps it for only a few hundred blocks, so a command run hours after the
+stop usually needs an archive node. Run the same command with
+`--archive-endpoint` added:
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  --uid=cathedral-validator --gid=cathedral-validator \
+  --property=RuntimeDirectory=cathedral-validator-record-pex \
+  --setenv=HOME=/var/lib/cathedral-validator \
+  --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
+  /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
+  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58 \
+  --archive-endpoint=wss://archive.chain.opentensor.ai:443
+```
+
+The endpoint must be `wss://`, or `ws://` on this host. The pinned Finney
+genesis still applies to it, so an endpoint on another chain is refused.
 
 Then start the validator:
 

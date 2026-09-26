@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import os
@@ -49,6 +50,7 @@ from cathedral_thin.independent_runtime.direct_writer import (
     DirectSubmissionContradiction,
     DirectSubmissionFinalizedFailure,
     DirectWeightWriter,
+    FailedWriteHistoryUnreadable,
     FailedWriteRecordRefused,
     PHASE_FINALIZED_FAILED,
     STATE_SCHEMA,
@@ -3544,19 +3546,35 @@ class FailedExecutionReceipt:
 
 
 class ModuleErrorMetadata:
-    """The metadata lookup the pinned client names a module error with."""
+    """The metadata lookup the pinned client names a module error with.
+
+    Like the pinned metadata, it finds a pallet by comparing its index for
+    equality and then indexes that pallet's errors like a list, so ``True``
+    finds pallet 1 and ``-1`` finds the last error.
+    """
 
     def __init__(self, name: str | None = FAILED_ERROR_NAME) -> None:
         self.name = name
-        self.lookups: list[tuple[int, int]] = []
+        self.lookup_error: Exception | None = None
+        self.lookups: list[tuple[object, object]] = []
 
-    def get_module_error(self, *, module_index: int, error_index: int):
+    def get_module_error(self, *, module_index: object, error_index: object):
         self.lookups.append((module_index, error_index))
-        if self.name is not None and (module_index, error_index) == (
-            FAILED_PALLET_INDEX,
-            FAILED_ERROR_INDEX,
-        ):
-            return SimpleNamespace(name=self.name, docs=list(FAILED_ERROR_DOCS))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        pallets = {
+            1: [SimpleNamespace(name="OtherPalletError", docs=[])] * 16,
+            FAILED_PALLET_INDEX: [
+                *(
+                    SimpleNamespace(name=f"Earlier{index}", docs=[])
+                    for index in range(FAILED_ERROR_INDEX)
+                ),
+                SimpleNamespace(name=self.name, docs=list(FAILED_ERROR_DOCS)),
+            ],
+        }
+        for index, errors in pallets.items():
+            if index == module_index:
+                return errors[error_index]
         return None
 
 
@@ -3586,7 +3604,9 @@ class FailedWriteSubstrate(WriterSubstrate):
     event, so only the extrinsic index pairs the right outcome with the write.
     ``validator_sees_failure`` is what the validator's recovery reads through
     the pinned client's receipt; ``dispatch`` is what the block's events hold.
-    A real node keeps the two in step. Refusal tests move them apart.
+    A real node keeps the two in step. Refusal tests move them apart. The
+    remaining knobs model a node that cannot serve history: an RPC error, a
+    missing block or hash, or state it has already discarded.
     """
 
     def __init__(self) -> None:
@@ -3598,9 +3618,17 @@ class FailedWriteSubstrate(WriterSubstrate):
         }
         self.duplicate_block: int | None = None
         self.unreadable_block: int | None = None
-        self.block_not_mapping: int | None = None
+        self.junk_block: int | None = None
+        self.missing_block: int | None = None
+        self.failing_block: int | None = None
         self.bad_hash_block: int | None = None
         self.unreadable_extrinsic_block: int | None = None
+        # Heights whose chain_getBlockHash fails, answers null, or answers junk.
+        self.failing_hashes: set[int] = set()
+        self.missing_hashes: set[int] = set()
+        self.malformed_hashes: set[int] = set()
+        self.runtime_error: Exception | None = None
+        self.fee_payers: list[object] = [VALIDATOR]
         self.events_mode = "list"
         self.extra_events: list[object] = []
         self.genesis = FINNEY_GENESIS_HASH
@@ -3614,17 +3642,31 @@ class FailedWriteSubstrate(WriterSubstrate):
             return self.genesis
         return super().block_hash(block)
 
-    def get_block(self, *, block_hash: str) -> dict[str, object]:
+    def rpc_request(self, method: str, params: list[object]) -> dict[str, object]:
+        (block,) = params
+        if block in self.failing_hashes:
+            raise SubstrateRequestException(f"chain_getBlockHash {block} failed")
+        if block in self.missing_hashes:
+            return {"jsonrpc": "2.0", "result": None}
+        if block in self.malformed_hashes:
+            return {"jsonrpc": "2.0", "result": "0x1234"}
+        return super().rpc_request(method, params)
+
+    def get_block(self, *, block_hash: str) -> dict[str, object] | None:
         if block_hash in self.orphans.values():
             # The node still serves the orphan, which never held this write.
             self.block_reads.append(-1)
             return {"extrinsics": []}
         block_number = self.get_block_number(block_hash)
         self.block_reads.append(block_number)
+        if block_number == self.failing_block:
+            raise SubstrateRequestException(f"block {block_number} is unavailable")
+        if block_number == self.missing_block:
+            return None
         if block_number == self.unreadable_block:
             return {"extrinsics": None}
-        if block_number == self.block_not_mapping:
-            return None
+        if block_number == self.junk_block:
+            return "junk"
         extrinsics: list[object] = []
         if block_number == self.bad_hash_block:
             extrinsics.append(Extrinsic({"call": {}}, extrinsic_hash="not-a-hash"))
@@ -3659,8 +3701,9 @@ class FailedWriteSubstrate(WriterSubstrate):
 
     def get_events(self, block_hash: str | None = None):
         self.event_reads.append(block_hash)
-        if self.events_mode == "raise":
-            raise SubstrateRequestException("events are unavailable")
+        if self.events_mode == "discarded":
+            # What a node that prunes state answers for an old block.
+            raise StateDiscardedError(block_hash)
         if self.events_mode == "not_list":
             return {"events": []}
         info = {"weight": {"ref_time": 1, "proof_size": 0}, "pays_fee": "No"}
@@ -3683,12 +3726,21 @@ class FailedWriteSubstrate(WriterSubstrate):
         return [
             event_record(0, "System", "ExtrinsicSuccess", {"dispatch_info": info}),
             event_record(1, "Balances", "Transfer", {}),
-            event_record(1, "System", "ExtrinsicSuccess", {"dispatch_info": info}),
             event_record(
-                WEIGHT_CALL_INDEX,
+                1,
                 "TransactionPayment",
                 "TransactionFeePaid",
-                {"who": VALIDATOR, "actual_fee": 0, "tip": 0},
+                {"who": MINER_ONE, "actual_fee": 1, "tip": 0},
+            ),
+            event_record(1, "System", "ExtrinsicSuccess", {"dispatch_info": info}),
+            *(
+                event_record(
+                    WEIGHT_CALL_INDEX,
+                    "TransactionPayment",
+                    "TransactionFeePaid",
+                    {"who": payer, "actual_fee": 0, "tip": 0},
+                )
+                for payer in self.fee_payers
             ),
             *outcome,
             *self.extra_events,
@@ -3698,6 +3750,8 @@ class FailedWriteSubstrate(WriterSubstrate):
     def init_runtime(self, block_hash: str | None = None, block_id: int | None = None):
         assert block_id is None
         self.runtime_reads.append(block_hash)
+        if self.runtime_error is not None:
+            raise self.runtime_error
         return SimpleNamespace(metadata=self.metadata)
 
 
@@ -3991,46 +4045,49 @@ def test_recorded_failure_keeps_fencing_its_anchor(tmp_path: Path, monkeypatch) 
 
 
 def _mutate_substrate(substrate: FailedWriteSubstrate, mutation: str) -> None:
-    if mutation == "genesis":
-        substrate.genesis = OTHER_GENESIS_HASH
-        substrate.runtime_cache = RuntimeCache()
-        SubstrateInterface._get_block_hash.cache_clear()
-    elif mutation == "inclusion_unfinalized":
-        substrate.finalized_number = substrate.inclusion_block - 1
-    elif mutation == "era_unfinalized":
-        substrate.finalized_number = ERA_END - 1
-    elif mutation == "not_included":
-        substrate.included = False
-    elif mutation == "duplicate":
-        substrate.duplicate_block = substrate.inclusion_block + 3
-    elif mutation == "wrong_call":
-        substrate.wrong_call = True
-    elif mutation == "unreadable_block":
-        substrate.unreadable_block = ERA_END
-    elif mutation == "block_not_mapping":
-        substrate.block_not_mapping = ERA_END
-    elif mutation == "bad_extrinsic_hash":
-        substrate.bad_hash_block = ERA_END
-    elif mutation == "unreadable_extrinsic":
-        substrate.unreadable_extrinsic_block = ERA_END
-    elif mutation == "finalized_head_down":
+    settings: dict[str, tuple[str, object]] = {
+        # The chain serves history that shows something else.
+        "genesis": ("genesis", OTHER_GENESIS_HASH),
+        "inclusion_unfinalized": ("finalized_number", ANCHOR_NUMBER + 1),
+        "era_unfinalized": ("finalized_number", ERA_END - 1),
+        "not_included": ("included", False),
+        "duplicate": ("duplicate_block", ANCHOR_NUMBER + 5),
+        "wrong_call": ("wrong_call", True),
+        "unreadable_block": ("unreadable_block", ERA_END),
+        "junk_block": ("junk_block", ERA_END),
+        "malformed_block_hash": ("malformed_hashes", {ERA_END}),
+        "bad_extrinsic_hash": ("bad_hash_block", ERA_END),
+        "unreadable_extrinsic": ("unreadable_extrinsic_block", ERA_END),
+        "events_not_list": ("events_mode", "not_list"),
+        "event_not_mapping": ("extra_events", ["not-an-event"]),
+        "extrinsic_event_not_mapping": (
+            "extra_events",
+            [{"extrinsic_idx": WEIGHT_CALL_INDEX, "event": []}],
+        ),
+        "fee_paid_by_another": ("fee_payers", [OTHER_VALIDATOR]),
+        "no_fee_paid": ("fee_payers", []),
+        "fee_paid_twice": ("fee_payers", [VALIDATOR, VALIDATOR]),
+        # The node cannot serve the history the proof needs.
+        "genesis_unreadable": ("failing_hashes", {0}),
+        "hash_rpc_error": ("failing_hashes", {ERA_END}),
+        "hash_missing": ("missing_hashes", {ERA_END}),
+        "block_rpc_error": ("failing_block", ERA_END),
+        "block_missing": ("missing_block", ERA_END),
+        "state_discarded": ("events_mode", "discarded"),
+        "runtime_unavailable": (
+            "runtime_error",
+            SubstrateRequestException("runtime is unavailable"),
+        ),
+    }
+    if mutation == "finalized_head_down":
 
         def unavailable() -> str:
             raise SubstrateRequestException("finalized head is unavailable")
 
         substrate.get_chain_finalised_head = unavailable
-    elif mutation in {"events_raise", "events_not_list"}:
-        substrate.events_mode = mutation.removeprefix("events_")
-    elif mutation == "event_not_mapping":
-        substrate.extra_events = ["not-an-event"]
-    elif mutation == "extrinsic_event_not_mapping":
-        substrate.extra_events = [{"extrinsic_idx": WEIGHT_CALL_INDEX, "event": []}]
-    elif mutation == "unnamed_error":
-        substrate.metadata.name = None
-    elif mutation == "empty_error_name":
-        substrate.metadata.name = ""
-    elif mutation == "malformed_error":
-        substrate.dispatch_error = {"Module": "not-a-module-error"}
+    elif mutation in settings:
+        name, value = settings[mutation]
+        setattr(substrate, name, value)
     else:
         substrate.dispatch = mutation
 
@@ -4047,19 +4104,18 @@ def _mutate_substrate(substrate: FailedWriteSubstrate, mutation: str) -> None:
         ("inclusion_unfinalized", "is not finalized"),
         ("era_unfinalized", "is not finalized"),
         ("wrong_call", "different chain call"),
-        ("genesis", "pinned Finney genesis"),
-        ("finalized_head_down", "ChainClientError"),
+        ("genesis", "not the pinned Finney genesis"),
         ("unreadable_block", "has no readable extrinsics"),
-        ("block_not_mapping", "has no readable extrinsics"),
+        ("junk_block", "has no readable extrinsics"),
+        ("malformed_block_hash", f"block {ERA_END} hash is not a canonical"),
         ("bad_extrinsic_hash", "era extrinsic is not"),
         ("unreadable_extrinsic", f"extrinsic {ERA_END}-0 is not readable"),
-        ("events_raise", "events are unavailable"),
         ("events_not_list", "has no readable events"),
         ("event_not_mapping", "an event record is not readable"),
         ("extrinsic_event_not_mapping", "an extrinsic event is not readable"),
-        ("unnamed_error", "not named by its block's runtime"),
-        ("empty_error_name", "not named by its block's runtime"),
-        ("malformed_error", "dispatch module error is malformed"),
+        ("fee_paid_by_another", "not paid for by the journaled signer"),
+        ("no_fee_paid", "not paid for by the journaled signer"),
+        ("fee_paid_twice", "not paid for by the journaled signer"),
     ],
 )
 def test_record_refuses_unless_finalized_history_proves_the_failure(
@@ -4069,6 +4125,72 @@ def test_record_refuses_unless_finalized_history_proves_the_failure(
     _mutate_substrate(subtensor.substrate, mutation)
 
     assert_record_refused(instance, subtensor, message)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("genesis_unreadable", "hash of block 0: SubstrateRequestException"),
+        ("finalized_head_down", "finalized head: ChainClientError"),
+        ("hash_rpc_error", f"hash of block {ERA_END}: SubstrateRequestException"),
+        ("hash_missing", f"node has no hash for block {ERA_END}"),
+        ("block_rpc_error", f"finalized block {ERA_END}: SubstrateRequestException"),
+        ("block_missing", f"node does not hold finalized block {ERA_END}"),
+        ("state_discarded", "events of finalized block .*: StateDiscardedError"),
+        ("runtime_unavailable", "runtime of finalized block .*: SubstrateRequest"),
+    ],
+)
+def test_record_reports_unreadable_history_without_refusing(
+    tmp_path: Path, monkeypatch, mutation: str, message: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    _mutate_substrate(subtensor.substrate, mutation)
+    before = instance.state_path.read_bytes()
+
+    with pytest.raises(FailedWriteHistoryUnreadable, match=message):
+        instance.record_finalized_failure()
+
+    assert instance.state_path.read_bytes() == before
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("change", "raw"),
+    [
+        (
+            ("metadata", "name", None),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("metadata", "name", ""),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("metadata", "lookup_error", IndexError("no such error")),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("substrate", "dispatch_error", {"Module": "not-a-module-error"}),
+            {"Module": "not-a-module-error"},
+        ),
+    ],
+)
+def test_a_proven_failure_with_an_unnamed_error_is_recorded_raw(
+    tmp_path: Path, monkeypatch, change: tuple[str, str, object], raw: object
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    target, name, value = change
+    substrate = subtensor.substrate
+    setattr(substrate.metadata if target == "metadata" else substrate, name, value)
+
+    record = instance.record_finalized_failure()
+
+    undecoded = {"type": "Undecoded", "raw": raw}
+    assert record["dispatch_error"] == undecoded
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["failure"]["dispatch_error"] == undecoded
 
 
 @pytest.mark.parametrize(
@@ -4281,35 +4403,234 @@ def test_dispatch_errors_are_decoded_from_the_block_runtime(
 
 
 @pytest.mark.parametrize(
-    ("attributes", "message"),
+    ("dispatch_error", "raw"),
     [
-        (None, "not decodable"),
-        ({"dispatch_error": None}, "not decodable"),
-        ({"dispatch_error": {}}, "not decodable"),
-        ({"dispatch_error": ""}, "not decodable"),
-        ({"dispatch_error": {"A": 1, "B": 2}}, "not decodable"),
-        ({"dispatch_error": {"Module": (7, 15), "Other": 1}}, "not decodable"),
-        ({"dispatch_error": {1: "Other"}}, "not decodable"),
-        ({"dispatch_error": {"": 1}}, "not decodable"),
-        ({"dispatch_error": {"Module": 7}}, "module error is malformed"),
-        ({"dispatch_error": {"Module": (7,)}}, "module error is malformed"),
-        ({"dispatch_error": {"Module": (True, 15)}}, "module index is invalid"),
-        ({"dispatch_error": {"Module": (256, 15)}}, "module index is invalid"),
-        ({"dispatch_error": {"Module": ("7", 15)}}, "module index is invalid"),
-        ({"dispatch_error": {"Module": (7, "0x0f00")}}, "error bytes are invalid"),
-        ({"dispatch_error": {"Module": (7, "0x0f0000zz")}}, "error bytes are invalid"),
-        ({"dispatch_error": {"Module": (7, "1x0f000000")}}, "error bytes are invalid"),
-        ({"dispatch_error": {"Module": (7, 256)}}, "error index is invalid"),
-        ({"dispatch_error": {"Module": (7, False)}}, "error index is invalid"),
-        ({"dispatch_error": {"Module": (7, 15.0)}}, "error index is invalid"),
-        ({"dispatch_error": {"Module": (7, 14)}}, "not named"),
-        ({"dispatch_error": {"Other": b"bytes"}}, "not plain data"),
-        ({"dispatch_error": {"Other": {1: "key"}}}, "not plain data"),
+        (None, None),
+        ({}, {}),
+        ("", ""),
+        ({"A": 1, "B": 2}, {"A": 1, "B": 2}),
+        ({"Module": (7, 15), "Other": 1}, {"Module": [7, 15], "Other": 1}),
+        ({1: "Other"}, "{1: 'Other'}"),
+        ({"": 1}, {"": 1}),
+        ({"Module": 7}, {"Module": 7}),
+        ({"Module": (7,)}, {"Module": [7]}),
+        ({"Module": (True, 15)}, {"Module": [True, 15]}),
+        ({"Module": (256, 15)}, {"Module": [256, 15]}),
+        ({"Module": ("7", 15)}, {"Module": ["7", 15]}),
+        ({"Module": (7, "0x0f00")}, {"Module": [7, "0x0f00"]}),
+        ({"Module": (7, "0x0f0000zz")}, {"Module": [7, "0x0f0000zz"]}),
+        ({"Module": (7, "1x0f000000")}, {"Module": [7, "1x0f000000"]}),
+        ({"Module": (7, 256)}, {"Module": [7, 256]}),
+        ({"Module": (7, False)}, {"Module": [7, False]}),
+        ({"Module": (7, 15.0)}, "{'Module': (7, 15.0)}"),
+        ({"Module": (7, 16)}, {"Module": [7, 16]}),
+        ({"Module": (7, -1)}, {"Module": [7, -1]}),
+        ({"Module": (7.0, 15)}, "{'Module': (7.0, 15)}"),
+        ({"Module": (2, 15)}, {"Module": [2, 15]}),
+        ({"Module": (7, [15, 0, 0])}, {"Module": [7, [15, 0, 0]]}),
+        ({"Module": (7, 15, 0)}, {"Module": [7, 15, 0]}),
+        ({"Other": b"bytes"}, "{'Other': b'bytes'}"),
+        ({"Other": {1: "key"}}, "{'Other': {1: 'key'}}"),
+        ({"Other": b"x" * 4000}, repr({"Other": b"x" * 4000})[:1024]),
     ],
 )
-def test_undecodable_dispatch_errors_refuse(attributes: object, message: str) -> None:
-    with pytest.raises(FailedWriteRecordRefused, match=message):
-        writer_runtime._decoded_dispatch_error(attributes, ModuleErrorMetadata())
+def test_undecodable_dispatch_errors_are_kept_raw(
+    dispatch_error: object, raw: object
+) -> None:
+    # The failure is already proven by its ExtrinsicFailed event, so an error
+    # that cannot be named is recorded as the node sent it, never refused.
+    result = writer_runtime._decoded_dispatch_error(
+        {"dispatch_error": dispatch_error}, ModuleErrorMetadata()
+    )
+
+    assert result == {"type": "Undecoded", "raw": raw}
+    assert len(json.dumps(result)) < 1100
+
+
+@pytest.mark.parametrize(
+    "metadata", (None, SimpleNamespace(), "not-metadata"), ids=("none", "empty", "str")
+)
+def test_a_module_error_without_usable_metadata_is_kept_raw(metadata) -> None:
+    error = {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}}
+
+    assert writer_runtime._decoded_dispatch_error(
+        {"dispatch_error": error}, metadata
+    ) == {"type": "Undecoded", "raw": error}
+    assert writer_runtime._decoded_dispatch_error(None, ModuleErrorMetadata()) == {
+        "type": "Undecoded",
+        "raw": None,
+    }
+
+
+def test_record_writes_the_journal_while_every_lock_is_held(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, _subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    write_state = DirectWeightWriter._write_state
+    checked: list[str] = []
+
+    def write_under_locks(self, document):
+        for name in ("process.lock", "cycle.lock", "state.lock"):
+            descriptor = os.open(self.state_path.with_name(name), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+            checked.append(name)
+        write_state(self, document)
+
+    monkeypatch.setattr(DirectWeightWriter, "_write_state", write_under_locks)
+
+    instance.record_finalized_failure()
+
+    assert checked == ["process.lock", "cycle.lock", "state.lock"]
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["last_attempt"]["status"] == STATUS_FINALIZED_FAILED
+
+
+@pytest.mark.parametrize("where", ("journal_lock", "journal_path"))
+def test_record_refuses_a_lock_or_journal_it_cannot_open(
+    tmp_path: Path, monkeypatch, capsys, where: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    monkeypatch.setattr(record_cli, "make_subtensor", lambda *_a, **_k: subtensor)
+    before = instance.state_path.read_bytes()
+    if where == "journal_lock":
+        real_open = writer_runtime.os.open
+
+        def deny_the_journal_lock(path, *args, **kwargs):
+            if Path(path).name == "state.lock":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(writer_runtime.os, "open", deny_the_journal_lock)
+    else:
+
+        def deny_the_journal(self):
+            raise PermissionError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(writer_runtime.Path, "is_file", deny_the_journal)
+
+    with pytest.raises(FailedWriteRecordRefused, match="Permission denied"):
+        instance.record_finalized_failure()
+    assert runtime.main(RECORD_ARGS) == record_cli.EXIT_REFUSED
+    (line,) = _lines(capsys)
+    assert line["status"] == record_cli.STATUS_REFUSED
+    assert "Permission denied" in line["error"]
+    monkeypatch.undo()
+    assert instance.state_path.read_bytes() == before
+
+
+ARCHIVE = "wss://archive.example:443"
+
+
+def _connections(monkeypatch, subtensor, *, archive_serves_state: bool = True):
+    calls: list[str] = []
+
+    def connect(_bt, *, network: str):
+        calls.append(network)
+        if network == ARCHIVE and archive_serves_state:
+            subtensor.substrate.events_mode = "list"
+        return subtensor
+
+    monkeypatch.setattr(record_cli, "make_subtensor", connect)
+    return calls
+
+
+def test_discarded_state_asks_for_an_archive_node_then_the_archive_proves_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.events_mode = "discarded"
+    calls = _connections(monkeypatch, subtensor)
+    before = instance.state_path.read_bytes()
+
+    # The network's own node has pruned the inclusion block's state.
+    assert runtime.main(RECORD_ARGS) == record_cli.EXIT_RETRY == 75
+    (retry,) = _lines(capsys)
+    assert retry["status"] == record_cli.STATUS_RETRY_WITH_ARCHIVE
+    assert "StateDiscardedError" in retry["error"]
+    assert "--archive-endpoint" in retry["action"]
+    assert instance.state_path.read_bytes() == before
+
+    # The same command against an archive node proves it and records it.
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 0
+    (recorded,) = _lines(capsys)
+    assert recorded["status"] == record_cli.STATUS_RECORDED
+    assert recorded["block_hash"] == INCLUSION_HASH
+    assert calls == ["finney", ARCHIVE]
+    assert subtensor.substrate.signed == [(SIGN_HEAD, 4)]
+    assert subtensor.substrate.broadcast == [EXTRINSIC_HASH]
+
+
+def test_an_archive_that_cannot_serve_the_history_is_still_a_retry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.events_mode = "discarded"
+    _connections(monkeypatch, subtensor, archive_serves_state=False)
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 75
+    (retry,) = _lines(capsys)
+    assert retry["status"] == record_cli.STATUS_RETRY_WITH_ARCHIVE
+    assert "another archive endpoint" in retry["action"]
+
+
+def test_the_genesis_pin_applies_to_an_archive_endpoint(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.genesis = OTHER_GENESIS_HASH
+    calls = _connections(monkeypatch, subtensor)
+    before = instance.state_path.read_bytes()
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 1
+    (refused,) = _lines(capsys)
+    assert refused["status"] == record_cli.STATUS_REFUSED
+    assert "not the pinned Finney genesis" in refused["error"]
+    assert calls == [ARCHIVE]
+    assert instance.state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "endpoint", ("ws://127.0.0.1:9944", "ws://localhost:9944", "wss://a.example")
+)
+def test_record_accepts_a_tls_or_local_archive_endpoint(
+    tmp_path: Path, monkeypatch, capsys, endpoint: str
+) -> None:
+    _instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    calls = _connections(monkeypatch, subtensor)
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={endpoint}"]) == 0
+    assert calls == [endpoint]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--network=test"], "pinned to the Finney network"),
+        (["--archive-endpoint=http://archive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=ws://archive.example:9944"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://user@archive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://archive.example#x"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://arch ive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://arch\u00efve.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://archive.example\n"], "must be a wss:// URL"),
+    ],
+)
+def test_record_refuses_another_network_or_an_unsafe_endpoint_before_the_chain(
+    monkeypatch, arguments: list[str], message: str
+) -> None:
+    monkeypatch.setattr(
+        record_cli,
+        "make_subtensor",
+        lambda *_a, **_k: pytest.fail("record command reached the chain"),
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        runtime.main([*RECORD_ARGS, *arguments])
 
 
 def test_unit_never_restarts_either_deliberate_stop() -> None:
