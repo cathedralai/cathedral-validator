@@ -29,7 +29,9 @@ from cathedral_thin.independent.compute import (
 )
 from cathedral_thin.independent.constants import (
     MAX_DESTS,
+    MAX_NETUID,
     MULTICOMPUTE_MACHINE_WORK_UNIT_CAP,
+    NETUID,
 )
 from cathedral_thin.independent.errors import SatWorkError
 from cathedral_thin.independent.sat import (
@@ -155,10 +157,14 @@ def _try_collect(
     hotkey: str,
     validator_ss58: str,
     keypair: Any,
+    netuid: int,
     deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     transport = SignedValidatorTransport(
-        _transport(deadline_monotonic), keypair=keypair, worker_hotkey=hotkey
+        _transport(deadline_monotonic),
+        keypair=keypair,
+        worker_hotkey=hotkey,
+        netuid=netuid,
     )
     timings = _empty_phase_timings()
     try:
@@ -213,6 +219,7 @@ def _units_after_quote(
     collected: CollectedEvidence,
     sat_url: str,
     keypair: Any,
+    netuid: int,
     deadline_monotonic: float | None = None,
 ) -> int:
     item = canonical_work_item(
@@ -225,6 +232,7 @@ def _units_after_quote(
         keypair=keypair,
         worker_hotkey=collected.assigned_hotkey,
         expected_spki=collected.channel_binding.digest,
+        netuid=netuid,
     )
     units = collect_sat_work(
         url=sat_url,
@@ -247,6 +255,7 @@ def _collect_candidate(
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None,
+    netuid: int,
     deadline_monotonic: float | None = None,
 ) -> tuple[dict[str, Any], MachineWorkObservation, CollectedEvidence | None, bool]:
     evidence_url, sat_url = _candidate_urls(candidate.endpoint)
@@ -256,6 +265,7 @@ def _collect_candidate(
         "hotkey": candidate.hotkey,
         "validator_ss58": validator_ss58,
         "keypair": keypair,
+        "netuid": netuid,
     }
     if deadline_monotonic is not None:
         collect_kwargs["deadline_monotonic"] = deadline_monotonic
@@ -611,6 +621,7 @@ def _collect_miner_evidence(
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None,
     deadline_monotonic: float | None,
+    netuid: int,
     progress: _FleetProgress | None = None,
 ) -> _MinerEvidence:
     """Collect one miner into local state which late workers cannot publish.
@@ -637,6 +648,7 @@ def _collect_miner_evidence(
         anchor_hash=anchor_hash,
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
+        netuid=netuid,
         deadline_monotonic=deadline_monotonic,
     )
     pass_count, qvl_infra_count, snp_infra_count = _verdict_tally(root_row, root_pass)
@@ -678,6 +690,7 @@ def _collect_miner_evidence(
         keypair=keypair,
         worker_hotkey=axon.hotkey,
         expected_spki=root_collected.channel_binding.digest,
+        netuid=netuid,
     )
     root_key = (root.uid, root.endpoint)
     fleet_started = _phase_started()
@@ -754,6 +767,7 @@ def _collect_miner_evidence(
             anchor_hash=anchor_hash,
             verifier_adapter=verifier_adapter,
             snp_verifier=snp_verifier,
+            netuid=netuid,
             deadline_monotonic=deadline_monotonic,
         )
         machine[0]["phase_timings_ms"]["fleet"] = fleet_ms
@@ -817,9 +831,27 @@ def score_multicompute_round(
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None = None,
     cycle_deadline_monotonic: float | None = None,
+    netuid: int = NETUID,
 ) -> MultiComputeRound:
-    """Attest roots, discover fleets, deduplicate, challenge, and aggregate."""
+    """Attest roots, discover fleets, deduplicate, challenge, and aggregate.
 
+    Every signed validator request names ``netuid``, and the signature binds
+    it, so a request made for one subnet cannot stand in for another. The
+    default is the compiled netuid for callers that predate the setting; the
+    direct validator always passes the netuid its snapshot was read on.
+    """
+
+    # Not direct_contract.require_netuid: that module imports the submission
+    # builder, which this write-free scorer's preview callers must never load.
+    # The check cannot be left to the signed transports either. In a bounded
+    # round their refusal is caught per miner, so a bad netuid would quietly
+    # zero every miner instead of halting the round.
+    if (
+        isinstance(netuid, bool)
+        or not isinstance(netuid, int)
+        or not 0 <= netuid <= MAX_NETUID
+    ):
+        raise IndependentLiveError("validator request netuid is invalid")
     if not verifier_adapter.supports_stable_platform_identity:
         return MultiComputeRound(
             rows=(),
@@ -923,6 +955,7 @@ def score_multicompute_round(
                     verifier_adapter=verifier_adapter,
                     snp_verifier=snp_verifier,
                     deadline_monotonic=discovery_deadline,
+                    netuid=netuid,
                     progress=progress,
                 )
             ] = axon
@@ -985,6 +1018,7 @@ def score_multicompute_round(
                 verifier_adapter=verifier_adapter,
                 snp_verifier=snp_verifier,
                 deadline_monotonic=None,
+                netuid=netuid,
             )
 
     for axon in ordered_axons:
@@ -1050,6 +1084,7 @@ def score_multicompute_round(
                     "collected": collected_by_key[key],
                     "sat_url": row["sat_url"],
                     "keypair": keypair,
+                    "netuid": netuid,
                 }
                 if miner_deadline is not None:
                     kwargs["deadline_monotonic"] = miner_deadline

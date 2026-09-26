@@ -37,6 +37,7 @@ from cathedral_thin.independent.compute import (
 from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
     MULTICOMPUTE_FLEET_CAP,
+    NETUID,
 )
 from cathedral_thin.independent_runtime import direct_validator, fleet_score
 from cathedral_thin.independent_runtime.axon import ServingAxon
@@ -173,9 +174,10 @@ def _install_miners(
         hotkey,
         validator_ss58,
         keypair,
+        netuid,
         deadline_monotonic=None,
     ):
-        del validator_ss58, keypair, deadline_monotonic
+        del validator_ss58, keypair, netuid, deadline_monotonic
         endpoint = evidence_url.removesuffix("/v1/evidence")
         evidence_cost(endpoint)
         return {
@@ -202,8 +204,10 @@ def _install_miners(
         assert endpoints[0] == primary_origin
         return FleetDiscovery(worker_hotkey, endpoints, False)
 
-    def units(*, anchor_hash, collected, sat_url, keypair, deadline_monotonic=None):
-        del anchor_hash, collected, keypair, deadline_monotonic
+    def units(
+        *, anchor_hash, collected, sat_url, keypair, netuid, deadline_monotonic=None
+    ):
+        del anchor_hash, collected, keypair, netuid, deadline_monotonic
         sat_endpoints.append(sat_url.removesuffix("/v1/sat-work"))
         return UNITS
 
@@ -358,6 +362,7 @@ def test_truncated_uid_is_paid_for_its_eight_machines_in_the_direct_plan(
         validator_hotkey=CANARY_HOTKEY,
         miners=(BOB_AXON,),
         skipped_axons={},
+        netuid=NETUID,
     )
 
     plan = direct_validator.build_direct_plan(snapshot, result)
@@ -570,6 +575,7 @@ def _machine(endpoint: str) -> fleet_score._Machine:
         anchor_hash=WINDOW,
         verifier_adapter=_adapter(lambda _marker: None),
         snp_verifier=None,
+        netuid=NETUID,
     )
 
 

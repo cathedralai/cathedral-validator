@@ -195,6 +195,7 @@ def snapshot(
             "unroutable": 0,
             "unusable_ip": 0,
         },
+        netuid=NETUID,
     )
 
 
@@ -3287,8 +3288,9 @@ def test_cli_bounds_rpc_waits_on_the_constructed_client_before_recovery(
     monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: client)
     seen: list[tuple[float, int]] = []
 
-    def build_writer(*, subtensor, keypair):
+    def build_writer(*, subtensor, keypair, netuid):
         assert subtensor is client
+        assert netuid == NETUID
         return SimpleNamespace(
             recover=lambda: seen.append(
                 (subtensor.substrate.retry_timeout, subtensor.substrate.max_retries)
@@ -4471,6 +4473,39 @@ def test_failed_write_stop_exits_two_unless_the_unit_keeps_three_stopped(
     (stop,) = _lines(capsys)
     assert stop["status"] == runtime.STATUS_FINALIZED_FAILED_STOPPED
     assert "record-failed-write" in stop["action"]
+
+
+def test_record_rebuilds_the_failed_call_for_its_own_netuid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed write signed for one subnet is never recorded under another.
+
+    The record command's writer rebuilds the journaled call for its own
+    netuid, so the same journal under another netuid's scope is refused before
+    any chain read, while its own writer still proves and records it.
+    """
+
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    journal = instance.state_path.read_bytes()
+    other = DirectWeightWriter(
+        subtensor=subtensor, keypair=instance.keypair, netuid=NETUID + 1
+    )
+    assert other.state_path != instance.state_path
+    other.state_path.parent.mkdir(mode=0o700, parents=True)
+    other.state_path.write_bytes(journal)
+    other.state_path.chmod(0o600)
+    substrate = subtensor.substrate
+    reads = (list(substrate.block_reads), list(substrate.event_reads))
+
+    with pytest.raises(FailedWriteRecordRefused, match="pending signed intent"):
+        other.record_finalized_failure()
+    assert other.state_path.read_bytes() == journal
+    assert (substrate.block_reads, substrate.event_reads) == reads
+
+    record = instance.record_finalized_failure()
+
+    assert record["extrinsic_index"] == WEIGHT_CALL_INDEX
+    assert len(substrate.event_reads) > len(reads[1])
 
 
 def test_recorded_failure_keeps_fencing_its_anchor(tmp_path: Path, monkeypatch) -> None:

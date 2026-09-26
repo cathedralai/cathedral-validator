@@ -26,7 +26,9 @@ from cathedral_thin.bt_compat import make_subtensor
 
 from .direct_validator import (
     RECORD_FAILED_WRITE_COMMAND,
+    _add_netuid_argument,
     _add_network_argument,
+    _configured_netuid,
     _expected_hotkey,
     _pinned_network,
 )
@@ -85,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_network_argument(parser)
+    _add_netuid_argument(parser)
     parser.add_argument(
         "--expected-hotkey",
         required=True,
@@ -109,6 +112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     options = _parser().parse_args(argv)
     network = _pinned_network(options.network)
+    # The journal is scoped by netuid, so the command resolves it exactly as
+    # the validator does and hands it to the writer it proves and records with.
+    netuid = _configured_netuid(options.netuid)
     hotkey = _expected_hotkey(options.expected_hotkey)
     archive = (
         _archive_endpoint(options.archive_endpoint)
@@ -126,7 +132,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         )
         return EXIT_REFUSED
-    writer = DirectWeightWriter(subtensor=subtensor, keypair=PublicHotkey(hotkey))
+    writer = DirectWeightWriter(
+        subtensor=subtensor, keypair=PublicHotkey(hotkey), netuid=netuid
+    )
     try:
         record = writer.record_finalized_failure()
     except FailedWriteRecordRefused as exc:
