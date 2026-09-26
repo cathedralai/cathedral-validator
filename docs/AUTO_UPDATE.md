@@ -294,8 +294,10 @@ sudo systemd-run --pipe --wait --collect \
 ```
 
 `--network` takes the same value as the unit's `ExecStart` and is checked the
-same way the validator checks it. The command loads no key, and never signs or
-broadcasts. It:
+same way the validator checks it. `--netuid` is accepted exactly as the
+validator accepts it; leave it out unless the unit passes one, so the command
+reads the same journal the validator writes. The command loads no key, and
+never signs or broadcasts. It:
 
 1. refuses unless the validator process, the cycle lock it shares with the
    updater, and the journal lock are all free;
