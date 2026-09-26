@@ -23,17 +23,28 @@ H = 10**12
 W = 65535
 
 NETUID = 39
+# The chain stores a netuid as a u16. A configured value outside this bound can
+# never name a subnet, so every place that accepts one refuses it outright.
+MAX_NETUID = 2**16 - 1
 MECID = 0
 VERSION_KEY = 10005000
 TEMPO_BLOCKS = 360
 # Transaction mortality, in blocks, measured from the SIGNED head -- not from
 # the anchor. Mixing the two makes the extrinsic dead on arrival.
 SN39_MORTAL_PERIOD_BLOCKS = 16
+# The direct writer's own mortal era, in blocks. It names no subnet; the
+# direct path reads only this, and the legacy writers keep the pin above.
+MORTAL_PERIOD_BLOCKS = 16
 
-# Chain contract values that must hold at the anchor. `max_weight_limit` must
-# be exactly 1.0: any smaller cap makes a legal burn-heavy vector overweight.
+# Launch pins the independent launcher config and the UID30 launch and state
+# readers still compare exactly. They are stricter than the chain, which only
+# requires a vector of min(SubnetworkN, MinAllowedWeights) weights and never
+# reads the `MaxWeightsLimit` storage (its cap is a constant u16::MAX). The
+# direct writer checks the chain's own rule against the vector it signs and
+# uses neither pin.
 MIN_ALLOWED_WEIGHTS = 1
 MAX_WEIGHT_LIMIT = 1.0
+# Chain contract value that must hold at the anchor.
 COMMIT_REVEAL_ENABLED = False
 # Intel's public PCS collateral root used by every TDX QVL adapter. Keeping it
 # here lets read-only proof modules avoid importing the live runner.
@@ -197,11 +208,13 @@ __all__ = [
     "INTEL_PCS_HOSTS",
     "LINEAGE",
     "MAX_DESTS",
+    "MAX_NETUID",
     "MAX_POLICY_BUNDLE_BYTES",
     "MAX_POLICY_SIGNATURES",
     "MAX_WEIGHT_LIMIT",
     "MECID",
     "MIN_ALLOWED_WEIGHTS",
+    "MORTAL_PERIOD_BLOCKS",
     "NETUID",
     "POLICY_BUNDLE_SCHEMA",
     "POLICY_KEY_IDS",

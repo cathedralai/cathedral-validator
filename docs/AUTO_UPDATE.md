@@ -163,9 +163,9 @@ Setup never starts or restarts the direct validator itself. The first signed
 install starts it, and setup only records the boot dependency afterwards. If
 setup is interrupted after that first start, re-run it while the validator is
 still running. Once the installation is committed, a stopped validator, whether
-stopped by a reboot, an operator, or a contradiction stop, makes every setup
-rerun refuse. Review `sudo cathedral-validator-status`, the journal, and
-finalized chain state before starting anything. The one exception is a first
+stopped by a reboot, an operator, a contradiction stop, or a failed-write stop,
+makes every setup rerun refuse. Review `sudo cathedral-validator-status`, the
+journal, and finalized chain state before starting anything. The one exception is a first
 install the updater never committed: re-running setup resumes the updater's own
 durable recovery, which starts the writer only while the journal is idle and
 never after a contradiction.
@@ -179,6 +179,15 @@ sudo cathedral-validator-status
 The result separates local service health, signed release state, updater state,
 and the latest recorded weight result. A locally confirmed record does not by
 itself prove current finalized chain state.
+
+`release_metadata` shows when the installed channel's signed metadata expires.
+Its state is `VALID`, `EXPIRES_SOON` (within 5 days), `EXPIRED`, or `UNKNOWN`
+(the updater has not yet recorded a verified copy of the committed record).
+A `warning:` line appears under the result for the two expiry states. The
+validator keeps running its installed release after expiry, but the updater
+refuses every update until the maintainers re-sign the channel. Only the
+maintainers can fix it. The field ships with the signed bootstrap, so a host
+shows it only after it installs a bootstrap that carries it.
 
 The updater reports one of these normal results:
 
@@ -235,9 +244,146 @@ The direct writer keeps its journal at:
 ```
 
 Never delete or replace the journal to clear an error. The service uses
-`RestartPreventExitStatus=2`, so a contradiction remains stopped for review.
+`RestartPreventExitStatus=2 3`, so a contradiction (exit code 2) and a failed
+on-chain write (exit code 3) both remain stopped for review.
 If the host reboots during an update, inspect
 `cathedral-validator-boot-reconcile.service` before taking action.
+
+## Failed weight write
+
+A weight write the chain refuses ends in one of two ways.
+
+- The transaction pool refuses it. It is never included, it expires, and the
+  validator moves on by itself (`EXPIRED_WITHOUT_INCLUSION`).
+- It is included in a finalized block and its dispatch fails. Examples are a
+  validator permit lost between the pre-sign check and inclusion, or a weight
+  version key raised in that window. The validator prints
+  `FINALIZED_FAILED_STOPPED` and exits with code 3. The journal keeps the
+  write pending, so every later cycle, setup rerun and update refuses.
+  `sudo cathedral-validator-status` reports `FINALIZED_FAILED_STOPPED`.
+
+These exit codes stop the service for good:
+
+| Exit code | Service log line | Meaning |
+|---|---|---|
+| 2 | `CONTRADICTION_STOPPED` | The journal or finalized chain contradicts the signed write. Review it. |
+| 3 | `FINALIZED_FAILED_STOPPED` | The exact signed write is in a finalized block and its dispatch failed. |
+
+The unit sets `CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE=3` to tell the
+validator that it keeps exit code 3 stopped. A unit from an older bootstrap
+keeps only exit code 2 stopped and does not set it, so under that unit the
+validator stops a failed write with exit code 2. The service log line still
+names `FINALIZED_FAILED_STOPPED`, and the same command clears it. The status
+tool from that older bootstrap reports the stopped service as `NEEDS_REVIEW`.
+After a record, that older status tool reads the new last attempt as invalid.
+It shows `NOT_PROVEN` with the "Inspect" action until the next confirmed write
+replaces the record, about one interval after the service starts again.
+
+Clear a `FINALIZED_FAILED_STOPPED` stop with this command, never by editing
+the journal. It runs as the validator's service user while the validator is
+stopped:
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  --uid=cathedral-validator --gid=cathedral-validator \
+  --property=RuntimeDirectory=cathedral-validator-record-pex \
+  --setenv=HOME=/var/lib/cathedral-validator \
+  --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
+  /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
+  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+```
+
+`--network` takes the same value as the unit's `ExecStart` and is checked the
+same way the validator checks it. `--netuid` is accepted exactly as the
+validator accepts it; leave it out unless the unit passes one, so the command
+reads the same journal the validator writes. The command loads no key, and
+never signs or broadcasts. It:
+
+1. refuses unless the validator process, the cycle lock it shares with the
+   updater, and the journal lock are all free;
+2. refuses unless the pending write is in the `finalized_failed` state, so it
+   never clears a write that the validator's own recovery can still resolve;
+3. reads finalized chain state only. It checks the pinned Finney genesis. It
+   requires the write's whole mortal era to be finalized. It requires the
+   signed hash, as the exact journaled call from the journaled hotkey, in
+   exactly one block of that era. The hash covers the whole signed extrinsic,
+   signature included. For that extrinsic index in that block it requires
+   exactly one `System.ExtrinsicFailed` event and no success;
+4. only then moves the write to the journal's last attempt as
+   `FINALIZED_FAILED`. The record keeps the signed intent and adds the block
+   hash, the extrinsic index and the decoded dispatch error. An error the
+   block's runtime cannot name is kept as the node sent it
+   (`"type": "Undecoded"`). The command prints `FINALIZED_FAILED_RECORDED`
+   with those values and exits with code 0.
+
+`RECORD_REFUSED` (exit code 1) names the check that failed and changes nothing.
+
+- A busy lock, or a lock or journal this user cannot open, means the command
+  ran as the wrong user or while the validator or an update is still running.
+  Run it again as shown once neither is running.
+- The write's era is finalized about 3 to 4 minutes after the write was
+  signed. Before that, the command refuses; run it again then.
+- `journal has no pending intent` means there is nothing to clear.
+- `dispatch succeeded` means the write landed and succeeded. Start the
+  service: its recovery reads the write again and confirms it. If it stops
+  again with the same error, keep it stopped and open an issue.
+- Any other refusal means finalized chain state shows something other than a
+  failed dispatch of that exact write. Keep the service stopped, do not edit
+  the journal, and open an issue with the output.
+
+`RECORD_RETRY_WITH_ARCHIVE` (exit code 75) is not a refusal and changes
+nothing. The node could not serve the history the proof needs: an RPC failed,
+or the node no longer holds the inclusion block's state. A node that prunes
+state keeps it for only a few hundred blocks, so a command run hours after the
+stop usually needs an archive node. Run the same command with
+`--archive-endpoint` added:
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  --uid=cathedral-validator --gid=cathedral-validator \
+  --property=RuntimeDirectory=cathedral-validator-record-pex \
+  --setenv=HOME=/var/lib/cathedral-validator \
+  --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
+  /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
+  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58 \
+  --archive-endpoint=wss://archive.chain.opentensor.ai:443
+```
+
+The endpoint must be `wss://`, or `ws://` on this host. The pinned Finney
+genesis still applies to it, so an endpoint on another chain is refused.
+
+Then start the validator:
+
+```bash
+sudo systemctl start cathedral-validator-direct.service
+```
+
+Its next cycle re-runs every pre-sign chain check, then signs fresh weights at
+a newer anchor with a fresh nonce. The recorded attempt keeps its anchor, so that
+anchor is never signed again. The next confirmed write replaces the record as
+the journal's last attempt.
+
+A release older than this command stopped the same failure as
+`CONTRADICTION_STOPPED` with the error `finalized with failure`, and its
+journal holds the same `finalized_failed` pending write. Such a host cannot
+receive the new release through the updater, which refuses while a write is
+pending. The stable timer still verifies and unpacks the newest signed stable
+release under `/opt/cathedral-validator/releases/` before that refusal. Run
+the command with that release's `bin/cathedral-validator` in place of the
+`current` path.
+
+The bootstrap ships no alert unit, so the direct service sets no `OnFailure=`.
+To be alerted, point a drop-in at your own alert unit, then run
+`sudo systemctl daemon-reload`:
+
+```ini
+# /etc/systemd/system/cathedral-validator-direct.service.d/alert.conf
+[Unit]
+OnFailure=YOUR-ALERT.service
+```
+
+systemd starts that unit when the service enters the failed state. Exit codes
+2 and 3 always do, because systemd never restarts them.
 
 ## Recovery rules
 
@@ -250,6 +396,8 @@ If the host reboots during an update, inspect
 - Do not retry a chain write whose outcome is unresolved.
 - Keep the pause file in place while investigating repeated update refusal.
 - A `CONTRADICTION_STOPPED` validator needs journal and finalized-chain review.
+- A `FINALIZED_FAILED_STOPPED` validator is cleared only by
+  `record-failed-write` ([Failed weight write](#failed-weight-write)).
 
 The updater has no access to the hotkey. The root updater verifies and switches
 files. The unprivileged validator service alone receives the hotkey through a

@@ -26,8 +26,9 @@ pinned TDX and SNP verifier programs.
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
   Ubuntu 24.04 LTS is what Cathedral tests on.
 - A hotkey registered on SN39 that holds a validator permit. The validator
-  refuses to start otherwise, and a permit depends on your stake relative to
-  other validators.
+  writes no weights without one. It keeps running, checks again every cycle,
+  and reports `NOT_REGISTERED` or `NO_PERMIT` until the chain grants the permit
+  at an epoch. A permit depends on your stake relative to other validators.
 - Your Bittensor validator hotkey file and its public SS58 address, the
   `ss58Address` field inside that file. The file must be unencrypted (the
   `btcli` default for hotkeys) and readable only by its owner.
@@ -127,6 +128,16 @@ not replace finalized chain verification. The service log is
   mortal era without finalized inclusion. Recurring operation then moves on.
 - `CONTRADICTION_STOPPED` is a deliberate terminal stop. Inspect the journal
   and finalized chain state before taking action.
+- `NOT_REGISTERED` and `NO_PERMIT` mean the hotkey had no registration, or no
+  validator permit, at the latest finalized block, so nothing was written. The
+  validator keeps running, checks again every cycle, and starts writing on its
+  own once the permit exists. The status summary reports the same result.
+- `FINALIZED_FAILED_STOPPED` means a weight write was included in a finalized
+  block and failed on chain. The validator stops and stays stopped. Clear it
+  only with `cathedral-validator record-failed-write`, which proves the
+  failure from finalized chain state before it records anything, then start
+  the service. The exact steps are in
+  [Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write).
 
 Never delete or replace the journal to clear an error. The journal location,
 pause and resume, and the recovery rules are in

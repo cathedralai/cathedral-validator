@@ -11,6 +11,7 @@ import pytest
 
 from cathedral_thin.independent.collect import ChannelBinding, CollectedEvidence
 from cathedral_thin.independent.compute import QuoteVerdict
+from cathedral_thin.independent.constants import NETUID
 from cathedral_thin.independent_runtime import fleet_score
 from cathedral_thin.independent_runtime import direct_validator
 from cathedral_thin.independent_runtime.snp_production import (
@@ -162,6 +163,7 @@ def test_direct_scorer_dispatches_snp_without_qvl_fallback(monkeypatch):
         validator_ss58="validator-hotkey",
         anchor_hash="0x" + "1" * 64,
         verifier_adapter=_NeverQvl(),
+        netuid=NETUID,
         snp_verifier=_SnpPass(),
     )
     assert passed is True
@@ -194,6 +196,7 @@ def test_snp_verifier_infrastructure_is_distinct_from_a_failed_quote(monkeypatch
         validator_ss58="validator-hotkey",
         anchor_hash="0x" + "1" * 64,
         verifier_adapter=_NeverQvl(),
+        netuid=NETUID,
         snp_verifier=_SnpInfra(),
     )
     assert passed is False
@@ -222,6 +225,7 @@ def test_unconfigured_snp_verifier_is_infrastructure_not_a_zero_score(monkeypatc
         validator_ss58="validator-hotkey",
         anchor_hash="0x" + "1" * 64,
         verifier_adapter=_NeverQvl(),
+        netuid=NETUID,
         snp_verifier=None,
     )
     assert passed is False
@@ -260,6 +264,7 @@ def test_late_snp_response_is_a_miner_deadline_miss_not_infrastructure(monkeypat
         validator_ss58="validator-hotkey",
         anchor_hash="0x" + "1" * 64,
         verifier_adapter=_NeverQvl(),
+        netuid=NETUID,
         snp_verifier=verifier,
         deadline_monotonic=now + fleet_score.SNP_VERIFIER_RESERVED_SECONDS,
     )

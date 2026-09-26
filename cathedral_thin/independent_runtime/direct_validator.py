@@ -16,16 +16,17 @@ import json
 import math
 import os
 import socket
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.compute import ComputeAdapter
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .axon import (
     AXON_SKIP_REASONS,
@@ -40,6 +41,7 @@ from .direct_contract import (
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
+    require_netuid,
     zero_burn_vector,
 )
 from .errors import IndependentLiveError
@@ -65,6 +67,21 @@ from .telemetry import (
 )
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
+STATUS_NO_PERMIT = "NO_PERMIT"
+STATUS_NOT_REGISTERED = "NOT_REGISTERED"
+_CYCLE_STATUS_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+# Exit codes of a deliberate stop. The unit's RestartPreventExitStatus= lists
+# both, so systemd never restarts either one.
+EXIT_CONTRADICTION_STOPPED = 2
+# The exact signed weight call was included in a finalized block and its
+# dispatch failed. Only the record-failed-write command clears it.
+EXIT_FINALIZED_FAILED_STOPPED = 3
+# The unit sets this to "3" to declare that it keeps exit 3 stopped. A unit
+# from an older bootstrap keeps only exit 2 stopped and would restart exit 3
+# every RestartSec, so without the declaration this stop exits 2 as well.
+FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
+STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
+RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -85,15 +102,19 @@ def _expected_hotkey(value: object) -> str:
     return value
 
 
+def _notify_address() -> str | None:
+    notify_socket = os.environ.get("NOTIFY_SOCKET")
+    if not notify_socket:
+        return None
+    return "\0" + notify_socket[1:] if notify_socket.startswith("@") else notify_socket
+
+
 def _notify_ready() -> None:
     """Tell systemd initialization finished before any cycle or chain write."""
 
-    notify_socket = os.environ.get("NOTIFY_SOCKET")
-    if not notify_socket:
+    address = _notify_address()
+    if address is None:
         return
-    address = (
-        "\0" + notify_socket[1:] if notify_socket.startswith("@") else notify_socket
-    )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
             client.connect(address)
@@ -102,6 +123,88 @@ def _notify_ready() -> None:
             )
     except OSError as exc:
         raise SystemExit("systemd readiness notification failed") from exc
+
+
+def _cycle_status_text(event: dict[str, Any]) -> str:
+    """Return the one-line systemd status for the latest cycle event.
+
+    The local status tool reads this line to tell an operator why a running
+    validator is not writing. Eligibility states carry the hotkey and block so
+    the tool can bind them to the configured identity; every other state is the
+    bare status word, and anything unexpected collapses to ``NOT_PROVEN``.
+    """
+
+    status = event.get("status")
+    if status in {STATUS_NO_PERMIT, STATUS_NOT_REGISTERED}:
+        hotkey = event.get("hotkey")
+        block_number = event.get("block_number")
+        if (
+            isinstance(hotkey, str)
+            and 1 <= len(hotkey) <= 64
+            and hotkey.isascii()
+            and hotkey.isalnum()
+            and type(block_number) is int
+            and block_number >= 0
+        ):
+            return f"{status} hotkey={hotkey} block={block_number}"
+        return "NOT_PROVEN"
+    if (
+        isinstance(status, str)
+        and 1 <= len(status) <= 64
+        and set(status) <= _CYCLE_STATUS_WORD
+    ):
+        return status
+    return "NOT_PROVEN"
+
+
+def _notify_cycle_status(event: dict[str, Any]) -> None:
+    """Publish the latest cycle outcome as the unit's systemd status line.
+
+    Every cycle overwrites the line, so a permit granted at a later epoch
+    clears an earlier ``NO_PERMIT``. The line is an operator projection like
+    telemetry: the journal and the chain stay authoritative, so a failed
+    datagram is ignored rather than allowed to stop a validator that can write.
+    """
+
+    address = _notify_address()
+    if address is None:
+        return
+    try:
+        payload = ("STATUS=" + _cycle_status_text(event)).encode("ascii")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.connect(address)
+            client.sendall(payload)
+    except (OSError, UnicodeEncodeError):
+        pass
+
+
+def _print_event(event: dict[str, Any]) -> None:
+    """Write one cycle event as its own line of the operator stream."""
+
+    print(json.dumps(event, sort_keys=True, default=str), flush=True)
+
+
+def _stop_on_finalized_failure(exc: BaseException) -> int:
+    """Report a failed on-chain write and name the only command that clears it."""
+
+    print(
+        json.dumps(
+            {
+                "status": STATUS_FINALIZED_FAILED_STOPPED,
+                "error": str(exc),
+                "action": (
+                    "prove and record it with `cathedral-validator "
+                    f"{RECORD_FAILED_WRITE_COMMAND}`, then start the service; "
+                    "see docs/AUTO_UPDATE.md"
+                ),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if os.environ.get(FAILED_WRITE_EXIT_CODE_ENV) == str(EXIT_FINALIZED_FAILED_STOPPED):
+        return EXIT_FINALIZED_FAILED_STOPPED
+    return EXIT_CONTRADICTION_STOPPED
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -125,16 +228,61 @@ def _metagraph_block(metagraph: Any) -> int:
     return value
 
 
+class ValidatorNotEligible(DirectValidatorError):
+    """The validator's own hotkey cannot set weights at this finalized block.
+
+    This is chain state, not a local fault. Registration can happen at any
+    time and a permit is granted at an epoch once stake qualifies, so the
+    recurring loop reports it and checks again next cycle. Exiting instead
+    would either leave the unit stopped, so a later permit is never used, or
+    become a systemd restart loop.
+    """
+
+    def __init__(
+        self,
+        status: str,
+        message: str,
+        *,
+        hotkey: str,
+        block_number: int,
+        block_hash: str,
+    ) -> None:
+        if status not in {STATUS_NO_PERMIT, STATUS_NOT_REGISTERED}:
+            raise ValueError("validator eligibility status is unknown")
+        super().__init__(message)
+        self.status = status
+        self.hotkey = hotkey
+        self.block_number = block_number
+        self.block_hash = block_hash
+
+    def event(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "error": str(self),
+            "hotkey": self.hotkey,
+            "block_number": self.block_number,
+            "block_hash": self.block_hash,
+        }
+
+
 def finalized_serving_miners_snapshot(
     subtensor: Any,
     keypair: Any,
+    netuid: int = NETUID,
 ) -> FinalizedMetagraphSnapshot:
-    """Read every serving non-validator miner at one finalized head."""
+    """Read every serving non-validator miner at one finalized head.
 
+    The snapshot records ``netuid``, so the plan, writer, and telemetry built
+    from it name the subnet that was actually read. The default is the compiled
+    netuid for callers that predate the setting; the validator's entry point
+    always passes the value it resolved.
+    """
+
+    netuid = require_netuid(netuid)
     observed_genesis_hash(subtensor)
     block_number, block_hash = finalized_head(subtensor)
     try:
-        metagraph = subtensor.metagraph(NETUID, block=block_number)
+        metagraph = subtensor.metagraph(netuid, block=block_number)
     except Exception as exc:
         raise DirectValidatorError("finalized SN39 metagraph is unavailable") from exc
     if _metagraph_block(metagraph) != block_number:
@@ -144,7 +292,13 @@ def finalized_serving_miners_snapshot(
     validator_hotkey = str(getattr(keypair, "ss58_address", ""))
     validator_uid = view.hotkey_to_uid.get(validator_hotkey)
     if isinstance(validator_uid, bool) or not isinstance(validator_uid, int):
-        raise DirectValidatorError("validator hotkey is not registered on SN39")
+        raise ValidatorNotEligible(
+            STATUS_NOT_REGISTERED,
+            "validator hotkey is not registered on this subnet",
+            hotkey=validator_hotkey,
+            block_number=block_number,
+            block_hash=block_hash,
+        )
     try:
         uids = [int(value) for value in list(metagraph.uids)]
         permits = list(metagraph.validator_permit)
@@ -158,7 +312,13 @@ def finalized_serving_miners_snapshot(
         _strict_bool(value, label="finalized validator permit") for value in permits
     )
     if strict_permits[uids.index(validator_uid)] is not True:
-        raise DirectValidatorError("validator hotkey lacks a finalized permit")
+        raise ValidatorNotEligible(
+            STATUS_NO_PERMIT,
+            "validator hotkey lacks a finalized permit",
+            hotkey=validator_hotkey,
+            block_number=block_number,
+            block_hash=block_hash,
+        )
     validator_uids = {
         uid for uid, permit in zip(uids, strict_permits) if permit is True
     }
@@ -184,6 +344,7 @@ def finalized_serving_miners_snapshot(
         validator_hotkey=validator_hotkey,
         miners=miners,
         skipped_axons=dict(scan.skipped),
+        netuid=netuid,
     )
 
 
@@ -395,31 +556,53 @@ def _run_direct_cycle_unlocked(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
+    netuid: int,
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
-    """Recover first, otherwise derive and submit at most one fresh vector."""
+    """Recover first, otherwise derive and submit at most one fresh vector.
+
+    A recovery that proves the pending hash expired without inclusion wrote
+    nothing and leaves no pending intent, so this cycle goes on to score and
+    submit instead of spending a whole interval on bookkeeping. Its event goes
+    to ``report_recovery`` first, so it is still reported on its own even when
+    the fresh cycle then fails. The reporter is required: a caller that could
+    omit it would silently lose that event. Every other recovery outcome ends
+    the cycle exactly as before.
+    """
+
+    from .direct_writer import STATUS_EXPIRED
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
     )
     recovered = writer.recover()
     if recovered is not None:
-        return _recovered_cycle_event(
+        recovery_event = _recovered_cycle_event(
             recovered=recovered,
             writer=writer,
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
+        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+            return recovery_event
+        report_recovery(recovery_event)
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
         )
     cycle_started = time.monotonic()
     cycle_deadline = cycle_started + FULL_CYCLE_RESPONSE_DEADLINE_SECONDS
-    snapshot = finalized_serving_miners_snapshot(subtensor, keypair)
+    snapshot = finalized_serving_miners_snapshot(subtensor, keypair, netuid)
+    if snapshot.netuid != netuid:
+        raise DirectValidatorError(
+            "finalized snapshot was read on another netuid than this cycle"
+        )
     if time.monotonic() >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired during discovery")
+    # Miners are challenged for the subnet whose metagraph named them, which
+    # the checks above have tied to this cycle and to its writer.
     result = score_multicompute_round(
         axons=snapshot.miners,
         keypair=keypair,
@@ -427,6 +610,7 @@ def _run_direct_cycle_unlocked(
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
         cycle_deadline_monotonic=cycle_deadline,
+        netuid=snapshot.netuid,
     )
     plan = build_direct_plan(snapshot, result)
     evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
@@ -482,6 +666,11 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if getattr(receipt, "status", None) == STATUS_EXPIRED:
+        # The writer proved these bytes can never land and nothing was
+        # written, so there is no finalized receipt for telemetry; a prior
+        # pending candidate keeps waiting for the next confirmed write.
+        return event
     reconciled_event_id: str | None = None
     if pending_telemetry is not None:
         try:
@@ -583,15 +772,32 @@ def run_direct_cycle(
     keypair: Any,
     verifier_adapter: ComputeAdapter,
     writer: Any,
+    report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
+    netuid: int = NETUID,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
     Test doubles without a cycle lock remain usable, while the installed
     ``DirectWeightWriter`` always supplies the per-signer flock.
+
+    ``netuid`` is the subnet this cycle reads, challenges on behalf of, and
+    hands to the writer, which refuses a plan for any subnet but its own. The
+    default is the compiled netuid for callers that predate the setting;
+    ``main`` always passes the value it resolved.
     """
 
+    netuid = require_netuid(netuid)
+    # The writer would refuse this cycle's plan anyway, but only after every
+    # miner had been challenged on behalf of the wrong subnet. Refuse before
+    # recovery, discovery, or any signed request instead. Like the cycle lock,
+    # a test double may omit the attribute; the installed writer always has it.
+    writer_netuid = getattr(writer, "netuid", netuid)
+    if isinstance(writer_netuid, bool) or writer_netuid != netuid:
+        raise DirectValidatorError(
+            "direct writer signs for another netuid than this cycle"
+        )
     lock = getattr(writer, "cycle_locked", None)
     context = lock() if callable(lock) else nullcontext()
     with context:
@@ -600,14 +806,49 @@ def run_direct_cycle(
             keypair=keypair,
             verifier_adapter=verifier_adapter,
             writer=writer,
+            report_recovery=report_recovery,
+            netuid=netuid,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
         )
 
 
+def _add_network_argument(parser: argparse.ArgumentParser) -> None:
+    """The one --network option, shared with the record-failed-write command."""
+
+    parser.add_argument("--network", default="finney")
+
+
+def _pinned_network(value: object) -> str:
+    """Refuse any network the direct validator is not pinned to."""
+
+    if value != "finney":
+        raise SystemExit("direct validator is pinned to the Finney network")
+    return value
+
+
+def _add_netuid_argument(parser: argparse.ArgumentParser) -> None:
+    """The one --netuid option, shared with the record-failed-write command.
+
+    It is read as a string and resolved by ``_configured_netuid``, so a bad
+    value is a configuration refusal rather than an argparse error.
+    """
+
+    parser.add_argument(
+        "--netuid",
+        action="append",
+        metavar="NETUID",
+        help=(
+            "subnet to validate; this release accepts only the netuid it was "
+            "built for, which is also what omitting the flag selects"
+        ),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
-    parser.add_argument("--network", default="finney")
+    _add_network_argument(parser)
+    _add_netuid_argument(parser)
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
@@ -648,12 +889,60 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configured_netuid(values: Sequence[str] | None) -> int:
+    """Resolve ``--netuid`` for a release that runs only its compiled netuid.
+
+    An absent flag behaves exactly as before the flag existed. A value is
+    parsed here rather than by argparse because an argparse error exits with
+    status 2, which the unit's ``RestartPreventExitStatus=2`` never restarts.
+    Every refusal below is a ``SystemExit`` message, status 1, like the other
+    configuration refusals in ``main``.
+
+    Any value other than the compiled netuid is refused for now. The updater
+    and the status tool still spell out the journal directory for the compiled
+    netuid, and the updater's cycle lock sits beside that journal. A writer on
+    another netuid would journal and lock where neither of them looks, so an
+    update could activate in the middle of a signing cycle.
+    """
+
+    if values is None:
+        return NETUID
+    if len(values) != 1:
+        # argparse would silently keep the last one, and the unit still expands
+        # a free-form argument variable after the managed flags.
+        raise SystemExit("--netuid may be given only once")
+    value = values[0]
+    if (
+        not value.isascii()
+        or not value.isdigit()
+        or str(int(value)) != value
+        or int(value) > MAX_NETUID
+    ):
+        raise SystemExit("--netuid must be a canonical decimal u16 integer")
+    netuid = int(value)
+    if netuid != NETUID:
+        raise SystemExit(
+            f"--netuid {netuid} is not the netuid this release was built for "
+            f"({NETUID}); non-default netuids arrive with a later release, "
+            "because the updater and status tool still locate the journal "
+            "and cycle lock by the built-in value"
+        )
+    return netuid
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    options = _parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
+        # The operator's recovery command ships in the same signed release
+        # entrypoint. It loads no key and never signs or broadcasts.
+        from .failed_write_recovery import main as record_failed_write
+
+        return record_failed_write(arguments[1:])
+    options = _parser().parse_args(arguments)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
-    if options.network != "finney":
-        raise SystemExit("direct validator is pinned to the Finney network")
+    _pinned_network(options.network)
+    netuid = _configured_netuid(options.netuid)
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -690,14 +979,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .direct_writer import (
         DirectSubmissionAmbiguous,
         DirectSubmissionContradiction,
+        DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        bound_rpc_waits,
     )
+
+    try:
+        bound_rpc_waits(subtensor)
+    except DirectValidatorError as exc:
+        raise SystemExit(f"direct validator chain client refused: {exc}") from exc
 
     writer = DirectWeightWriter(
         subtensor=subtensor,
         keypair=keypair,
+        netuid=netuid,
     )
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
@@ -715,6 +1012,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         telemetry_sink = TelemetrySpool(
             options.telemetry_spool,
             reader_gid=reader_gid,
+            netuid=netuid,
         )
     process_lock = getattr(writer, "process_locked", None)
     process_context = process_lock() if callable(process_lock) else nullcontext()
@@ -726,6 +1024,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         startup_ambiguity: DirectSubmissionAmbiguous | None = None
         try:
             startup_recovery = writer.recover()
+        except DirectSubmissionFinalizedFailure as exc:
+            return _stop_on_finalized_failure(exc)
         except DirectSubmissionContradiction as exc:
             print(
                 json.dumps(
@@ -734,7 +1034,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            return 2
+            return EXIT_CONTRADICTION_STOPPED
         except DirectSubmissionAmbiguous as exc:
             startup_recovery = None
             startup_ambiguity = exc
@@ -807,8 +1107,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     writer=writer,
                     snp_verifier=snp_verifier,
                     telemetry_sink=telemetry_sink,
+                    report_recovery=_print_event,
+                    netuid=netuid,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
+            except DirectSubmissionFinalizedFailure as exc:
+                return _stop_on_finalized_failure(exc)
             except DirectSubmissionContradiction as exc:
                 print(
                     json.dumps(
@@ -817,30 +1121,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     flush=True,
                 )
-                return 2
+                return EXIT_CONTRADICTION_STOPPED
+            except ValidatorNotEligible as exc:
+                # A missing registration or permit is the chain's answer, not
+                # a fault, so it gets its own status instead of NOT_PROVEN and
+                # the loop keeps checking at the normal pace.
+                event = exc.event()
+                print(json.dumps(event, sort_keys=True), flush=True)
+                if options.once:
+                    return 2
             except (DirectSubmissionAmbiguous, IndependentLiveError) as exc:
-                print(
-                    json.dumps(
-                        {"status": "NOT_PROVEN", "error": str(exc)},
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+                event = {"status": "NOT_PROVEN", "error": str(exc)}
+                print(json.dumps(event, sort_keys=True), flush=True)
                 if options.once:
                     return 2
             except Exception as exc:
-                print(
-                    json.dumps(
-                        {
-                            "status": "NOT_PROVEN",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+                event = {
+                    "status": "NOT_PROVEN",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                print(json.dumps(event, sort_keys=True), flush=True)
                 if options.once:
                     return 2
+            _notify_cycle_status(event)
             if options.once:
                 return (
                     0
@@ -852,9 +1155,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "DIRECT_PLAN_SCHEMA",
+    "EXIT_CONTRADICTION_STOPPED",
+    "EXIT_FINALIZED_FAILED_STOPPED",
+    "FAILED_WRITE_EXIT_CODE_ENV",
+    "RECORD_FAILED_WRITE_COMMAND",
+    "STATUS_FINALIZED_FAILED_STOPPED",
     "DirectValidatorError",
     "DirectWeightPlan",
     "FinalizedMetagraphSnapshot",
+    "STATUS_NOT_REGISTERED",
+    "STATUS_NO_PERMIT",
+    "ValidatorNotEligible",
     "build_direct_plan",
     "finalized_serving_miners_snapshot",
     "main",

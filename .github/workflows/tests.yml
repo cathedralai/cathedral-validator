@@ -159,13 +159,20 @@ jobs:
           print(f"production SNP contract {SANDBOX_CONTRACT_COMMIT} loaded")
           PY
 
+      # test_cross_repo_validator_request_wire.py skips in the tests job: the
+      # provenance `cathedral` there predates cathedral.validator_access. Here
+      # the pinned Sandbox revision provides it, so the validator-built request
+      # meets the miner's authorizer and gates. The import runs first so a pin
+      # without that module fails the job instead of turning it into a skip.
       - name: AMD production verification tests
         run: |
+          python -c "import cathedral.validator_access"
           python -m pytest -q \
             tests/thin/test_snp_production.py \
             tests/thin/test_amd_snp_dev_preview.py \
             tests/thin/test_direct_validator.py \
-            tests/thin/test_independent_collect.py
+            tests/thin/test_independent_collect.py \
+            tests/thin/test_cross_repo_validator_request_wire.py
 
   publisher:
     # GATING for the validator-facing tests, advisory for the rest.
@@ -322,6 +329,7 @@ jobs:
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
+            scripts/check_release_expiry.py \
             tests/release_smoke/run_real_validator.py \
             tests/live/cathedral_no_chain_readiness.py \
             tests/live/tampered_https_origin.py \
@@ -336,6 +344,7 @@ jobs:
             deploy/validator-update/install_updater_bundle.py \
             deploy/validator-update/publish_github_bootstrap.py \
             deploy/validator-update/publish_github_channel.py \
+            scripts/check_release_expiry.py \
             tests/release_smoke/run_real_validator.py \
             tests/live/cathedral_no_chain_readiness.py \
             tests/live/tampered_https_origin.py \
