@@ -4,6 +4,10 @@ The signed extrinsic hash, nonce, era, exact call, and evidence identity reach
 disk before broadcast.  A restart with a pending intent only searches finalized
 blocks for that hash.  Recovery never signs and never resubmits.  A signature
 too close to the end of its mortal era is dropped before it reaches disk.
+
+A write that is included in a finalized block and fails its dispatch stops the
+validator. Only ``record_finalized_failure`` clears it, after proving that
+failure from finalized chain state; it also never signs or resubmits.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import stat
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -27,6 +31,7 @@ from bittensor.utils import get_mechid_storage_index
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
+    FINNEY_GENESIS_HASH,
     MECID,
     MORTAL_PERIOD_BLOCKS,
     NETUID,
@@ -51,6 +56,12 @@ STATE_SCHEMA = "cathedral_direct_validator_state_v1"
 STATUS_CONFIRMED = "CONFIRMED"
 STATUS_RECOVERED = "RECOVERED_CONFIRMED"
 STATUS_EXPIRED = "EXPIRED_WITHOUT_INCLUSION"
+# Terminal status of an intent whose exact call is proven included in a
+# finalized block of its era with a failed dispatch. Only the operator's
+# record command writes it, never the validator.
+STATUS_FINALIZED_FAILED = "FINALIZED_FAILED"
+# Pending phase the writer journals when its exact call finalized with failure.
+PHASE_FINALIZED_FAILED = "finalized_failed"
 MAX_STATE_BYTES = 1_048_576
 DIRECT_STATE_ROOT = Path.home() / ".local/state/cathedral-validator/direct-writer"
 DIRECT_STATE_SCOPE = "finney-sn39-mechanism-0"
@@ -115,6 +126,36 @@ class DirectSubmissionAmbiguous(DirectValidatorError):
 
 class DirectSubmissionContradiction(DirectSubmissionAmbiguous):
     """Finalized history or durable state contradicts the signed intent."""
+
+
+class DirectSubmissionFinalizedFailure(DirectSubmissionContradiction):
+    """The exact signed call is in a finalized block and its dispatch failed.
+
+    It stays a contradiction for every existing handler. The validator stops
+    on it with its own exit code, and only ``record_finalized_failure`` clears
+    the pending intent.
+    """
+
+
+class FailedWriteRecordRefused(DirectValidatorError):
+    """The failed-write record was refused and the journal is unchanged."""
+
+
+class FailedWriteHistoryUnreadable(DirectValidatorError):
+    """The node could not serve the history the proof needs; nothing changed.
+
+    This is not a refusal. A node that prunes state, or an RPC that fails,
+    proves nothing either way, so the same command may be retried, for
+    example against an archive node.
+    """
+
+
+class _Undecodable(ValueError):
+    """A dispatch error that cannot be named; it is then recorded raw."""
+
+
+# Bound on a raw dispatch error kept in the journal when it cannot be named.
+MAX_RAW_DISPATCH_ERROR_CHARS = 1024
 
 
 def _presign_deadline(value: object) -> float:
@@ -388,6 +429,111 @@ def _subtensor_max_upscale_to_u16(weights: tuple[int, ...]) -> tuple[int, ...]:
         (((weight * W * _I32F32_ONE) // maximum) + _I32F32_HALF) // _I32F32_ONE
         for weight in weights
     )
+
+
+def _plain_detail(value: object) -> object:
+    """Copy one decoded dispatch-error detail as JSON data."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_plain_detail(item) for item in value]
+    if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
+        return {key: _plain_detail(item) for key, item in value.items()}
+    raise _Undecodable("dispatch error detail is not plain data")
+
+
+def _module_error_index(value: object) -> int:
+    """Return a pallet error index, including the four-byte encoding.
+
+    Newer runtimes encode ``ModuleError.error`` as ``[u8; 4]``, whose first
+    byte is the index; the pinned client reads it the same way
+    (``async_substrate_interface/utils/receipt.py:99-101``). The metadata
+    indexes errors like a list, so a bool or negative index would name the
+    wrong error; any other unusable index fails the lookup and stays raw.
+    """
+
+    if isinstance(value, str):
+        text = value.lower()
+        if (
+            len(text) != 10
+            or not text.startswith("0x")
+            or any(character not in _CHAIN_HASH_HEX for character in text[2:])
+        ):
+            raise _Undecodable("dispatch module error bytes are invalid")
+        return int(text[2:4], 16)
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        value = value[0]
+    if isinstance(value, bool) or value < 0:
+        raise _Undecodable("dispatch module error index is invalid")
+    return value
+
+
+def _decoded_dispatch_error(attributes: object, metadata: Any) -> dict[str, Any]:
+    """Name one proven ``ExtrinsicFailed`` dispatch error, or keep it raw.
+
+    The failure itself is already proven by the event, so an error that
+    cannot be named is recorded as it came from the node, never refused.
+    """
+
+    error = (
+        attributes.get("dispatch_error") if isinstance(attributes, Mapping) else None
+    )
+    try:
+        return _named_dispatch_error(error, metadata)
+    except Exception:
+        try:
+            raw = _plain_detail(error)
+        except _Undecodable:
+            raw = repr(error)[:MAX_RAW_DISPATCH_ERROR_CHARS]
+        return {"type": "Undecoded", "raw": raw}
+
+
+def _named_dispatch_error(error: object, metadata: Any) -> dict[str, Any]:
+    """Name a dispatch error, or raise.
+
+    A module error is named from the runtime metadata of its own block, as
+    the pinned client names it (``sync_substrate.py:282-292``). Any other
+    ``DispatchError`` variant keeps its variant name and plain detail.
+    """
+
+    if isinstance(error, Mapping) and set(error) == {"Module"}:
+        body = error["Module"]
+        if isinstance(body, (list, tuple)):
+            pallet_index, raw_error = body
+        elif isinstance(body, Mapping) and "index" in body and "error" in body:
+            pallet_index, raw_error = body["index"], body["error"]
+        else:
+            raise _Undecodable("dispatch module error is malformed")
+        # The metadata matches a pallet by equality, so True or 7.0 would
+        # name another pallet's error or this one's under a wrong index.
+        if isinstance(pallet_index, bool) or not isinstance(pallet_index, int):
+            raise _Undecodable("dispatch module index is invalid")
+        error_index = _module_error_index(raw_error)
+        named = metadata.get_module_error(
+            module_index=pallet_index, error_index=error_index
+        )
+        name = getattr(named, "name", None)
+        docs = getattr(named, "docs", None)
+        if not isinstance(name, str) or not name:
+            raise _Undecodable("dispatch module error is not named by its runtime")
+        return {
+            "type": "Module",
+            "pallet_index": pallet_index,
+            "error_index": error_index,
+            "name": name,
+            "docs": [str(line) for line in docs]
+            if isinstance(docs, (list, tuple))
+            else [],
+        }
+    if isinstance(error, str) and error:
+        return {"type": "System", "name": error, "detail": None}
+    if isinstance(error, Mapping):
+        # Exactly one variant; anything else fails to unpack and stays raw.
+        ((name, detail),) = error.items()
+        if isinstance(name, str) and name:
+            return {"type": "System", "name": name, "detail": _plain_detail(detail)}
+    raise _Undecodable("dispatch error is not decodable")
 
 
 def _read_fresh_snapshot(subtensor: Any, keypair: Any) -> FinalizedMetagraphSnapshot:
@@ -1282,12 +1428,9 @@ class DirectWeightWriter:
                 return "pending", None
             time.sleep(min(CONFIRMATION_POLL_SECONDS, remaining))
 
-    def _locate(
-        self,
-        pending: Mapping[str, Any],
-        *,
-        finalized_number: int | None = None,
-    ) -> tuple[str, DirectSubmissionReceipt | None]:
+    def _signed_intent(self, pending: Mapping[str, Any]) -> tuple[str, int, int]:
+        """Return the journaled hash, era anchor and period, or refuse."""
+
         intent = pending["intent"]
         try:
             extrinsic_hash = _canonical_hash(
@@ -1319,6 +1462,16 @@ class DirectWeightWriter:
             or kwargs != expected_kwargs
         ):
             raise DirectSubmissionContradiction("pending signed intent is invalid")
+        return extrinsic_hash, era_reference, period
+
+    def _locate(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        finalized_number: int | None = None,
+    ) -> tuple[str, DirectSubmissionReceipt | None]:
+        intent = pending["intent"]
+        extrinsic_hash, era_reference, period = self._signed_intent(pending)
 
         if finalized_number is None:
             try:
@@ -1456,15 +1609,305 @@ class DirectWeightWriter:
             if status == "expired" and receipt is not None:
                 return self._finish(state, pending, receipt)
             if status == "failed":
-                pending["phase"] = "finalized_failed"
+                pending["phase"] = PHASE_FINALIZED_FAILED
                 state["pending"] = pending
                 self._write_state(state)
-                raise DirectSubmissionContradiction(
+                raise DirectSubmissionFinalizedFailure(
                     "signed direct extrinsic finalized with failure"
                 )
             raise DirectSubmissionAmbiguous(
                 "signed direct extrinsic is unresolved; recovery will not retry it"
             )
+
+    @contextmanager
+    def _record_locks(self) -> Iterator[None]:
+        """Hold every lock of this signer without waiting, or refuse.
+
+        The process lock proves no validator process runs, the cycle lock is
+        the one the validator's cycles and the updater share, and the journal
+        lock serializes every journal write. A busy lock is a refusal, never a
+        wait, so the record cannot interleave with a validator or an update.
+        """
+
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(self.process_locked())
+                stack.enter_context(
+                    self._exclusive_runtime_lock(
+                        cycle_lock_path_for_state(self.state_path),
+                        label="cycle",
+                        wait=False,
+                    )
+                )
+                stack.enter_context(self._locked())
+            except (DirectValidatorError, OSError) as exc:
+                # A busy lock, or a lock or directory this user cannot open.
+                raise FailedWriteRecordRefused(f"{type(exc).__name__}: {exc}") from exc
+            yield
+
+    def record_finalized_failure(self) -> dict[str, Any]:
+        """Prove that the pending write failed on chain, then record it terminal.
+
+        This is the only way to clear an intent the validator stopped on with
+        ``finalized_failed``. It never signs or broadcasts and needs no key.
+        It refuses unless every lock of this signer is free and the journal
+        holds exactly that stop. It then proves from finalized chain state
+        that the journaled hash is in exactly one block of its fully finalized
+        era, as the exact journaled call, and that the block's events hold one
+        ``System.ExtrinsicFailed`` and no success for that extrinsic index.
+        Only then does the intent move to ``last_attempt`` as
+        ``FINALIZED_FAILED``: its identity and intent unchanged, the pending
+        record's own phase, receipt and error kept beside the proof. Its
+        anchor keeps fencing reuse, and the next write reads a fresh nonce
+        from the chain. Every refusal leaves the journal unchanged.
+
+        A node that cannot serve that history raises
+        ``FailedWriteHistoryUnreadable`` instead of a refusal, also with the
+        journal unchanged.
+        """
+
+        try:
+            missing = self.state_path.is_symlink() or not self.state_path.is_file()
+        except OSError as exc:
+            raise FailedWriteRecordRefused(
+                f"direct writer journal is not accessible: {exc}"
+            ) from exc
+        if missing:
+            raise FailedWriteRecordRefused(
+                "no direct writer journal exists at the canonical path"
+            )
+        with self._record_locks():
+            try:
+                state, record = self._proven_failure_record()
+            except (FailedWriteRecordRefused, FailedWriteHistoryUnreadable):
+                raise
+            except Exception as exc:
+                raise FailedWriteRecordRefused(f"{type(exc).__name__}: {exc}") from exc
+            self._write_state(state)
+        return record
+
+    def _proven_failure_record(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        state = self._read_state()
+        pending = self._pending(state)
+        if pending is None:
+            last = state.get("last_attempt")
+            last_status = last.get("status") if isinstance(last, dict) else None
+            raise FailedWriteRecordRefused(
+                f"journal has no pending intent (last attempt: {last_status})"
+            )
+        if pending["phase"] != PHASE_FINALIZED_FAILED:
+            raise FailedWriteRecordRefused(
+                f"pending intent is {pending['phase']!r}, not "
+                f"{PHASE_FINALIZED_FAILED!r}; only the validator's recovery "
+                "may resolve it"
+            )
+        intent = pending["intent"]
+        if intent.get("validator_hotkey") != str(
+            getattr(self.keypair, "ss58_address", "")
+        ):
+            raise FailedWriteRecordRefused("pending intent names another signer")
+        extrinsic_hash, era_reference, period = self._signed_intent(pending)
+        proof = self._prove_finalized_failure(
+            intent,
+            extrinsic_hash=extrinsic_hash,
+            era_reference=era_reference,
+            period=period,
+        )
+        receipt = DirectSubmissionReceipt(
+            status=STATUS_FINALIZED_FAILED,
+            attempt_id=str(pending["attempt_id"]),
+            extrinsic_hash=extrinsic_hash,
+            block_hash=proof["block_hash"],
+            block_number=proof["block_number"],
+            recovered=True,
+        )
+        state["last_attempt"] = {
+            "attempt_id": pending["attempt_id"],
+            "status": STATUS_FINALIZED_FAILED,
+            "identity": pending["identity"],
+            "intent": intent,
+            "receipt": receipt.as_document(),
+            "failure": {
+                **proof,
+                "pending_phase": pending["phase"],
+                "pending_receipt": pending["receipt"],
+                "pending_error": pending["error"],
+            },
+        }
+        state["pending"] = None
+        record = {
+            "attempt_id": pending["attempt_id"],
+            "extrinsic_hash": extrinsic_hash,
+            "block_number": proof["block_number"],
+            "block_hash": proof["block_hash"],
+            "extrinsic_index": proof["extrinsic_index"],
+            "dispatch_error": proof["dispatch_error"],
+        }
+        return state, record
+
+    @staticmethod
+    def _history(label: str, read: Callable[..., Any], *args: Any, **kwargs: Any):
+        """Run one node read the proof needs; a failed read proves nothing."""
+
+        try:
+            return read(*args, **kwargs)
+        except Exception as exc:
+            raise FailedWriteHistoryUnreadable(
+                f"{label}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def _history_block_hash(self, substrate: Any, block_number: int) -> str:
+        raw = self._history(
+            f"hash of block {block_number}",
+            _uncached_block_hash,
+            substrate,
+            block_number,
+        )
+        if raw is None:
+            raise FailedWriteHistoryUnreadable(
+                f"node has no hash for block {block_number}"
+            )
+        return _canonical_hash(raw, label=f"block {block_number} hash")
+
+    def _prove_finalized_failure(
+        self,
+        intent: Mapping[str, Any],
+        *,
+        extrinsic_hash: str,
+        era_reference: int,
+        period: int,
+    ) -> dict[str, Any]:
+        """Read the failed inclusion from finalized blocks, or refuse.
+
+        Every node read goes through ``_history``: an RPC error, discarded
+        state or a missing block proves nothing and is reported as unreadable
+        history, not as a refusal. What the node does serve is checked. Every
+        height is read uncached, as recovery reads it. The whole era must be
+        finalized, so the scan covers every block the signature could ever
+        land in. An extrinsic's position in its block's list is the
+        ``extrinsic_idx`` of its events, as the pinned client pairs them
+        (``sync_substrate.py:157, 201``), and the error is named from the
+        runtime of that block.
+        """
+
+        substrate = self.subtensor.substrate
+        if self._history_block_hash(substrate, 0) != FINNEY_GENESIS_HASH:
+            raise FailedWriteRecordRefused(
+                "the node's chain is not the pinned Finney genesis"
+            )
+        finalized_number, finalized_hash = self._history(
+            "finalized head", finalized_head, self.subtensor
+        )
+        era_end = era_reference + period - 1
+        if finalized_number < era_end:
+            raise FailedWriteRecordRefused(
+                f"mortal era {era_reference}-{era_end} is not finalized "
+                f"(finalized head {finalized_number})"
+            )
+        matches: list[tuple[int, str, int]] = []
+        for block_number in range(era_reference, era_reference + period):
+            block_hash = self._history_block_hash(substrate, block_number)
+            block = self._history(
+                f"finalized block {block_number}",
+                substrate.get_block,
+                block_hash=block_hash,
+            )
+            if block is None:
+                raise FailedWriteHistoryUnreadable(
+                    f"node does not hold finalized block {block_number}"
+                )
+            extrinsics = block.get("extrinsics") if isinstance(block, Mapping) else None
+            if not isinstance(extrinsics, (list, tuple)):
+                raise FailedWriteRecordRefused(
+                    f"finalized block {block_number} has no readable extrinsics"
+                )
+            for index, item in enumerate(extrinsics):
+                # The pinned client decodes each extrinsic to an object that
+                # carries its hash beside the decoded value.
+                observed = getattr(item, "value", None)
+                if not isinstance(observed, Mapping):
+                    raise FailedWriteRecordRefused(
+                        f"extrinsic {block_number}-{index} is not readable"
+                    )
+                raw_hash = getattr(item, "extrinsic_hash", None)
+                if _canonical_hash(raw_hash, label="era extrinsic") != extrinsic_hash:
+                    continue
+                # The signer is bound twice. The journaled hash is blake2b-256 of
+                # the whole signed extrinsic, address and signature included,
+                # on both sides (scalecodec 0.5.0 GenericExtrinsic.extrinsic_hash,
+                # ``types.c:65655-65656``; signed bytes built at
+                # ``sync_substrate.py:2407-2436``). And the decoded call must
+                # name the journaled hotkey as its address (``_exact_call``).
+                if not self._exact_call(observed, intent):
+                    raise FailedWriteRecordRefused(
+                        "signed hash resolved to a different chain call"
+                    )
+                matches.append((block_number, block_hash, index))
+        if not matches:
+            raise FailedWriteRecordRefused(
+                "signed hash is not in any finalized block of its era"
+            )
+        if len(matches) != 1:
+            raise FailedWriteRecordRefused(
+                "signed hash appears more than once in its finalized era"
+            )
+        block_number, block_hash, index = matches[0]
+        events = self._history(
+            f"events of finalized block {block_number}",
+            substrate.get_events,
+            block_hash=block_hash,
+        )
+        if not isinstance(events, (list, tuple)):
+            raise FailedWriteRecordRefused(
+                f"finalized block {block_number} has no readable events"
+            )
+        outcomes: list[tuple[bool, object]] = []
+        # The pinned client returns the decoded records as plain mappings
+        # (``sync_substrate.py:1563-1582``).
+        for event_record in events:
+            if not isinstance(event_record, Mapping):
+                raise FailedWriteRecordRefused("an event record is not readable")
+            if event_record.get("extrinsic_idx") != index:
+                continue
+            event = event_record.get("event")
+            if not isinstance(event, Mapping):
+                raise FailedWriteRecordRefused("an extrinsic event is not readable")
+            # TransactionFeePaid is deliberately not used to bind the signer:
+            # its ``who`` is the fee payer, and subtensor charges this call to
+            # the signing hotkey's owning coldkey (subtensor ``main`` c004ceb
+            # and ``mainnet`` d3f40e4: ``runtime/src/fee_filters.rs:18``,
+            # ``runtime/src/transaction_payment_wrapper.rs`` validate at
+            # ``:280-301`` on main, ``:264-287`` on mainnet;
+            # ``pallet_transaction_payment`` ``lib.rs:951-954, 960-978`` at the
+            # pinned polkadot-sdk ``cacb431``).
+            kind = (event.get("module_id"), event.get("event_id"))
+            if kind == ("System", "ExtrinsicSuccess"):
+                outcomes.append((True, None))
+            elif kind == ("System", "ExtrinsicFailed"):
+                outcomes.append((False, event.get("attributes")))
+        if any(succeeded for succeeded, _attributes in outcomes):
+            raise FailedWriteRecordRefused(
+                f"extrinsic {block_number}-{index} dispatch succeeded"
+            )
+        if len(outcomes) != 1:
+            raise FailedWriteRecordRefused(
+                f"extrinsic {block_number}-{index} has {len(outcomes)} "
+                "ExtrinsicFailed events, not one"
+            )
+        runtime = self._history(
+            f"runtime of finalized block {block_number}",
+            substrate.init_runtime,
+            block_hash=block_hash,
+        )
+        return {
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "extrinsic_index": index,
+            "dispatch_error": _decoded_dispatch_error(
+                outcomes[0][1], getattr(runtime, "metadata", None)
+            ),
+            "finalized_head": [finalized_number, finalized_hash],
+        }
 
     def submit(
         self,
@@ -1662,10 +2105,10 @@ class DirectWeightWriter:
                 )
                 return self._finish(state, pending, located)
             if status == "failed":
-                pending["phase"] = "finalized_failed"
+                pending["phase"] = PHASE_FINALIZED_FAILED
                 state["pending"] = pending
                 self._write_state(state)
-                raise DirectSubmissionContradiction(
+                raise DirectSubmissionFinalizedFailure(
                     "direct extrinsic finalized with failure"
                 )
             pending["phase"] = "ambiguous"
@@ -1679,8 +2122,11 @@ class DirectWeightWriter:
 __all__ = [
     "DirectSubmissionAmbiguous",
     "DirectSubmissionContradiction",
+    "DirectSubmissionFinalizedFailure",
     "DirectSubmissionReceipt",
     "DirectWeightWriter",
+    "FailedWriteHistoryUnreadable",
+    "FailedWriteRecordRefused",
     "BROADCAST_ERA_MARGIN_BLOCKS",
     "BROADCAST_WATCH_MAX_RETRIES",
     "BROADCAST_WATCH_RETRY_TIMEOUT_SECONDS",
@@ -1692,7 +2138,9 @@ __all__ = [
     "DIRECT_STATE_SCOPE",
     "STATE_SCHEMA",
     "STATUS_CONFIRMED",
+    "PHASE_FINALIZED_FAILED",
     "STATUS_EXPIRED",
+    "STATUS_FINALIZED_FAILED",
     "STATUS_RECOVERED",
     "bound_rpc_waits",
     "canonical_state_path",

@@ -32,7 +32,22 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _CHAIN_HASH = re.compile(r"0x[0-9a-f]{64}")
 _ATTEMPT_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _FINALIZED_RESULTS = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
-_TERMINAL_RESULTS = _FINALIZED_RESULTS | {"EXPIRED_WITHOUT_INCLUSION"}
+_FINALIZED_FAILED = "FINALIZED_FAILED"
+_TERMINAL_RESULTS = _FINALIZED_RESULTS | {
+    "EXPIRED_WITHOUT_INCLUSION",
+    _FINALIZED_FAILED,
+}
+_PENDING_PHASE = re.compile(r"[a-z_]{1,40}")
+_PHASE_FINALIZED_FAILED = "finalized_failed"
+_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
+_FINALIZED_FAILED_ACTION = (
+    "A weight write was included in a finalized block and failed on chain, and "
+    "the validator stopped. Do not delete or edit the journal. Run "
+    "`cathedral-validator record-failed-write` as the validator user, as "
+    'docs/AUTO_UPDATE.md "Failed weight write" shows. It proves the failure '
+    "from finalized chain state before it records anything. Then start "
+    "cathedral-validator-direct.service."
+)
 _ELIGIBILITY_RESULTS = frozenset({"NO_PERMIT", "NOT_REGISTERED"})
 _ELIGIBILITY_STATUS = re.compile(
     r"(NO_PERMIT|NOT_REGISTERED) hotkey=([1-9A-HJ-NP-Za-km-z]{1,64})"
@@ -322,13 +337,10 @@ def _last_attempt_summary(
 ) -> tuple[str | None, int | None]:
     if last is None:
         return None, None
-    if not isinstance(last, dict) or set(last) != {
-        "attempt_id",
-        "status",
-        "identity",
-        "intent",
-        "receipt",
-    }:
+    fields = {"attempt_id", "status", "identity", "intent", "receipt"}
+    if isinstance(last, dict) and last.get("status") == _FINALIZED_FAILED:
+        fields.add("failure")
+    if not isinstance(last, dict) or set(last) != fields:
         raise StatusUnavailable("direct journal last attempt is invalid")
     attempt_id = last["attempt_id"]
     result = last["status"]
@@ -406,6 +418,28 @@ def _last_attempt_summary(
 
     block_number = receipt["block_number"]
     block_hash = receipt["block_hash"]
+    if result == _FINALIZED_FAILED:
+        failure = last["failure"]
+        if (
+            not _nonnegative_int(block_number)
+            or not isinstance(block_hash, str)
+            or _CHAIN_HASH.fullmatch(block_hash) is None
+            or receipt["recovered"] is not True
+            or receipt["confirmation_heads"] != []
+            or not (
+                intent["era_reference_block"]
+                <= block_number
+                < intent["era_reference_block"] + intent["mortal_period_blocks"]
+            )
+            or not isinstance(failure, dict)
+            or failure.get("block_number") != block_number
+            or failure.get("block_hash") != block_hash
+            or not _nonnegative_int(failure.get("extrinsic_index"))
+            or not isinstance(failure.get("dispatch_error"), dict)
+            or failure.get("pending_phase") != _PHASE_FINALIZED_FAILED
+        ):
+            raise StatusUnavailable("direct journal failure record is invalid")
+        return result, block_number
     expected_recovered = result == "RECOVERED_CONFIRMED"
     heads = receipt["confirmation_heads"]
     if (
@@ -434,6 +468,31 @@ def _last_attempt_summary(
     if heads[0][1] != block_hash:
         raise StatusUnavailable("direct journal receipt is invalid")
     return result, block_number
+
+
+def _pending_phase(pending: object, *, expected_identity: str) -> str | None:
+    """Name the pending phase; prove the intent's integrity before a stop."""
+
+    if pending is None:
+        return None
+    # _direct_summary has already refused a pending intent that is not an object.
+    phase = pending.get("phase")
+    if not isinstance(phase, str) or _PENDING_PHASE.fullmatch(phase) is None:
+        raise StatusUnavailable("direct journal pending phase is invalid")
+    if phase != _PHASE_FINALIZED_FAILED:
+        return phase
+    identity = pending.get("identity")
+    intent = pending.get("intent")
+    if (
+        set(pending)
+        != {"attempt_id", "phase", "identity", "intent", "receipt", "error"}
+        or not isinstance(identity, dict)
+        or not isinstance(intent, dict)
+        or intent.get("validator_hotkey") != expected_identity
+        or pending.get("attempt_id") != _attempt_id(identity, intent)
+    ):
+        raise StatusUnavailable("direct journal failed intent is invalid")
+    return phase
 
 
 def _direct_summary(identity: str) -> dict[str, Any]:
@@ -473,6 +532,7 @@ def _direct_summary(identity: str) -> dict[str, Any]:
     status, block_number = _last_attempt_summary(last, expected_identity=identity)
     return {
         "pending": pending is not None,
+        "pending_phase": _pending_phase(pending, expected_identity=identity),
         "last_result": status,
         "block_number": block_number,
         "recorded_unix": journal_mtime_unix,
@@ -526,7 +586,14 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
     )
     if eligibility is not None:
         report["eligibility"] = eligibility
-    if not report["service_active"]:
+    # Precedence: a pending write that failed on chain outranks every other
+    # state, NO_PERMIT and NOT_REGISTERED included. The validator has stopped
+    # on it and only the record command clears it, while an eligibility line
+    # describes a cycle that can no longer write until that record exists.
+    if direct["pending_phase"] == _PHASE_FINALIZED_FAILED:
+        report["result"] = _FINALIZED_FAILED_STOPPED
+        report["action"] = _FINALIZED_FAILED_ACTION
+    elif not report["service_active"]:
         report["result"] = "NEEDS_REVIEW"
         report["action"] = (
             "Inspect cathedral-validator-direct.service logs. Do not delete its journal."

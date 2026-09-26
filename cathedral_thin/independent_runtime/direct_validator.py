@@ -16,6 +16,7 @@ import json
 import math
 import os
 import socket
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -68,6 +69,18 @@ DEFAULT_INTERVAL_SECONDS = 1500.0
 STATUS_NO_PERMIT = "NO_PERMIT"
 STATUS_NOT_REGISTERED = "NOT_REGISTERED"
 _CYCLE_STATUS_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+# Exit codes of a deliberate stop. The unit's RestartPreventExitStatus= lists
+# both, so systemd never restarts either one.
+EXIT_CONTRADICTION_STOPPED = 2
+# The exact signed weight call was included in a finalized block and its
+# dispatch failed. Only the record-failed-write command clears it.
+EXIT_FINALIZED_FAILED_STOPPED = 3
+# The unit sets this to "3" to declare that it keeps exit 3 stopped. A unit
+# from an older bootstrap keeps only exit 2 stopped and would restart exit 3
+# every RestartSec, so without the declaration this stop exits 2 as well.
+FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
+STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
+RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -168,6 +181,29 @@ def _print_event(event: dict[str, Any]) -> None:
     """Write one cycle event as its own line of the operator stream."""
 
     print(json.dumps(event, sort_keys=True, default=str), flush=True)
+
+
+def _stop_on_finalized_failure(exc: BaseException) -> int:
+    """Report a failed on-chain write and name the only command that clears it."""
+
+    print(
+        json.dumps(
+            {
+                "status": STATUS_FINALIZED_FAILED_STOPPED,
+                "error": str(exc),
+                "action": (
+                    "prove and record it with `cathedral-validator "
+                    f"{RECORD_FAILED_WRITE_COMMAND}`, then start the service; "
+                    "see docs/AUTO_UPDATE.md"
+                ),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if os.environ.get(FAILED_WRITE_EXIT_CODE_ENV) == str(EXIT_FINALIZED_FAILED_STOPPED):
+        return EXIT_FINALIZED_FAILED_STOPPED
+    return EXIT_CONTRADICTION_STOPPED
 
 
 def _strict_bool(value: Any, *, label: str) -> bool:
@@ -742,9 +778,23 @@ def run_direct_cycle(
         )
 
 
+def _add_network_argument(parser: argparse.ArgumentParser) -> None:
+    """The one --network option, shared with the record-failed-write command."""
+
+    parser.add_argument("--network", default="finney")
+
+
+def _pinned_network(value: object) -> str:
+    """Refuse any network the direct validator is not pinned to."""
+
+    if value != "finney":
+        raise SystemExit("direct validator is pinned to the Finney network")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cathedral-validator")
-    parser.add_argument("--network", default="finney")
+    _add_network_argument(parser)
     parser.add_argument("--wallet-name", default="validator")
     parser.add_argument("--wallet-hotkey", default="default")
     parser.add_argument("--wallet-path", type=Path)
@@ -786,11 +836,17 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    options = _parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
+        # The operator's recovery command ships in the same signed release
+        # entrypoint. It loads no key and never signs or broadcasts.
+        from .failed_write_recovery import main as record_failed_write
+
+        return record_failed_write(arguments[1:])
+    options = _parser().parse_args(arguments)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
-    if options.network != "finney":
-        raise SystemExit("direct validator is pinned to the Finney network")
+    _pinned_network(options.network)
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -827,6 +883,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .direct_writer import (
         DirectSubmissionAmbiguous,
         DirectSubmissionContradiction,
+        DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
@@ -869,6 +926,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         startup_ambiguity: DirectSubmissionAmbiguous | None = None
         try:
             startup_recovery = writer.recover()
+        except DirectSubmissionFinalizedFailure as exc:
+            return _stop_on_finalized_failure(exc)
         except DirectSubmissionContradiction as exc:
             print(
                 json.dumps(
@@ -877,7 +936,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            return 2
+            return EXIT_CONTRADICTION_STOPPED
         except DirectSubmissionAmbiguous as exc:
             startup_recovery = None
             startup_ambiguity = exc
@@ -953,6 +1012,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report_recovery=_print_event,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
+            except DirectSubmissionFinalizedFailure as exc:
+                return _stop_on_finalized_failure(exc)
             except DirectSubmissionContradiction as exc:
                 print(
                     json.dumps(
@@ -961,7 +1022,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     flush=True,
                 )
-                return 2
+                return EXIT_CONTRADICTION_STOPPED
             except ValidatorNotEligible as exc:
                 # A missing registration or permit is the chain's answer, not
                 # a fault, so it gets its own status instead of NOT_PROVEN and
@@ -995,6 +1056,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "DIRECT_PLAN_SCHEMA",
+    "EXIT_CONTRADICTION_STOPPED",
+    "EXIT_FINALIZED_FAILED_STOPPED",
+    "FAILED_WRITE_EXIT_CODE_ENV",
+    "RECORD_FAILED_WRITE_COMMAND",
+    "STATUS_FINALIZED_FAILED_STOPPED",
     "DirectValidatorError",
     "DirectWeightPlan",
     "FinalizedMetagraphSnapshot",

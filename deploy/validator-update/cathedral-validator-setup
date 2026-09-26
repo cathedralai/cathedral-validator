@@ -734,7 +734,8 @@ def configure(
         # updater starts the writer before it returns, so an absent marker
         # only proves that setup was interrupted afterwards; it cannot prove
         # the writer was not later stopped on purpose, including by a
-        # contradiction stop that RestartPreventExitStatus=2 keeps stopped.
+        # contradiction (exit 2) or failed on-chain write (exit 3) stop that
+        # RestartPreventExitStatus= keeps stopped.
         raise SetupRefused("existing direct validator is stopped and needs review")
 
     service_gid = _service_gid()

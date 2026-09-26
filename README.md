@@ -132,6 +132,12 @@ not replace finalized chain verification. The service log is
   validator permit, at the latest finalized block, so nothing was written. The
   validator keeps running, checks again every cycle, and starts writing on its
   own once the permit exists. The status summary reports the same result.
+- `FINALIZED_FAILED_STOPPED` means a weight write was included in a finalized
+  block and failed on chain. The validator stops and stays stopped. Clear it
+  only with `cathedral-validator record-failed-write`, which proves the
+  failure from finalized chain state before it records anything, then start
+  the service. The exact steps are in
+  [Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write).
 
 Never delete or replace the journal to clear an error. The journal location,
 pause and resume, and the recovery rules are in

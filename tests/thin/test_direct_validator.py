@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import fcntl
+import importlib.util
 import json
 import os
 import socket
 import stat
 from contextlib import contextmanager
 from dataclasses import replace
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +31,7 @@ from cathedral_thin.independent.constants import (
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime import direct_validator as runtime
 from cathedral_thin.independent_runtime import direct_writer as writer_runtime
+from cathedral_thin.independent_runtime import failed_write_recovery as record_cli
 from cathedral_thin.independent_runtime import qvl as qvl_runtime
 from cathedral_thin.independent_runtime.axon import ServingAxon
 from cathedral_thin.independent_runtime.direct_contract import (
@@ -44,10 +48,15 @@ from cathedral_thin.independent_runtime.direct_validator import (
 from cathedral_thin.independent_runtime.direct_writer import (
     DirectSubmissionAmbiguous,
     DirectSubmissionContradiction,
+    DirectSubmissionFinalizedFailure,
     DirectWeightWriter,
+    FailedWriteHistoryUnreadable,
+    FailedWriteRecordRefused,
+    PHASE_FINALIZED_FAILED,
     STATE_SCHEMA,
     STATUS_CONFIRMED,
     STATUS_EXPIRED,
+    STATUS_FINALIZED_FAILED,
     STATUS_RECOVERED,
     canonical_state_path,
 )
@@ -3929,3 +3938,1184 @@ def test_direct_runtime_has_no_relay_publisher_or_cybergym_dependency() -> None:
 def test_validator_and_writer_import_without_a_cycle() -> None:
     assert runtime.DirectWeightPlan is DirectWeightPlan
     assert writer_runtime.DirectWeightPlan is DirectWeightPlan
+
+
+# A weight write included in a finalized block whose dispatch failed (V-07).
+# The validator stops with its own exit code, only the operator's record
+# command clears the journal, and only after it proves the failure from
+# finalized chain state. The next cycle then writes fresh weights.
+
+ROOT = Path(__file__).resolve().parents[2]
+ERA_END = SIGN_HEAD + MORTAL_PERIOD_BLOCKS - 1
+WEIGHT_CALL_INDEX = 2
+FAILED_PALLET_INDEX = 7
+FAILED_ERROR_INDEX = 15
+FAILED_ERROR_NAME = "NeuronNoValidatorPermit"
+FAILED_ERROR_DOCS = ["The validator has no permit."]
+OTHER_GENESIS_HASH = "0x" + "7" * 64
+VALIDATOR_COLDKEY = "5ValidatorColdkey"
+VALIDATOR_ARGS = [
+    "--qvl",
+    "/reviewed/qvl",
+    "--snp-policy",
+    "/reviewed/snp-policy.json",
+    "--snpguest",
+    "/reviewed/snpguest",
+    f"--expected-hotkey={VALIDATOR}",
+    "--confirm-direct-write",
+]
+RECORD_ARGS = [runtime.RECORD_FAILED_WRITE_COMMAND, f"--expected-hotkey={VALIDATOR}"]
+
+
+def _status_tool():
+    name = "cathedral_test_direct_writer_status"
+    path = ROOT / "deploy" / "validator-update" / "cathedral-validator-status"
+    spec = importlib.util.spec_from_file_location(
+        name, path, loader=SourceFileLoader(name, str(path))
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FailedExecutionReceipt:
+    is_success = False
+    error_message = {"type": "Module", "name": FAILED_ERROR_NAME, "docs": []}
+
+
+class ModuleErrorMetadata:
+    """The metadata lookup the pinned client names a module error with.
+
+    Like the pinned metadata, it finds a pallet by comparing its index for
+    equality and then indexes that pallet's errors like a list, so ``True``
+    finds pallet 1 and ``-1`` finds the last error.
+    """
+
+    def __init__(self, name: str | None = FAILED_ERROR_NAME) -> None:
+        self.name = name
+        self.lookup_error: Exception | None = None
+        self.lookups: list[tuple[object, object]] = []
+
+    def get_module_error(self, *, module_index: object, error_index: object):
+        self.lookups.append((module_index, error_index))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        pallets = {
+            1: [SimpleNamespace(name="OtherPalletError", docs=[])] * 16,
+            FAILED_PALLET_INDEX: [
+                *(
+                    SimpleNamespace(name=f"Earlier{index}", docs=[])
+                    for index in range(FAILED_ERROR_INDEX)
+                ),
+                SimpleNamespace(name=self.name, docs=list(FAILED_ERROR_DOCS)),
+            ],
+        }
+        for index, errors in pallets.items():
+            if index == module_index:
+                return errors[error_index]
+        return None
+
+
+def event_record(
+    index: int | None,
+    module_id: str,
+    event_id: str,
+    attributes: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """One decoded System.Events record, in the pinned client's shape."""
+
+    body = {"module_id": module_id, "event_id": event_id, "attributes": attributes}
+    return {
+        "phase": "ApplyExtrinsic" if index is not None else "Finalization",
+        "extrinsic_idx": index,
+        "event": body,
+        "event_index": "0000",
+        **body,
+        "topics": [],
+    }
+
+
+class FailedWriteSubstrate(WriterSubstrate):
+    """The fake node, where the weight call lands and its dispatch fails.
+
+    Two other extrinsics come first in its block and each has its own success
+    event, so only the extrinsic index pairs the right outcome with the write.
+    ``validator_sees_failure`` is what the validator's recovery reads through
+    the pinned client's receipt; ``dispatch`` is what the block's events hold.
+    A real node keeps the two in step. Refusal tests move them apart. The
+    remaining knobs model a node that cannot serve history: an RPC error, a
+    missing block or hash, or state it has already discarded.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.validator_sees_failure = True
+        self.dispatch = "failed"
+        self.dispatch_error: object = {
+            "Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}
+        }
+        self.duplicate_block: int | None = None
+        self.unreadable_block: int | None = None
+        self.junk_block: int | None = None
+        self.missing_block: int | None = None
+        self.failing_block: int | None = None
+        self.bad_hash_block: int | None = None
+        self.unreadable_extrinsic_block: int | None = None
+        # Heights whose chain_getBlockHash fails, answers null, or answers junk.
+        self.failing_hashes: set[int] = set()
+        self.missing_hashes: set[int] = set()
+        self.malformed_hashes: set[int] = set()
+        self.runtime_error: Exception | None = None
+        # Subtensor charges this call to the hotkey's owning coldkey, so the
+        # fee event names the coldkey, not the signer.
+        self.fee_payers: list[object] = [VALIDATOR_COLDKEY]
+        self.signer_address = VALIDATOR
+        self.events_mode = "list"
+        self.extra_events: list[object] = []
+        self.genesis = FINNEY_GENESIS_HASH
+        self.metadata = ModuleErrorMetadata()
+        self.block_reads: list[int] = []
+        self.event_reads: list[object] = []
+        self.runtime_reads: list[object] = []
+
+    def block_hash(self, block: int) -> str:
+        if block == 0:
+            return self.genesis
+        return super().block_hash(block)
+
+    def rpc_request(self, method: str, params: list[object]) -> dict[str, object]:
+        (block,) = params
+        if block in self.failing_hashes:
+            raise SubstrateRequestException(f"chain_getBlockHash {block} failed")
+        if block in self.missing_hashes:
+            return {"jsonrpc": "2.0", "result": None}
+        if block in self.malformed_hashes:
+            return {"jsonrpc": "2.0", "result": "0x1234"}
+        return super().rpc_request(method, params)
+
+    def get_block(self, *, block_hash: str) -> dict[str, object] | None:
+        if block_hash in self.orphans.values():
+            # The node still serves the orphan, which never held this write.
+            self.block_reads.append(-1)
+            return {"extrinsics": []}
+        block_number = self.get_block_number(block_hash)
+        self.block_reads.append(block_number)
+        if block_number == self.failing_block:
+            raise SubstrateRequestException(f"block {block_number} is unavailable")
+        if block_number == self.missing_block:
+            return None
+        if block_number == self.unreadable_block:
+            return {"extrinsics": None}
+        if block_number == self.junk_block:
+            return "junk"
+        extrinsics: list[object] = []
+        if block_number == self.bad_hash_block:
+            extrinsics.append(Extrinsic({"call": {}}, extrinsic_hash="not-a-hash"))
+        if block_number == self.unreadable_extrinsic_block:
+            extrinsics.append(Extrinsic("0x0400", extrinsic_hash="0x" + "3" * 64))
+        if self.included and block_number in {
+            self.inclusion_block,
+            self.duplicate_block,
+        }:
+            (weight_call,) = super().get_block(
+                block_hash=self.block_hash(self.inclusion_block)
+            )["extrinsics"]
+            weight_call = Extrinsic(
+                {**weight_call.value, "address": self.signer_address},
+                extrinsic_hash=weight_call.extrinsic_hash,
+            )
+            extrinsics = [
+                Extrinsic(
+                    {"call": {"call_module": "Timestamp", "call_function": "set"}},
+                    extrinsic_hash="0x" + "1" * 64,
+                ),
+                Extrinsic(
+                    {
+                        "address": MINER_ONE,
+                        "call": {"call_module": "Balances", "call_function": "x"},
+                    },
+                    extrinsic_hash="0x" + "2" * 64,
+                ),
+                weight_call,
+            ]
+        return {"extrinsics": extrinsics}
+
+    def retrieve_extrinsic_by_hash(self, block_hash: str, extrinsic_hash: str):
+        receipt = super().retrieve_extrinsic_by_hash(block_hash, extrinsic_hash)
+        return FailedExecutionReceipt() if self.validator_sees_failure else receipt
+
+    def get_events(self, block_hash: str | None = None):
+        self.event_reads.append(block_hash)
+        if self.events_mode == "discarded":
+            # What a node that prunes state answers for an old block.
+            raise StateDiscardedError(block_hash)
+        if self.events_mode == "not_list":
+            return {"events": []}
+        info = {"weight": {"ref_time": 1, "proof_size": 0}, "pays_fee": "No"}
+        failed = event_record(
+            WEIGHT_CALL_INDEX,
+            "System",
+            "ExtrinsicFailed",
+            {"dispatch_error": self.dispatch_error, "dispatch_info": info},
+        )
+        succeeded = event_record(
+            WEIGHT_CALL_INDEX, "System", "ExtrinsicSuccess", {"dispatch_info": info}
+        )
+        outcome = {
+            "failed": [failed],
+            "succeeded": [succeeded],
+            "failed_and_succeeded": [failed, succeeded],
+            "no_outcome": [],
+            "failed_twice": [failed, failed],
+        }[self.dispatch]
+        return [
+            event_record(0, "System", "ExtrinsicSuccess", {"dispatch_info": info}),
+            event_record(1, "Balances", "Transfer", {}),
+            event_record(
+                1,
+                "TransactionPayment",
+                "TransactionFeePaid",
+                {"who": MINER_ONE, "actual_fee": 1, "tip": 0},
+            ),
+            event_record(1, "System", "ExtrinsicSuccess", {"dispatch_info": info}),
+            *(
+                event_record(
+                    WEIGHT_CALL_INDEX,
+                    "TransactionPayment",
+                    "TransactionFeePaid",
+                    {"who": payer, "actual_fee": 0, "tip": 0},
+                )
+                for payer in self.fee_payers
+            ),
+            *outcome,
+            *self.extra_events,
+            event_record(None, "System", "Remarked", {}),
+        ]
+
+    def init_runtime(self, block_hash: str | None = None, block_id: int | None = None):
+        assert block_id is None
+        self.runtime_reads.append(block_hash)
+        if self.runtime_error is not None:
+            raise self.runtime_error
+        return SimpleNamespace(metadata=self.metadata)
+
+
+def failed_write_writer(tmp_path: Path, monkeypatch):
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    substrate = FailedWriteSubstrate()
+    substrate.owner = subtensor
+    substrate.expected_uids = subtensor.substrate.expected_uids
+    substrate.expected_weights = subtensor.substrate.expected_weights
+    subtensor.substrate = substrate
+    return instance, subtensor, planned
+
+
+def stopped_on_failed_write(tmp_path: Path, monkeypatch):
+    """Journal a real included-and-failed write, then finalize its whole era."""
+
+    instance, subtensor, planned = failed_write_writer(tmp_path, monkeypatch)
+    with pytest.raises(DirectSubmissionFinalizedFailure, match="finalized with"):
+        submit_before_deadline(instance, planned)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"]["phase"] == PHASE_FINALIZED_FAILED
+    subtensor.substrate.finalized_number = ERA_END + 1
+    return instance, subtensor, planned
+
+
+def assert_record_refused(instance: DirectWeightWriter, subtensor, match: str):
+    before = instance.state_path.read_bytes()
+    with pytest.raises(FailedWriteRecordRefused, match=match):
+        instance.record_finalized_failure()
+    assert instance.state_path.read_bytes() == before
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+
+
+def _cli_with_real_writer(monkeypatch, instance, subtensor, anchor: list):
+    """Run the real validator CLI and record command over the fake chain."""
+
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    # What the shipped unit declares: it keeps exit 3 stopped.
+    monkeypatch.setenv(runtime.FAILED_WRITE_EXIT_CODE_ENV, "3")
+    monkeypatch.setattr(
+        runtime,
+        "load_direct_validator_verifier",
+        lambda _path: SimpleNamespace(digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "ComputeAdapter",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+    )
+    monkeypatch.setattr(runtime, "load_snp_policy", lambda _path: object())
+    monkeypatch.setattr(runtime, "SnpProductionVerifier", lambda **_kwargs: object())
+    wallets: list[str] = []
+
+    def load_wallet(*_args, **_kwargs):
+        wallets.append("validator")
+        return SimpleNamespace(hotkey=FakeKeypair())
+
+    monkeypatch.setattr(runtime, "make_wallet", load_wallet)
+    monkeypatch.setattr(runtime, "make_subtensor", lambda *_a, **_k: subtensor)
+    monkeypatch.setattr(record_cli, "make_subtensor", lambda *_a, **_k: subtensor)
+    # The validator gets the test's writer; the record command builds its own
+    # real writer from the public hotkey alone.
+    monkeypatch.setattr(writer_runtime, "DirectWeightWriter", lambda **_k: instance)
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: anchor[0]
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: round_result(machine_row("1")),
+    )
+    return wallets
+
+
+def _lines(capsys) -> list[dict[str, object]]:
+    return [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+
+def test_failed_write_stops_then_a_proven_record_lets_the_next_cycle_write(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, planned = failed_write_writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    anchor = [planned.snapshot]
+    wallets = _cli_with_real_writer(monkeypatch, instance, subtensor, anchor)
+    ready: list[str] = []
+    monkeypatch.setattr(runtime, "_notify_ready", lambda: ready.append("READY"))
+
+    # 1. The write lands in a finalized block and fails: the cycle stops the
+    #    validator with the failed-write exit code, not the contradiction one.
+    assert runtime.main(VALIDATOR_ARGS) == runtime.EXIT_FINALIZED_FAILED_STOPPED == 3
+    (stop,) = _lines(capsys)
+    assert stop["status"] == runtime.STATUS_FINALIZED_FAILED_STOPPED
+    assert "record-failed-write" in stop["action"]
+    journal = json.loads(instance.state_path.read_text(encoding="ascii"))
+    pending = journal["pending"]
+    # The on-disk phase every reader keys on, including the status tool.
+    assert pending["phase"] == PHASE_FINALIZED_FAILED == "finalized_failed"
+    assert substrate.signed == [(SIGN_HEAD, 4)]
+    assert ready == ["READY"]
+
+    # 2. A restart finds the same stop before it reports ready.
+    assert runtime.main(VALIDATOR_ARGS) == runtime.EXIT_FINALIZED_FAILED_STOPPED
+    assert [line["status"] for line in _lines(capsys)] == [
+        runtime.STATUS_FINALIZED_FAILED_STOPPED
+    ]
+    assert ready == ["READY"]
+    stopped = instance.state_path.read_bytes()
+    assert _status_tool()._pending_phase(pending, expected_identity=VALIDATOR) == (
+        PHASE_FINALIZED_FAILED
+    )
+
+    # 3. The record command refuses while the validator or an update holds a
+    #    lock, and while the era is not fully finalized. It changes nothing.
+    wallets_before = list(wallets)
+    for held, message in (
+        (instance.cycle_locked, "cycle lock"),
+        (instance.process_locked, "process lock"),
+    ):
+        with held():
+            assert runtime.main(RECORD_ARGS) == 1
+        (refused,) = _lines(capsys)
+        assert refused["status"] == record_cli.STATUS_REFUSED
+        assert message in refused["error"]
+        assert instance.state_path.read_bytes() == stopped
+    assert substrate.finalized_number < ERA_END
+    assert runtime.main(RECORD_ARGS) == 1
+    (refused,) = _lines(capsys)
+    assert refused["error"] == (
+        f"mortal era {SIGN_HEAD}-{ERA_END} is not finalized "
+        f"(finalized head {substrate.finalized_number})"
+    )
+    assert instance.state_path.read_bytes() == stopped
+
+    # 4. Once the era is finalized it proves the failure and records it. The
+    #    record command bounds its own client and never loads a key.
+    substrate.finalized_number = ERA_END + 1
+    substrate.retry_timeout, substrate.max_retries = 60.0, 5
+    assert runtime.main(RECORD_ARGS) == 0
+    (recorded,) = _lines(capsys)
+    dispatch_error = {
+        "type": "Module",
+        "pallet_index": FAILED_PALLET_INDEX,
+        "error_index": FAILED_ERROR_INDEX,
+        "name": FAILED_ERROR_NAME,
+        "docs": FAILED_ERROR_DOCS,
+    }
+    assert recorded == {
+        "status": record_cli.STATUS_RECORDED,
+        "attempt_id": pending["attempt_id"],
+        "extrinsic_hash": EXTRINSIC_HASH,
+        "block_number": ANCHOR_NUMBER + 2,
+        "block_hash": INCLUSION_HASH,
+        "extrinsic_index": WEIGHT_CALL_INDEX,
+        "dispatch_error": dispatch_error,
+    }
+    assert VALIDATOR not in json.dumps(recorded)
+    assert (substrate.retry_timeout, substrate.max_retries) == (
+        writer_runtime.DIRECT_RPC_RETRY_TIMEOUT_SECONDS,
+        writer_runtime.DIRECT_RPC_MAX_RETRIES,
+    )
+    assert wallets == wallets_before
+    assert substrate.event_reads == [INCLUSION_HASH]
+    assert substrate.runtime_reads == [INCLUSION_HASH]
+    assert substrate.metadata.lookups == [(FAILED_PALLET_INDEX, FAILED_ERROR_INDEX)]
+    journal = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert journal["pending"] is None
+    assert journal["last_attempt"] == {
+        "attempt_id": pending["attempt_id"],
+        "status": STATUS_FINALIZED_FAILED,
+        "identity": pending["identity"],
+        "intent": pending["intent"],
+        "receipt": {
+            "status": STATUS_FINALIZED_FAILED,
+            "attempt_id": pending["attempt_id"],
+            "extrinsic_hash": EXTRINSIC_HASH,
+            "block_hash": INCLUSION_HASH,
+            "block_number": ANCHOR_NUMBER + 2,
+            "recovered": True,
+            "confirmation_heads": [],
+        },
+        "failure": {
+            "block_number": ANCHOR_NUMBER + 2,
+            "block_hash": INCLUSION_HASH,
+            "extrinsic_index": WEIGHT_CALL_INDEX,
+            "dispatch_error": dispatch_error,
+            "finalized_head": [ERA_END + 1, substrate.block_hash(ERA_END + 1)],
+            "pending_phase": PHASE_FINALIZED_FAILED,
+            "pending_receipt": None,
+            "pending_error": None,
+        },
+    }
+    # The status tool accepts the record the writer wrote.
+    assert _status_tool()._last_attempt_summary(
+        journal["last_attempt"], expected_identity=VALIDATOR
+    ) == (STATUS_FINALIZED_FAILED, ANCHOR_NUMBER + 2)
+    # Nothing was signed or sent again.
+    assert substrate.signed == [(SIGN_HEAD, 4)]
+    assert substrate.broadcast == [EXTRINSIC_HASH]
+
+    # 5. The next cycle signs fresh weights at a newer anchor and sign head,
+    #    with the nonce the chain reports now, and confirms them.
+    substrate.validator_sees_failure = False
+    substrate.sign_head = substrate.best_number = ERA_END + 2
+    substrate.nonce = 5
+    substrate.extrinsic_hash = SECOND_EXTRINSIC_HASH
+    substrate.inclusion_block = ERA_END + 3
+    substrate.finalized_number = substrate.inclusion_block + 2
+    anchor[0] = replace(
+        snapshot(ERA_END + 1), block_hash=substrate.block_hash(ERA_END + 1)
+    )
+    assert runtime.main([*VALIDATOR_ARGS, "--once"]) == 0
+    (written,) = _lines(capsys)
+    assert written["status"] == STATUS_CONFIRMED
+    assert written["receipt"]["extrinsic_hash"] == SECOND_EXTRINSIC_HASH
+    assert substrate.signed == [(SIGN_HEAD, 4), (ERA_END + 2, 5)]
+    assert substrate.broadcast == [EXTRINSIC_HASH, SECOND_EXTRINSIC_HASH]
+    journal = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert journal["pending"] is None
+    assert journal["last_attempt"]["status"] == STATUS_CONFIRMED
+    assert journal["last_attempt"]["identity"]["anchor"]["block_number"] == (
+        ERA_END + 1
+    )
+    assert journal["last_attempt"]["intent"]["nonce"] == 5
+    assert journal["last_attempt"]["intent"]["era_reference_block"] == ERA_END + 2
+
+
+def test_record_reads_each_era_height_past_a_cached_orphan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = failed_write_writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    # Signing caches the best head by number; that block is then reorged out
+    # and the write lands in the canonical block at the same height.
+    substrate.best_number = substrate.inclusion_block
+    substrate.best_orphaned = True
+    with pytest.raises(DirectSubmissionFinalizedFailure):
+        submit_before_deadline(instance, planned)
+    assert substrate.get_block_hash(substrate.inclusion_block) == ORPHAN_HASH
+    substrate.finalized_number = ERA_END + 1
+
+    record = instance.record_finalized_failure()
+
+    assert (record["block_number"], record["block_hash"]) == (
+        substrate.inclusion_block,
+        INCLUSION_HASH,
+    )
+    assert -1 not in substrate.block_reads
+
+
+@pytest.mark.parametrize("declared", (None, "2", "4", " 3"))
+def test_failed_write_stop_exits_two_unless_the_unit_keeps_three_stopped(
+    tmp_path: Path, monkeypatch, capsys, declared: str | None
+) -> None:
+    # A unit from an older bootstrap keeps only exit 2 stopped; exit 3 would
+    # restart every RestartSec. The stop line still names the failed write.
+    instance, subtensor, planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    _cli_with_real_writer(monkeypatch, instance, subtensor, [planned.snapshot])
+    if declared is None:
+        monkeypatch.delenv(runtime.FAILED_WRITE_EXIT_CODE_ENV)
+    else:
+        monkeypatch.setenv(runtime.FAILED_WRITE_EXIT_CODE_ENV, declared)
+    monkeypatch.setattr(
+        runtime, "_notify_ready", lambda: pytest.fail("stopped writer reported ready")
+    )
+
+    assert runtime.main(VALIDATOR_ARGS) == runtime.EXIT_CONTRADICTION_STOPPED
+    (stop,) = _lines(capsys)
+    assert stop["status"] == runtime.STATUS_FINALIZED_FAILED_STOPPED
+    assert "record-failed-write" in stop["action"]
+
+
+def test_recorded_failure_keeps_fencing_its_anchor(tmp_path: Path, monkeypatch) -> None:
+    instance, subtensor, planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    instance.record_finalized_failure()
+    substrate = subtensor.substrate
+    substrate.validator_sees_failure = False
+    substrate.sign_head = substrate.best_number = ERA_END + 2
+    substrate.nonce = 5
+
+    with pytest.raises(DirectValidatorError, match="already attempted"):
+        submit_before_deadline(instance, planned)
+
+    assert substrate.signed == [(SIGN_HEAD, 4)]
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["status"] == STATUS_FINALIZED_FAILED
+
+
+def _mutate_substrate(substrate: FailedWriteSubstrate, mutation: str) -> None:
+    settings: dict[str, tuple[str, object]] = {
+        # The chain serves history that shows something else.
+        "genesis": ("genesis", OTHER_GENESIS_HASH),
+        "inclusion_unfinalized": ("finalized_number", ANCHOR_NUMBER + 1),
+        "era_unfinalized": ("finalized_number", ERA_END - 1),
+        "not_included": ("included", False),
+        "duplicate": ("duplicate_block", ANCHOR_NUMBER + 5),
+        "wrong_call": ("wrong_call", True),
+        "unreadable_block": ("unreadable_block", ERA_END),
+        "junk_block": ("junk_block", ERA_END),
+        "malformed_block_hash": ("malformed_hashes", {ERA_END}),
+        "bad_extrinsic_hash": ("bad_hash_block", ERA_END),
+        "unreadable_extrinsic": ("unreadable_extrinsic_block", ERA_END),
+        "events_not_list": ("events_mode", "not_list"),
+        "event_not_mapping": ("extra_events", ["not-an-event"]),
+        "extrinsic_event_not_mapping": (
+            "extra_events",
+            [{"extrinsic_idx": WEIGHT_CALL_INDEX, "event": []}],
+        ),
+        "signed_by_another": ("signer_address", OTHER_VALIDATOR),
+        # The node cannot serve the history the proof needs.
+        "genesis_unreadable": ("failing_hashes", {0}),
+        "hash_rpc_error": ("failing_hashes", {ERA_END}),
+        "hash_missing": ("missing_hashes", {ERA_END}),
+        "block_rpc_error": ("failing_block", ERA_END),
+        "block_missing": ("missing_block", ERA_END),
+        "state_discarded": ("events_mode", "discarded"),
+        "runtime_unavailable": (
+            "runtime_error",
+            SubstrateRequestException("runtime is unavailable"),
+        ),
+    }
+    if mutation == "finalized_head_down":
+
+        def unavailable() -> str:
+            raise SubstrateRequestException("finalized head is unavailable")
+
+        substrate.get_chain_finalised_head = unavailable
+    elif mutation in settings:
+        name, value = settings[mutation]
+        setattr(substrate, name, value)
+    else:
+        substrate.dispatch = mutation
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("succeeded", "dispatch succeeded"),
+        ("failed_and_succeeded", "dispatch succeeded"),
+        ("no_outcome", "has 0 ExtrinsicFailed events"),
+        ("failed_twice", "has 2 ExtrinsicFailed events"),
+        ("not_included", "not in any finalized block of its era"),
+        ("duplicate", "more than once"),
+        ("inclusion_unfinalized", "is not finalized"),
+        ("era_unfinalized", "is not finalized"),
+        ("wrong_call", "different chain call"),
+        ("genesis", "not the pinned Finney genesis"),
+        ("unreadable_block", "has no readable extrinsics"),
+        ("junk_block", "has no readable extrinsics"),
+        ("malformed_block_hash", f"block {ERA_END} hash is not a canonical"),
+        ("bad_extrinsic_hash", "era extrinsic is not"),
+        ("unreadable_extrinsic", f"extrinsic {ERA_END}-0 is not readable"),
+        ("events_not_list", "has no readable events"),
+        ("event_not_mapping", "an event record is not readable"),
+        ("extrinsic_event_not_mapping", "an extrinsic event is not readable"),
+        ("signed_by_another", "different chain call"),
+    ],
+)
+def test_record_refuses_unless_finalized_history_proves_the_failure(
+    tmp_path: Path, monkeypatch, mutation: str, message: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    _mutate_substrate(subtensor.substrate, mutation)
+
+    assert_record_refused(instance, subtensor, message)
+
+
+@pytest.mark.parametrize(
+    "fee_payers",
+    ([], [VALIDATOR_COLDKEY], [OTHER_VALIDATOR], [VALIDATOR]),
+    ids=("absent", "coldkey", "another_account", "signer"),
+)
+def test_the_fee_event_never_decides_the_record(
+    tmp_path: Path, monkeypatch, fee_payers: list[str]
+) -> None:
+    # The fee event names whoever paid: the hotkey's coldkey on today's
+    # subtensor, the signer on a runtime without that rule, or nothing at all.
+    # The signer is bound by the signed bytes' hash and the decoded address
+    # instead, so this event neither proves nor refuses a record.
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.fee_payers = fee_payers
+
+    record = instance.record_finalized_failure()
+
+    assert record["extrinsic_index"] == WEIGHT_CALL_INDEX
+    assert record["dispatch_error"]["name"] == FAILED_ERROR_NAME
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["last_attempt"]["status"] == STATUS_FINALIZED_FAILED
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("genesis_unreadable", "hash of block 0: SubstrateRequestException"),
+        ("finalized_head_down", "finalized head: ChainClientError"),
+        ("hash_rpc_error", f"hash of block {ERA_END}: SubstrateRequestException"),
+        ("hash_missing", f"node has no hash for block {ERA_END}"),
+        ("block_rpc_error", f"finalized block {ERA_END}: SubstrateRequestException"),
+        ("block_missing", f"node does not hold finalized block {ERA_END}"),
+        ("state_discarded", "events of finalized block .*: StateDiscardedError"),
+        ("runtime_unavailable", "runtime of finalized block .*: SubstrateRequest"),
+    ],
+)
+def test_record_reports_unreadable_history_without_refusing(
+    tmp_path: Path, monkeypatch, mutation: str, message: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    _mutate_substrate(subtensor.substrate, mutation)
+    before = instance.state_path.read_bytes()
+
+    with pytest.raises(FailedWriteHistoryUnreadable, match=message):
+        instance.record_finalized_failure()
+
+    assert instance.state_path.read_bytes() == before
+    assert subtensor.substrate.sign_calls == 1
+    assert subtensor.substrate.submit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("change", "raw"),
+    [
+        (
+            ("metadata", "name", None),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("metadata", "name", ""),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("metadata", "lookup_error", IndexError("no such error")),
+            {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}},
+        ),
+        (
+            ("substrate", "dispatch_error", {"Module": "not-a-module-error"}),
+            {"Module": "not-a-module-error"},
+        ),
+    ],
+)
+def test_a_proven_failure_with_an_unnamed_error_is_recorded_raw(
+    tmp_path: Path, monkeypatch, change: tuple[str, str, object], raw: object
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    target, name, value = change
+    substrate = subtensor.substrate
+    setattr(substrate.metadata if target == "metadata" else substrate, name, value)
+
+    record = instance.record_finalized_failure()
+
+    undecoded = {"type": "Undecoded", "raw": raw}
+    assert record["dispatch_error"] == undecoded
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["pending"] is None
+    assert state["last_attempt"]["failure"]["dispatch_error"] == undecoded
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("signed_intent", "ambiguous", "included_awaiting_confirmation"),
+)
+def test_record_refuses_a_pending_intent_recovery_can_still_resolve(
+    tmp_path: Path, monkeypatch, phase: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    state["pending"]["phase"] = phase
+    instance.state_path.write_text(json.dumps(state), encoding="ascii")
+    reads = list(subtensor.substrate.block_reads)
+
+    assert_record_refused(instance, subtensor, f"{phase!r}, not 'finalized_failed'")
+    assert subtensor.substrate.block_reads == reads
+    assert subtensor.substrate.event_reads == []
+
+
+def test_record_refuses_a_real_ambiguous_journal_without_reading_the_chain(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = failed_write_writer(tmp_path, monkeypatch)
+    subtensor.substrate.raise_without_include = True
+    with pytest.raises(DirectSubmissionAmbiguous):
+        submit_before_deadline(instance, planned)
+    subtensor.substrate.finalized_number = ERA_END + 1
+
+    assert_record_refused(instance, subtensor, "'ambiguous', not 'finalized_failed'")
+    assert subtensor.substrate.block_reads == []
+    assert subtensor.substrate.event_reads == []
+
+    # Hand-editing the phase cannot clear it: the chain shows no inclusion.
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    state["pending"]["phase"] = PHASE_FINALIZED_FAILED
+    instance.state_path.write_text(json.dumps(state), encoding="ascii")
+    assert_record_refused(instance, subtensor, "not in any finalized block")
+
+
+def test_record_refuses_a_confirmed_journal(tmp_path: Path, monkeypatch) -> None:
+    instance, subtensor, planned = failed_write_writer(tmp_path, monkeypatch)
+    subtensor.substrate.validator_sees_failure = False
+    assert submit_before_deadline(instance, planned).status == STATUS_CONFIRMED
+    reads = list(subtensor.substrate.block_reads)
+
+    assert_record_refused(
+        instance, subtensor, r"no pending intent \(last attempt: CONFIRMED\)"
+    )
+    assert subtensor.substrate.block_reads == reads
+
+
+def _tamper(state: dict[str, object], tampering: str) -> dict[str, object] | str:
+    pending = state["pending"]
+    if tampering == "not_json":
+        return "not-json"
+    if tampering == "unbound_nonce":
+        pending["intent"]["nonce"] += 1
+        return state
+    if tampering == "foreign_signer":
+        pending["intent"]["validator_hotkey"] = OTHER_VALIDATOR
+    elif tampering == "other_period":
+        pending["intent"]["mortal_period_blocks"] = MORTAL_PERIOD_BLOCKS * 2
+    pending["attempt_id"] = writer_runtime._attempt_id(
+        pending["identity"], pending["intent"]
+    )
+    return state
+
+
+@pytest.mark.parametrize(
+    ("tampering", "message"),
+    [
+        ("not_json", "not strict JSON"),
+        ("unbound_nonce", "attempt id is wrong"),
+        ("foreign_signer", "names another signer"),
+        ("other_period", "pending signed intent is invalid"),
+    ],
+)
+def test_record_refuses_a_tampered_journal(
+    tmp_path: Path, monkeypatch, tampering: str, message: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    tampered = _tamper(state, tampering)
+    instance.state_path.write_text(
+        tampered if isinstance(tampered, str) else json.dumps(tampered),
+        encoding="ascii",
+    )
+
+    assert_record_refused(instance, subtensor, message)
+    assert subtensor.substrate.event_reads == []
+
+
+def test_record_refuses_while_the_journal_lock_is_held(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+
+    with instance._locked():
+        assert_record_refused(instance, subtensor, "another direct writer")
+    assert subtensor.substrate.event_reads == []
+    # Every lock taken for the refusal was released again.
+    assert instance.record_finalized_failure()["extrinsic_index"] == 2
+
+
+def test_record_refuses_without_a_journal_and_creates_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, _planned = failed_write_writer(tmp_path, monkeypatch)
+
+    with pytest.raises(FailedWriteRecordRefused, match="no direct writer journal"):
+        instance.record_finalized_failure()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_command_reports_an_unwritten_record_as_not_proven(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    monkeypatch.setattr(record_cli, "make_subtensor", lambda *_a, **_k: subtensor)
+    before = instance.state_path.read_bytes()
+
+    def lose_the_write(self, document):
+        raise DirectSubmissionAmbiguous("direct state could not be persisted")
+
+    monkeypatch.setattr(DirectWeightWriter, "_write_state", lose_the_write)
+
+    assert runtime.main(RECORD_ARGS) == 1
+    (line,) = _lines(capsys)
+    assert line["status"] == record_cli.STATUS_NOT_PROVEN
+    assert "could not be persisted" in line["error"]
+    assert instance.state_path.read_bytes() == before
+
+
+def test_record_command_refuses_a_chain_client_it_cannot_bound(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        record_cli,
+        "make_subtensor",
+        lambda *_a, **_k: SimpleNamespace(substrate=SimpleNamespace()),
+    )
+
+    assert runtime.main(RECORD_ARGS) == 1
+    (line,) = _lines(capsys)
+    assert line["status"] == record_cli.STATUS_REFUSED
+    assert "chain client refused" in line["error"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_command_refuses_an_unsafe_hotkey_before_chain_access(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        record_cli,
+        "make_subtensor",
+        lambda *_a, **_k: pytest.fail("record command reached the chain"),
+    )
+
+    with pytest.raises(SystemExit, match="path-safe"):
+        runtime.main([runtime.RECORD_FAILED_WRITE_COMMAND, "--expected-hotkey=../x"])
+
+
+@pytest.mark.parametrize(
+    ("dispatch_error", "decoded"),
+    [
+        (
+            {"Module": {"index": 7, "error": "0x0F000000"}},
+            {"type": "Module", "pallet_index": 7, "error_index": 15},
+        ),
+        (
+            {"Module": (7, 15)},
+            {"type": "Module", "pallet_index": 7, "error_index": 15},
+        ),
+        (
+            {"Module": {"index": 7, "error": [15, 0, 0, 0]}},
+            {"type": "Module", "pallet_index": 7, "error_index": 15},
+        ),
+        ("BadOrigin", {"type": "System", "name": "BadOrigin", "detail": None}),
+        (
+            {"Token": "FundsUnavailable"},
+            {"type": "System", "name": "Token", "detail": "FundsUnavailable"},
+        ),
+        (
+            {"Arithmetic": {"Overflow": None}},
+            {"type": "System", "name": "Arithmetic", "detail": {"Overflow": None}},
+        ),
+        (
+            {"Other": [1, (2, 3)]},
+            {"type": "System", "name": "Other", "detail": [1, [2, 3]]},
+        ),
+    ],
+)
+def test_dispatch_errors_are_decoded_from_the_block_runtime(
+    dispatch_error: object, decoded: dict[str, object]
+) -> None:
+    metadata = ModuleErrorMetadata()
+
+    result = writer_runtime._decoded_dispatch_error(
+        {"dispatch_error": dispatch_error}, metadata
+    )
+
+    if decoded["type"] == "Module":
+        decoded = {**decoded, "name": FAILED_ERROR_NAME, "docs": FAILED_ERROR_DOCS}
+        assert metadata.lookups == [(7, 15)]
+    else:
+        assert metadata.lookups == []
+    assert result == decoded
+
+
+@pytest.mark.parametrize(
+    ("dispatch_error", "raw"),
+    [
+        (None, None),
+        ({}, {}),
+        ("", ""),
+        ({"A": 1, "B": 2}, {"A": 1, "B": 2}),
+        ({"Module": (7, 15), "Other": 1}, {"Module": [7, 15], "Other": 1}),
+        ({1: "Other"}, "{1: 'Other'}"),
+        ({"": 1}, {"": 1}),
+        ({"Module": 7}, {"Module": 7}),
+        ({"Module": (7,)}, {"Module": [7]}),
+        ({"Module": (True, 15)}, {"Module": [True, 15]}),
+        ({"Module": (256, 15)}, {"Module": [256, 15]}),
+        ({"Module": ("7", 15)}, {"Module": ["7", 15]}),
+        ({"Module": (7, "0x0f00")}, {"Module": [7, "0x0f00"]}),
+        ({"Module": (7, "0x0f0000zz")}, {"Module": [7, "0x0f0000zz"]}),
+        ({"Module": (7, "1x0f000000")}, {"Module": [7, "1x0f000000"]}),
+        ({"Module": (7, 256)}, {"Module": [7, 256]}),
+        ({"Module": (7, False)}, {"Module": [7, False]}),
+        ({"Module": (7, 15.0)}, "{'Module': (7, 15.0)}"),
+        ({"Module": (7, 16)}, {"Module": [7, 16]}),
+        ({"Module": (7, -1)}, {"Module": [7, -1]}),
+        ({"Module": (7.0, 15)}, "{'Module': (7.0, 15)}"),
+        ({"Module": (2, 15)}, {"Module": [2, 15]}),
+        ({"Module": (7, [15, 0, 0])}, {"Module": [7, [15, 0, 0]]}),
+        ({"Module": (7, 15, 0)}, {"Module": [7, 15, 0]}),
+        ({"Other": b"bytes"}, "{'Other': b'bytes'}"),
+        ({"Other": {1: "key"}}, "{'Other': {1: 'key'}}"),
+        ({"Other": b"x" * 4000}, repr({"Other": b"x" * 4000})[:1024]),
+    ],
+)
+def test_undecodable_dispatch_errors_are_kept_raw(
+    dispatch_error: object, raw: object
+) -> None:
+    # The failure is already proven by its ExtrinsicFailed event, so an error
+    # that cannot be named is recorded as the node sent it, never refused.
+    result = writer_runtime._decoded_dispatch_error(
+        {"dispatch_error": dispatch_error}, ModuleErrorMetadata()
+    )
+
+    assert result == {"type": "Undecoded", "raw": raw}
+    assert len(json.dumps(result)) < 1100
+
+
+@pytest.mark.parametrize(
+    "metadata", (None, SimpleNamespace(), "not-metadata"), ids=("none", "empty", "str")
+)
+def test_a_module_error_without_usable_metadata_is_kept_raw(metadata) -> None:
+    error = {"Module": {"index": FAILED_PALLET_INDEX, "error": "0x0f000000"}}
+
+    assert writer_runtime._decoded_dispatch_error(
+        {"dispatch_error": error}, metadata
+    ) == {"type": "Undecoded", "raw": error}
+    assert writer_runtime._decoded_dispatch_error(None, ModuleErrorMetadata()) == {
+        "type": "Undecoded",
+        "raw": None,
+    }
+
+
+def test_record_writes_the_journal_while_every_lock_is_held(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, _subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    write_state = DirectWeightWriter._write_state
+    checked: list[str] = []
+
+    def write_under_locks(self, document):
+        for name in ("process.lock", "cycle.lock", "state.lock"):
+            descriptor = os.open(self.state_path.with_name(name), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+            checked.append(name)
+        write_state(self, document)
+
+    monkeypatch.setattr(DirectWeightWriter, "_write_state", write_under_locks)
+
+    instance.record_finalized_failure()
+
+    assert checked == ["process.lock", "cycle.lock", "state.lock"]
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert state["last_attempt"]["status"] == STATUS_FINALIZED_FAILED
+
+
+@pytest.mark.parametrize("where", ("journal_lock", "journal_path"))
+def test_record_refuses_a_lock_or_journal_it_cannot_open(
+    tmp_path: Path, monkeypatch, capsys, where: str
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    monkeypatch.setattr(record_cli, "make_subtensor", lambda *_a, **_k: subtensor)
+    before = instance.state_path.read_bytes()
+    if where == "journal_lock":
+        real_open = writer_runtime.os.open
+
+        def deny_the_journal_lock(path, *args, **kwargs):
+            if Path(path).name == "state.lock":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(writer_runtime.os, "open", deny_the_journal_lock)
+    else:
+
+        def deny_the_journal(self):
+            raise PermissionError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(writer_runtime.Path, "is_file", deny_the_journal)
+
+    with pytest.raises(FailedWriteRecordRefused, match="Permission denied"):
+        instance.record_finalized_failure()
+    assert runtime.main(RECORD_ARGS) == record_cli.EXIT_REFUSED
+    (line,) = _lines(capsys)
+    assert line["status"] == record_cli.STATUS_REFUSED
+    assert "Permission denied" in line["error"]
+    monkeypatch.undo()
+    assert instance.state_path.read_bytes() == before
+
+
+ARCHIVE = "wss://archive.example:443"
+
+
+def _connections(monkeypatch, subtensor, *, archive_serves_state: bool = True):
+    calls: list[str] = []
+
+    def connect(_bt, *, network: str):
+        calls.append(network)
+        if network == ARCHIVE and archive_serves_state:
+            subtensor.substrate.events_mode = "list"
+        return subtensor
+
+    monkeypatch.setattr(record_cli, "make_subtensor", connect)
+    return calls
+
+
+def test_discarded_state_asks_for_an_archive_node_then_the_archive_proves_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.events_mode = "discarded"
+    calls = _connections(monkeypatch, subtensor)
+    before = instance.state_path.read_bytes()
+
+    # The network's own node has pruned the inclusion block's state.
+    assert runtime.main(RECORD_ARGS) == record_cli.EXIT_RETRY == 75
+    (retry,) = _lines(capsys)
+    assert retry["status"] == record_cli.STATUS_RETRY_WITH_ARCHIVE
+    assert "StateDiscardedError" in retry["error"]
+    assert "--archive-endpoint" in retry["action"]
+    assert instance.state_path.read_bytes() == before
+
+    # The same command against an archive node proves it and records it.
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 0
+    (recorded,) = _lines(capsys)
+    assert recorded["status"] == record_cli.STATUS_RECORDED
+    assert recorded["block_hash"] == INCLUSION_HASH
+    assert calls == ["finney", ARCHIVE]
+    assert subtensor.substrate.signed == [(SIGN_HEAD, 4)]
+    assert subtensor.substrate.broadcast == [EXTRINSIC_HASH]
+
+
+def test_an_archive_that_cannot_serve_the_history_is_still_a_retry(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.events_mode = "discarded"
+    _connections(monkeypatch, subtensor, archive_serves_state=False)
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 75
+    (retry,) = _lines(capsys)
+    assert retry["status"] == record_cli.STATUS_RETRY_WITH_ARCHIVE
+    assert "another archive endpoint" in retry["action"]
+
+
+def test_the_genesis_pin_applies_to_an_archive_endpoint(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    subtensor.substrate.genesis = OTHER_GENESIS_HASH
+    calls = _connections(monkeypatch, subtensor)
+    before = instance.state_path.read_bytes()
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={ARCHIVE}"]) == 1
+    (refused,) = _lines(capsys)
+    assert refused["status"] == record_cli.STATUS_REFUSED
+    assert "not the pinned Finney genesis" in refused["error"]
+    assert calls == [ARCHIVE]
+    assert instance.state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "endpoint", ("ws://127.0.0.1:9944", "ws://localhost:9944", "wss://a.example")
+)
+def test_record_accepts_a_tls_or_local_archive_endpoint(
+    tmp_path: Path, monkeypatch, capsys, endpoint: str
+) -> None:
+    _instance, subtensor, _planned = stopped_on_failed_write(tmp_path, monkeypatch)
+    calls = _connections(monkeypatch, subtensor)
+
+    assert runtime.main([*RECORD_ARGS, f"--archive-endpoint={endpoint}"]) == 0
+    assert calls == [endpoint]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--network=test"], "pinned to the Finney network"),
+        (["--archive-endpoint=http://archive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=ws://archive.example:9944"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://user@archive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://archive.example#x"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://arch ive.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://arch\u00efve.example"], "must be a wss:// URL"),
+        (["--archive-endpoint=wss://archive.example\n"], "must be a wss:// URL"),
+    ],
+)
+def test_record_refuses_another_network_or_an_unsafe_endpoint_before_the_chain(
+    monkeypatch, arguments: list[str], message: str
+) -> None:
+    monkeypatch.setattr(
+        record_cli,
+        "make_subtensor",
+        lambda *_a, **_k: pytest.fail("record command reached the chain"),
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        runtime.main([*RECORD_ARGS, *arguments])
+
+
+def test_unit_never_restarts_either_deliberate_stop() -> None:
+    unit = (
+        ROOT / "deploy" / "validator-update" / "cathedral-validator-direct.service"
+    ).read_text(encoding="ascii")
+    lines = unit.splitlines()
+
+    assert runtime.EXIT_CONTRADICTION_STOPPED == 2
+    assert runtime.EXIT_FINALIZED_FAILED_STOPPED not in {0, 1, 2}
+    assert "Restart=on-failure" in lines
+    assert [line for line in lines if line.startswith("RestartPreventExitStatus=")] == [
+        "RestartPreventExitStatus="
+        f"{runtime.EXIT_CONTRADICTION_STOPPED} "
+        f"{runtime.EXIT_FINALIZED_FAILED_STOPPED}"
+    ]
+    # The unit declares that it keeps the failed-write code stopped.
+    assert (
+        f"Environment={runtime.FAILED_WRITE_EXIT_CODE_ENV}="
+        f"{runtime.EXIT_FINALIZED_FAILED_STOPPED}"
+    ) in lines
+    # The bootstrap ships no alert unit to point at, so none is named here.
+    assert not [line for line in lines if line.startswith("OnFailure=")]
