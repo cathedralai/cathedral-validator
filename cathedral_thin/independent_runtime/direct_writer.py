@@ -25,9 +25,7 @@ from bittensor.utils import get_mechid_storage_index
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
-    MAX_WEIGHT_LIMIT,
     MECID,
-    MIN_ALLOWED_WEIGHTS,
     NETUID,
     SN39_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
@@ -595,10 +593,6 @@ class DirectWeightWriter:
                 label="SN39 minimum allowed weights",
             )
             _require_presign_time(presign_deadline, stage="minimum-weights RPC")
-            max_weight = float(
-                _raw_value(self.subtensor.max_weight_limit(netuid=NETUID, block=block))
-            )
-            _require_presign_time(presign_deadline, stage="maximum-weight RPC")
             commit_reveal = _strict_bool(
                 self.subtensor.commit_reveal_enabled(netuid=NETUID, block=block),
                 label="SN39 commit-reveal state",
@@ -640,6 +634,14 @@ class DirectWeightWriter:
                 for value in list(info.validator_permit)
             )
             info_stakes = list(info.total_stake)
+            # SubnetworkN at the sign head, taken from the answer just read
+            # rather than from another RPC: the chain's metagraph runtime API
+            # reports it as `num_uids` and builds `hotkeys` over exactly
+            # `0..num_uids`, so the two are cross-checked below.
+            subnet_n = _nonnegative_int(
+                getattr(info, "num_uids", None),
+                label="subnet registered UID count",
+            )
             stake_threshold = _nonnegative_int(
                 self.subtensor.substrate.query(
                     module="SubtensorModule",
@@ -688,7 +690,7 @@ class DirectWeightWriter:
         ):
             raise DirectValidatorError("validator is not eligible at the sign head")
         if not (
-            len(info_hotkeys) == len(info_permits) == len(info_stakes)
+            len(info_hotkeys) == len(info_permits) == len(info_stakes) == subnet_n
             and 0 <= fresh.validator_uid < len(info_hotkeys)
             and info_hotkeys[fresh.validator_uid] == fresh.validator_hotkey
             and info_permits[fresh.validator_uid] is True
@@ -714,12 +716,27 @@ class DirectWeightWriter:
             raise DirectValidatorError(
                 "validator is inside the finalized weight cooldown"
             )
-        if min_allowed != MIN_ALLOWED_WEIGHTS or len(plan.wire_uids) < min_allowed:
-            raise DirectValidatorError("direct vector violates minimum weight count")
-        if max_weight != MAX_WEIGHT_LIMIT or max(plan.wire_weights) / W > max_weight:
+        # Mirror the chain's `check_length` (pallets/subtensor/src/subnets/
+        # weights.rs): at least min(SubnetworkN, MinAllowedWeights) weights, or
+        # a lone self-weight, which this plan never is (`_validate_plan`
+        # excludes the validator's own UID). A shorter vector passes the pool
+        # and fails at dispatch, which halts the writer, so it is refused here;
+        # a vector that meets the rule is signed whatever MinAllowedWeights is.
+        # MinAllowedWeights above SubnetworkN demands every registered UID,
+        # which a writer that excludes itself cannot meet: that refusal is the
+        # chain's rule, not a stricter one.
+        required_weights = min(subnet_n, min_allowed)
+        if len(plan.wire_uids) < required_weights:
             raise DirectValidatorError(
-                "direct vector violates the maximum weight limit"
+                f"direct vector has {len(plan.wire_uids)} weights but the chain "
+                f"requires at least {required_weights} "
+                f"(MinAllowedWeights {min_allowed}, SubnetworkN {subnet_n})"
             )
+        # No maximum-weight check: the chain compares against a constant
+        # u16::MAX (`get_max_weight_limit`, pallets/subtensor/src/utils/misc.rs)
+        # and never reads the `MaxWeightsLimit` storage behind the SDK's
+        # `max_weight_limit()`, so a legacy stored value must not refuse a
+        # write the chain accepts. It is not read.
         if commit_reveal is not COMMIT_REVEAL_ENABLED:
             raise DirectValidatorError("SN39 commit-reveal policy blocks direct writes")
         if mechanism_count <= MECID:
@@ -735,7 +752,7 @@ class DirectWeightWriter:
             "blocks_since_last_update": blocks_since,
             "weights_rate_limit": rate_limit,
             "min_allowed_weights": min_allowed,
-            "max_weight_limit": max_weight,
+            "subnetwork_n": subnet_n,
             "commit_reveal_enabled": commit_reveal,
             "mechanism_count": mechanism_count,
             "weights_version_key": version_key,

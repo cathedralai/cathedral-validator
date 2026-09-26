@@ -637,6 +637,11 @@ class WriterSubtensor:
         self.truthy_permit_at: int | None = None
         self.validator_stake = 10_000
         self.stake_threshold = 1_000
+        self.min_allowed = 1
+        # What the SDK's `max_weight_limit()` would return: the chain's
+        # `MaxWeightsLimit` storage, which the chain itself never consults.
+        self.stored_max_weight_limit = 1.0
+        self.max_weight_limit_reads = 0
 
     def metagraph(self, netuid: int, *, block: int) -> Metagraph:
         assert netuid == 39
@@ -671,6 +676,7 @@ class WriterSubtensor:
             stakes[uid] = graph.total_stake[index]
         return SimpleNamespace(
             block=block,
+            num_uids=size,
             hotkeys=hotkeys,
             validator_permit=permits,
             total_stake=stakes,
@@ -686,11 +692,12 @@ class WriterSubtensor:
 
     def min_allowed_weights(self, *, netuid: int, block: int) -> int:
         assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
-        return 1
+        return self.min_allowed
 
     def max_weight_limit(self, *, netuid: int, block: int) -> float:
         assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
-        return 1.0
+        self.max_weight_limit_reads += 1
+        return self.stored_max_weight_limit
 
     def commit_reveal_enabled(self, *, netuid: int, block: int) -> bool:
         assert (netuid, block) == (39, ANCHOR_NUMBER + 1)
@@ -875,6 +882,154 @@ def test_stake_threshold_refuses_before_signing_or_journaling(
     subtensor.validator_stake = subtensor.stake_threshold - 1
 
     with pytest.raises(DirectValidatorError, match="below.*stake threshold"):
+        submit_before_deadline(instance, planned)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def serving_miners(*uids: int) -> tuple[ServingAxon, ...]:
+    return tuple(ServingAxon(uid, f"5Miner{uid}", f"8.8.{uid}.1", 8081) for uid in uids)
+
+
+def paying_plan(miners: tuple[ServingAxon, ...]) -> DirectWeightPlan:
+    """One verified machine per miner, so every miner is a destination."""
+
+    return plan(
+        miners=miners,
+        rows=tuple(
+            machine_row("1", uid=miner.uid, hotkey=miner.hotkey) for miner in miners
+        ),
+    )
+
+
+# The fake metagraph places the validator at UID 7 and each miner at its own
+# UID, and reports SubnetworkN as the highest UID plus one. The last case is a
+# fully registered subnet of nine UIDs whose every non-validator UID is paid.
+@pytest.mark.parametrize(
+    ("miner_uids", "min_allowed"),
+    (
+        ((19, 20, 21), 3),
+        ((19, 20, 21, 22, 23), 3),
+        ((0, 1, 2, 3, 4, 5, 6, 8), 8),
+    ),
+    ids=("exactly-the-minimum", "above-the-minimum", "every-non-validator-uid"),
+)
+def test_raised_min_allowed_weights_signs_a_vector_the_chain_accepts(
+    tmp_path: Path, monkeypatch, miner_uids: tuple[int, ...], min_allowed: int
+) -> None:
+    # The writer used to require MinAllowedWeights == 1 exactly and stopped
+    # writing when an owner raised it. The chain only requires the vector to be
+    # at least min(SubnetworkN, MinAllowedWeights) long, which each of these is.
+    planned = paying_plan(serving_miners(*miner_uids))
+    assert len(planned.wire_uids) >= min_allowed
+    instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
+    subtensor.min_allowed = min_allowed
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert subtensor.substrate.submit_calls == 1
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    eligibility = state["last_attempt"]["intent"]["eligibility"]
+    assert eligibility["min_allowed_weights"] == min_allowed
+    assert eligibility["subnetwork_n"] == max(miner_uids) + 1
+
+
+def test_min_allowed_weights_refuses_a_vector_the_chain_fails_at_dispatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # SubnetworkN is 21 here, so the chain requires min(21, 3) = 3 weights. A
+    # two-weight vector passes the pool and fails at dispatch, which would halt
+    # the writer; it must be refused before anything is signed or journaled.
+    planned = paying_plan((MINER_ONE_AXON, MINER_TWO_AXON))
+    instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
+    subtensor.min_allowed = 3
+
+    with pytest.raises(
+        DirectValidatorError,
+        match=r"has 2 weights but the chain requires at least 3 "
+        r"\(MinAllowedWeights 3, SubnetworkN 21\)",
+    ):
+        submit_before_deadline(instance, planned)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_min_allowed_weights_above_subnet_size_demands_every_uid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # With MinAllowedWeights above SubnetworkN the chain requires SubnetworkN
+    # weights, i.e. every registered UID. The writer never weights itself, so
+    # even a plan paying all eight non-validator UIDs of a nine-UID subnet is
+    # one short and fails at dispatch. The refusal names the capped
+    # requirement, 9, not the raw 64: it is the chain's rule, not a stricter one.
+    planned = paying_plan(serving_miners(0, 1, 2, 3, 4, 5, 6, 8))
+    instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
+    subtensor.min_allowed = 64
+
+    with pytest.raises(
+        DirectValidatorError,
+        match=r"has 8 weights but the chain requires at least 9 "
+        r"\(MinAllowedWeights 64, SubnetworkN 9\)",
+    ):
+        submit_before_deadline(instance, planned)
+
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_legacy_max_weights_limit_storage_does_not_refuse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The writer used to refuse unless the SDK's `max_weight_limit()` read
+    # exactly 1.0 and the largest weight fitted under it. That reads the
+    # `MaxWeightsLimit` storage, which the chain ignores in favour of a constant
+    # u16::MAX, so a legacy stored value must neither refuse this single
+    # full-weight vector nor even be read.
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    assert planned.wire_weights == (W,)
+    subtensor.stored_max_weight_limit = 1_000 / W
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert subtensor.max_weight_limit_reads == 0
+    state = json.loads(instance.state_path.read_text(encoding="ascii"))
+    assert "max_weight_limit" not in state["last_attempt"]["intent"]["eligibility"]
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    (
+        (lambda info: delattr(info, "num_uids"), "registered UID count"),
+        (lambda info: setattr(info, "num_uids", -1), "registered UID count"),
+        (
+            lambda info: setattr(info, "num_uids", len(info.hotkeys) + 1),
+            "metagraph-info eligibility is inconsistent",
+        ),
+    ),
+    ids=("missing", "negative", "disagrees-with-rows"),
+)
+def test_unusable_subnet_size_refuses_before_signing_or_journaling(
+    tmp_path: Path, monkeypatch, corrupt, message: str
+) -> None:
+    # SubnetworkN decides how many weights the chain demands, so a missing,
+    # malformed or row-inconsistent value refuses rather than guessing.
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    original = subtensor.get_metagraph_info
+
+    def corrupted_info(netuid, mechid, *, block):
+        info = original(netuid, mechid, block=block)
+        corrupt(info)
+        return info
+
+    subtensor.get_metagraph_info = corrupted_info
+    with pytest.raises(DirectValidatorError, match=message):
         submit_before_deadline(instance, planned)
 
     assert subtensor.substrate.sign_calls == 0
