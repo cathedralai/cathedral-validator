@@ -81,7 +81,7 @@ expiry times, is listed under
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 -o install.sh \
   https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/scripts/install.sh &&
-echo '2957ec3487c550adbec9cb08955364d74af14a22140f400a48f5b0c92490cf25  install.sh' | sha256sum -c &&
+echo '7f4056ba35b4c8d836c30c363f1095d4cdd0ea0edeb3fe229d2638dd905358ef  install.sh' | sha256sum -c &&
 sudo bash install.sh
 ```
 
