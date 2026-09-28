@@ -200,20 +200,20 @@ def test_last_good_is_usable_only_while_the_anchor_still_names_its_digest():
     assert last_good_is_usable(
         last_good_digest=bundle.digest(),
         commitment=commitment_for(bundle),
-        netuid=39,
+        netuid=94,
         epoch=EPOCH_OPEN,
     )
     assert not last_good_is_usable(
         last_good_digest=bundle.digest(),
         commitment=commitment_for(other),
-        netuid=39,
+        netuid=94,
         epoch=EPOCH_OPEN,
     )
     with pytest.raises(CommitmentError, match="does not name the cached"):
         require_last_good(
             last_good_digest=bundle.digest(),
             commitment=commitment_for(other),
-            netuid=39,
+            netuid=94,
             epoch=EPOCH_OPEN,
         )
 

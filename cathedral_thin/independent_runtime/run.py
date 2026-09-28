@@ -5,8 +5,8 @@ Subcommands:
 * ``profiles`` -- public ``GET /v1/profiles`` (no API key)
 * ``list-workers`` -- ``GET /v1/workers``
 * ``rent`` -- ``POST`` a sealed Intel TDX Worker (``bounded_service``)
-* ``probe-sn39`` -- snapshot the live metagraph and serving axons
-* ``run`` -- list or rent a TDX Worker, collect from SN39 axons, re-derive
+* ``probe-sn94`` -- snapshot the live metagraph and serving axons
+* ``run`` -- list or rent a TDX Worker, collect from SN94 axons, re-derive
   audit work units over ``POST /v1/sat-work`` for every quote a pinned QVL
   passed, compose, and submit ``set_mechanism_weights`` through the one-write
   canary if a dedicated canary wallet and a pinned QVL are present
@@ -185,7 +185,7 @@ def _connect_subtensor() -> Any:
     return bt.Subtensor(network="finney")
 
 
-def cmd_probe_sn39(_options: argparse.Namespace) -> int:
+def cmd_probe_sn94(_options: argparse.Namespace) -> int:
     subtensor = _connect_subtensor()
     genesis = observed_genesis_hash(subtensor)
     metagraph = subtensor.metagraph(NETUID)
@@ -471,7 +471,7 @@ def cmd_run(options: argparse.Namespace) -> int:
         anchor_view = snapshot.anchor_view
         axons = snapshot.axons
         report["anchor"] = snapshot.as_report()
-        report["sn39"] = {
+        report["sn94"] = {
             "uids": len(anchor_view.uid_to_hotkey),
             "axon_skip": snapshot.skipped,
             "serving_axons": [
@@ -570,7 +570,7 @@ def cmd_run(options: argparse.Namespace) -> int:
 
     validator_ss58 = CANARY_HOTKEY
     collect_hits: list[dict[str, Any]] = []
-    # A rented Cathedral Worker is a listed machine. It is not an SN39 miner
+    # A rented Cathedral Worker is a listed machine. It is not an SN94 miner
     # unless it serves POST /v1/evidence under a registered hotkey. Collect
     # from serving axons with those hotkeys, never with the canary identity.
     for axon in axons:
@@ -832,7 +832,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds to wait until the Worker is ready (0 skips wait)",
     )
 
-    sub.add_parser("probe-sn39", help="snapshot SN39 metagraph and serving axons")
+    sub.add_parser("probe-sn94", help="snapshot SN94 metagraph and serving axons")
 
     run = sub.add_parser("run", help="list/rent, collect, compose, canary submit")
     run.add_argument("--name", default="independent-canary-miner")
@@ -875,8 +875,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_list_workers(options)
         if options.command == "rent":
             return cmd_rent(options)
-        if options.command == "probe-sn39":
-            return cmd_probe_sn39(options)
+        if options.command == "probe-sn94":
+            return cmd_probe_sn94(options)
         if options.command == "run":
             return cmd_run(options)
     except IndependentLiveError as exc:

@@ -1,9 +1,9 @@
-# Cathedral SN39 origin publisher — slim runtime image.
+# Cathedral SN94 origin publisher — slim runtime image.
 #
 # Ported verbatim from the hub's deploy/Dockerfile (cathedral repo) with two
 # deliberate deltas for the consolidated validator:
 #   1. base is python:3.12-slim (the validator .venv + the systemd units under
-#      deploy/publisher/ and deploy/sn39/ all run 3.12); the pinned wheels in
+#      deploy/publisher/ and deploy/sn94/ all run 3.12); the pinned wheels in
 #      requirements.txt (bittensor-wallet, psycopg2-binary, blake3, cryptography)
 #      all ship manylinux cp312 wheels, so the slim/glibc base needs no rust or
 #      libpq build toolchain.
@@ -12,7 +12,7 @@
 #      mechanism_router, external_scores, weights).
 #
 # This image runs the same canonical origin app as
-# cathedral-scorer-sn39.service: scaffold.publisher.server:app from
+# cathedral-scorer-sn94.service: scaffold.publisher.server:app from
 # validator-sourced code. It does not define an alternate publisher role.
 FROM python:3.12-slim AS base
 

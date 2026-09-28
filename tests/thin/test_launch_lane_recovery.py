@@ -15,7 +15,7 @@ def _state(**over):
     state = {
         "submission_validator_hotkey": HOTKEY,
         "submission_genesis_hash": FINNEY,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
     }
     state.update(over)
     return state
@@ -24,7 +24,7 @@ def _state(**over):
 def _identity(**over):
     identity = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": HOTKEY,
         "operator_declared_authority": True,
     }

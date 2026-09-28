@@ -28,9 +28,9 @@ def test_persisted_vectors_are_scoped_by_network_and_netuid(tmp_path, monkeypatc
     weights._persist_vector(store, test_vector)
 
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
     assert weights._load_persisted_vector(store) is None
-    main_vector = _vector("finney", 39, "main-vector")
+    main_vector = _vector("finney", 94, "main-vector")
     weights._persist_vector(store, main_vector)
     assert weights._load_persisted_vector(store) == main_vector
 
@@ -39,7 +39,7 @@ def test_persisted_vectors_are_scoped_by_network_and_netuid(tmp_path, monkeypatc
     assert weights._load_persisted_vector(store) == test_vector
 
     rows = store.query("SELECT id, vector_json FROM signed_weight_vectors ORDER BY id")
-    assert {row["id"] for row in rows} == {"latest:finney:39", "latest:test:292"}
+    assert {row["id"] for row in rows} == {"latest:finney:94", "latest:test:292"}
     assert {json.loads(row["vector_json"])["vector_id"] for row in rows} == {
         "main-vector",
         "test-vector",
@@ -52,11 +52,11 @@ def test_refresh_lock_is_scoped_by_network_and_netuid(monkeypatch):
     test_lock = weights._refresh_lock_name()
 
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
     main_lock = weights._refresh_lock_name()
 
     assert test_lock == "cathedral:weights:refresh:test:292"
-    assert main_lock == "cathedral:weights:refresh:finney:39"
+    assert main_lock == "cathedral:weights:refresh:finney:94"
     assert test_lock != main_lock
 
 
@@ -81,7 +81,7 @@ def test_legacy_singleton_is_only_adopted_for_matching_subnet(tmp_path, monkeypa
     store.write(write)
 
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
     assert weights._load_persisted_vector(store) is None
 
     monkeypatch.setenv(weights.NETWORK_ENV, "test")
@@ -92,12 +92,12 @@ def test_legacy_singleton_is_only_adopted_for_matching_subnet(tmp_path, monkeypa
 def test_persistence_and_cache_refuse_policy_version_regression(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "publisher.sqlite"))
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
     weights._reset_vector_cache()
 
-    newer = _vector("finney", 39, "newer")
+    newer = _vector("finney", 94, "newer")
     newer["policy_version"] = 2
-    older = _vector("finney", 39, "older")
+    older = _vector("finney", 94, "older")
     older["policy_version"] = 1
 
     assert weights._persist_vector(store, newer) == newer

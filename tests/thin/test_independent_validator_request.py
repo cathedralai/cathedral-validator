@@ -66,7 +66,7 @@ def test_request_header_cross_verifies_with_worker_sr25519_primitive():
         "validator_hotkey": keypair.ss58_address,
         "worker_hotkey": bob().ss58_address,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "method": "POST",
         "path": "/v1/sat-work",
         "body_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),

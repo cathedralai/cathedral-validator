@@ -34,11 +34,11 @@ from types import SimpleNamespace
 import pytest
 
 from scaffold import provenance_audit as pa
-from scaffold import sn39_public_reproduction as repro
+from scaffold import sn94_public_reproduction as repro
 from scaffold import validator_thin
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 MECHANISM = "validated_supply_v2"
 VERIFIER_DIGEST = "sha256:" + "a" * 64
 GENERATED_AT = "2026-08-04T12:00:00+00:00"
@@ -558,7 +558,7 @@ def test_the_deployed_alert_script_does_not_match_the_stale_event():
     script = (
         Path(__file__).resolve().parents[2]
         / "deploy"
-        / "sn39"
+        / "sn94"
         / "cathedral-mismatch-check"
     ).read_text(encoding="utf-8")
     matchers = [
@@ -593,7 +593,7 @@ def test_a_vector_lagging_more_than_one_epoch_is_not_stale_but_wrong(fake_cathed
     A publisher that stopped advancing, or a replay of an older genuinely
     signed vector, must keep firing PROVENANCE_VECTOR_MISMATCH: the recurring
     thin tick submits the signed vector whatever the audit concludes, so
-    classifying this as merely stale would pin SN39 weights to an old epoch
+    classifying this as merely stale would pin SN94 weights to an old epoch
     while emitting only the non-alerting event.
     """
     store = _BlobStore()

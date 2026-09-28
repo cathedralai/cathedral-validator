@@ -1,4 +1,4 @@
-"""Finney / SN39 client living outside `cathedral_thin.independent`.
+"""Finney / SN94 client living outside `cathedral_thin.independent`.
 
 Reads the metagraph, observes genesis, and submits ``set_mechanism_weights``
 as the dedicated canary hotkey. The live relay and burn destination refuse
@@ -28,7 +28,7 @@ from cathedral_thin.independent.constants import (
     LINEAGE,
     MECID,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
 )
 from cathedral_thin.independent.errors import IndependentValidatorError
@@ -195,7 +195,7 @@ class SubstrateCanaryTransport:
                 weights=list(expected["weights"]),
                 version_key=int(expected["version_key"]),
             )
-            era = {"period": SN39_MORTAL_PERIOD_BLOCKS, "current": block_number}
+            era = {"period": SN94_MORTAL_PERIOD_BLOCKS, "current": block_number}
             signed = substrate.create_signed_extrinsic(
                 call=call,
                 keypair=self.keypair,

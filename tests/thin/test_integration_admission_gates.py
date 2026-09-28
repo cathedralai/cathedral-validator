@@ -95,7 +95,7 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
 
     monkeypatch.setattr(itf, "verify_lane_receipt", spy)
 
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
 
     def gpu_verifier(_evidence):
@@ -113,7 +113,7 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
             key_registry=fx.registry,
             receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
             network="finney",
-            netuid=39,
+            netuid=94,
             source_epoch=11,
             now=__import__("datetime").datetime(
                 2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
@@ -147,7 +147,7 @@ def test_admission_arguments_reach_verify_lane_receipt(monkeypatch):
 def test_the_ledger_is_used_after_selection_not_during():
     """In the authoritative pass the credited receipt's token is consumed, and
     only that one. Verification itself never consumes."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipt = fx.cpu_receipt()
     out = ig.preview_integrated_vector(
@@ -158,7 +158,7 @@ def test_the_ledger_is_used_after_selection_not_during():
         key_registry=fx.registry,
         receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, receipt)],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=__import__("datetime").datetime(
             2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
@@ -178,7 +178,7 @@ def test_the_ledger_is_used_after_selection_not_during():
 
 def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
     """A threaded verifier must be able to refuse, not merely be forwarded."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
         allocation_config=fx.allocation_config(
@@ -187,7 +187,7 @@ def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
         key_registry=fx.registry,
         receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=__import__("datetime").datetime(
             2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC
@@ -207,7 +207,7 @@ def test_injected_cpu_quote_verifier_is_enforced_through_the_preview():
 
 def test_every_gate_supplied_composes_and_reports_the_gates_applied():
     """The fully policed preview is the reference case for a funded lane."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
         allocation_config=fx.allocation_config(
@@ -216,7 +216,7 @@ def test_every_gate_supplied_composes_and_reports_the_gates_applied():
         key_registry=fx.registry,
         receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=__import__("datetime").datetime(
             2026, 7, 25, 12, 30, tzinfo=__import__("datetime").UTC

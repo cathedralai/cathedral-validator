@@ -8,7 +8,7 @@ Refresh keeps each enabled artifact-tier mechanism's scores fresh for ``compose`
 (``mechanism_artifact_refresh.refresh_artifact_scores``). ``--publish`` additionally
 composes the eligible vector and publishes the NEXT preview artifact via
 ``set_weights``, which is permanently DRY-RUN and **hard-refuses mainnet / finney /
-SN39** — so this can never write real weights. The operator's scheduler owns the
+SN94** — so this can never write real weights. The operator's scheduler owns the
 cadence by how often it invokes this.
 """
 from __future__ import annotations

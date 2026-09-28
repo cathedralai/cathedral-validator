@@ -5,7 +5,7 @@ The exact claim these tests support, stated narrowly on purpose:
 1. structural: neither the seam nor its CLI imports scaffold, bittensor or a
    substrate client, in a fresh interpreter or by AST, so no import path from the
    integration lane to any writer in this repo exists;
-2. every chain writer this repo ships refuses SN39 and finney on its own, whatever
+2. every chain writer this repo ships refuses SN94 and finney on its own, whatever
    calls it;
 3. behavioural: a full preview composes its vector with every writer entry point in
    this repo replaced by a trap that raises if touched.
@@ -91,13 +91,13 @@ def test_the_lane_source_imports_nothing_that_could_write():
 
 
 # --------------------------------------------------------------------------- #
-# 2. The writers refuse SN39 on their own
+# 2. The writers refuse SN94 on their own
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
     "network,netuid",
-    [("finney", 39), ("finney", 1), ("mainnet", 7), ("test", 39), ("unknown", 2)],
+    [("finney", 94), ("finney", 1), ("mainnet", 7), ("test", 94), ("unknown", 2)],
 )
 def test_legacy_mechanism_writer_hard_refuses(network, netuid):
     with pytest.raises(mws.UnsafeNetworkError):
@@ -111,26 +111,26 @@ def test_legacy_mechanism_writer_hard_refuses(network, netuid):
         )
 
 
-def test_scaffold_chain_writer_refuses_sn39_even_when_broadcast_is_requested():
+def test_scaffold_chain_writer_refuses_sn94_even_when_broadcast_is_requested():
     chain = scaffold_chain.ChainClient(
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="w",
         hotkey="hk",
         broadcast=True,
     )
     result = chain.set_weights(scaffold_chain.WeightVector(by_uid={1: 1.0}))
     assert result["submitted"] is False
-    assert "disabled on SN39" in result["reason"]
+    assert "disabled on SN94" in result["reason"]
 
 
-def test_the_thin_validator_writer_refuses_sn39():
-    """The canonical thin path refuses SN39 before touching a chain client."""
+def test_the_thin_validator_writer_refuses_sn94():
+    """The canonical thin path refuses SN94 before touching a chain client."""
     import asyncio
 
     runtime = thin_validator.BittensorRuntime.__new__(thin_validator.BittensorRuntime)
-    runtime.netuid = 39
-    with pytest.raises(Exception, match="disabled on SN39"):
+    runtime.netuid = 94
+    with pytest.raises(Exception, match="disabled on SN94"):
         asyncio.run(runtime.submit_weights(object()))
 
 
@@ -147,7 +147,7 @@ _WRITERS = (
     (scaffold_chain.ChainClient, "set_weights"),
     (scaffold_chain.ChainClient, "map_weights"),
     (validator_thin, "set_weights_on_chain"),
-    (validator_thin, "_submit_exact_sn39_extrinsic"),
+    (validator_thin, "_submit_exact_sn94_extrinsic"),
 )
 
 
@@ -176,7 +176,7 @@ def test_preview_completes_with_every_writer_in_this_repo_booby_trapped(monkeypa
         monkeypatch.setattr(owner, name, trap)
     monkeypatch.setattr(thin_validator.BittensorRuntime, "submit_weights", trap)
 
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
         allocation_config=fx.allocation_config(
@@ -185,7 +185,7 @@ def test_preview_completes_with_every_writer_in_this_repo_booby_trapped(monkeypa
         key_registry=fx.registry,
         receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -198,7 +198,7 @@ def test_preview_completes_with_every_writer_in_this_repo_booby_trapped(monkeypa
 
 def test_preview_returns_the_vector_and_reports_no_submission():
     """The seam's only output is data: nothing in it claims a chain submission."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = ig.preview_integrated_vector(
         burn_config=fx.burn_config(),
         allocation_config=fx.allocation_config(
@@ -207,7 +207,7 @@ def test_preview_returns_the_vector_and_reports_no_submission():
         key_registry=fx.registry,
         receipts=[ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=NOW_DT,
         now_iso=NOW_ISO,

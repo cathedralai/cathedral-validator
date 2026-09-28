@@ -26,7 +26,7 @@ THIN_JOURNAL_NAME = "thin-state.json"
 def record(**overrides) -> dict:
     base = {
         "lineage": LINEAGE,
-        "netuid": 39,
+        "netuid": 94,
         "epoch_open": 6_120_000,
         "anchor_number": 6_119_999,
         "anchor_hash": "0x" + "ab" * 32,

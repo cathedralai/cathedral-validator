@@ -53,7 +53,7 @@ NOW = 1_785_916_800.0  # 2026-08-05T08:00:00Z
 REAL_PRODUCER = "5CtobNq2yNmUKaaR9HL5eSY2jN4j43iz1GLXNeNp2tbkwawK"
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 
-# The three shapes the live SN39 box actually runs, because the decoys are not
+# The three shapes the live SN94 box actually runs, because the decoys are not
 # hypothetical: cathedral-publisher.service (a pre-scope tree writing an
 # unscoped `latest` nothing consumes) and cathedral-scorer-canary.service
 # (scoped to test/292) both answer /v1/validator/weights/next with a real
@@ -61,8 +61,8 @@ ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 COMPOSER_PID = 673997
 LEGACY_PID = 135145
 CANARY_PID = 134825
-EXPECTED_VECTOR_ID = "latest:finney:39"
-EXPECTED_LOCK_NAME = "cathedral:weights:refresh:finney:39"
+EXPECTED_VECTOR_ID = "latest:finney:94"
+EXPECTED_LOCK_NAME = "cathedral:weights:refresh:finney:94"
 
 
 def _iso(offset_secs: float) -> str:
@@ -77,7 +77,7 @@ def publisher_process(**over) -> gate.ProcessFacts:
         gate.MECHANISM_ENABLED_ENV: "1",
         gate.WEIGHT_FRACTION_ENV: "0.30",
         gate.NETWORK_ENV: "finney",
-        gate.NETUID_ENV: "39",
+        gate.NETUID_ENV: "94",
     }
     environ.update(over.pop("environ", {}))
     base = {
@@ -116,7 +116,7 @@ def legacy_process(**over) -> gate.ProcessFacts:
 
 
 def canary_process(**over) -> gate.ProcessFacts:
-    """Scoped, current code -- but to test/292, not finney/39."""
+    """Scoped, current code -- but to test/292, not finney/94."""
     base = {
         "pid": CANARY_PID,
         "unit": "cathedral-scorer-canary.service",
@@ -219,7 +219,7 @@ def validator_process(**over) -> gate.ProcessFacts:
         "pid": 505121,
         "unit": gate.DEFAULT_VALIDATOR_UNIT,
         "user": "cathedral-validator",
-        "argv": ["/opt/sn39/current-venv/bin/python", "-m", "scaffold.cli"],
+        "argv": ["/opt/sn94/current-venv/bin/python", "-m", "scaffold.cli"],
         "cwd": "/opt/validator",
         "exe": "/usr/bin/python3.12",
         "environ": {"PATH": "/usr/bin", "PYTHONPATH": "/opt/validator"},
@@ -345,7 +345,7 @@ def test_every_non_pass_verdict_names_an_action():
 # --------------------------------------------------------------------------
 # 0. composer identity -- the decoy trap
 #
-# The live SN39 box runs four publisher-shaped processes writing three
+# The live SN94 box runs four publisher-shaped processes writing three
 # different durable rows. The one this preflight originally probed by default
 # was a legacy tree writing an unscoped `latest` row nothing consumes, so the
 # report confidently described the wrong process. These tests hold the line at
@@ -373,7 +373,7 @@ def test_the_composer_is_found_among_the_decoys_without_a_unit_flag():
 
 def test_the_legacy_unscoped_tree_is_never_accepted_as_the_composer():
     """Its weights.py has no _persisted_vector_id at all: it writes one
-    unscoped `latest` row for every subnet, so it cannot be finney/39's."""
+    unscoped `latest` row for every subnet, so it cannot be finney/94's."""
     host = FakeHost(
         processes=[legacy_process()], scopes={LEGACY_PID: legacy_scope_probe()}
     )
@@ -500,9 +500,9 @@ def test_a_confirmed_identity_names_the_process_it_probed():
     assert selected["persisted_vector_id"] == EXPECTED_VECTOR_ID
 
 
-def test_the_default_publisher_unit_is_the_sn39_composer_not_the_legacy_one():
+def test_the_default_publisher_unit_is_the_sn94_composer_not_the_legacy_one():
     """The fallback should still land on the right process if it is ever used."""
-    assert gate.DEFAULT_PUBLISHER_UNIT == "cathedral-scorer-sn39.service"
+    assert gate.DEFAULT_PUBLISHER_UNIT == "cathedral-scorer-sn94.service"
 
 
 def test_enumeration_falls_back_to_the_named_unit_but_keeps_the_proof():
@@ -532,8 +532,8 @@ def test_the_scope_names_match_the_publishers_own_derivation():
     ).read_text()
     assert 'f"latest:{network}:{netuid}"' in weights
     assert 'f"cathedral:weights:refresh:{network}:{netuid}"' in weights
-    assert gate.persisted_vector_id("finney", 39) == "latest:finney:39"
-    assert gate.refresh_lock_name("finney", 39) == "cathedral:weights:refresh:finney:39"
+    assert gate.persisted_vector_id("finney", 94) == "latest:finney:94"
+    assert gate.refresh_lock_name("finney", 94) == "cathedral:weights:refresh:finney:94"
 
 
 def test_the_scope_probe_never_imports_the_server_module():
@@ -620,9 +620,9 @@ def test_unresolvable_publisher_blocks_every_publisher_side_check():
         composer_id=gate.ComposerResolution(
             expected_vector_id=EXPECTED_VECTOR_ID,
             expected_lock_name=EXPECTED_LOCK_NAME,
-            error="cathedral-scorer-sn39.service is inactive",
+            error="cathedral-scorer-sn94.service is inactive",
         ),
-        publisher_error="cathedral-scorer-sn39.service is inactive",
+        publisher_error="cathedral-scorer-sn94.service is inactive",
         now=NOW,
     )
     verdicts = {r.check_id: r for r in gate.run_checks(facts)}
@@ -719,7 +719,7 @@ def test_an_unreadable_database_fails_rather_than_passing_quietly():
 def test_no_database_query_can_write():
     """Read-only by construction, asserted rather than assumed."""
     forbidden = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE")
-    for spec in gate.database_queries("finney", 39).values():
+    for spec in gate.database_queries("finney", 94).values():
         upper = spec["sql"].upper()
         for verb in forbidden:
             assert verb not in upper, spec["sql"]
@@ -1161,14 +1161,14 @@ class FakeHost(gate.Host):
         return {"text": "\n".join(json.dumps(e) for e in status_events())}
 
     def state(self, path):
-        return {"validator_uid": 30, "network": "finney", "netuid": 39}
+        return {"validator_uid": 30, "network": "finney", "netuid": 94}
 
     def now(self):
         return NOW
 
 
 def live_box_host(**over) -> FakeHost:
-    """The population the live SN39 box actually runs: one composer, two decoys."""
+    """The population the live SN94 box actually runs: one composer, two decoys."""
     base = {
         "processes": [legacy_process(), canary_process(), publisher_process()],
         "scopes": {
@@ -1190,7 +1190,7 @@ def _args(**over):
         "status_log": gate.DEFAULT_STATUS_LOG,
         "state_file": gate.DEFAULT_STATE_FILE,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "chain_json": None,
         "max_weights_age_secs": gate.DEFAULT_MAX_WEIGHTS_AGE_SECS,
         "max_cooldown_multiple": gate.DEFAULT_MAX_COOLDOWN_MULTIPLE,
@@ -1204,7 +1204,7 @@ def test_gather_runs_each_probe_in_its_own_services_interpreter():
     facts = gate.gather(host, _args())
     by_unit = {unit: interpreter for unit, interpreter, _, _ in host.calls}
     assert by_unit[gate.DEFAULT_PUBLISHER_UNIT] == "/srv/app/.venv/bin/python3"
-    assert by_unit[gate.DEFAULT_VALIDATOR_UNIT] == "/opt/sn39/current-venv/bin/python"
+    assert by_unit[gate.DEFAULT_VALIDATOR_UNIT] == "/opt/sn94/current-venv/bin/python"
     assert facts.composer["present"] is True
     assert [r.state for r in gate.run_checks(facts)] == [gate.PASS] * 7
 
@@ -1239,8 +1239,8 @@ def test_the_json_report_never_prints_the_database_dsn(capsys):
 def test_the_live_box_shape_probes_the_composer_and_not_a_decoy(capsys):
     """End to end, through main(), against the population the live box runs.
 
-    The publisher-side verdicts must be about cathedral-scorer-sn39.service --
-    the process that composes latest:finney:39 -- and the report must say so
+    The publisher-side verdicts must be about cathedral-scorer-sn94.service --
+    the process that composes latest:finney:94 -- and the report must say so
     where a reader will see it.
     """
     host = live_box_host()

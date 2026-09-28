@@ -28,7 +28,7 @@ TOKEN = "mounted-cybergym-token"
 SECRET = "mounted-cybergym-secret"
 PRODUCER = "5MountedProducer"
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 PATH = "/v1/cybergym/scores"
 
 

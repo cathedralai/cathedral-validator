@@ -53,7 +53,7 @@ from cathedral_thin.independent.constants import (
     MECID,
     MIN_ALLOWED_WEIGHTS,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
@@ -379,24 +379,24 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
         raise UID30LaunchError("UID30 lacks the current validator permit")
     if state.validator_stake_rao < state.stake_threshold_rao:
         raise UID30LaunchError("UID30 is below the current weight stake threshold")
-    if state.weights_rate_limit < SN39_MORTAL_PERIOD_BLOCKS:
-        raise UID30LaunchError("SN39 weight cooldown is shorter than the mortal era")
+    if state.weights_rate_limit < SN94_MORTAL_PERIOD_BLOCKS:
+        raise UID30LaunchError("SN94 weight cooldown is shorter than the mortal era")
     if state.blocks_since_last_update != state.block_number - state.last_update:
         raise UID30LaunchError("UID30 last_update and cooldown distance disagree")
     if state.blocks_since_last_update < state.weights_rate_limit:
         raise UID30LaunchError("UID30 is still inside the current weight cooldown")
     if state.mechanism_count <= MECID:
-        raise UID30LaunchError("SN39 mechanism 0 does not exist")
+        raise UID30LaunchError("SN94 mechanism 0 does not exist")
     if state.min_allowed_weights != MIN_ALLOWED_WEIGHTS:
-        raise UID30LaunchError("SN39 min_allowed_weights differs from the launch pin")
+        raise UID30LaunchError("SN94 min_allowed_weights differs from the launch pin")
     if not math.isclose(
         state.max_weight_limit, MAX_WEIGHT_LIMIT, rel_tol=0.0, abs_tol=0.0
     ):
-        raise UID30LaunchError("SN39 max_weight_limit differs from the launch pin")
+        raise UID30LaunchError("SN94 max_weight_limit differs from the launch pin")
     if state.commit_reveal_enabled is not COMMIT_REVEAL_ENABLED:
-        raise UID30LaunchError("SN39 commit-reveal state differs from the launch pin")
+        raise UID30LaunchError("SN94 commit-reveal state differs from the launch pin")
     if state.weights_version_key != 0 and VERSION_KEY < state.weights_version_key:
-        raise UID30LaunchError("the pinned weight version is not accepted by SN39")
+        raise UID30LaunchError("the pinned weight version is not accepted by SN94")
     if state.miner_hotkey != MINER_HOTKEY:
         raise UID30LaunchError("the launch target is not the pinned Cathedral miner")
     if state.subnet_owner_hotkey in {UID30_HOTKEY, MINER_HOTKEY}:
@@ -411,8 +411,8 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
         state.next_epoch_start_block
         != state.block_number + state.blocks_until_next_epoch
     ):
-        raise UID30LaunchError("SN39 next-epoch facts disagree")
-    if state.blocks_until_next_epoch < SN39_MORTAL_PERIOD_BLOCKS * 2:
+        raise UID30LaunchError("SN94 next-epoch facts disagree")
+    if state.blocks_until_next_epoch < SN94_MORTAL_PERIOD_BLOCKS * 2:
         raise UID30LaunchError(
             "too few blocks remain for preview review and mortal inclusion"
         )
@@ -439,12 +439,12 @@ def read_uid30_chain_state() -> UID30ChainState:
             raise UID30LaunchError("chain preflight resolved the wrong genesis")
         info = preflight.subtensor.get_metagraph_info(NETUID, MECID, block=block)
         if info is None:
-            raise UID30LaunchError("SN39 metagraph info is unavailable")
+            raise UID30LaunchError("SN94 metagraph info is unavailable")
         info_block = _strict_nonnegative_int(
             getattr(info, "block", None), label="metagraph block"
         )
         if info_block != block:
-            raise UID30LaunchError("SN39 metagraph info is not at the finalized head")
+            raise UID30LaunchError("SN94 metagraph info is not at the finalized head")
         hotkeys = [str(value) for value in list(info.hotkeys)]
         axons = list(info.axons)
         permits = list(info.validator_permit)
@@ -460,7 +460,7 @@ def read_uid30_chain_state() -> UID30ChainState:
             == len(total_stakes)
             == len(last_updates)
         ):
-            raise UID30LaunchError("SN39 metagraph eligibility arrays are inconsistent")
+            raise UID30LaunchError("SN94 metagraph eligibility arrays are inconsistent")
         if preflight.validator_uid < 0 or preflight.validator_uid >= len(hotkeys):
             raise UID30LaunchError("UID30 index is outside the metagraph")
         if hotkeys[preflight.validator_uid] != preflight.validator_hotkey:
@@ -479,7 +479,7 @@ def read_uid30_chain_state() -> UID30ChainState:
         )
         mechanism_count = _strict_nonnegative_int(
             preflight.subtensor.get_mechanism_count(NETUID, block=block),
-            label="SN39 mechanism count",
+            label="SN94 mechanism count",
         )
         weights_version_key = _strict_nonnegative_int(
             preflight.subtensor.substrate.query(
@@ -488,17 +488,17 @@ def read_uid30_chain_state() -> UID30ChainState:
                 params=[NETUID],
                 block_hash=block_hash,
             ),
-            label="SN39 weight version",
+            label="SN94 weight version",
         )
         miner_uid = preflight.hotkey_to_uid.get(MINER_HOTKEY)
         if isinstance(miner_uid, bool) or not isinstance(miner_uid, int):
             raise UID30LaunchError(
-                "the pinned Cathedral miner is not registered on SN39"
+                "the pinned Cathedral miner is not registered on SN94"
             )
         uid_safety = canonical_validator._require_uid_mapping_stability(
             preflight,
             {miner_uid: MINER_HOTKEY},
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
         )
         serving_axon = _serving_axon_from_info_row(
             axons[miner_uid], uid=miner_uid, hotkey=MINER_HOTKEY
@@ -521,7 +521,7 @@ def read_uid30_chain_state() -> UID30ChainState:
                 label="blocks since UID30 update",
             ),
             weights_rate_limit=_strict_nonnegative_int(
-                preflight.weights_rate_limit, label="SN39 weight cooldown"
+                preflight.weights_rate_limit, label="SN94 weight cooldown"
             ),
             mechanism_count=mechanism_count,
             weights_version_key=weights_version_key,
@@ -626,7 +626,7 @@ def read_uid30_successor_state() -> UID30SuccessorState:
         uid_safety = canonical_validator._require_uid_mapping_stability(
             base.preflight,
             {row.uid: row.hotkey for row in rows},
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
         )
     except Exception as exc:
         raise UID30LaunchError(f"two-miner UID safety failed: {exc}") from exc
@@ -945,7 +945,7 @@ def build_preview(
         preview_sha256="0" * 64,
     )
     _assert_writer_available(provisional)
-    valid_until_block = state.next_epoch_start_block - SN39_MORTAL_PERIOD_BLOCKS
+    valid_until_block = state.next_epoch_start_block - SN94_MORTAL_PERIOD_BLOCKS
     created = (
         _parse_utc(created_at, label="preview creation time")
         if created_at is not None
@@ -978,7 +978,7 @@ def build_preview(
             "valid_from_time": timestamp,
             "valid_until_time": valid_until_time,
             "require_commit_reveal_disabled": True,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "expected_next_epoch_start_block": state.next_epoch_start_block,
         },
         "validator": state.artifact(),
@@ -1081,7 +1081,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         in {UID30_HOTKEY, MINER_HOTKEY}
         or _CHAIN_HASH_RE.fullmatch(str(network.get("finalized_hash", ""))) is None
     ):
-        raise UID30LaunchError("preview network identity is not pinned Finney SN39")
+        raise UID30LaunchError("preview network identity is not pinned Finney SN94")
     finalized_block = _strict_nonnegative_int(
         network.get("finalized_block"), label="preview finalized block"
     )
@@ -1101,8 +1101,8 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     if (
         valid_from != finalized_block
         or next_epoch != finalized_block + blocks_until_next_epoch
-        or blocks_until_next_epoch < SN39_MORTAL_PERIOD_BLOCKS * 2
-        or valid_until != next_epoch - SN39_MORTAL_PERIOD_BLOCKS
+        or blocks_until_next_epoch < SN94_MORTAL_PERIOD_BLOCKS * 2
+        or valid_until != next_epoch - SN94_MORTAL_PERIOD_BLOCKS
     ):
         raise UID30LaunchError("preview block validity is inconsistent")
     created = _parse_utc(preview.get("created_at"), label="preview creation time")
@@ -1119,7 +1119,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         or policy_until_time - policy_from_time
         != timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
         or inclusion.get("require_commit_reveal_disabled") is not True
-        or inclusion.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or inclusion.get("mortal_period_blocks") != SN94_MORTAL_PERIOD_BLOCKS
         or inclusion.get("expected_next_epoch_start_block") != next_epoch
     ):
         raise UID30LaunchError(
@@ -1159,7 +1159,7 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     max_limit = validator.get("max_weight_limit")
     if (
         blocks_since != finalized_block - last_update
-        or rate_limit < SN39_MORTAL_PERIOD_BLOCKS
+        or rate_limit < SN94_MORTAL_PERIOD_BLOCKS
         or blocks_since < rate_limit
         or mechanism_count <= MECID
         or (chain_version != 0 and VERSION_KEY < chain_version)
@@ -1228,9 +1228,9 @@ def validate_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         or rotation.get("status") != canonical_validator.PASS
         or rotation.get("mapping_block") != finalized_block
         or rotation_mapping_hash != network.get("finalized_hash")
-        or rotation.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or rotation.get("mortal_period_blocks") != SN94_MORTAL_PERIOD_BLOCKS
         or rotation.get("era_last_block")
-        != finalized_block + SN39_MORTAL_PERIOD_BLOCKS - 1
+        != finalized_block + SN94_MORTAL_PERIOD_BLOCKS - 1
         or not isinstance(targets, list)
         or len(targets) != 1
         or len(matching_targets) != 1
@@ -1379,7 +1379,7 @@ def build_successor_preview(
         else datetime.now(UTC)
     )
     timestamp = _canonical_utc(created)
-    valid_until_block = state.next_epoch_start_block - SN39_MORTAL_PERIOD_BLOCKS
+    valid_until_block = state.next_epoch_start_block - SN94_MORTAL_PERIOD_BLOCKS
     uids, weights = second_miner_plan.equal_wire(
         state.targets[0].uid,
         state.targets[1].uid,
@@ -1409,7 +1409,7 @@ def build_successor_preview(
                 created + timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
             ),
             "require_commit_reveal_disabled": True,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "expected_next_epoch_start_block": state.next_epoch_start_block,
         },
         "validator": state.base.artifact(),
@@ -1517,7 +1517,7 @@ def validate_successor_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         or _canonical_hash(network.get("finalized_hash"), label="successor hash")
         != network.get("finalized_hash")
         or preview.get("valid_from_block") != block
-        or preview.get("valid_until_block") != next_epoch - SN39_MORTAL_PERIOD_BLOCKS
+        or preview.get("valid_until_block") != next_epoch - SN94_MORTAL_PERIOD_BLOCKS
         or inclusion.get("valid_from_block") != block
         or inclusion.get("valid_until_block") != preview.get("valid_until_block")
         or _parse_utc(inclusion.get("valid_from_time"), label="successor valid-from")
@@ -1526,7 +1526,7 @@ def validate_successor_preview(document: Mapping[str, Any]) -> dict[str, Any]:
         - created
         != timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
         or inclusion.get("require_commit_reveal_disabled") is not True
-        or inclusion.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or inclusion.get("mortal_period_blocks") != SN94_MORTAL_PERIOD_BLOCKS
         or inclusion.get("expected_next_epoch_start_block") != next_epoch
         or validator.get("hotkey") != UID30_HOTKEY
         or validator.get("uid") != UID30
@@ -2624,7 +2624,7 @@ def submit_reviewed_successor(
                 ) from exc
 
             try:
-                receipt = canonical_validator._submit_exact_sn39_extrinsic(
+                receipt = canonical_validator._submit_exact_sn94_extrinsic(
                     fresh_state.preflight,
                     runtime_contract=args,
                     attempt_id=attempt_id,
@@ -2632,7 +2632,7 @@ def submit_reviewed_successor(
                     version_key=VERSION_KEY,
                     wire_uids=list(wire_uids),
                     wire_weights=list(wire_weights),
-                    mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+                    mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
                     allow_reviewed_uid30_finalized_descendant=True,
                 )
                 submission = _receipt_submission(receipt, state=fresh_state)
@@ -2807,7 +2807,7 @@ def submit_reviewed_preview(
                 ) from exc
             wire_uids = [fresh_state.miner_uid]
             wire_weights = [W]
-            call = submit_call or canonical_validator._submit_exact_sn39_extrinsic
+            call = submit_call or canonical_validator._submit_exact_sn94_extrinsic
             submit_kwargs = {
                 "runtime_contract": args,
                 "attempt_id": attempt_id,
@@ -2815,7 +2815,7 @@ def submit_reviewed_preview(
                 "version_key": VERSION_KEY,
                 "wire_uids": wire_uids,
                 "wire_weights": wire_weights,
-                "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+                "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             }
             if submit_call is None:
                 # Only this digest-reviewed, zero-burn launch receives the
@@ -3087,7 +3087,7 @@ def recover_reviewed_preview(
                     or version_key != VERSION_KEY
                     or intent_version != VERSION_KEY
                     or intent_reference != identity.get("mapping_block")
-                    or intent_mortal != SN39_MORTAL_PERIOD_BLOCKS
+                    or intent_mortal != SN94_MORTAL_PERIOD_BLOCKS
                     or wire_uids != [miner_uid]
                     or wire_weights != [W]
                     or intent_uids != wire_uids
@@ -3180,7 +3180,7 @@ def recover_reviewed_preview(
                 ) from exc
             if (
                 era_reference_block != identity.get("mapping_block")
-                or mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+                or mortal_period != SN94_MORTAL_PERIOD_BLOCKS
                 or version_key != VERSION_KEY
                 or wire_uids != [miner_uid]
                 or wire_weights != [W]
@@ -3468,7 +3468,7 @@ def _successor_signed_record(
         or nonce < 0
         or type(era_reference) is not int
         or era_reference != identity.get("mapping_block")
-        or mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period != SN94_MORTAL_PERIOD_BLOCKS
         or version_key != VERSION_KEY
         or intent_uids != wire_uids
         or intent_weights != wire_weights

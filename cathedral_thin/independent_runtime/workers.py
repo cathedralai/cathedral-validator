@@ -1,6 +1,6 @@
 """Cathedral Workers rental and listing client.
 
-This is the customer API at ``https://cathedral.computer/v1``, not the SN39
+This is the customer API at ``https://cathedral.computer/v1``, not the SN94
 miner protocol. A rented persistent Intel TDX Worker is how this runner lists
 a machine. Serving ``POST /v1/evidence`` from inside that guest is a later
 step; listing the Worker is this module.

@@ -2,7 +2,7 @@
 
 bittensor's Subtensor opens a websocket in its constructor and does not close
 it on garbage collection, so an un-closed instance strands a socket and an fd
-for the life of the process. Measured on SN39 mainnet before the fix: +4
+for the life of the process. Measured on SN94 mainnet before the fix: +4
 stranded descriptors per 25-minute tick, which reaches the default
 RLIMIT_NOFILE ceiling of 1024 in about three days and then stops the validator
 writing weights entirely.
@@ -107,13 +107,13 @@ def test_block_hash_lookup_closes_its_connection(fake_bittensor):
 
 
 def test_historical_metagraph_lookup_closes_its_connection(fake_bittensor):
-    lookup = vt._historical_metagraph_lookup("finney", 39)
+    lookup = vt._historical_metagraph_lookup("finney", 94)
     lookup(100)
     assert _only_instance().closed is True
 
 
 def test_metagraph_hotkey_to_uid_closes_its_connection(fake_bittensor):
-    mapping = vt.metagraph_hotkey_to_uid(network="finney", netuid=39)
+    mapping = vt.metagraph_hotkey_to_uid(network="finney", netuid=94)
     assert mapping == {"hk-a": 0, "hk-b": 1}
     assert _only_instance().closed is True
 

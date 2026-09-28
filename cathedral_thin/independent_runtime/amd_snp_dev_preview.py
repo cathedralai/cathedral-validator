@@ -252,7 +252,7 @@ def parse_config_document(document: Any) -> DevPreviewConfig:
         or root["netuid"] != NETUID
     ):
         raise AmdSnpDevPreviewError(
-            "AMD SEV-SNP development preview is pinned to finney SN39"
+            "AMD SEV-SNP development preview is pinned to finney SN94"
         )
 
     validator_hotkey = _ss58(root["validator_hotkey"], label="validator_hotkey")

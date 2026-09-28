@@ -52,13 +52,13 @@ def test_capture_produces_a_valid_sorted_snapshot():
     fake = _FakeSubtensor(hotkeys=["zed-hotkey", "alpha-hotkey"], block=123)
     document = capture_candidate_snapshot(
         network="finney",
-        netuid=39,
+        netuid=94,
         subtensor_factory=lambda network: fake,
     )
     assert document == {
         "schema": "cathedral_candidate_snapshot_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "block": 123,
         "block_hash": BLOCK_HASH.lower(),
         "hotkeys": ["alpha-hotkey", "zed-hotkey"],
@@ -69,7 +69,7 @@ def test_capture_produces_a_valid_sorted_snapshot():
     # The confidential exporter accepts the captured document verbatim.
     from cathedral.score_class import validate_candidate_snapshot
 
-    binding = validate_candidate_snapshot(document, network="finney", netuid=39)
+    binding = validate_candidate_snapshot(document, network="finney", netuid=94)
     assert binding["block"] == 123
     assert binding["block_hash"] == "ab" * 32
     assert binding["hotkeys"] == ["alpha-hotkey", "zed-hotkey"]
@@ -79,12 +79,12 @@ def test_capture_pins_an_explicit_finalized_block():
     fake = _FakeSubtensor(hotkeys=["m1"], expected_block_arg=555)
     document = capture_candidate_snapshot(
         network="finney",
-        netuid=39,
+        netuid=94,
         block=555,
         subtensor_factory=lambda network: fake,
     )
     assert document["block"] == 555
-    assert fake.metagraph_calls == [(39, 555)]
+    assert fake.metagraph_calls == [(94, 555)]
     assert fake.hash_calls == [555]
 
 
@@ -92,22 +92,22 @@ def test_capture_rejects_duplicate_and_malformed_chain_data():
     duplicate = _FakeSubtensor(hotkeys=["m1", "m1"])
     with pytest.raises(SnapshotError, match="duplicate hotkeys"):
         capture_candidate_snapshot(
-            network="finney", netuid=39, subtensor_factory=lambda n: duplicate
+            network="finney", netuid=94, subtensor_factory=lambda n: duplicate
         )
     malformed_hotkey = _FakeSubtensor(hotkeys=["m1", ""])
     with pytest.raises(SnapshotError, match="malformed hotkey"):
         capture_candidate_snapshot(
-            network="finney", netuid=39, subtensor_factory=lambda n: malformed_hotkey
+            network="finney", netuid=94, subtensor_factory=lambda n: malformed_hotkey
         )
     bad_hash = _FakeSubtensor(hotkeys=["m1"], block_hash="not-a-hash")
     with pytest.raises(SnapshotError, match="no usable hash"):
         capture_candidate_snapshot(
-            network="finney", netuid=39, subtensor_factory=lambda n: bad_hash
+            network="finney", netuid=94, subtensor_factory=lambda n: bad_hash
         )
     no_block = _FakeSubtensor(hotkeys=["m1"], block=None)
     with pytest.raises(SnapshotError, match="usable block number"):
         capture_candidate_snapshot(
-            network="finney", netuid=39, subtensor_factory=lambda n: no_block
+            network="finney", netuid=94, subtensor_factory=lambda n: no_block
         )
     with pytest.raises(SnapshotError, match="netuid is invalid"):
         capture_candidate_snapshot(
@@ -120,7 +120,7 @@ def test_write_snapshot_atomic_is_exact_and_replaces(tmp_path: Path):
     document = {
         "schema": "cathedral_candidate_snapshot_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "block": 100,
         "block_hash": BLOCK_HASH,
         "hotkeys": ["m1"],
@@ -144,7 +144,7 @@ def test_main_captures_via_cli(tmp_path: Path, monkeypatch, capsys):
             "--network",
             "finney",
             "--netuid",
-            "39",
+            "94",
             "--block",
             "777",
             "--output",
@@ -168,7 +168,7 @@ def test_main_reports_chain_failures_without_traceback(
 
     monkeypatch.setattr(module, "_default_subtensor_factory", broken_factory)
     code = main(
-        ["--network", "finney", "--netuid", "39", "--output", str(tmp_path / "x.json")]
+        ["--network", "finney", "--netuid", "94", "--output", str(tmp_path / "x.json")]
     )
     assert code == 2
     assert "candidate snapshot failed" in capsys.readouterr().err
@@ -188,7 +188,7 @@ def test_capture_refuses_a_metagraph_not_at_the_requested_block():
     with pytest.raises(SnapshotError, match="refusing the unproven binding"):
         capture_candidate_snapshot(
             network="finney",
-            netuid=39,
+            netuid=94,
             block=555,
             subtensor_factory=lambda n: dishonest,
         )
@@ -201,7 +201,7 @@ def test_capture_refuses_a_metagraph_not_at_the_requested_block():
     with pytest.raises(SnapshotError, match="binding cannot be proven"):
         capture_candidate_snapshot(
             network="finney",
-            netuid=39,
+            netuid=94,
             block=555,
             subtensor_factory=lambda n: blockless,
         )

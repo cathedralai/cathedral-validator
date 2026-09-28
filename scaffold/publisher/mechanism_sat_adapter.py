@@ -86,7 +86,7 @@ def sat_mechanism_scores(
     nothing this cycle," never an exception.
     """
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    netuid = int(os.environ.get(NETUID_ENV, "94"))
 
     totals = score_totals(store, since_iso=since_iso, epoch=epoch)
     hotkey_to_uid = _load_hotkey_to_uid(store, network=network, netuid=netuid)

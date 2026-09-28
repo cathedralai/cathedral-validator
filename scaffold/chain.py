@@ -6,8 +6,8 @@ provenance.
     surfaces it so a tripartite vali is never confused with a production vali.
 
   * set_weights is DRY-RUN by default (compute + log the vector). This legacy
-    scaffold can broadcast only away from SN39; the reviewed immutable
-    ``cathedral-validator`` release is the sole SN39 writer.
+    scaffold can broadcast only away from SN94; the reviewed immutable
+    ``cathedral-validator`` release is the sole SN94 writer.
 
 bittensor is imported lazily; if it's absent (it isn't installed in every env)
 the layer still computes weights and records provenance — it just can't read a
@@ -201,7 +201,7 @@ class ChainClient:
     def set_weights(self, wv: WeightVector) -> dict:
         """Submit weights. DRY-RUN unless broadcast=True (explicit opt-in).
 
-        SN39 is hard-disabled regardless of network label or endpoint. The
+        SN94 is hard-disabled regardless of network label or endpoint. The
         canonical signed-vector relay and bounded launch tools are the only
         repository paths permitted to write Cathedral mainnet weights.
         """
@@ -212,11 +212,11 @@ class ChainClient:
                 "weight_vector": wv.nonzero(),
                 "uids": wv.by_uid,
             }
-        if self.netuid == 39:
+        if self.netuid == 94:
             return {
                 "submitted": False,
                 "reason": (
-                    "legacy scaffold broadcasts are disabled on SN39; use the "
+                    "legacy scaffold broadcasts are disabled on SN94; use the "
                     "immutable cathedral-validator release"
                 ),
             }

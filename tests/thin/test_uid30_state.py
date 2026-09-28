@@ -34,7 +34,7 @@ class _Substrate:
             assert params == []
             return 100
         if storage_function == "WeightsVersionKey":
-            assert params == [39]
+            assert params == [94]
             return 0
         raise AssertionError(storage_function)
 
@@ -48,7 +48,7 @@ class _Subtensor:
         self.hotkeys[124] = uid30_state.MINER_HOTKEY
 
     def metagraph(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         permits = [False] * len(self.hotkeys)
         permits[uid30_state.UID30] = self.permit
         return SimpleNamespace(
@@ -59,7 +59,7 @@ class _Subtensor:
         )
 
     def get_metagraph_info(self, netuid, mecid, *, block):
-        assert (netuid, mecid, block) == (39, 0, BLOCK)
+        assert (netuid, mecid, block) == (94, 0, BLOCK)
         permits = [False] * len(self.hotkeys)
         permits[uid30_state.UID30] = self.permit
         stakes = [SimpleNamespace(rao=0) for _ in self.hotkeys]
@@ -85,39 +85,39 @@ class _Subtensor:
         )
 
     def blocks_until_next_epoch(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return 100
 
     def get_next_epoch_start_block(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return 200
 
     def weights_rate_limit(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return 10
 
     def blocks_since_last_update(self, netuid, uid, *, block):
-        assert (netuid, uid, block) == (39, uid30_state.UID30, BLOCK)
+        assert (netuid, uid, block) == (94, uid30_state.UID30, BLOCK)
         return 50
 
     def commit_reveal_enabled(self, *, netuid, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return np.bool_(False)
 
     def min_allowed_weights(self, *, netuid, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return np.int64(1)
 
     def max_weight_limit(self, *, netuid, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return 1.0
 
     def get_subnet_owner_hotkey(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return OWNER
 
     def get_mechanism_count(self, netuid, *, block):
-        assert (netuid, block) == (39, BLOCK)
+        assert (netuid, block) == (94, BLOCK)
         return np.int64(1)
 
 

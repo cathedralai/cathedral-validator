@@ -370,7 +370,7 @@ def _lock_for_other_process(path: Path) -> int:
 def test_updater_derives_the_only_journal_for_the_expected_hotkey(
     tmp_path: Path,
 ) -> None:
-    scope = tmp_path / "direct-writer" / "finney-sn39-mechanism-0"
+    scope = tmp_path / "direct-writer" / "finney-sn94-mechanism-0"
     updater = SignedReleaseUpdater(
         install_root=tmp_path / "install",
         state_root=tmp_path / "state",

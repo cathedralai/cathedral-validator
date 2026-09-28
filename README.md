@@ -1,6 +1,6 @@
 # Cathedral Validator
 
-Cathedral Validator scores compute on Bittensor SN39 and writes weights directly
+Cathedral Validator scores compute on Bittensor SN94 and writes weights directly
 with your validator hotkey. It does not download a weight vector, use a relay,
 or send your key to Cathedral.
 
@@ -8,7 +8,7 @@ or send your key to Cathedral.
 
 Each cycle, the validator:
 
-1. Reads a finalized SN39 metagraph and finds serving miners.
+1. Reads a finalized SN94 metagraph and finds serving miners.
 2. Authenticates to each miner and requests its machine fleet.
 3. Verifies Intel TDX or AMD SEV-SNP evidence and the same SAT workload.
 4. Removes duplicate endpoints, TLS identities, and physical machines.
@@ -25,7 +25,7 @@ pinned TDX and SNP verifier programs.
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
   Ubuntu 24.04 LTS is what Cathedral tests on.
-- A hotkey registered on SN39 that holds a validator permit. The validator
+- A hotkey registered on SN94 that holds a validator permit. The validator
   writes no weights without one. It keeps running, checks again every cycle,
   and reports `NOT_REGISTERED` or `NO_PERMIT` until the chain grants the permit
   at an epoch. A permit depends on your stake relative to other validators.
@@ -60,7 +60,7 @@ public address.
   submissions.
 - `raw.githubusercontent.com` and `github.com`, for the signed release channel
   and the release archives it downloads.
-- Each serving SN39 miner, on the address and port it advertises on chain.
+- Each serving SN94 miner, on the address and port it advertises on chain.
   These are arbitrary hosts and ports that change as miners come and go, so
   outbound traffic to them cannot be pinned to a fixed allowlist.
 

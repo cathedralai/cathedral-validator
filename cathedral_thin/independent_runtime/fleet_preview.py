@@ -1,6 +1,6 @@
-"""Dedicated no-write SN39 multi-machine scoring preview.
+"""Dedicated no-write SN94 multi-machine scoring preview.
 
-This console reads one finalized SN39 metagraph, authenticates worker HTTPS
+This console reads one finalized SN94 metagraph, authenticates worker HTTPS
 requests with the pinned UID30 hotkey, verifies bounded fleets, and renders a
 non-authorizing normalized row.  It imports no Cloud client, canary writer,
 journal, account-nonce helper, extrinsic builder, or submission transport.
@@ -134,7 +134,7 @@ def read_finalized_snapshot(
             _strict_int(getattr(metagraph, "block", None), label="metagraph block")
             != block_number
         ):
-            raise FleetPreviewError("SN39 metagraph is not at the finalized head")
+            raise FleetPreviewError("SN94 metagraph is not at the finalized head")
         raw_uids = (
             metagraph.uids.tolist()
             if hasattr(metagraph.uids, "tolist")
@@ -144,13 +144,13 @@ def read_finalized_snapshot(
         hotkeys = [str(value) for value in list(metagraph.hotkeys)]
         permits = list(metagraph.validator_permit)
         if not (len(uids) == len(hotkeys) == len(permits)):
-            raise FleetPreviewError("SN39 metagraph identity arrays are inconsistent")
+            raise FleetPreviewError("SN94 metagraph identity arrays are inconsistent")
         if not uids or len(uids) > MAX_DESTS:
             raise FleetPreviewError(
-                f"SN39 registered-set size is outside 1..{MAX_DESTS}"
+                f"SN94 registered-set size is outside 1..{MAX_DESTS}"
             )
         if len(set(uids)) != len(uids) or len(set(hotkeys)) != len(hotkeys):
-            raise FleetPreviewError("SN39 metagraph repeats a UID or hotkey")
+            raise FleetPreviewError("SN94 metagraph repeats a UID or hotkey")
         hotkey_to_uid = dict(zip(hotkeys, uids))
         uid_to_hotkey = dict(zip(uids, hotkeys))
         validator_uid = hotkey_to_uid.get(UID30_VALIDATOR_HOTKEY)
@@ -166,7 +166,7 @@ def read_finalized_snapshot(
     except FleetPreviewError:
         raise
     except Exception as exc:
-        raise FleetPreviewError(f"finalized SN39 preview failed: {exc}") from exc
+        raise FleetPreviewError(f"finalized SN94 preview failed: {exc}") from exc
     return FinalizedFleetSnapshot(
         keypair=keypair,
         block_number=block_number,

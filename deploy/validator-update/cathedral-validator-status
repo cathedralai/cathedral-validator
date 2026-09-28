@@ -25,7 +25,7 @@ UPDATER_VERIFIED_METADATA = Path(
     "/var/lib/cathedral-validator-update/verified-metadata.json"
 )
 DIRECT_SCOPE = Path(
-    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0"
+    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn94-mechanism-0"
 )
 DIRECT_UNIT = "cathedral-validator-direct.service"
 STABLE_TIMER = "cathedral-validator-update.timer"

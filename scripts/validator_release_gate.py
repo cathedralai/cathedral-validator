@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validator release gate — read-only pre-deploy check for SN39 weight setting.
+"""Validator release gate — read-only pre-deploy check for SN94 weight setting.
 
 Runs the plan's validator release-gate checks (deploy/RELIABILITY_UPGRADE_PLAN.md,
 "Validator release gate" + "Vector Freshness Thresholds") against:
@@ -69,7 +69,7 @@ except Exception:
 # wrong fields. Bump this constant when the env is intentionally upgraded.
 BITTENSOR_REQUIRED_MAJOR = 10
 
-# Current Cathedral SN39 validator identity and live service cadence. The UID is
+# Current Cathedral SN94 validator identity and live service cadence. The UID is
 # only a CLI default: operators still resolve their validator by hotkey before
 # any write. The cadence matches the public relay config and scaffold.cli.
 DEFAULT_VALIDATOR_UID = 30
@@ -80,7 +80,7 @@ UID_UPDATE_SCHEDULING_GRACE_SECONDS = 120.0
 DEFAULT_FEED_BASE = "https://api.cathedral.computer"
 DEFAULT_READ_BASE = "https://read.cathedral.computer"
 WEIGHTS_PATH = "/v1/validator/weights/next"
-DEFAULT_NETUID = 39
+DEFAULT_NETUID = 94
 
 # All three validator weight-feed URLs that must keep working, per the plan's
 # "Validator URL Compatibility (all three must keep working)" section. Each is
@@ -509,7 +509,7 @@ def run_gate(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, 
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="SN39 validator release gate (read-only).")
+    p = argparse.ArgumentParser(description="SN94 validator release gate (read-only).")
     p.add_argument("--feed-url", default=DEFAULT_FEED_BASE,
                    help="base URL of the public weight feed (api.* host)")
     p.add_argument("--read-url", default=DEFAULT_READ_BASE,

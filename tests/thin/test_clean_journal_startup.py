@@ -100,7 +100,7 @@ _IDENTITY = {
     "uid_hotkeys": [[0, "5Test"]],
     "burn_hotkey": "5Test",
     "network": "finney",
-    "netuid": 39,
+    "netuid": 94,
     "mapping_block": 100,
     "policy_version": 1,
     "vector_id": "v1",
@@ -110,7 +110,7 @@ _INTENT = {
     "extrinsic_hash": "0x" + "1" * 64,
     "nonce": 1,
     "era_reference_block": 100,
-    "mortal_period_blocks": vt.SN39_MORTAL_PERIOD_BLOCKS,
+    "mortal_period_blocks": vt.SN94_MORTAL_PERIOD_BLOCKS,
     "version_key": 1,
     "wire_uids": [0],
     "wire_weights": [65535],
@@ -171,7 +171,7 @@ def test_abort_of_a_later_unsigned_attempt_does_not_wedge_recovery(
     journal = tmp_path / "journal-test.json"
     monkeypatch.setattr(vt, "_submission_state_path", lambda args: journal)
     monkeypatch.setattr(vt, "_wire_weights", lambda uids, weights: ([0], [65535]))
-    args = SimpleNamespace(state_file=str(tmp_path / "thin-state.json"), netuid=39)
+    args = SimpleNamespace(state_file=str(tmp_path / "thin-state.json"), netuid=94)
 
     vt._write_state(journal, _post_finalize_state())
 

@@ -240,7 +240,7 @@ The direct writer keeps its journal at:
 
 ```text
 /var/lib/cathedral-validator/.local/state/cathedral-validator/
-  direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json
+  direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json
 ```
 
 Never delete or replace the journal to clear an error. The service uses

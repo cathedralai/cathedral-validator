@@ -41,6 +41,9 @@ REFUSED_UNITS = (
     "cathedral-validator-sn39.service",
     "cathedral-validator-sn39-relay.service",
     "cathedral-confidential-validator-sn39.service",
+    "cathedral-validator-sn94.service",
+    "cathedral-validator-sn94-relay.service",
+    "cathedral-confidential-validator-sn94.service",
     "cathedral-confidential-validator.service",
     "cathedral-validator.service",
 )

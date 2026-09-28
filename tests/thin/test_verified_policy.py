@@ -118,7 +118,7 @@ def signed_task_and_hidden(
     )
     body = make_task(
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=9,
         task_class="agent_tool_policy",
         validator_hotkey=validator.ss58_address,
@@ -141,7 +141,7 @@ def verified_task(miner: Keypair, validator: Keypair, *, nonce_byte: int = 7):
     task = verify_task(
         raw,
         network="finney",
-        netuid=39,
+        netuid=94,
         current_block=BLOCK,
         now=NOW,
         expected_validator_hotkey=validator.ss58_address,
@@ -192,7 +192,7 @@ def test_task_is_individualized_signed_and_replay_bounded() -> None:
         verify_task(
             raw,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=BLOCK,
             now=NOW,
             expected_miner_hotkey=miner_b.ss58_address,
@@ -201,7 +201,7 @@ def test_task_is_individualized_signed_and_replay_bounded() -> None:
         verify_task(
             raw,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=BLOCK + 5,
             now=NOW,
         )
@@ -212,7 +212,7 @@ def test_task_is_individualized_signed_and_replay_bounded() -> None:
         verify_task(
             canonical_json(tampered),
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=BLOCK,
             now=NOW,
         )
@@ -263,7 +263,7 @@ def test_hidden_suite_is_cryptographically_bound_to_task_nonce() -> None:
     with pytest.raises(ThinSubnetError, match="different task nonce"):
         make_task(
             network="finney",
-            netuid=39,
+            netuid=94,
             source_epoch=9,
             task_class="agent_tool_policy",
             validator_hotkey=validator.ss58_address,
@@ -325,7 +325,7 @@ def test_execution_receipt_must_bind_exact_artifact_bytes() -> None:
     task, _, hidden, artifact, artifact_raw = good_artifact(miner, validator)
     receipt_body = make_unsigned_receipt(
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=task.source_epoch,
         validator_hotkey=validator.ss58_address,
         miner_hotkey=miner.ss58_address,
@@ -352,7 +352,7 @@ def test_execution_receipt_must_bind_exact_artifact_bytes() -> None:
         receipt_raw,
         ReceiptPolicy(
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=BLOCK,
             require_attestation=False,
         ),
@@ -389,7 +389,7 @@ def _policy_document(public_key: bytes) -> dict:
     return {
         "schema": "cathedral_score_policy_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {
                 "allocation": allocations[class_id],
@@ -451,7 +451,7 @@ def test_score_report_cannot_repackage_cross_network_epoch_or_block_evidence() -
     common = {
         "evaluations": [evaluation],
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "class_id": "policy_fidelity",
         "source_id": "cathedral_verified_agent_work",
         "source_epoch": 9,
@@ -491,13 +491,13 @@ def test_end_to_end_measurements_become_validator_owned_class_weights(tmp_path) 
     )
     policy_path = tmp_path / "policy.json"
     policy_path.write_bytes(canonical_json(_policy_document(public_key)))
-    policy = load_score_policy(policy_path, network="finney", netuid=39)
+    policy = load_score_policy(policy_path, network="finney", netuid=94)
     decisions = []
     for class_policy in policy.external_classes:
         body = score_report_body_from_evaluations(
             evaluations,
             network="finney",
-            netuid=39,
+            netuid=94,
             class_id=class_policy.class_id,
             source_id=class_policy.source_id,
             source_epoch=9,
@@ -513,7 +513,7 @@ def test_end_to_end_measurements_become_validator_owned_class_weights(tmp_path) 
             sign_report(body, report_key),
             class_policy,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=BLOCK,
             now=NOW,
         )

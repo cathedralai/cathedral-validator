@@ -56,7 +56,7 @@ def write_policy(
     document = {
         "schema": "cathedral_score_policy_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {"allocation": "0.4", "class_id": "local_sat", "kind": "local_sat"},
             {
@@ -80,14 +80,14 @@ def write_policy(
         document["burn_hotkey"] = burn_hotkey
     path = tmp_path / "policy.json"
     path.write_bytes(canonical_json(document))
-    return load_score_policy(path, network="finney", netuid=39)
+    return load_score_policy(path, network="finney", netuid=94)
 
 
 def report_body(*, epoch=7, previous=None, entries=None):
     return {
         "schema": "cathedral_score_class_report_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "class_id": "confidential_compute",
         "source_id": "cathedralconfidential",
         "source_epoch": epoch,
@@ -156,7 +156,7 @@ def verified(tmp_path, *, epoch=7, previous=None, entries=None, asserted=False):
         raw,
         policy.external_classes[0],
         network="finney",
-        netuid=39,
+        netuid=94,
         current_block=1010,
         now=NOW,
     )
@@ -199,7 +199,7 @@ def test_tamper_wrong_domain_stale_block_and_network_fail_closed(tmp_path):
             canonical_json(tampered),
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -208,7 +208,7 @@ def test_tamper_wrong_domain_stale_block_and_network_fail_closed(tmp_path):
             raw,
             external,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -217,7 +217,7 @@ def test_tamper_wrong_domain_stale_block_and_network_fail_closed(tmp_path):
             raw,
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=2000,
             now=NOW,
         )
@@ -226,7 +226,7 @@ def test_tamper_wrong_domain_stale_block_and_network_fail_closed(tmp_path):
             raw,
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW + timedelta(hours=1),
         )
@@ -254,7 +254,7 @@ def test_duplicate_json_key_and_noncanonical_bytes_rejected(tmp_path):
             raw + b"\n",
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -264,7 +264,7 @@ def test_duplicate_json_key_and_noncanonical_bytes_rejected(tmp_path):
             duplicate,
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -283,7 +283,7 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
             sign_report(missing, private),
             policy,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -294,7 +294,7 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
             sign_report(body, private),
             legacy_policy,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             now=NOW,
         )
@@ -302,7 +302,7 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
         sign_report(body, private),
         policy,
         network="finney",
-        netuid=39,
+        netuid=94,
         current_block=1010,
         now=NOW,
     )
@@ -333,7 +333,7 @@ def test_compute_v2_snapshot_is_signed_and_covers_the_exact_entry_set(tmp_path):
                 sign_report(invalid, private),
                 policy,
                 network="finney",
-                netuid=39,
+                netuid=94,
                 current_block=1010,
                 now=NOW,
             )
@@ -345,7 +345,7 @@ def test_score_policy_rejects_an_unknown_report_schema(tmp_path):
     body = {
         "schema": "cathedral_score_policy_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {"allocation": "0.4", "class_id": "local_sat", "kind": "local_sat"},
             {
@@ -373,7 +373,7 @@ def test_score_policy_rejects_an_unknown_report_schema(tmp_path):
     }
     path.write_bytes(canonical_json(body))
     with pytest.raises(ThinSubnetError, match="report_schema"):
-        load_score_policy(path, network="finney", netuid=39)
+        load_score_policy(path, network="finney", netuid=94)
 
 
 def test_checkpoint_blocks_rollback_equivocation_and_broken_chain(tmp_path):
@@ -412,7 +412,7 @@ def test_mirrors_choose_highest_and_detect_same_epoch_equivocation(
     selected, checkpoint = load_best_report(
         external,
         network="finney",
-        netuid=39,
+        netuid=94,
         current_block=1010,
         checkpoint=None,
         now=NOW,
@@ -430,7 +430,7 @@ def test_mirrors_choose_highest_and_detect_same_epoch_equivocation(
         load_best_report(
             external,
             network="finney",
-            netuid=39,
+            netuid=94,
             current_block=1010,
             checkpoint=None,
             now=NOW,
@@ -564,7 +564,7 @@ def test_decision_record_is_vector_bound_and_immutable(tmp_path):
     document, digest = decision_document(
         validator_hotkey="validator",
         network="finney",
-        netuid=39,
+        netuid=94,
         round_id=10,
         block=1010,
         policy_digest=policy.digest,
@@ -588,7 +588,7 @@ def test_decision_record_is_vector_bound_and_immutable(tmp_path):
         decision_document(
             validator_hotkey="validator",
             network="finney",
-            netuid=39,
+            netuid=94,
             round_id=10,
             block=1010,
             policy_digest=policy.digest,
@@ -604,7 +604,7 @@ def test_policy_rejects_implicit_reallocation_and_noncanonical_config(tmp_path):
     policy = {
         "schema": "cathedral_score_policy_v1",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {"allocation": "0.9", "class_id": "local_sat", "kind": "local_sat"}
         ],
@@ -612,10 +612,10 @@ def test_policy_rejects_implicit_reallocation_and_noncanonical_config(tmp_path):
     path = tmp_path / "bad.json"
     path.write_bytes(canonical_json(policy))
     with pytest.raises(ThinSubnetError, match="sum exactly"):
-        load_score_policy(path, network="finney", netuid=39)
+        load_score_policy(path, network="finney", netuid=94)
     path.write_text(json.dumps(policy, indent=2))
     with pytest.raises(ThinSubnetError, match="canonical"):
-        load_score_policy(path, network="finney", netuid=39)
+        load_score_policy(path, network="finney", netuid=94)
     assert public
 
 

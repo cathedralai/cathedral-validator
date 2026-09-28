@@ -39,7 +39,7 @@ from cathedral_thin.independent.launcher import (
 )
 from cathedral_thin.independent.refuse import is_refused, require_permitted_hotkey
 
-PROFILE = Path("config/validator-independent-sn39.toml")
+PROFILE = Path("config/validator-independent-sn94.toml")
 RELAY_HOTKEY = "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw"
 PERMITTED_HOTKEY = "5Eyj9kxQF5zimWrnt1mh3dDeATDiHZ6mQHeLGhNuyCN9agG3"
 
@@ -114,7 +114,7 @@ def test_the_shipped_profile_loads_and_broadcasts_nothing():
     config = load_config(PROFILE)
     assert config.lineage == LINEAGE
     assert config.broadcast is False
-    assert config.netuid == 39
+    assert config.netuid == 94
     assert config.network == "finney"
     assert config.genesis_hash == FINNEY_GENESIS_HASH
     assert config.state_file == INDEPENDENT_STATE_FILE
@@ -181,7 +181,7 @@ def test_a_config_on_the_wrong_chain_is_refused():
 def test_a_config_on_another_netuid_is_refused():
     document = profile_document()
     document["network"]["netuid"] = 1
-    with pytest.raises(ConfigError, match="network.netuid must be 39"):
+    with pytest.raises(ConfigError, match="network.netuid must be 94"):
         parse_config(document)
 
 

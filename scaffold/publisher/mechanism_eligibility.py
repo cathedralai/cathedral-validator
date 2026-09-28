@@ -94,7 +94,7 @@ def eligible_uids(
     stake_floor = _min_stake() if min_stake is None else float(min_stake)
 
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    netuid = int(os.environ.get(NETUID_ENV, "94"))
 
     hotkeys, snapshot_meta = _load_fresh_metagraph_hotkeys(store, now=now)
 

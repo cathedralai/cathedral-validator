@@ -95,7 +95,7 @@ def main() -> int:
         )
     base = os.environ.get("CYBERGYM_BACKEND", "http://127.0.0.1:8700")
     docker = os.environ.get("CYBERGYM_DOCKER", "docker")
-    # SN39 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so this
+    # SN94 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so this
     # producer does not set weights: it RECORDS them locally and posts its scores to the
     # publisher's ingest, which is what turns them into weights. Unconfigured, it records only.
     publish_config = PublisherConfig.from_environment()

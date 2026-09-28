@@ -204,7 +204,7 @@ def test_wrong_audience_rejected(tmp_path, monkeypatch):
     store = _store(tmp_path)
     client = _client(store)
     assert _post(client, _doc(network="finney")).status_code == 400
-    assert _post(client, _doc(netuid=39)).status_code == 400
+    assert _post(client, _doc(netuid=94)).status_code == 400
     assert store.query("SELECT * FROM cybergym_score_reports") == []
 
 

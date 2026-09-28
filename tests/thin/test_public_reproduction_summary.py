@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from scaffold.sn39_public_reproduction import (
+from scaffold.sn94_public_reproduction import (
     ReproductionError,
     assert_public_reproduction,
 )

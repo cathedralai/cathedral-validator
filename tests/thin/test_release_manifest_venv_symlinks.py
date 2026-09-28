@@ -19,7 +19,7 @@ for the owner rather than a side effect of a sync.
 Upstream's rewrite also requires the tree ROOT to be root-owned, readable and
 searchable. That cannot hold for a `tmp_path` owned by the test user, so `ROOT_UID`
 is monkeypatched to the current uid — the same pattern upstream's own
-`test_sn39_rotation_bundle.py` uses. The ownership rule is then still exercised
+`test_sn94_rotation_bundle.py` uses. The ownership rule is then still exercised
 against a *target* the fixture makes non-conforming, so the security-relevant half
 runs everywhere rather than only as root.
 """
@@ -35,9 +35,9 @@ import pytest
 _MODULE_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "scripts"
-    / "build_sn39_release_manifest.py"
+    / "build_sn94_release_manifest.py"
 )
-_spec = importlib.util.spec_from_file_location("_sn39_release_manifest", _MODULE_PATH)
+_spec = importlib.util.spec_from_file_location("_sn94_release_manifest", _MODULE_PATH)
 _manifest = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_manifest)
 
@@ -147,7 +147,7 @@ def test_the_narrowing_is_what_differs_from_upstream(tmp_path, as_owner):
         as_owner.immutable_tree_digest(root)
     source = _MODULE_PATH.read_text(encoding="utf-8")
     assert 'relative != "lib64"' in source, (
-        "the lib64 narrowing is gone from build_sn39_release_manifest.py; upstream's "
+        "the lib64 narrowing is gone from build_sn94_release_manifest.py; upstream's "
         "broader rule accepts any in-root directory symlink, which is a loosening "
         "that needs an owner decision rather than a sync"
     )

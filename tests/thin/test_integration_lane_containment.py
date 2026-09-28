@@ -65,7 +65,7 @@ def _preview(fx, receipts, **kw):
         key_registry=fx.registry,
         receipts=receipts,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -87,7 +87,7 @@ def _good_cpu(fx):
 
 
 def test_an_unknown_kind_fails_only_itself():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(
         fx,
         [
@@ -102,7 +102,7 @@ def test_an_unknown_kind_fails_only_itself():
 
 
 def test_a_receipt_naming_an_unfunded_lane_fails_only_itself():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(
         fx,
         [
@@ -118,7 +118,7 @@ def test_a_receipt_naming_an_unfunded_lane_fails_only_itself():
 
 
 def test_a_malformed_receipt_burns_only_its_own_lane_share():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(
         fx,
         [_good_cpu(fx), ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, {"junk": True})],
@@ -137,7 +137,7 @@ def test_a_verifier_that_raises_fails_only_that_receipt():
     def explode(_evidence):
         raise RuntimeError("verifier blew up")
 
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(
         fx,
         [
@@ -158,7 +158,7 @@ def test_a_ledger_outage_fails_the_preview_instead_of_burning_every_lane(monkeyp
     and reported PASS, which denies every legitimate miner while looking like a
     normal epoch. It is a preview-level failure.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
 
     def explode(*_args, **_kw):
@@ -190,7 +190,7 @@ def test_a_ledger_outage_is_reported_as_an_integration_error():
 
 
 def test_two_valid_receipts_from_one_miner_credit_exactly_one():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     first = fx.cpu_receipt(work_units="30")
     second = fx.cpu_receipt(work_units="31")
     assert first["receipt_id"] != second["receipt_id"]
@@ -226,7 +226,7 @@ def test_two_valid_receipts_from_one_miner_credit_exactly_one():
 
 
 def test_which_duplicate_wins_is_independent_of_submission_order():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     first = fx.cpu_receipt(work_units="30")
     second = fx.cpu_receipt(work_units="31")
 
@@ -248,7 +248,7 @@ def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
     so whichever submission the caller listed first burned the token and the OTHER
     lane lost its contribution. Reversing the input moved the forced burn between
     20% and 90%. Selection now completes before anything is consumed."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.distill_receipt()
     forward = ig.LaneReceipt(itf.KIND_DISTILL, LANE_DISTILL, receipt)
     reverse = ig.LaneReceipt(itf.KIND_DISTILL, LANE_CPU, receipt)
@@ -274,7 +274,7 @@ def test_one_receipt_in_two_lanes_composes_the_same_vector_in_either_order():
 
 def test_a_receipt_that_is_not_credited_keeps_its_replay_token():
     """Nothing is consumed for a contribution the preview will not credit."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
     out = _preview(
@@ -292,7 +292,7 @@ def test_a_receipt_that_is_not_credited_keeps_its_replay_token():
 
 
 def test_one_receipt_replayed_into_two_lanes_earns_once_without_a_ledger():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.distill_receipt()
     out = _preview(
         fx,
@@ -325,7 +325,7 @@ def test_every_audit_row_carries_the_same_keys_in_submission_order():
     the end with fewer keys than the composed rows, so `row["credited"]` raised
     KeyError on exactly the rows that explain a dropped contribution.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     good = fx.cpu_receipt()
     unfunded = fx.distill_receipt()
     duplicate = fx.cpu_receipt()  # same subject and receipt as `good`
@@ -365,7 +365,7 @@ def test_every_audit_row_carries_the_same_keys_in_submission_order():
 
 
 def test_the_burn_hotkey_cannot_earn_weight():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     out = _preview(
         fx,
@@ -393,7 +393,7 @@ def test_the_burn_hotkey_cannot_earn_weight():
 
 def test_a_burn_subject_receipt_never_reaches_the_ledger():
     """It is refused before consumption, so it cannot burn its own token."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipt = fx.cpu_receipt(subject=BURN_HOTKEY)
     out = _preview(

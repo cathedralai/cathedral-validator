@@ -7,12 +7,12 @@ projection is what the public status service reads, group-readable.
 Three files have to agree for that to hold, and a re-sync broke it by changing only
 one of them:
 
-  1. config/validator-thin-sn39-relay.toml must set [logs].status_jsonl, or nothing
+  1. config/validator-thin-sn94-relay.toml must set [logs].status_jsonl, or nothing
      ever writes the projection.
-  2. deploy/sn39/cathedral-sn39-public-status.service names exactly that path in
+  2. deploy/sn94/cathedral-sn94-public-status.service names exactly that path in
      ConditionPathExists, so if (1) is missing the unit can never start and skips
      silently rather than failing loudly.
-  3. deploy/sn39/cathedral-sn39-release-launcher.py builds the COMPLETE child
+  3. deploy/sn94/cathedral-sn94-release-launcher.py builds the COMPLETE child
      environment for os.execve, so the service's own Environment= never reaches the
      child; the launcher must grant the reader group on the projection and never on
      the raw journal.
@@ -33,12 +33,12 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_CONFIG = _ROOT / "config" / "validator-thin-sn39-relay.toml"
-_STATUS_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-sn39-public-status.service"
-_VALIDATOR_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39.service"
-_LAUNCHER = _ROOT / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"
+_CONFIG = _ROOT / "config" / "validator-thin-sn94-relay.toml"
+_STATUS_UNIT = _ROOT / "deploy" / "sn94" / "cathedral-sn94-public-status.service"
+_VALIDATOR_UNIT = _ROOT / "deploy" / "sn94" / "cathedral-validator-sn94.service"
+_LAUNCHER = _ROOT / "deploy" / "sn94" / "cathedral-sn94-release-launcher.py"
 
-_spec = importlib.util.spec_from_file_location("_sn39_launcher_contract", _LAUNCHER)
+_spec = importlib.util.spec_from_file_location("_sn94_launcher_contract", _LAUNCHER)
 _launcher = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_launcher)
 

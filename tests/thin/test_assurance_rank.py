@@ -1,6 +1,6 @@
 """The audit assurance ladder reports only the claim it establishes.
 
-The old gate demanded the whole epoch be proven. On SN39 that is not strict,
+The old gate demanded the whole epoch be proven. On SN94 that is not strict,
 it is unsatisfiable: the 255 registered hotkeys that never submitted work have
 no replayable evidence to produce, and independently the manifest caps verified
 candidates at 28 while permitting thousands of candidate rows, so the quantifier

@@ -39,7 +39,7 @@ from scaffold import wire_vector as wire
 from scaffold.events import stable_error
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 KEY_ID = "cathedral-weight-policy"
 PUBLISHER_URL = "https://api.example.test"
 

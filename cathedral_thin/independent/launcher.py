@@ -31,7 +31,7 @@ from .constants import (
     MECID,
     MIN_ALLOWED_WEIGHTS,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     TEMPO_BLOCKS,
     VERSION_KEY,
 )
@@ -101,7 +101,7 @@ def check_genesis_pin(observed: object) -> str:
     """Return the observed genesis hash if it is the pinned Finney genesis.
 
     A composer on the wrong chain would read a metagraph that has nothing to do
-    with SN39 and resolve a burn UID from it.
+    with SN94 and resolve a burn UID from it.
     """
     if not isinstance(observed, str) or not observed:
         raise GenesisPinError("no chain genesis hash was observed")
@@ -215,9 +215,9 @@ def parse_config(document: Mapping[str, Any]) -> IndependentConfig:
     mortal_period_blocks = _config_int(
         weights, "mortal_period_blocks", "weights.mortal_period_blocks"
     )
-    if mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS:
+    if mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS:
         raise ConfigError(
-            f"weights.mortal_period_blocks must be {SN39_MORTAL_PERIOD_BLOCKS}"
+            f"weights.mortal_period_blocks must be {SN94_MORTAL_PERIOD_BLOCKS}"
         )
 
     state_file = Path(_config_str(runtime, "state_file", "runtime.state_file"))

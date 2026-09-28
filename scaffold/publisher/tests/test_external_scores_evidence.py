@@ -40,14 +40,14 @@ def _report(scores, *, source="violet_audio", epoch=7):
 def _tdx_report(scores, *, epoch=41):
     report = _report(scores, source="cathedral_confidential_tdx", epoch=epoch)
     report["network"] = "finney"
-    report["netuid"] = 39
+    report["netuid"] = 94
     return report
 
 
 @pytest.fixture
 def tdx_audience(monkeypatch):
     monkeypatch.setenv(external_scores.WEIGHT_POLICY_NETWORK_ENV, "finney")
-    monkeypatch.setenv(external_scores.WEIGHT_POLICY_NETUID_ENV, "39")
+    monkeypatch.setenv(external_scores.WEIGHT_POLICY_NETUID_ENV, "94")
 
 
 def test_unevidenced_positive_score_warns_while_permissive(caplog):

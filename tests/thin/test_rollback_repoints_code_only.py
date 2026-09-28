@@ -1,6 +1,6 @@
 """Rolling back must move the CODE and refuse to move anything else.
 
-``deploy/sn39/cathedral-sn39-rollback`` exists because going back a version was a
+``deploy/sn94/cathedral-sn94-rollback`` exists because going back a version was a
 hand-run sequence — sed the drop-in, daemon-reload, restart — performed under the
 time pressure that makes hand-run sequences go wrong. Three properties are what
 make the scripted form safer than the hand-run one, and they are what these tests
@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "deploy" / "sn39" / "cathedral-sn39-rollback"
+SCRIPT = REPO / "deploy" / "sn94" / "cathedral-sn94-rollback"
 
 PREFIX = "cathedral-validator-staging-"
 OLD = "a026a68"

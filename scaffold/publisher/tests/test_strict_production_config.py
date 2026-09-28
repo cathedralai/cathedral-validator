@@ -56,7 +56,7 @@ RETIRED_PRODUCTION_FLAGS = {
 def _strict_env(monkeypatch, *, production: bool = True) -> None:
     monkeypatch.setattr(
         launch_profile,
-        "_SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX",
+        "_SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX",
         rows.public_key_hex(SIGNING_KEY_HEX),
     )
     for name in ("ENV", "APP_ENV", "CATHEDRAL_PRODUCTION"):
@@ -74,7 +74,7 @@ def _strict_env(monkeypatch, *, production: bool = True) -> None:
     monkeypatch.setenv("CATHEDRAL_LAUNCH_PROFILE", "v2-converged")
     monkeypatch.setenv("CATHEDRAL_SERVICE_ROLE", "all")
     monkeypatch.setenv(
-        "CATHEDRAL_PUBLISHER_GENERATION_ID", "sn39-test-generation-01"
+        "CATHEDRAL_PUBLISHER_GENERATION_ID", "sn94-test-generation-01"
     )
     monkeypatch.setenv("CATHEDRAL_CYBERGYM_INGEST_ENABLED", "false")
     monkeypatch.setenv("CATHEDRAL_TEE_GPU_ENABLED", "false")
@@ -136,7 +136,7 @@ def _strict_env(monkeypatch, *, production: bool = True) -> None:
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_MAX_BODY_BYTES", "1048576")
     monkeypatch.setenv("CATHEDRAL_WEIGHTS_ORIGIN_FAILCLOSED", "true")
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_KEY_ID", "cathedral-weight-policy")
     monkeypatch.setenv("CATHEDRAL_CLIENT_IP_MODE", "headers")
     monkeypatch.setenv("CATHEDRAL_TRUSTED_PROXY_HOPS", "1")
@@ -224,16 +224,16 @@ def _production_read_headers():
 
 def test_production_signer_and_burn_pins_match_canonical_relay_config():
     relay = tomllib.loads(
-        (REPO_ROOT / "config" / "validator-thin-sn39-relay.toml").read_text(
+        (REPO_ROOT / "config" / "validator-thin-sn94-relay.toml").read_text(
             encoding="utf-8"
         )
     )
 
     assert (
-        launch_profile._SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX
+        launch_profile._SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX
         == relay["weight_policy"]["public_key_hex"]
     )
-    assert launch_profile._SN39_WEIGHT_POLICY_KEY_ID == relay["weight_policy"]["key_id"]
+    assert launch_profile._SN94_WEIGHT_POLICY_KEY_ID == relay["weight_policy"]["key_id"]
     assert launch_profile._SN39_BURN_HOTKEY == relay["provenance"]["burn_hotkey"]
 
 
@@ -786,7 +786,7 @@ def test_production_pins_derived_weight_policy_public_key(monkeypatch):
     _strict_env(monkeypatch)
     monkeypatch.setattr(
         launch_profile,
-        "_SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX",
+        "_SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX",
         "00" * 32,
     )
 
@@ -1189,7 +1189,7 @@ def test_startup_emits_redacted_effective_configuration(tmp_path, monkeypatch, c
     fingerprints = payload["replica_identity"]
     assert fingerprints == launch_profile.replica_identity_summary()
     assert fingerprints["schema"] == "cathedral_publisher_replica_identity_v1"
-    assert fingerprints["publisher_generation_id"] == "sn39-test-generation-01"
+    assert fingerprints["publisher_generation_id"] == "sn94-test-generation-01"
     assert len(fingerprints["database_identity_fingerprint"]) == 64
     assert "submit_token_secret_fingerprint" not in fingerprints
     assert "perminer_seed_secret_fingerprint" not in fingerprints
@@ -1311,7 +1311,7 @@ def test_replica_identity_never_derives_public_secret_fingerprints(monkeypatch):
     ).hexdigest() not in changed_serialized
 
     monkeypatch.setenv(
-        "CATHEDRAL_PUBLISHER_GENERATION_ID", "sn39-test-generation-02"
+        "CATHEDRAL_PUBLISHER_GENERATION_ID", "sn94-test-generation-02"
     )
     next_generation = launch_profile.replica_identity_summary()
     assert next_generation["publisher_generation_id"] != original[

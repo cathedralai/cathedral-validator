@@ -1,6 +1,6 @@
 """Rule 2 of the shadow-audit alert must de-noise on a THIRD-PARTY relay too.
 
-``deploy/sn39/cathedral-mismatch-check`` rule 2 exists to page an operator when
+``deploy/sn94/cathedral-mismatch-check`` rule 2 exists to page an operator when
 the shadow audit stops recovering. Its documented de-noising was keyed on
 ``PROVENANCE_AUDIT_PASS``: one FAIL alerted unless a PASS followed it.
 
@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "deploy" / "sn39" / "cathedral-mismatch-check"
+SCRIPT = REPO / "deploy" / "sn94" / "cathedral-mismatch-check"
 
 # One audit cycle. The thin tick is ~1500s, so 90 minutes is ~3 cycles.
 CYCLE_MINUTES = 25
@@ -356,7 +356,7 @@ def test_the_documented_relay_profile_really_is_receipts_only():
     file's reasoning would need revisiting — but the de-noising stays correct
     either way, so this only has to stay TRUE, not stay unchanged.
     """
-    relay = (REPO / "config" / "validator-thin-sn39-relay.toml").read_text(
+    relay = (REPO / "config" / "validator-thin-sn94-relay.toml").read_text(
         encoding="utf-8"
     )
     assert "min_assurance" not in relay

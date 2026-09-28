@@ -10,7 +10,7 @@ Safety posture (mirrors ``deploy/MECHANISM_ROUTER_CONTRACT.md`` §Isolation):
   * ALWAYS DRY-RUN. ``set_weights`` computes + signs + logs + records the
     artifact but never invokes the caller-provided callback.  An arbitrary
     callback cannot prove which chain it writes, so accepting one would let a
-    nominal testnet request launder an SN39/Finney submission.
+    nominal testnet request launder an SN94/Finney submission.
   * HARD REFUSE on ``network == "finney"`` / mainnet / a known mainnet netuid —
     ``set_weights`` raises before doing anything.
   * No secrets in code or logs; deterministic output (sorted, rounded).
@@ -47,8 +47,8 @@ LIVE_ENV = "CATHEDRAL_MECH_WEIGHTSET_LIVE"
 # Anything not explicitly testnet is treated as unsafe and refused.
 MAINNET_NETWORKS = frozenset({"finney", "mainnet", "main"})
 TESTNET_NETWORKS = frozenset({"test", "testnet", "local", "mock"})
-# SN39 is Cathedral's mainnet subnet; never emit for it here regardless of net.
-MAINNET_NETUIDS = frozenset({39})
+# SN94 is Cathedral's mainnet subnet; never emit for it here regardless of net.
+MAINNET_NETUIDS = frozenset({94})
 
 
 class UnsafeNetworkError(RuntimeError):
@@ -70,10 +70,10 @@ def is_testnet(network: str, netuid: int) -> bool:
 
 
 def _assert_target_allowed(network: str, netuid: int) -> None:
-    """Fail closed unless this is a recognized non-SN39 testnet target."""
+    """Fail closed unless this is a recognized non-SN94 testnet target."""
     if is_mainnet(network, netuid):
         raise UnsafeNetworkError(
-            "refusing legacy mechanism weight-set on mainnet/SN39: "
+            "refusing legacy mechanism weight-set on mainnet/SN94: "
             f"network={network!r} netuid={netuid}; use the immutable "
             "cathedral-validator release"
         )

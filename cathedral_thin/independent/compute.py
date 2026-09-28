@@ -2,7 +2,7 @@
 
 This module exists so the composer can NAME Compute and either pay it from
 integer mass a caller already verified, or refuse it for a stated reason.
-A dry-run mock verifier still cannot move SN39 mass: ``contributing`` is true
+A dry-run mock verifier still cannot move SN94 mass: ``contributing`` is true
 only when the QVL build digest is pinned AND the adapter was constructed with
 non-empty ``verified_mass``. Collecting a quote and getting ``PASS`` from an
 unpinned mock does not bind mass.
@@ -397,7 +397,7 @@ class ComputeAdapter:
         if mass and self.qvl_digest is None:
             raise AdapterUnavailable(
                 "verified Compute mass requires a pinned QVL digest; "
-                "an unpinned dry-run verifier cannot move SN39 mass"
+                "an unpinned dry-run verifier cannot move SN94 mass"
             )
         self._verified_mass = mass
 
@@ -408,7 +408,7 @@ class ComputeAdapter:
 
     @property
     def contributing(self) -> bool:
-        """Whether this adapter can move SN39 mass.
+        """Whether this adapter can move SN94 mass.
 
         True only with a pinned QVL digest and non-empty verified integer mass.
         A PASS quote from an unpinned mock stays false.

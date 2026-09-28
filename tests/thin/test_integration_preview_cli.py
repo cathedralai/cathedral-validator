@@ -49,7 +49,7 @@ def _bundle(fx, allocations, receipts, **over):
     pub = base64.b64encode(fx.key.public_key().public_bytes_raw()).decode()
     bundle = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "source_epoch": 11,
         "now": "2026-07-25T12:30:00Z",
         "now_iso": "2026-07-25T12:30:00.000000Z",
@@ -79,7 +79,7 @@ def _compute_entry(fx, *, kind="compute_cpu", lane=LANE_CPU):
 
 
 def test_preview_cli_composes_cpu_and_distill(tmp_path):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     allocations = [
         {"lane": LANE_CPU, "allocation": "0.45", "enabled": True},
         {"lane": LANE_DISTILL, "allocation": "0.45", "enabled": True},
@@ -116,7 +116,7 @@ def test_preview_cli_composes_cpu_and_distill(tmp_path):
 
 
 def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     allocations = [
         {"lane": LANE_CPU, "allocation": "0.45", "enabled": True},
         {"lane": LANE_GPU, "allocation": "0.45", "enabled": True},
@@ -138,7 +138,7 @@ def test_preview_cli_reports_gpu_not_proven_without_a_verifier(tmp_path):
 
 
 def test_preview_cli_rejects_a_rolled_back_config(tmp_path):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     allocations = [
         {"lane": LANE_CPU, "allocation": "0.45", "enabled": True},
         {"lane": LANE_DISTILL, "allocation": "0.45", "enabled": True},
@@ -165,7 +165,7 @@ def _funded_cpu_bundle(fx, tmp_path, **over):
 
 def test_preview_cli_refuses_a_funded_lane_without_policy(tmp_path, capsys):
     """A warning is not a gate: an unpoliced funded lane must fail closed."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path))
     assert cli.main(["--bundle", path]) == 2
     err = capsys.readouterr().err
@@ -174,7 +174,7 @@ def test_preview_cli_refuses_a_funded_lane_without_policy(tmp_path, capsys):
 
 
 def test_preview_cli_unpoliced_opt_out_is_explicit_and_reported(tmp_path, capsys):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path))
     out = tmp_path / "out.json"
     assert (
@@ -196,7 +196,7 @@ def test_preview_cli_unpoliced_opt_out_is_explicit_and_reported(tmp_path, capsys
 
 def test_preview_cli_empty_measurement_list_is_a_policy_not_an_omission(tmp_path):
     """An empty measurement list satisfies the gate and admits nothing."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     policy = _policy(fx, tmp_path)
     policy["allowed_measurements"] = []
     path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path, **policy))
@@ -214,7 +214,7 @@ def test_preview_cli_empty_advisory_list_still_admits_an_advisory_free_receipt(
     tmp_path,
 ):
     """The reference launch policy has an EMPTY advisory list and still credits."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     policy = _policy(fx, tmp_path)
     assert policy["allowed_advisories"] == []
     path = _write(tmp_path, _funded_cpu_bundle(fx, tmp_path, **policy))
@@ -227,14 +227,14 @@ def test_preview_cli_empty_advisory_list_still_admits_an_advisory_free_receipt(
 @pytest.mark.parametrize("value", ["false", "0", 1, {"unpoliced": True}])
 def test_run_bundle_refuses_a_non_boolean_opt_out(tmp_path, value):
     """`bool("false")` is True, so the opt-out is never read as a truthy value."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     bundle = _funded_cpu_bundle(fx, tmp_path)
     with pytest.raises(cli.PreviewError, match="must be the boolean"):
         cli.run_bundle(bundle, allow_unpoliced_preview=value)
 
 
 def test_preview_cli_rejects_an_unknown_receipt_kind(tmp_path):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipts = [{"kind": "sat_solve", "lane": LANE_CPU, "receipt": fx.cpu_receipt()}]
     allocations = [{"lane": LANE_CPU, "allocation": "0.90", "enabled": True}]
     path = _write(

@@ -1,4 +1,4 @@
-"""Adversarial boundaries for versioned SN39 release publication."""
+"""Adversarial boundaries for versioned SN94 release publication."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ def _load_script(name: str, relative: str):
 
 _finalizer = _load_script(
     "_cathedral_release_generation_finalizer",
-    "scripts/finalize_sn39_public_release.py",
+    "scripts/finalize_sn94_public_release.py",
 )
 _launcher = _load_script(
     "_cathedral_release_generation_launcher",
-    "deploy/sn39/cathedral-sn39-release-launcher.py",
+    "deploy/sn94/cathedral-sn94-release-launcher.py",
 )
 
 
@@ -234,7 +234,7 @@ def test_preflight_leaves_every_public_inode_unchanged(tmp_path):
     _finalizer._preflight_publication(plan, public_root=root)
 
     assert _tree_snapshot(root) == before
-    assert not (root / ".sn39-publication.lock").exists()
+    assert not (root / ".sn94-publication.lock").exists()
 
 
 def test_versioned_publication_preserves_the_historical_root_release(tmp_path):
@@ -310,7 +310,7 @@ def test_preflight_rejects_a_release_hardlink_alias(tmp_path):
 def test_versioned_reproducer_path_is_digest_bound():
     digest = "sha256:" + "a" * 64
     assert _finalizer.SHA256.fullmatch(digest)
-    from scaffold import sn39_public_reproduction as reproduction
+    from scaffold import sn94_public_reproduction as reproduction
 
     assert reproduction._release_artifact_paths(None) == (
         "/release.json",
@@ -400,7 +400,7 @@ def test_launcher_and_finalizer_context_contracts_match(tmp_path, operation):
 
 
 def test_tmpfiles_provisions_the_versioned_release_parents():
-    tmpfiles = (_ROOT / "deploy/sn39/cathedral-sn39-validator.tmpfiles").read_text(
+    tmpfiles = (_ROOT / "deploy/sn94/cathedral-sn94-validator.tmpfiles").read_text(
         "utf-8"
     )
     assert (
@@ -474,4 +474,4 @@ def test_preflight_main_never_enters_the_publication_primitive(
     assert _finalizer.main() == 0
 
     assert _tree_snapshot(root) == before
-    assert not (root / ".sn39-publication.lock").exists()
+    assert not (root / ".sn94-publication.lock").exists()

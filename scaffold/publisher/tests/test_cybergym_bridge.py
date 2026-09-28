@@ -28,7 +28,7 @@ from scaffold.publisher.mechanism_router import MechanismSpec, ScoreVectorMeta
 from scaffold.publisher.store import Store
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 BURN_HOTKEY = "5BurnDestination"
 BURN_UID = 204
 SECRET = "bridge-test-hmac-secret"

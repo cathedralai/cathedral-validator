@@ -2,7 +2,7 @@
   "schema": "cathedral_amd_sev_snp_development_preview_config_v1",
   "environment": "development",
   "network": "finney",
-  "netuid": 39,
+  "netuid": 94,
   "validator_hotkey": "5FF6FtDUhn7XdPYmEdH5XjLAmLfmwLTCNVBgcrj3A4sstwaw",
   "validator_wallet": {
     "name": "cathedral",

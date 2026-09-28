@@ -17,7 +17,7 @@ from scaffold.publisher import external_scores
 from scaffold.publisher.store import Store
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 
 
 def _iso(dt: datetime) -> str:

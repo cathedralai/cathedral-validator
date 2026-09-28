@@ -212,7 +212,7 @@ def _vector_scope() -> tuple[str, int]:
     """Return the signed subnet identity used to isolate shared scorer state."""
     network = os.environ.get(NETWORK_ENV, "finney").strip() or "finney"
     try:
-        netuid = int(os.environ.get(NETUID_ENV, "39") or "39")
+        netuid = int(os.environ.get(NETUID_ENV, "94") or "94")
     except ValueError as exc:
         raise ValueError(f"invalid {NETUID_ENV}") from exc
     return network, netuid
@@ -622,7 +622,7 @@ def _load_fresh_metagraph_hotkeys(
     refresh metagraph_hotkeys; stale rows age out and are not treated payable.
     """
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    netuid = int(os.environ.get(NETUID_ENV, "94"))
     max_age = payable_hotkeys_max_age_secs()
     cutoff = _ms_iso(now - timedelta(seconds=max_age))
     meta: dict[str, Any] = {
@@ -2345,7 +2345,7 @@ def build_signed_vector(
         "vector_id": str(uuid.uuid4()),
         "policy_version": next_policy_version(store),
         "network": os.environ.get(NETWORK_ENV, "finney"),
-        "netuid": int(os.environ.get(NETUID_ENV, "39")),
+        "netuid": int(os.environ.get(NETUID_ENV, "94")),
         "generated_at": _ms_iso(now),
         "expires_at": _ms_iso(now + timedelta(seconds=valid_for)),
         "burn_snapshot": burn_snapshot,

@@ -1,4 +1,4 @@
-"""`independent_v1`: an independent SN39 composer with no chain client.
+"""`independent_v1`: an independent SN94 composer with no chain client.
 
 This package composes a mechanism weight vector from a signed, on-chain
 committed policy document and journals it. It has no substrate client and no
@@ -108,7 +108,7 @@ _MODULE_EXPORTS = {
         "MECID",
         "NETUID",
         "REFUSE_HOTKEYS",
-        "SN39_MORTAL_PERIOD_BLOCKS",
+        "SN94_MORTAL_PERIOD_BLOCKS",
         "TEMPO_BLOCKS",
         "VERSION_KEY",
         "W",
@@ -242,7 +242,7 @@ __all__ = [
     "SAT_RESPONSE_KEYS",
     "SAT_WORK_PATH",
     "SAT_WORK_UNIT_RULE",
-    "SN39_MORTAL_PERIOD_BLOCKS",
+    "SN94_MORTAL_PERIOD_BLOCKS",
     "STATUS_BROADCAST_BLOCKED",
     "STATUS_COMPOSED",
     "STATUS_DEGRADED",

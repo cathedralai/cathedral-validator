@@ -45,28 +45,28 @@ from cathedral_thin.validator import (
         "test",
     ],
 )
-def test_legacy_sat_validator_refuses_sn39_broadcast_for_every_label(
+def test_legacy_sat_validator_refuses_sn94_broadcast_for_every_label(
     network: str,
 ) -> None:
     args = validator_module.build_parser().parse_args(
-        ["--network", network, "--netuid", "39", "--broadcast"]
+        ["--network", network, "--netuid", "94", "--broadcast"]
     )
-    with pytest.raises(SystemExit, match="cannot broadcast on SN39"):
+    with pytest.raises(SystemExit, match="cannot broadcast on SN94"):
         validator_module.validate_args(args)
 
 
-def test_legacy_runtime_refuses_direct_sn39_submission() -> None:
+def test_legacy_runtime_refuses_direct_sn94_submission() -> None:
     calls: list[dict] = []
     runtime = BittensorRuntime(
         wallet=object(),
         subtensor=SimpleNamespace(set_weights=lambda **kwargs: calls.append(kwargs)),
         dendrite=object(),
-        netuid=39,
+        netuid=94,
         mev_protection=False,
         commit_reveal_version=4,
     )
     pending = SimpleNamespace(uids=[1], weights=[1.0])
-    with pytest.raises(ThinSubnetError, match="disabled on SN39"):
+    with pytest.raises(ThinSubnetError, match="disabled on SN94"):
         asyncio.run(runtime.submit_weights(pending))
     assert calls == []
 
@@ -1035,7 +1035,7 @@ def test_bittensor_adapter_reads_source_subnet_owner_at_scoring_block():
         wallet=object(),
         subtensor=FakeSubtensor(),
         dendrite=object(),
-        netuid=39,
+        netuid=94,
         mev_protection=False,
         commit_reveal_version=4,
     )

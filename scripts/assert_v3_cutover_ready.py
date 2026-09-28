@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable preflight for the SN39 v3 cutover: is the flip safe to ATTEMPT?
+"""Executable preflight for the SN94 v3 cutover: is the flip safe to ATTEMPT?
 
 ``assert_live_v3_contract.py`` answers the question AFTER the publisher flips:
 "does a v3-pinned validator accept the vector now being emitted?" This script
@@ -102,24 +102,24 @@ BLOCKED = "BLOCKED-ON-OTHER"
 
 # Only ever consulted when /proc enumeration finds no publisher at all, or when
 # an operator names a unit explicitly. It is NOT how the composer is normally
-# identified -- see resolve_composer(). It is the SN39 composer's unit because,
+# identified -- see resolve_composer(). It is the SN94 composer's unit because,
 # if this script is ever reduced to guessing, it should guess the right one:
 # cathedral-publisher.service is a legacy process on the live box that writes
 # its own unscoped `latest` row, which nothing consumes.
-DEFAULT_PUBLISHER_UNIT = "cathedral-scorer-sn39.service"
+DEFAULT_PUBLISHER_UNIT = "cathedral-scorer-sn94.service"
 # Every publisher-shaped process runs this ASGI app. Matching on it (rather than
 # on a unit name) is what lets the identification below consider a decoy at all,
 # which is what lets it REJECT one.
 PUBLISHER_PROCESS_MARKER = "scaffold.publisher.server"
 DEFAULT_VALIDATOR_UNIT = "cathedral-validator-passive.service"
-DEFAULT_VALIDATOR_CONFIG = "/etc/cathedral-validator/validator-mainnet-sn39.toml"
+DEFAULT_VALIDATOR_CONFIG = "/etc/cathedral-validator/validator-mainnet-sn94.toml"
 DEFAULT_STATUS_LOG = "/var/log/cathedral-validator/validator-status.jsonl"
 DEFAULT_STATE_FILE = "/var/lib/cathedral-validator/thin-state.json"
 DEFAULT_NETWORK = "finney"
-DEFAULT_NETUID = 39
+DEFAULT_NETUID = 94
 # The publisher composes and signs roughly every 25 minutes and the validator
 # ticks against it; 2100s is the same staleness ceiling the public status
-# service applies to a validator event (scripts/publish_sn39_validator_status.py
+# service applies to a validator event (scripts/publish_sn94_validator_status.py
 # MAX_EVENT_AGE_SECONDS), so the two agree on what "recent" means.
 DEFAULT_MAX_WEIGHTS_AGE_SECS = 2100
 # blocks_since_last_update is EXPECTED to exceed weights_rate_limit -- that is
@@ -631,7 +631,7 @@ def gcloud_runner(instance: str, zone: str) -> Callable[[str, float], tuple[int,
 # evaluated against the environment it actually runs under -- so a legacy tree
 # whose weights.py has no _persisted_vector_id at all answers "attribute absent"
 # (it writes the unscoped `latest` row nothing consumes), and a canary scoped to
-# test/292 answers with test/292. Neither can be mistaken for finney/39.
+# test/292 answers with test/292. Neither can be mistaken for finney/94.
 #
 # Like COMPOSER_PROBE it imports scaffold.publisher.weights and nothing that
 # constructs a Store.
@@ -894,7 +894,7 @@ try:
     out["module_mtime"] = os.stat(out["module_file"]).st_mtime
 except OSError as exc:
     out["stat_error"] = str(exc)
-pinned = list(getattr(vt, "SN39_PINNED_REQUIRE_POLICIES", ()))
+pinned = list(getattr(vt, "SN94_PINNED_REQUIRE_POLICIES", ()))
 v3 = getattr(vt, "REQUIRE_POLICY_VALIDATED_SUPPLY_V3", "validated_supply_v3")
 out["pinned_policies"] = pinned
 out["admits_v3"] = v3 in pinned
@@ -1375,7 +1375,7 @@ def check_trust_profile(facts: Facts) -> CheckResult:
             f"the trust-profile probe did not run: {facts.trust_error}",
             "run it by hand in the validator's environment: "
             f"{proc.interpreter} -c 'from scaffold import validator_thin as vt; "
-            "print(vt.SN39_PINNED_REQUIRE_POLICIES)'",
+            "print(vt.SN94_PINNED_REQUIRE_POLICIES)'",
             evidence,
         )
     probe = facts.trust
@@ -1390,7 +1390,7 @@ def check_trust_profile(facts: Facts) -> CheckResult:
     if not probe.get("admits_v3"):
         return CheckResult(
             "trust_profile", title, FAIL,
-            "SN39_PINNED_REQUIRE_POLICIES in the running validator's code does not "
+            "SN94_PINNED_REQUIRE_POLICIES in the running validator's code does not "
             f"contain validated_supply_v3: {probe.get('pinned_policies')}",
             "this validator predates #74. Deploy the reviewed revision that widens "
             "the trust profile and restart it BEFORE re-pinning; a v3 pin against "
@@ -1493,7 +1493,7 @@ def check_fundable_lane(facts: Facts) -> CheckResult:
             f"set {NETWORK_ENV}={DEFAULT_NETWORK} and {NETUID_ENV}={DEFAULT_NETUID} "
             "and restart the publisher. cybergym_ingest.configured_audience() "
             "fails closed, so the intake answers 503 and no task can ever be "
-            "admitted -- the composing side would silently read finney/39 defaults.",
+            "admitted -- the composing side would silently read finney/94 defaults.",
             evidence,
         )
     if facts.database_error or (facts.database or {}).get("error"):
@@ -1806,7 +1806,7 @@ def resolve_composer(host: Host, args: argparse.Namespace) -> ComposerResolution
 
     Not by unit name. A box can run several processes that import the same ASGI
     app, answer the same paths, and differ only in which durable row they write;
-    the live SN39 host runs four. What separates them is a fact each one will
+    the live SN94 host runs four. What separates them is a fact each one will
     state about itself:
 
       * the row id its own imported ``weights`` module would write

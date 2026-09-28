@@ -44,7 +44,7 @@ def _now() -> datetime:
 # only meaningful for the exact (network, netuid) the publisher signs for, so
 # every source must name it.
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ def test_conflicting_epoch_rejected(store):
 
 def test_postgres_epoch_fence_locks_exact_audience_before_latest_read(monkeypatch):
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
     now = _now()
     report = external_scores.normalize_report(
         {
@@ -484,7 +484,7 @@ def test_postgres_epoch_fence_locks_exact_audience_before_latest_read(monkeypatc
             "epoch": 7,
             "generated_at": _iso(now),
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "scores": [{"miner_hotkey": "5A", "score": 1.0}],
             "source": "cathedral_confidential_tdx",
         },
@@ -699,7 +699,7 @@ def test_confidential_tdx_requires_complete_true(monkeypatch):
     'the report is the full truth at its epoch.'"""
     now = _now()
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
 
     # Attempt 1: complete omitted (None)
     with pytest.raises(
@@ -709,7 +709,7 @@ def test_confidential_tdx_requires_complete_true(monkeypatch):
             {
                 "source": "cathedral_confidential_tdx",
                 "network": "finney",
-                "netuid": 39,
+                "netuid": 94,
                 "epoch": 1,
                 # complete omitted
                 "generated_at": _iso(now),
@@ -726,7 +726,7 @@ def test_confidential_tdx_requires_complete_true(monkeypatch):
             {
                 "source": "cathedral_confidential_tdx",
                 "network": "finney",
-                "netuid": 39,
+                "netuid": 94,
                 "epoch": 1,
                 "complete": False,
                 "generated_at": _iso(now),
@@ -740,7 +740,7 @@ def test_confidential_tdx_requires_complete_true(monkeypatch):
         {
             "source": "cathedral_confidential_tdx",
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "epoch": 1,
             "complete": True,
             "generated_at": _iso(now),

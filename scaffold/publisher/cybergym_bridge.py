@@ -195,7 +195,7 @@ def resolve_burn_destination(
     meta["burn_hotkey_configured"] = True
 
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    netuid = int(os.environ.get(NETUID_ENV, "94"))
 
     fresh, snapshot_meta = _load_fresh_metagraph_hotkeys(store, now=now)
     meta["snapshot"] = {
@@ -288,7 +288,7 @@ def resolve_recipient_hotkeys(
         return None, meta
 
     network = os.environ.get(NETWORK_ENV, "finney")
-    netuid = int(os.environ.get(NETUID_ENV, "39"))
+    netuid = int(os.environ.get(NETUID_ENV, "94"))
     by_uid: dict[int, set[str]] = {uid: set() for uid in expected_uids}
     for row in store.query(
         "SELECT hotkey, uid FROM metagraph_hotkeys WHERE network=? AND netuid=?",

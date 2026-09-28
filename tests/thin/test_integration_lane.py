@@ -79,7 +79,7 @@ def _preview(fx, receipts, **kw):
         key_registry=fx.registry,
         receipts=receipts,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -88,7 +88,7 @@ def _preview(fx, receipts, **kw):
 
 
 def test_cpu_gpu_distill_preview_through_the_event_pipeline():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     out = _preview(
         fx, _receipts(fx), gpu_attestation_verifier=lambda _g: True, events=events
@@ -115,7 +115,7 @@ def test_cpu_gpu_distill_preview_through_the_event_pipeline():
 
 
 def test_gpu_without_verifier_is_not_proven_and_burns_its_share():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     out = _preview(fx, _receipts(fx), events=events)  # no GPU verifier
 
@@ -131,7 +131,7 @@ def test_gpu_without_verifier_is_not_proven_and_burns_its_share():
 
 
 def test_tampered_distill_fails_and_burns_its_lane():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     tampered = fx.distill_receipt()
     tampered["work"]["work_units"] = "999"
     events, buf = _logger()
@@ -149,7 +149,7 @@ def test_tampered_distill_fails_and_burns_its_lane():
 
 
 def test_rolled_back_burn_config_is_refused_with_a_fail_event():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     with pytest.raises(ig.IntegrationError, match="signed config rejected"):
         ig.preview_integrated_vector(
@@ -158,7 +158,7 @@ def test_rolled_back_burn_config_is_refused_with_a_fail_event():
             key_registry=fx.registry,
             receipts=_receipts(fx),
             network="finney",
-            netuid=39,
+            netuid=94,
             source_epoch=11,
             now=NOW_DT,
             now_iso=NOW_ISO,
@@ -171,7 +171,7 @@ def test_rolled_back_burn_config_is_refused_with_a_fail_event():
 
 
 def test_preview_never_reports_a_chain_write():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     _preview(fx, _receipts(fx), gpu_attestation_verifier=lambda _g: True, events=events)
     # no WEIGHTS/CHAIN stage is ever emitted by the preview path

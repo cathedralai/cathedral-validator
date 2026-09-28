@@ -17,7 +17,7 @@ also binds one thing the Cathedral manifest does not: the shadow-audit mismatch
 alert, which on a relay is the only health surface there is.
 
 The relay profile is only sound because its recurring shadow audit never needs
-the controlled verifier. `config/validator-thin-sn39-relay.toml` omits
+the controlled verifier. `config/validator-thin-sn94-relay.toml` omits
 `controlled_dir` and `verifier_binary`. Strict replay for bounded launch tools
 requires both. Without them the shadow audit is receipts-only and still never
 delays or blocks the recurring signed-vector submission.
@@ -44,12 +44,12 @@ import subprocess
 import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-_BUILDER_PATH = _ROOT / "scripts" / "build_sn39_release_manifest.py"
-_LAUNCHER_PATH = _ROOT / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"
-_ORIGIN_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39.service"
-_RELAY_UNIT = _ROOT / "deploy" / "sn39" / "cathedral-validator-sn39-relay.service"
-_ORIGIN_TMPFILES = _ROOT / "deploy" / "sn39" / "cathedral-sn39-validator.tmpfiles"
-_RELAY_TMPFILES = _ROOT / "deploy" / "sn39" / "cathedral-sn39-validator-relay.tmpfiles"
+_BUILDER_PATH = _ROOT / "scripts" / "build_sn94_release_manifest.py"
+_LAUNCHER_PATH = _ROOT / "deploy" / "sn94" / "cathedral-sn94-release-launcher.py"
+_ORIGIN_UNIT = _ROOT / "deploy" / "sn94" / "cathedral-validator-sn94.service"
+_RELAY_UNIT = _ROOT / "deploy" / "sn94" / "cathedral-validator-sn94-relay.service"
+_ORIGIN_TMPFILES = _ROOT / "deploy" / "sn94" / "cathedral-sn94-validator.tmpfiles"
+_RELAY_TMPFILES = _ROOT / "deploy" / "sn94" / "cathedral-sn94-validator-relay.tmpfiles"
 
 # The exact external files a Cathedral manifest has always bound. Pinned
 # literally so that the relay work cannot quietly drop one from the origin
@@ -87,8 +87,8 @@ def _load(path: pathlib.Path, name: str):
     return module
 
 
-_builder = _load(_BUILDER_PATH, "_sn39_release_manifest_relay")
-_launcher = _load(_LAUNCHER_PATH, "_sn39_release_launcher_relay")
+_builder = _load(_BUILDER_PATH, "_sn94_release_manifest_relay")
+_launcher = _load(_LAUNCHER_PATH, "_sn94_release_launcher_relay")
 
 
 def _git(repo: pathlib.Path, *args: str) -> str:
@@ -182,7 +182,7 @@ def install(tmp_path, monkeypatch):
 
     external = {
         "continuous_config": _install(
-            "config/validator-thin-sn39-relay.toml", "validator-thin-sn39-relay.toml"
+            "config/validator-thin-sn94-relay.toml", "validator-thin-sn94-relay.toml"
         ),
         "registry_keys": _install(
             "config/provenance/registry-keys.json", "registry-keys.json"
@@ -192,29 +192,29 @@ def install(tmp_path, monkeypatch):
         ),
         "index_keys": _install("config/provenance/index-keys.json", "index-keys.json"),
         "launcher": _install(
-            "deploy/sn39/cathedral-sn39-release-launcher.py", "cathedral-sn39-release"
+            "deploy/sn94/cathedral-sn94-release-launcher.py", "cathedral-sn94-release"
         ),
         "status_unit": _install(
-            "deploy/sn39/cathedral-sn39-public-status.service",
-            "cathedral-sn39-public-status.service",
+            "deploy/sn94/cathedral-sn94-public-status.service",
+            "cathedral-sn94-public-status.service",
         ),
         "status_timer": _install(
-            "deploy/sn39/cathedral-sn39-public-status.timer",
-            "cathedral-sn39-public-status.timer",
+            "deploy/sn94/cathedral-sn94-public-status.timer",
+            "cathedral-sn94-public-status.timer",
         ),
         "sysusers": _install(
-            "deploy/sn39/cathedral-sn39-validator.sysusers",
-            "cathedral-sn39-validator.conf",
+            "deploy/sn94/cathedral-sn94-validator.sysusers",
+            "cathedral-sn94-validator.conf",
         ),
         "mismatch_check": _install(
-            "deploy/sn39/cathedral-mismatch-check", "cathedral-mismatch-check"
+            "deploy/sn94/cathedral-mismatch-check", "cathedral-mismatch-check"
         ),
         "mismatch_unit": _install(
-            "deploy/sn39/cathedral-mismatch-alert.service",
+            "deploy/sn94/cathedral-mismatch-alert.service",
             "cathedral-mismatch-alert.service",
         ),
         "mismatch_timer": _install(
-            "deploy/sn39/cathedral-mismatch-alert.timer",
+            "deploy/sn94/cathedral-mismatch-alert.timer",
             "cathedral-mismatch-alert.timer",
         ),
     }
@@ -282,7 +282,7 @@ def install(tmp_path, monkeypatch):
         # a relay-only path to the Cathedral posture and see it refused.
         if mismatch_check is not None:
             argv += ["--mismatch-check", str(mismatch_check)]
-        monkeypatch.setattr("sys.argv", ["build_sn39_release_manifest.py", *argv])
+        monkeypatch.setattr("sys.argv", ["build_sn94_release_manifest.py", *argv])
         return _builder.main()
 
     build.release = release
@@ -318,8 +318,8 @@ def test_the_relay_manifest_binds_the_relay_unit_and_its_tmpfiles(install, capsy
     assert "relay-validator.service" in bound
     assert "relay-validator.tmpfiles" in bound
     for relative in (
-        "deploy/sn39/cathedral-validator-sn39-relay.service",
-        "deploy/sn39/cathedral-sn39-validator-relay.tmpfiles",
+        "deploy/sn94/cathedral-validator-sn94-relay.service",
+        "deploy/sn94/cathedral-sn94-validator-relay.tmpfiles",
     ):
         assert relative in document["release_files"]
 
@@ -337,9 +337,9 @@ def test_the_relay_manifest_binds_the_shadow_audit_mismatch_alert(install, capsy
     for key in ("mismatch_check", "mismatch_unit", "mismatch_timer"):
         assert str(install.paths[key]) in document["external_files"]
     for relative in (
-        "deploy/sn39/cathedral-mismatch-check",
-        "deploy/sn39/cathedral-mismatch-alert.service",
-        "deploy/sn39/cathedral-mismatch-alert.timer",
+        "deploy/sn94/cathedral-mismatch-check",
+        "deploy/sn94/cathedral-mismatch-alert.service",
+        "deploy/sn94/cathedral-mismatch-alert.timer",
     ):
         assert relative in document["release_files"]
 
@@ -368,7 +368,7 @@ def test_the_relay_manifest_binds_a_superset_of_the_reviewed_source(install, cap
 def test_the_launcher_would_accept_the_relay_manifest(install, capsys):
     """Every field the launcher's `_verify` reads, checked against its own code.
 
-    `_verify` itself needs root-owned `/opt/cathedral-sn39` trees and a masked
+    `_verify` itself needs root-owned `/opt/cathedral-sn94` trees and a masked
     legacy unit, so it cannot run here. What can be checked is that the
     document satisfies each rule it applies: the exact field set, the schema
     string, a 40-hex release SHA, non-empty digest maps whose every value is a
@@ -400,7 +400,7 @@ def test_the_launcher_would_accept_the_relay_manifest(install, capsys):
     # run was given and the shipped default is checked against the launcher's.
     assert str(install.paths["continuous_config"]) in document["external_files"]
     assert _launcher.CONFIGS["continuous"] == (
-        _builder.INSTALL_ROOT / "validator-thin-sn39-relay.toml"
+        _builder.INSTALL_ROOT / "validator-thin-sn94-relay.toml"
     )
 
 
@@ -432,7 +432,7 @@ def test_relay_is_refused_on_a_host_that_holds_launch_material(
 ):
     """`--relay` must not be usable to downgrade the one host that owes a launch.
 
-    The paths are the same three `scaffold.validator_thin._sn39_launch_obligation`
+    The paths are the same three `scaffold.validator_thin._sn94_launch_obligation`
     reads, so a host that the runtime would force through the launch and
     recurring-write authorization cannot build itself a manifest that pins no
     verifier.
@@ -440,7 +440,7 @@ def test_relay_is_refused_on_a_host_that_holds_launch_material(
     material = tmp_path / "controlled-current"
     material.mkdir()
     monkeypatch.setattr(_builder, "LAUNCH_MATERIAL_PATHS", (material,))
-    with pytest.raises(SystemExit, match="holds SN39 launch material"):
+    with pytest.raises(SystemExit, match="holds SN94 launch material"):
         install(relay=True)
 
 
@@ -449,9 +449,9 @@ def test_the_launch_material_paths_are_the_runtime_obligation_paths():
     from scaffold import validator_thin
 
     assert set(_builder.LAUNCH_MATERIAL_PATHS) == {
-        validator_thin.SN39_LAUNCH_CONTROLLED_DIR,
-        validator_thin.SN39_LAUNCH_VERIFIER_BINARY,
-        validator_thin.SN39_LAUNCH_APPROVAL_FILE,
+        validator_thin.SN94_LAUNCH_CONTROLLED_DIR,
+        validator_thin.SN94_LAUNCH_VERIFIER_BINARY,
+        validator_thin.SN94_LAUNCH_APPROVAL_FILE,
     }
 
 
@@ -476,7 +476,7 @@ def test_the_relay_unit_drops_exactly_the_producer_only_requirements():
         "cathedral-validator-evidence belongs to the producer and is "
         "deliberately not declared by the shipped sysusers file"
     )
-    assert "cathedral-validator-controlled-sn39" not in joined
+    assert "cathedral-validator-controlled-sn94" not in joined
     assert "cathedral-tdx-verifier" not in joined, (
         "an unprefixed ReadOnlyPaths= on a missing path fails the mount "
         "namespace and takes the unit down before ExecStart"
@@ -491,7 +491,7 @@ def test_the_relay_unit_keeps_every_gate_the_origin_unit_applies():
         "Group=cathedral-validator-log",
         "Environment=CATHEDRAL_VALIDATOR_STATUS_GROUP=cathedral-validator-log",
         "ExecStart=/usr/bin/python3.12 -I -E -s "
-        "/usr/local/libexec/cathedral-sn39-release continuous",
+        "/usr/local/libexec/cathedral-sn94-release continuous",
         "StateDirectoryMode=0700",
         "LogsDirectoryMode=0750",
         "UMask=0077",
@@ -509,16 +509,16 @@ def test_the_relay_unit_keeps_every_gate_the_origin_unit_applies():
     )
 
 
-def test_the_relay_unit_refuses_to_run_beside_any_other_sn39_writer():
+def test_the_relay_unit_refuses_to_run_beside_any_other_sn94_writer():
     relay = _RELAY_UNIT.read_text(encoding="utf-8")
     conflicts = [line for line in relay.splitlines() if line.startswith("Conflicts=")]
     assert len(conflicts) == 1
-    assert "cathedral-validator-sn39.service" in conflicts[0], (
+    assert "cathedral-validator-sn94.service" in conflicts[0], (
         "one host must never run both postures against one hotkey"
     )
     guard = [line for line in relay.splitlines() if line.startswith("ExecStartPre=")]
     assert len(guard) == 1
-    assert "cathedral-validator-sn39.service" in guard[0]
+    assert "cathedral-validator-sn94.service" in guard[0]
 
 
 def test_the_relay_tmpfiles_creates_what_the_unit_conditions_on():

@@ -42,7 +42,7 @@ UID163 = (
     "5CtobNq2yNmUKaaR9HL5eSY2jN4j43iz1GLXNeNp2tbkwawK"  # confidential TDX lane owner
 )
 UID250 = "5FCBM1y64aoDvuGWbDuerfPzzJNYWoXjofAjzVrnz3pYhFg3"  # cybergym solver
-PRODUCER = "cathedral-cybergym-producer-sn39"
+PRODUCER = "cathedral-cybergym-producer-sn94"
 HMAC = "test-cybergym-hmac-secret"
 EVIDENCE = "5c2d46477a942f632d9ccc380c318bcd5bd31cf7776ebdbc2b2492bf3b6117ab"
 
@@ -51,7 +51,7 @@ EVIDENCE = "5c2d46477a942f632d9ccc380c318bcd5bd31cf7776ebdbc2b2492bf3b6117ab"
 # negative test can drop exactly it.
 V3_ENV = {
     "CATHEDRAL_WEIGHT_POLICY_NETWORK": "finney",
-    "CATHEDRAL_WEIGHT_POLICY_NETUID": "39",
+    "CATHEDRAL_WEIGHT_POLICY_NETUID": "94",
     "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY": BURN,
     "CATHEDRAL_WEIGHT_POLICY_BURN_UID": "",  # v3 resolves burn by hotkey only
     "CATHEDRAL_WEIGHT_POLICY_FORCED_BURN_PERCENTAGE_V2": "0",  # v3 = exactly 0% fixed burn
@@ -85,7 +85,7 @@ def _seed(store: Store, now: datetime) -> None:
         {
             "source": "cathedral_confidential_tdx",
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "epoch": epoch,
             "generated_at": gen,
             "complete": True,
@@ -103,7 +103,7 @@ def _seed(store: Store, now: datetime) -> None:
     payload = {
         "producer_hotkey": PRODUCER,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "source_epoch": epoch,
         "generated_at": gen,
         "complete": True,
@@ -116,7 +116,7 @@ def _seed(store: Store, now: datetime) -> None:
     )
     signature = "sha256=" + cybergym_contract.body_hmac_hex(body, HMAC)
     cyb = cybergym_ingest.validate_report(
-        payload, producer=PRODUCER, audience=("finney", 39), now=now
+        payload, producer=PRODUCER, audience=("finney", 94), now=now
     )
     cyb = cybergym_ingest.bind_authenticated_body(cyb, body)
     cybergym_ingest.store_report(store, cyb, signature=signature)
@@ -139,7 +139,7 @@ def _seed(store: Store, now: datetime) -> None:
                 "INSERT OR REPLACE INTO metagraph_hotkeys"
                 "(network, netuid, hotkey, uid, coldkey, block, updated_at_iso) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("finney", 39, hk, u, "", 100, gen),
+                ("finney", 94, hk, u, "", 100, gen),
             )
         )
 

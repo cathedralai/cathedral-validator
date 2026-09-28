@@ -22,7 +22,7 @@ from cathedral_thin.independent.fetch_policy import (
     validated_peer_ips,
 )
 
-GOOD = "https://policy.example.com/cathedral/sn39/policy-bundle.json"
+GOOD = "https://policy.example.com/cathedral/sn94/policy-bundle.json"
 
 
 @pytest.mark.parametrize(
@@ -52,7 +52,7 @@ def test_the_path_is_used_exactly_as_given():
     endpoint = validate_policy_url(GOOD)
     assert endpoint.host == "policy.example.com"
     assert endpoint.port == 443
-    assert endpoint.path == "/cathedral/sn39/policy-bundle.json"
+    assert endpoint.path == "/cathedral/sn94/policy-bundle.json"
 
 
 def test_an_explicit_port_is_kept_and_the_label_hides_the_path():

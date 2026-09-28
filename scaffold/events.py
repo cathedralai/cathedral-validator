@@ -242,7 +242,7 @@ def _prepare_journal_directory(path: str, label: str) -> None:
     is not worth an error.
 
     Creating it is not sufficient, which is why the error path exists too: the
-    shipped SN39 profiles log to ``/var/log/cathedral-validator``, which the
+    shipped SN94 profiles log to ``/var/log/cathedral-validator``, which the
     service install owns and no ordinary user can create. There the honest
     answer is a message naming the directory and both fixes, not a traceback.
     """

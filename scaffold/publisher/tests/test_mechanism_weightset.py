@@ -56,7 +56,7 @@ class _Spy:
         ("finney", 123),  # finney network
         ("mainnet", 123),  # alias
         ("main", 123),  # alias
-        ("test", 39),  # mainnet netuid even on a testnet network name
+        ("test", 94),  # mainnet netuid even on a testnet network name
     ],
 )
 def test_set_weights_refuses_mainnet(network, netuid):
@@ -80,7 +80,7 @@ def test_set_weights_refuses_unknown_network():
         mw.set_weights(COMPOSED, netuid=123, network="weirdnet", signing_key_hex=sk_hex)
 
 
-def test_removed_mainnet_override_cannot_unlock_sn39(
+def test_removed_mainnet_override_cannot_unlock_sn94(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CATHEDRAL_MECH_WEIGHTSET_ALLOW_MAINNET", "true")
@@ -90,7 +90,7 @@ def test_removed_mainnet_override_cannot_unlock_sn39(
     with pytest.raises(mw.UnsafeNetworkError, match="immutable"):
         mw.set_weights(
             COMPOSED,
-            netuid=39,
+            netuid=94,
             network="test",
             signing_key_hex=sk_hex,
             confirm=True,

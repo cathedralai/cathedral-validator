@@ -64,7 +64,7 @@ _CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 def _fixtures():
     """Fixtures whose registry also resolves the cybergym signing key id."""
-    fx = IntegrationFixtures(source_epoch=SOURCE_EPOCH)
+    fx = IntegrationFixtures(netuid=94, source_epoch=SOURCE_EPOCH)
     pub = fx.key.public_key().public_bytes_raw()
     fx.registry = ReceiptKeyRegistry.from_keys(
         {"compute-1": pub, "distill-1": pub, "config-1": pub, "cybergym-1": pub}
@@ -98,7 +98,7 @@ def cybergym_receipt(fx, *, miner="5CyberMiner", epoch=SOURCE_EPOCH):
         block=VALID_FROM_BLOCK,
         block_hash="0x" + "cd" * 32,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=epoch,
         miner_hotkey=miner,
         model_commitment=digest("ckpt"),
@@ -124,7 +124,7 @@ def cybergym_receipt(fx, *, miner="5CyberMiner", epoch=SOURCE_EPOCH):
     return cr.build_receipt(
         score,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=epoch,
         validator_hotkey="5Validator",
         miner_hotkey=miner,
@@ -203,7 +203,7 @@ def epoch_proof(
     score=12.0,
     epoch=SOURCE_EPOCH,
     network="finney",
-    netuid=39,
+    netuid=94,
     complete=True,
     generated_at=None,
     secret=PROOF_SECRET,
@@ -299,7 +299,7 @@ def _preview(fx, receipts, **kw):
         key_registry=fx.registry,
         receipts=receipts,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=SOURCE_EPOCH,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -442,7 +442,7 @@ def _bundle(fx, tmp_path, receipts, **over):
     pub = base64.b64encode(fx.key.public_key().public_bytes_raw()).decode()
     bundle = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "source_epoch": SOURCE_EPOCH,
         "now": "2026-07-25T12:30:00Z",
         "now_iso": NOW_ISO,
@@ -575,7 +575,7 @@ def test_distill_closed_store_report_verifies_and_binds_end_to_end(tmp_path):
     document = producer.build_score_report(
         store,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=SOURCE_EPOCH,
         producer_hotkey=PRODUCER,
     )
@@ -749,7 +749,7 @@ def test_an_unfunded_cybergym_lane_needs_no_proof():
         key_registry=fx.registry,
         receipts=[_lane_receipt(cybergym_receipt(fx))],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=SOURCE_EPOCH,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -883,7 +883,7 @@ def test_the_validator_verifies_what_cathedrals_producer_actually_signs():
     document = {
         "producer_hotkey": "5Producer",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "source_epoch": SOURCE_EPOCH,
         "generated_at": _fresh_iso(),
         "complete": True,
@@ -891,7 +891,7 @@ def test_the_validator_verifies_what_cathedrals_producer_actually_signs():
         "scores": {"5CyberMiner": 12.0},
         "evidence_sha256": ev.manifest_digest(
             network="finney",
-            netuid=39,
+            netuid=94,
             source_epoch=SOURCE_EPOCH,
             entries=entries_for(receipt),
         ),
@@ -929,7 +929,7 @@ def test_a_noncanonical_wire_body_still_verifies_over_its_exact_bytes():
         {
             "producer_hotkey": "5Producer",
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "source_epoch": SOURCE_EPOCH,
             "generated_at": _fresh_iso(),
             "complete": True,
@@ -937,7 +937,7 @@ def test_a_noncanonical_wire_body_still_verifies_over_its_exact_bytes():
             "scores": {"5CyberMiner": 12.0},
             "evidence_sha256": ev.manifest_digest(
                 network="finney",
-                netuid=39,
+                netuid=94,
                 source_epoch=SOURCE_EPOCH,
                 entries=entries_for(receipt),
             ),
@@ -1131,7 +1131,7 @@ def test_a_backdated_bundle_cannot_revive_a_stale_proof():
         key_registry=fx.registry,
         receipts=[_lane_receipt(cybergym_receipt(fx))],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=SOURCE_EPOCH,
         now=NOW_DT,  # bundle claims 2026-07-25
         now_iso=NOW_ISO,
@@ -1243,7 +1243,7 @@ def test_a_funded_empty_epoch_uses_the_deterministic_empty_manifest():
     gate = out["gates"]["cybergym_epoch_proof"]
     assert gate["verified"] is True and gate["bound"] is True
     assert gate["evidence_sha256"] == ev.empty_digest(
-        network="finney", netuid=39, source_epoch=SOURCE_EPOCH
+        network="finney", netuid=94, source_epoch=SOURCE_EPOCH
     )
     assert _cybergym_burned(out)  # nothing scored, so the share still burns
 

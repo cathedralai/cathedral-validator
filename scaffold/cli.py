@@ -6,7 +6,7 @@ preview, offline, or broadcast mode.
 
 Config resolution for `serve`, lowest to highest precedence:
   built-in defaults  <  --config TOML  <  environment  <  command-line flags
-The production config ships at `config/validator-thin-sn39-relay.toml`.
+The production config ships at `config/validator-thin-sn94-relay.toml`.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ _DEFAULTS = {
     "public_key_hex": "",
     "key_id": "cathedral-weight-policy",
     "network": "finney",
-    "netuid": 39,
+    "netuid": 94,
     "wallet_name": "validator",
     "wallet_hotkey": "default",
     "state_file": str(Path.home() / ".cathedral" / "thin_validator.json"),
@@ -46,10 +46,10 @@ _DEFAULTS = {
     "max_submissions": 0,
     "require_full_provenance_for_broadcast": False,
     "require_completed_launch_for_broadcast": True,
-    "launch_approval_file": str(validator_thin.SN39_LAUNCH_APPROVAL_FILE),
-    "launch_release_sha": os.environ.get(validator_thin.SN39_RELEASE_SHA_ENV, ""),
+    "launch_approval_file": str(validator_thin.SN94_LAUNCH_APPROVAL_FILE),
+    "launch_release_sha": os.environ.get(validator_thin.SN94_RELEASE_SHA_ENV, ""),
     "launch_config_sha256": os.environ.get(
-        validator_thin.SN39_LAUNCH_CONFIG_DIGEST_ENV, ""
+        validator_thin.SN94_LAUNCH_CONFIG_DIGEST_ENV, ""
     ),
     "launch_preflight": False,
     "once": False,
@@ -58,7 +58,7 @@ _DEFAULTS = {
     # both values and exposes no switch for either one.
     "offline": False,
     "broadcast": True,
-    # Supported SN39 operation is PINNED to the launch policy contract;
+    # Supported SN94 operation is PINNED to the launch policy contract;
     # operators must explicitly override to run unpinned (unsupported).
     "require_policy": "validated_supply_v1",
     # Attestation-verified (thin/shadow) is the ONLY recurring operator mode:
@@ -203,14 +203,14 @@ def _anchor_config_paths(cfg: dict, config_path: str) -> None:
 
     ``Path(pin).read_bytes()`` resolves against the CWD, so the relay profile's
     ``config/provenance/*.json`` pins only work from the repository root. The
-    SN39 release launcher chdirs into the release before exec, so the live
+    SN94 release launcher chdirs into the release before exec, so the live
     validator is fine and every other invocation shape — a copied config run
     from ``$HOME``, a systemd unit with a different WorkingDirectory — loses
     the shadow audit to a ``FileNotFoundError`` that never reaches the write
     path and therefore never stops anything.
 
     The rule is deliberately additive rather than a straight "resolve against
-    the config file". The installed SN39 config lives in
+    the config file". The installed SN94 config lives in
     ``/etc/cathedral-validator`` while its key bundle lives in the release
     tree, so anchoring unconditionally would move a live mainnet writer's pins
     to a directory that does not contain them. Instead the CWD interpretation
@@ -219,7 +219,7 @@ def _anchor_config_paths(cfg: dict, config_path: str) -> None:
 
     Two anchors are tried, in the order the two shipped shapes need them: the
     config file's own directory, which is where an operator's copy of a
-    profile sits (``cp config/validator-thin-sn39-relay.toml my-validator.toml``
+    profile sits (``cp config/validator-thin-sn94-relay.toml my-validator.toml``
     at the repository root), and one directory above it, because a profile
     still inside ``config/`` writes its pins relative to the root that
     ``config/`` hangs off. Every candidate is digest-pinned at read time, so a
@@ -369,7 +369,7 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         print(
             "error: manual recurring starts are retired because older no-flag "
             "commands were non-writing. Install and start the system service "
-            "with deploy/sn39/install-validator",
+            "with deploy/sn94/install-validator",
             file=sys.stderr,
         )
         return 2
@@ -503,7 +503,7 @@ def _cmd_serve(ns: argparse.Namespace) -> int:
         rows.append(("journal", render.dim("enabled · path withheld")))
     render.banner(
         rows,
-        "SN39 validator",
+        "SN94 validator",
         f"{cfg.network} · netuid {cfg.netuid}",
     )
     return validator_thin.run(cfg)
@@ -592,7 +592,7 @@ def _cmd_status(ns: argparse.Namespace) -> int:
     report = health.evaluate(journal, interval_secs=getattr(cfg, "interval_secs", None))
     render.banner(
         [(label, value) for label, value in report.rows],
-        "SN39 validator status",
+        "SN94 validator status",
         f"{cfg.network} · netuid {cfg.netuid}",
     )
     # Outside the banner on purpose: the banner neutralizes absolute paths, and
@@ -637,7 +637,7 @@ def _line_buffer_stdout() -> None:
     cycle, and lands them in receipt recovery -- all for a validator that was
     healthy the whole time.
 
-    This belongs in the process, not in the unit file. The SN39 release
+    This belongs in the process, not in the unit file. The SN94 release
     launcher `execve`s a curated environment, so an operator's own
     `PYTHONUNBUFFERED` -- from a systemd drop-in, a shell, a compose file --
     never reaches the child. They cannot fix this from outside.
@@ -660,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     _line_buffer_stdout()
     p = argparse.ArgumentParser(
         prog="cathedral-validator",
-        description="Cathedral SN39 validator (v4) — fetch one signed score per miner, "
+        description="Cathedral SN94 validator (v4) — fetch one signed score per miner, "
         "verify, apply.",
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -700,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="optional local durable-attempt ceiling; 0 disables this extra "
-        "ceiling, but SN39 recurring writes still require a separately signed "
+        "ceiling, but SN94 recurring writes still require a separately signed "
         "bounded authorization; launch canary requires 1",
     )
     sp.add_argument(
@@ -795,7 +795,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pp = sub.add_parser(
         "preflight-launch",
-        help="run the exact SN39 strict replay read-only and emit approval",
+        help="run the exact SN94 strict replay read-only and emit approval",
     )
     pp.add_argument("--config", required=True)
     pp.add_argument("--chain-endpoint", dest="chain_endpoint", default=None)

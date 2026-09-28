@@ -18,14 +18,14 @@ from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
     MAX_WEIGHT_LIMIT,
     MIN_ALLOWED_WEIGHTS,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime.qvl import LAUNCH_QVL_DIGEST
 from scaffold import validator_thin as canonical_validator
-from scripts import publish_sn39_validator_status as status_publisher
+from scripts import publish_sn94_validator_status as status_publisher
 
 TEST_NOW = datetime(2026, 8, 28, 12, 1, tzinfo=UTC)
 
@@ -133,7 +133,7 @@ def _state(**changes) -> launch.UID30ChainState:
                 "status": canonical_validator.PASS,
                 "mapping_block": 1_000,
                 "mapping_block_hash": "0x" + "1" * 64,
-                "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+                "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
                 "era_last_block": 1_015,
                 "targets": [
                     {
@@ -234,7 +234,7 @@ def _intent_then_receipt(
     wire_weights,
     mortal_period_blocks,
 ):
-    assert netuid == 39
+    assert netuid == 94
     canonical_validator._record_pending_broadcast_intent(
         runtime_contract,
         attempt_id=attempt_id,
@@ -604,7 +604,7 @@ def test_exact_u16_vector_is_signed_read_back_and_finalized_once(
         "scope": "all_other_uid30_processes_and_hosts_stopped",
     }
     assert journal["submission_finalized_count"] == 1
-    assert SN39_MORTAL_PERIOD_BLOCKS == 16
+    assert SN94_MORTAL_PERIOD_BLOCKS == 16
 
 
 def test_production_uid30_seam_requests_the_launch_only_descendant_capability(
@@ -620,7 +620,7 @@ def test_production_uid30_seam_requests_the_launch_only_descendant_capability(
         return _intent_then_receipt(*args, **kwargs)
 
     monkeypatch.setattr(
-        canonical_validator, "_submit_exact_sn39_extrinsic", canonical_submit
+        canonical_validator, "_submit_exact_sn94_extrinsic", canonical_submit
     )
     launch.submit_reviewed_preview(
         preview_path=path,
@@ -941,7 +941,7 @@ def test_primary_finalization_rejects_nonexact_historical_weights(
         {
             "module": "SubtensorModule",
             "storage_function": "Weights",
-            "params": [39, launch.UID30],
+            "params": [94, launch.UID30],
             "block_hash": state.block_hash,
         }
     ]
@@ -1303,7 +1303,7 @@ def test_canonical_startup_recovers_zero_burn_uid30_without_resubmitting(
         {
             "module": "SubtensorModule",
             "storage_function": "Weights",
-            "params": [39, launch.UID30],
+            "params": [94, launch.UID30],
             "block_hash": "0x" + "b" * 64,
         }
     ]

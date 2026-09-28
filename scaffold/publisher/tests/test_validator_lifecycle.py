@@ -32,7 +32,7 @@ def _signed_vector(policy_version: int = 42) -> tuple[dict, str]:
         "vector_id": "12345678-lifecycle-test",
         "policy_version": policy_version,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "generated_at": _iso(now),
         "expires_at": _iso(now + timedelta(minutes=5)),
         "burn_snapshot": {
@@ -98,14 +98,14 @@ def test_startup_never_serializes_malformed_or_protocol_relative_endpoints(
         public_key_hex="00" * 32,
         key_id="test-key",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=True,
         broadcast=False,
         wallet_name="validator",
         wallet_hotkey="default",
         require_policy=None,
         # 'off' was deleted in 062d2fd as a mode no config could select and the
-        # SN39 trust profile already rejected. 'shadow' is the mode this fixture
+        # SN94 trust profile already rejected. 'shadow' is the mode this fixture
         # always meant: audit alongside, submission authority unchanged.
         provenance="shadow",
         once=True,
@@ -145,7 +145,7 @@ def test_attempted_policy_is_a_durable_rollback_high_water(tmp_path) -> None:
             public_key_hex=public_key,
             key_id="cathedral-weight-policy",
             network="finney",
-            netuid=39,
+            netuid=94,
             fence_version=validator_thin.load_fence(state_file),
         )
 
@@ -158,7 +158,7 @@ def test_vector_freshness_uses_canonical_utc_and_bounded_lifetime() -> None:
     wire_vector.invariant_check(
         payload,
         network="finney",
-        netuid=39,
+        netuid=94,
         now_iso=_iso(now),
     )
 
@@ -167,7 +167,7 @@ def test_vector_freshness_uses_canonical_utc_and_bounded_lifetime() -> None:
         wire_vector.invariant_check(
             malformed,
             network="finney",
-            netuid=39,
+            netuid=94,
             now_iso=_iso(now),
         )
 
@@ -177,7 +177,7 @@ def test_vector_freshness_uses_canonical_utc_and_bounded_lifetime() -> None:
         wire_vector.invariant_check(
             future,
             network="finney",
-            netuid=39,
+            netuid=94,
             now_iso=_iso(now),
         )
 
@@ -186,7 +186,7 @@ def test_vector_freshness_uses_canonical_utc_and_bounded_lifetime() -> None:
         wire_vector.invariant_check(
             long_lived,
             network="finney",
-            netuid=39,
+            netuid=94,
             now_iso=_iso(now),
         )
 
@@ -209,7 +209,7 @@ def test_tick_emits_sanitized_verdict_and_mapping_lifecycle(
         public_key_hex=public_key,
         key_id="cathedral-weight-policy",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=True,
         broadcast=False,
         wallet_name="unused",
@@ -237,7 +237,7 @@ def test_tick_emits_sanitized_verdict_and_mapping_lifecycle(
     assert stages["FEED fetch"] == "source=https://api.cathedral.computer"
     assert stages["FEED fetched"] == "id=12345678 policy_version=42"
     assert stages["SIGNATURE valid"] == "key_id=cathedral-weight-policy"
-    assert stages["FRESHNESS valid"].startswith("network=finney netuid=39")
+    assert stages["FRESHNESS valid"].startswith("network=finney netuid=94")
     assert stages["ROLLBACK valid"] == "policy_version=42 prior_fence=-1"
     assert (
         stages["MAP complete"]
@@ -311,7 +311,7 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
             extrinsic_hash="0x" + "a" * 64,
             nonce=17,
             era_reference_block=runtime._tick_preflight.block,
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             version_key=validator_thin._weight_version_key(),
             wire_uids=wire_uids,
             wire_weights=wire_weights,
@@ -342,7 +342,7 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         public_key_hex=public_key,
         key_id="cathedral-weight-policy",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=False,
         broadcast=True,
         wallet_name="validator",
@@ -351,7 +351,7 @@ def test_finalized_submission_fence_precedes_fallible_telemetry(tmp_path, monkey
         provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
-        # This fixture is a plain relay: it owes SN39 no launch of its own, so
+        # This fixture is a plain relay: it owes SN94 no launch of its own, so
         # it declares the stance a third-party config declares. The reservation
         # now reads the completed-launch requirement from
         # `_continuous_transition_required` alone, so an undeclared stance falls
@@ -429,7 +429,7 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
             extrinsic_hash="0x" + "a" * 64,
             nonce=17,
             era_reference_block=runtime._tick_preflight.block,
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             version_key=validator_thin._weight_version_key(),
             wire_uids=wire_uids,
             wire_weights=wire_weights,
@@ -461,7 +461,7 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         public_key_hex=public_key,
         key_id="cathedral-weight-policy",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=False,
         broadcast=True,
         wallet_name="validator",
@@ -470,7 +470,7 @@ def test_pending_thin_attempt_blocks_retry_when_final_state_write_fails(
         provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
-        # This fixture is a plain relay: it owes SN39 no launch of its own, so
+        # This fixture is a plain relay: it owes SN94 no launch of its own, so
         # it declares the stance a third-party config declares. The reservation
         # now reads the completed-launch requirement from
         # `_continuous_transition_required` alone, so an undeclared stance falls
@@ -505,7 +505,7 @@ def _run_loop_args(*, once: bool, interval_secs: int = 60) -> SimpleNamespace:
         public_key_hex="00" * 32,
         key_id="test-key",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=False,
         broadcast=True,
         wallet_name="validator",
@@ -601,7 +601,7 @@ def test_safe_pre_sign_head_drift_retries_whole_tick_once(
             "status": validator_thin.NOT_PROVEN,
             "detail": "finalized head advanced before signing",
             "retry": 1,
-            "retry_limit": validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES,
+            "retry_limit": validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_RETRIES,
             "remediation": (
                 "The unsigned reservation was safely released. Rebuilding the "
                 "complete tick from a fresh finalized head now."
@@ -672,15 +672,15 @@ def test_head_drift_exhaustion_rearms_without_losing_the_write_interval(
         monkeypatch, tick=_always_drifts, events=events, max_sleeps=1
     )
 
-    assert sleeps == [validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS]
+    assert sleeps == [validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS]
     assert sleeps[0] < 1500
     names = [name for name, _fields in events.rows]
     assert names.count("PRE_SIGN_HEAD_DRIFT_RETRY_EXHAUSTED") == 1
     # The retry budget itself is unchanged: exactly one exhaustion per tick,
-    # after exactly SN39_PRE_SIGN_HEAD_DRIFT_RETRIES retries.
+    # after exactly SN94_PRE_SIGN_HEAD_DRIFT_RETRIES retries.
     assert (
         names.count("PRE_SIGN_HEAD_DRIFT_RETRY")
-        == validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES
+        == validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_RETRIES
     )
 
 
@@ -690,12 +690,12 @@ def test_head_drift_rearm_is_bounded_and_falls_back_to_the_write_interval(
     """A chain that keeps losing the race must fall back to the daemon's own
     cadence instead of retrying forever at the short interval."""
     events = _RunEventRecorder()
-    cap = validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
+    cap = validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
     sleeps = _run_recurring_loop(
         monkeypatch, tick=_always_drifts, events=events, max_sleeps=cap + 1
     )
 
-    assert sleeps == [validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS] * cap + [1500]
+    assert sleeps == [validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS] * cap + [1500]
 
 
 def test_head_drift_rearm_never_lengthens_a_short_write_interval(
@@ -737,15 +737,15 @@ def test_head_drift_rearm_resets_after_a_tick_that_does_not_exhaust(
     def tick(_args: SimpleNamespace) -> bool:
         calls.append(1)
         # Tick 1 exhausts (9 raises), then one clean tick, then exhaust again.
-        if len(calls) <= validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES + 1:
+        if len(calls) <= validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_RETRIES + 1:
             raise validator_thin._RetryablePreSignHeadDrift("head advanced")
-        if len(calls) == validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES + 2:
+        if len(calls) == validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_RETRIES + 2:
             return True
         raise validator_thin._RetryablePreSignHeadDrift("head advanced")
 
     sleeps = _run_recurring_loop(monkeypatch, tick=tick, events=events, max_sleeps=3)
 
-    rearm = validator_thin.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS
+    rearm = validator_thin.SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS
     assert sleeps == [rearm, 1500, rearm]
 
 
@@ -782,7 +782,7 @@ def _cooldown_broadcast_args(state_file: Path, public_key: str) -> SimpleNamespa
         public_key_hex=public_key,
         key_id="cathedral-weight-policy",
         network="finney",
-        netuid=39,
+        netuid=94,
         offline=False,
         broadcast=True,
         wallet_name="validator",
@@ -791,7 +791,7 @@ def _cooldown_broadcast_args(state_file: Path, public_key: str) -> SimpleNamespa
         provenance="shadow",
         provenance_burn_hotkey="burn-hotkey",
         runtime_root=str(validator_thin._VALIDATOR_RUNTIME_ROOT),
-        # A plain relay, as in the fence fixtures above: it owes SN39 no launch
+        # A plain relay, as in the fence fixtures above: it owes SN94 no launch
         # of its own, so the recurring authorization is not what these tests
         # are about.
         require_completed_launch_for_broadcast=False,
@@ -836,7 +836,7 @@ def _install_cooldown_tick_fixture(
             extrinsic_hash="0x" + "a" * 64,
             nonce=17,
             era_reference_block=runtime._tick_preflight.block,
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             version_key=validator_thin._weight_version_key(),
             wire_uids=wire_uids,
             wire_weights=wire_weights,

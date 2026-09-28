@@ -1,6 +1,6 @@
 """A local funded-Compute PolicyBundle for the first independent canary.
 
-SN39 does not yet carry an on-chain ``CATHPOL1`` commitment this runner can
+SN94 does not yet carry an on-chain ``CATHPOL1`` commitment this runner can
 fetch. The live canary therefore signs its own genesis EconomicsSet with
 ephemeral 2-of-3 keys, funds Compute, and composes against the live
 metagraph. The resulting vector is this validator's origin, not the owner
@@ -43,7 +43,7 @@ COMPUTE_ALLOCATION = 10**11
 def _economics_keys() -> tuple[dict[str, Any], dict[str, bytes]]:
     """Process-local Ed25519 keys. Never repeating-byte or well-known seeds.
 
-    SN39 still has no on-chain ``CATHPOL1`` this runner can fetch. The live
+    SN94 still has no on-chain ``CATHPOL1`` this runner can fetch. The live
     canary therefore signs its own genesis EconomicsSet. Hardcoded
     ``bytes([1])*32`` seeds would let anyone reproduce the signatures; these
     keys exist only in this process and are discarded when it exits.

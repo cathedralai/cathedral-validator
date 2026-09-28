@@ -55,7 +55,7 @@ def _inclusion_policy(*, block: int = MAPPING_BLOCK) -> dict[str, object]:
         "valid_from_time": "2026-08-28T00:00:00.000Z",
         "valid_until_time": "2026-09-01T00:00:00.000Z",
         "require_commit_reveal_disabled": True,
-        "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
         "expected_next_epoch_start_block": block + 200,
     }
 
@@ -164,7 +164,7 @@ def _successor_identity(
     }
     return {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "mapping_block": MAPPING_BLOCK,
         "validator_hotkey": validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
         "validator_uid": validator.SN39_UID30_LAUNCH_VALIDATOR_UID,
@@ -221,6 +221,7 @@ def test_shared_attempt_id_preserves_the_live_predecessor_hash() -> None:
             "valid_until_block": 8_945_692,
             "valid_until_time": "2026-08-28T18:32:27.996Z",
         },
+        # The live 2026-08-28 predecessor was recorded on the previous subnet.
         "netuid": 39,
         "network": "finney",
         "next_epoch_start_block": 8_945_708,
@@ -383,7 +384,7 @@ def _patch_synthetic_predecessor(
         "era_reference_block": (
             validator.SN39_UID30_SUCCESSOR_PREDECESSOR_SOURCE_EPOCH
         ),
-        "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
         "wire_uids": [validator.SN39_UID30_SUCCESSOR_PREDECESSOR_UID],
         "wire_weights": [65535],
@@ -421,7 +422,7 @@ def _predecessor_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     attempt_id = validator.SN39_UID30_SUCCESSOR_PREDECESSOR_ID
     return {
         "submission_genesis_hash": validator.FINNEY_GENESIS_HASH,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
         "submission_validator_hotkey": (validator.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY),
         # The live finalized launch journal keeps its historical pending
         # receipt fields with pending_id=null.  Preserve that shape so an
@@ -496,7 +497,7 @@ def _runtime(root: Path) -> SimpleNamespace:
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="cathedral",
         wallet_hotkey="default",
         runtime_root=root,
@@ -572,7 +573,7 @@ def test_successor_reservation_preserves_predecessor_and_commits_one_new_budget(
         "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
         "nonce": 11,
         "era_reference_block": MAPPING_BLOCK,
-        "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
         "wire_uids": [8, 124],
         "wire_weights": [65535, 65535],
@@ -715,7 +716,7 @@ def test_signed_successor_fence_forbids_any_replacement_attempt(
             "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
             "nonce": 11,
             "era_reference_block": MAPPING_BLOCK,
-            "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
             "wire_uids": [8, 124],
             "wire_weights": [65535, 65535],
@@ -763,7 +764,7 @@ def test_signed_successor_cannot_be_disguised_as_unsigned_and_rolled_back(
             "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
             "nonce": 11,
             "era_reference_block": MAPPING_BLOCK,
-            "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
             "wire_uids": [8, 124],
             "wire_weights": [65535, 65535],
@@ -806,7 +807,7 @@ def test_successor_commit_and_abort_linearize_without_crossing(
         "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
         "nonce": 11,
         "era_reference_block": MAPPING_BLOCK,
-        "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
         "wire_uids": [8, 124],
         "wire_weights": [65535, 65535],
@@ -923,7 +924,7 @@ def test_generic_recovery_keeps_signed_successor_fenced_for_fixed_recovery(
             "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
             "nonce": 11,
             "era_reference_block": MAPPING_BLOCK,
-            "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
             "wire_uids": [8, 124],
             "wire_weights": [65535, 65535],
@@ -1226,54 +1227,54 @@ def _descendant_preflight(
         substrate=substrate,
         commit_reveal_enabled=lambda *, netuid, block: (
             False
-            if netuid == 39 and block == latest_block and case != "commit"
+            if netuid == 94 and block == latest_block and case != "commit"
             else True
         ),
         get_subnet_owner_hotkey=lambda netuid, *, block: (
             validator.SN39_UID30_SUCCESSOR_SECOND_HOTKEY
             if case == "owner"
             else validator.SN39_BURN_HOTKEY
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         min_allowed_weights=lambda *, netuid, block: (
             2
             if case == "min_weights"
             else 1
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         max_weight_limit=lambda *, netuid, block: (
             0.5
             if case == "max_weight"
             else 1.0
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         get_next_epoch_start_block=lambda netuid, *, block: (
             MAPPING_BLOCK + 201
             if case == "epoch"
             else MAPPING_BLOCK + 200
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         weights_rate_limit=lambda netuid, *, block: (
-            validator.SN39_MORTAL_PERIOD_BLOCKS - 1
+            validator.SN94_MORTAL_PERIOD_BLOCKS - 1
             if case == "rate_limit"
             else 100
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         get_mechanism_count=lambda netuid, *, block: (
             0
             if case == "mechanism"
             else 1
-            if netuid == 39 and block == latest_block
+            if netuid == 94 and block == latest_block
             else pytest.fail((netuid, block))
         ),
         get_metagraph_info=lambda netuid, mechid, *, block: (
             info
-            if (netuid, mechid, block) == (39, 0, latest_block)
+            if (netuid, mechid, block) == (94, 0, latest_block)
             else pytest.fail((netuid, mechid, block))
         ),
     )
@@ -1371,15 +1372,15 @@ def test_exact_successor_descendant_refuses_at_time_window_expiry(
         validator.wire.VectorError,
         match="UID30 successor descendant lacks reviewed time, block, or epoch room",
     ):
-        validator._submit_exact_sn39_extrinsic(
+        validator._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime,
             attempt_id=attempt_id,
-            netuid=39,
+            netuid=94,
             version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
             wire_uids=[8, 124],
             wire_weights=[65535, 65535],
-            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
@@ -1411,15 +1412,15 @@ def test_exact_successor_descendant_refuses_if_window_expires_before_signature(
         validator.wire.VectorError,
         match="UID30 descendant signing evidence time window expired before signature",
     ):
-        validator._submit_exact_sn39_extrinsic(
+        validator._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime,
             attempt_id=attempt_id,
-            netuid=39,
+            netuid=94,
             version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
             wire_uids=[8, 124],
             wire_weights=[65535, 65535],
-            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
@@ -1486,15 +1487,15 @@ def test_exact_successor_signer_accepts_only_bounded_reviewed_descendants(
         lambda *_args, **kwargs: intents.append(kwargs),
     )
 
-    receipt = validator._submit_exact_sn39_extrinsic(
+    receipt = validator._submit_exact_sn94_extrinsic(
         preflight,
         runtime_contract=runtime,
         attempt_id=attempt_id,
-        netuid=39,
+        netuid=94,
         version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
         wire_uids=[second_uid, primary_uid],
         wire_weights=[65535, 65535],
-        mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
         allow_reviewed_uid30_finalized_descendant=True,
     )
 
@@ -1587,15 +1588,15 @@ def test_successor_descendant_counterexamples_refuse_before_irreversible_touch(
     )
 
     with pytest.raises(validator.wire.VectorError):
-        validator._submit_exact_sn39_extrinsic(
+        validator._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime,
             attempt_id=SUCCESSOR_ATTEMPT_ID,
-            netuid=39,
+            netuid=94,
             version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
             wire_uids=[8, 124],
             wire_weights=[65535, 65534] if case == "wire" else [65535, 65535],
-            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
@@ -1633,17 +1634,17 @@ def test_generic_descendant_flag_does_not_authorize_an_unreviewed_caller(
     )
 
     with pytest.raises(validator.wire.VectorError):
-        validator._submit_exact_sn39_extrinsic(
+        validator._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=SimpleNamespace(
                 require_full_provenance_for_broadcast=False,
             ),
             attempt_id="sha256:" + "4" * 64,
-            netuid=39,
+            netuid=94,
             version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
             wire_uids=[8, 124],
             wire_weights=[65535, 65535],
-            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
@@ -1828,15 +1829,15 @@ def test_successor_pre_sign_counterexamples_refuse_before_nonce(
     )
 
     with pytest.raises(validator.wire.VectorError):
-        validator._submit_exact_sn39_extrinsic(
+        validator._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime,
             attempt_id=SUCCESSOR_ATTEMPT_ID,
-            netuid=39,
+            netuid=94,
             version_key=validator.SN39_UID30_LAUNCH_VERSION_KEY,
             wire_uids=[8, 124],
             wire_weights=[65535, 65535],
-            mortal_period_blocks=validator.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator.SN94_MORTAL_PERIOD_BLOCKS,
         )
 
 
@@ -1858,7 +1859,7 @@ def test_successor_finalization_and_restart_recovery_keep_two_rows_and_zero_burn
             "extrinsic_hash": SUCCESSOR_EXTRINSIC_HASH,
             "nonce": 11,
             "era_reference_block": MAPPING_BLOCK,
-            "mortal_period_blocks": validator.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator.SN39_UID30_LAUNCH_VERSION_KEY,
             "wire_uids": [8, 124],
             "wire_weights": [65535, 65535],

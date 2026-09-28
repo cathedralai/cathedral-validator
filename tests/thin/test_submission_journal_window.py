@@ -1,6 +1,6 @@
 """The signed-attempt journal is bounded, and bounding it costs no protection.
 
-``submission_attempt_ids`` used to be append-only forever. On the live SN39 box
+``submission_attempt_ids`` used to be append-only forever. On the live SN94 box
 it reached 77 entries (5775 bytes) in nine days inside a document that is read,
 re-serialized and fsynced IN FULL on every state write while the submission
 lock is held, so the cost of the journal is paid by the write path itself and
@@ -33,7 +33,7 @@ from scaffold import validator_thin as vt
 
 def _args(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
-        netuid=39,
+        netuid=94,
         offline=False,
         runtime_root=str(tmp_path),
         max_submissions=0,
@@ -70,7 +70,7 @@ def _signed_attempt(args: SimpleNamespace, policy_version: int) -> str:
         extrinsic_hash="0x" + "a" * 64,
         nonce=policy_version,
         era_reference_block=100 + policy_version,
-        mortal_period_blocks=vt.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=vt.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=vt._weight_version_key(),
         wire_uids=[7, 241],
         wire_weights=[65535, 7282],

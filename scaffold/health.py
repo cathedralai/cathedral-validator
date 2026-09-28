@@ -27,7 +27,7 @@ Rules 1-3 exist because a monitor that reports success when it cannot see the
 thing it monitors is worse than no monitor: it is a green light on a broken
 sensor. Every one of them fails CLOSED — an unreadable path is an alert, not a
 silent zero. Rules 4 and 5 are the shadow-audit alarms, kept verbatim so
-``deploy/sn39/cathedral-mismatch-check`` and ``cathedral-validator status``
+``deploy/sn94/cathedral-mismatch-check`` and ``cathedral-validator status``
 cannot disagree about what "healthy" means — a claim that is pinned by
 ``tests/thin/test_liveness_alert.py`` running both against the same journals,
 because it was false once: #64 rewrote rule 5 in the shell script only, so one
@@ -97,7 +97,7 @@ DEFAULT_INTERVAL_SECS = 1500.0
 # Only the tail is read: the journal is append-only, and every rule here is
 # about recent history.
 TAIL_BYTES = 512 * 1024
-# The one rotated generation `deploy/sn39/cathedral-validator.logrotate` keeps
+# The one rotated generation `deploy/sn94/cathedral-validator.logrotate` keeps
 # uncompressed, via `delaycompress`.
 #
 # That fragment rotates with `copytruncate`, because the validator holds its
@@ -274,7 +274,7 @@ def _trailing_audit_fail_streak(
 ) -> int:
     """Length of the unbroken run of audit FAILs at the end of ``window``.
 
-    Journal order, matching ``deploy/sn39/cathedral-mismatch-check`` rule 5.
+    Journal order, matching ``deploy/sn94/cathedral-mismatch-check`` rule 5.
     """
     streak = 0
     for record in records:
@@ -381,7 +381,7 @@ def evaluate(
             f"{JOURNAL_STALE_TICKS:.0f} tick intervals "
             f"({humanize_secs(stale_after)}) — the validator is stopped, "
             "wedged, or writing somewhere else. Check "
-            "`systemctl status cathedral-validator-sn39`."
+            "`systemctl status cathedral-validator-sn94`."
         )
 
     live = _latest(records, LIVENESS_EVENTS)

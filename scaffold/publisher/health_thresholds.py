@@ -10,7 +10,7 @@ can never silently disagree on what "fresh" means. Values come straight from
 ``deploy/RELIABILITY_UPGRADE_PLAN.md`` (Vector Freshness Thresholds + Phase 7).
 
 All thresholds are seconds. The chain constants (tempo) are verified against
-finney: SN39 tempo = 360 blocks = 72 min @ 12 s/block.
+finney: SN94 tempo = 360 blocks = 72 min @ 12 s/block.
 """
 
 from __future__ import annotations

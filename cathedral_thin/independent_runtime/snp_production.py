@@ -1,4 +1,4 @@
-"""Fail-closed AMD SEV-SNP verification for the direct SN39 validator.
+"""Fail-closed AMD SEV-SNP verification for the direct SN94 validator.
 
 This is deliberately a verifier boundary, not a second scoring mode.  A miner
 either supplies one of the two admitted CPU evidence kinds and satisfies its

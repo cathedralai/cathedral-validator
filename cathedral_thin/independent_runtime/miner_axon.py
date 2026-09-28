@@ -1,4 +1,4 @@
-"""Digest-authorized SN39 announcement for one verified Cathedral miner.
+"""Digest-authorized SN94 announcement for one verified Cathedral miner.
 
 This is a narrow port of the uncommitted independent-E2E implementation from
 cathedral_thin/independent_runtime/miner_axon.py in the protected
@@ -43,8 +43,8 @@ from .qvl import LAUNCH_QVL_DIGEST, load_verifier
 from .run import INTEL_COLLATERAL, _try_collect, _units_after_quote, snapshot_epoch
 
 NETWORK = "finney"
-NETUID = 39
-SN39_HTTPS_PORT = 8081
+NETUID = 94
+SN94_HTTPS_PORT = 8081
 ANNOUNCEMENT_PERIOD_BLOCKS = 128
 FINALIZED_SUCCESSOR_UID = 124
 UID124_GENERATION2_ENDPOINT_IP = "35.222.166.235"
@@ -114,7 +114,7 @@ class MinerAxonContract:
     preview_schema: str
     journal_schema: str
     endpoint_ip: str | None = None
-    endpoint_port: int = SN39_HTTPS_PORT
+    endpoint_port: int = SN94_HTTPS_PORT
     fixed_uid: int | None = None
     supports_legacy_successor: bool = False
     first_announcement_only: bool = False
@@ -155,7 +155,7 @@ UID124_GENERATION2_AXON_CONTRACT = MinerAxonContract(
     preview_schema="cathedral_sn39_uid124_axon_generation2_preview_v1",
     journal_schema=JOURNAL_SCHEMA,
     endpoint_ip=UID124_GENERATION2_ENDPOINT_IP,
-    endpoint_port=SN39_HTTPS_PORT,
+    endpoint_port=SN94_HTTPS_PORT,
     fixed_uid=FINALIZED_SUCCESSOR_UID,
     supports_legacy_successor=True,
     require_proven_success_receipt=True,
@@ -210,7 +210,7 @@ def _contract_preview_path(contract: MinerAxonContract) -> Path:
 
 @dataclass(frozen=True)
 class FinalizedMinerState:
-    """The pinned miner row observed at one finalized SN39 head."""
+    """The pinned miner row observed at one finalized SN94 head."""
 
     block_number: int
     block_hash: str
@@ -483,9 +483,9 @@ def _registered_row(
     except MinerAxonError:
         raise
     except Exception as exc:
-        raise MinerAxonError("SN39 metagraph identity rows are malformed") from exc
+        raise MinerAxonError("SN94 metagraph identity rows are malformed") from exc
     if not (len(uids) == len(hotkeys) == len(coldkeys) == len(axons)):
-        raise MinerAxonError("SN39 metagraph identity rows are ragged")
+        raise MinerAxonError("SN94 metagraph identity rows are ragged")
     matches = [
         (uid, hotkey, coldkey, axon)
         for uid, hotkey, coldkey, axon in zip(uids, hotkeys, coldkeys, axons)
@@ -493,7 +493,7 @@ def _registered_row(
     ]
     if len(matches) != 1:
         raise MinerAxonError(
-            "the pinned Cathedral miner is not registered exactly once on SN39"
+            "the pinned Cathedral miner is not registered exactly once on SN94"
         )
     uid, hotkey, coldkey, axon = matches[0]
     _require_ss58(hotkey, label="registered miner hotkey")
@@ -528,7 +528,7 @@ def finalized_miner_state(
         raise
     except Exception as exc:
         raise MinerAxonError(
-            f"finalized SN39 metagraph is unavailable: {type(exc).__name__}"
+            f"finalized SN94 metagraph is unavailable: {type(exc).__name__}"
         ) from exc
     uid, hotkey, coldkey, axon = _registered_row(metagraph, contract=contract)
     ip, port, serving = _strict_axon_endpoint(axon)
@@ -875,7 +875,7 @@ def validate_preview(
         "netuid": NETUID,
         "genesis_hash": FINNEY_GENESIS_HASH,
     }:
-        raise MinerAxonError("preview network is not pinned Finney SN39")
+        raise MinerAxonError("preview network is not pinned Finney SN94")
     uid = _strict_nonnegative_int(miner.get("uid"), label="preview miner UID")
     if dict(miner) != {
         "uid": uid,
@@ -1400,7 +1400,7 @@ def _finalized_readback(
     state = state_loader(subtensor)
     if not _same_endpoint(state, ip=ip, port=port):
         raise MinerAxonAmbiguous(
-            "finalized SN39 axon differs from the authorized HTTPS endpoint"
+            "finalized SN94 axon differs from the authorized HTTPS endpoint"
         )
     if minimum_block_number is not None and state.block_number < minimum_block_number:
         raise MinerAxonAmbiguous("finalized successor readback predates its preflight")
@@ -3298,7 +3298,7 @@ __all__ = [
     "PREVIEW_ALREADY",
     "PREVIEW_READY",
     "PREVIEW_SCHEMA",
-    "SN39_HTTPS_PORT",
+    "SN94_HTTPS_PORT",
     "SECOND_MINER_AXON_CONTRACT",
     "SECOND_MINER_ENDPOINT_IP",
     "SECOND_MINER_HOTKEY",

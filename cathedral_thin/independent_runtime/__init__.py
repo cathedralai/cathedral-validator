@@ -15,7 +15,7 @@ What this package is allowed to do:
   the miner hotkey and the observed channel identity, and bind Compute mass
   ONLY from the integer units the sealed package re-derived itself. A PASS
   quote is admission to the audit; it is never payment;
-* read the SN39 metagraph and, through an injected canary transport, submit
+* read the SN94 metagraph and, through an injected canary transport, submit
   ``set_mechanism_weights`` as the dedicated canary hotkey.
 
 What it must never do:

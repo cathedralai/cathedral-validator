@@ -52,7 +52,7 @@ SAMPLE_SCOREBOARD = {
 }
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 
 
 @pytest.fixture(autouse=True)

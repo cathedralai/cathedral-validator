@@ -65,7 +65,7 @@ def _insert_metagraph_hotkey(
     hotkey: str,
     uid: int,
     network: str = "finney",
-    netuid: int = 39,
+    netuid: int = 94,
     updated_at: str = "2026-07-01T00:00:00.000Z",
 ) -> None:
     def write(conn):
@@ -81,7 +81,7 @@ def _insert_metagraph_hotkey(
 
 def _common_env(monkeypatch) -> None:
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
 
 
 def test_maps_verified_scores_to_uids_and_drops_unmapped_hotkeys(tmp_path, monkeypatch):
@@ -183,7 +183,7 @@ def test_since_iso_and_epoch_filters_pass_through(tmp_path, monkeypatch):
 
 
 def test_default_off_no_env_still_maps_using_default_network_netuid(tmp_path, monkeypatch):
-    """No CATHEDRAL_WEIGHT_POLICY_* env set: defaults (finney/39) should still
+    """No CATHEDRAL_WEIGHT_POLICY_* env set: defaults (finney/94) should still
     find a mapping if metagraph_hotkeys already carries those defaults, and
     must not raise."""
     monkeypatch.delenv(weights.NETWORK_ENV, raising=False)
@@ -194,7 +194,7 @@ def test_default_off_no_env_still_maps_using_default_network_netuid(tmp_path, mo
         store, manifest_id="m-1", hotkey="hk-a", challenge_id="chal-1",
         weighted_score=1.0,
     )
-    _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1, network="finney", netuid=39)
+    _insert_metagraph_hotkey(store, hotkey="hk-a", uid=1, network="finney", netuid=94)
 
     vector, meta = mechanism_sat_adapter.sat_mechanism_scores(store)
 

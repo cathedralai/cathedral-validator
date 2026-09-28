@@ -60,7 +60,7 @@ def _weights_call() -> dict:
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "call_args": [
-            {"name": "netuid", "value": 39},
+            {"name": "netuid", "value": 94},
             {"name": "mecid", "value": 0},
             {"name": "version_key", "value": VERSION_KEY},
             {"name": "dests", "value": WIRE_UIDS},
@@ -135,7 +135,7 @@ def _classify(subtensor, **overrides):
         "block_hash": BLOCK_HASH,
         "block_number": BLOCK_NUMBER,
         "validator_hotkey": HOTKEY,
-        "netuid": 39,
+        "netuid": 94,
         "version_key": VERSION_KEY,
         "wire_uids": WIRE_UIDS,
         "wire_weights": WIRE_WEIGHTS,
@@ -295,7 +295,7 @@ def test_the_reason_collector_is_optional():
             block_hash=BLOCK_HASH,
             block_number=BLOCK_NUMBER,
             validator_hotkey=HOTKEY,
-            netuid=39,
+            netuid=94,
             version_key=VERSION_KEY,
             wire_uids=WIRE_UIDS,
             wire_weights=WIRE_WEIGHTS,
@@ -316,7 +316,7 @@ def _recovery_args(tmp_path):
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         state_file=str(tmp_path / "state.json"),
@@ -330,10 +330,10 @@ DIAGNOSTIC_PREFLIGHT_CAUSES = [
     "metagraph did not resolve at the finalized chain head",
     "subnet registration and immunity policy is unavailable at finalized head",
     "chain preflight exceeded its 180s wall-clock deadline",
-    "Finney SN39 broadcast requires commit-reveal disabled",
-    "Finney SN39 broadcast requires the pinned burn hotkey to remain the live "
+    "Finney SN94 broadcast requires commit-reveal disabled",
+    "Finney SN94 broadcast requires the pinned burn hotkey to remain the live "
     "subnet owner",
-    "SN39 broadcast is supported only on the pinned Finney genesis",
+    "SN94 broadcast is supported only on the pinned Finney genesis",
 ]
 
 
@@ -344,7 +344,7 @@ def test_a_diagnostic_preflight_refusal_surfaces_its_own_wording(
     """Each of these already knew exactly what was wrong. Say it.
 
     These are the nine shapes a `chain_preflight` refusal actually takes on
-    SN39, and every one of them names a condition an operator owns. The old
+    SN94, and every one of them names a condition an operator owns. The old
     wrapper replaced all nine with "temporarily unavailable", which is both
     unactionable and, for most of them, false: an unregistered hotkey does not
     become registered by waiting.
@@ -417,7 +417,7 @@ def test_a_preflight_refusal_carrying_a_path_is_redacted_not_dropped(
 
     def _refuse(_args):
         raise vt.wire.VectorError(
-            "Finney SN39 broadcast requires the canonical owner-only runtime "
+            "Finney SN94 broadcast requires the canonical owner-only runtime "
             "root /var/lib/cathedral-validator"
         )
 
@@ -480,7 +480,7 @@ def _run_args(tmp_path, records) -> SimpleNamespace:
         once=True,
         interval_secs=0,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         publisher_url="https://api.cathedral.computer",
@@ -609,7 +609,7 @@ def test_a_dry_run_never_marks_the_tick_as_having_reached_the_chain(tmp_path):
     submission = vt.set_weights_on_chain(
         {3: 0.6, 11: 0.4},
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         broadcast=False,
@@ -623,7 +623,7 @@ def test_a_dry_run_never_marks_the_tick_as_having_reached_the_chain(tmp_path):
 
 
 def test_the_marker_is_reporting_only_and_tolerates_no_runtime_contract():
-    vt._mark_tick_reached_chain_call(None)  # non-SN39 callers pass none
+    vt._mark_tick_reached_chain_call(None)  # non-SN94 callers pass none
     holder = SimpleNamespace()
     vt._mark_tick_reached_chain_call(holder)
     assert holder._tick_chain_call_started is True

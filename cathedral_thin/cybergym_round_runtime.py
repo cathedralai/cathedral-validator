@@ -210,7 +210,7 @@ def compose_and_set(
     validator.
 
     `set_weights` is a RECORDER here, not a chain call, and that is correct rather than temporary:
-    SN39 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so a producer
+    SN94 composes ONE weight vector at the publisher (compute 0.70 + cybergym 0.30), so a producer
     broadcasting its own would be a second writer for the same subnet from the same hotkey. What
     turns these scores into weights is `publisher` -- the producer end of the publisher's score
     ingest. Without one configured, the round is recorded locally and goes no further, which is

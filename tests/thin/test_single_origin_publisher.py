@@ -1,4 +1,4 @@
-"""The deploy tree exposes one SN39 origin publisher, not fallback roles."""
+"""The deploy tree exposes one SN94 origin publisher, not fallback roles."""
 
 from pathlib import Path
 
@@ -11,15 +11,15 @@ DEPLOY = ROOT / "deploy" / "publisher"
 
 def test_only_the_canonical_origin_unit_is_shipped() -> None:
     assert sorted(path.name for path in DEPLOY.glob("*.service")) == [
-        "cathedral-scorer-sn39.service"
+        "cathedral-scorer-sn94.service"
     ]
     assert sorted(path.name for path in DEPLOY.glob("*.env.example")) == [
-        "cathedral-scorer-sn39.env.example"
+        "cathedral-scorer-sn94.env.example"
     ]
 
 
 def test_canonical_unit_blocks_legacy_installed_origins() -> None:
-    unit = (DEPLOY / "cathedral-scorer-sn39.service").read_text(encoding="utf-8")
+    unit = (DEPLOY / "cathedral-scorer-sn94.service").read_text(encoding="utf-8")
     assert (
         "Conflicts=cathedral-publisher.service cathedral-weight-feed-publish.service"
         in unit
@@ -36,7 +36,7 @@ def test_canonical_unit_blocks_legacy_installed_origins() -> None:
 def test_every_shipped_origin_entrypoint_is_single_worker() -> None:
     image = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
     server = (ROOT / "scaffold" / "publisher" / "server.py").read_text(encoding="utf-8")
-    environment = (DEPLOY / "cathedral-scorer-sn39.env.example").read_text(
+    environment = (DEPLOY / "cathedral-scorer-sn94.env.example").read_text(
         encoding="utf-8"
     )
     assert "--workers 1 --no-access-log" in image
@@ -49,7 +49,7 @@ def test_every_shipped_origin_entrypoint_is_single_worker() -> None:
 def test_production_image_has_no_sqlite_fallback_or_volume_setup() -> None:
     image = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
     entrypoint = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
-    unit = (DEPLOY / "cathedral-scorer-sn39.service").read_text(encoding="utf-8")
+    unit = (DEPLOY / "cathedral-scorer-sn94.service").read_text(encoding="utf-8")
     server = (ROOT / "scaffold" / "publisher" / "server.py").read_text(encoding="utf-8")
 
     assert "CATHEDRAL_DB_PATH" not in image
@@ -62,7 +62,7 @@ def test_production_image_has_no_sqlite_fallback_or_volume_setup() -> None:
 
 
 def test_shipped_environment_selects_one_strict_profile() -> None:
-    environment = (DEPLOY / "cathedral-scorer-sn39.env.example").read_text(
+    environment = (DEPLOY / "cathedral-scorer-sn94.env.example").read_text(
         encoding="utf-8"
     )
     assert "CATHEDRAL_LAUNCH_PROFILE=v2-converged" in environment
@@ -91,7 +91,7 @@ def test_shipped_environment_selects_one_strict_profile() -> None:
 def test_shipped_unit_and_environment_cover_every_production_pin() -> None:
     values: dict[str, str] = {}
     for line in (
-        (DEPLOY / "cathedral-scorer-sn39.env.example")
+        (DEPLOY / "cathedral-scorer-sn94.env.example")
         .read_text(encoding="utf-8")
         .splitlines()
     ):
@@ -100,7 +100,7 @@ def test_shipped_unit_and_environment_cover_every_production_pin() -> None:
             name, value = stripped.split("=", 1)
             values[name] = value
     for line in (
-        (DEPLOY / "cathedral-scorer-sn39.service")
+        (DEPLOY / "cathedral-scorer-sn94.service")
         .read_text(encoding="utf-8")
         .splitlines()
     ):
@@ -117,7 +117,7 @@ def test_shipped_unit_and_environment_cover_every_production_pin() -> None:
 
 def test_operator_document_is_a_retired_historical_pointer() -> None:
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
-    assert readme.startswith("# Retired SN39 weight publisher deployment\n")
+    assert readme.startswith("# Retired SN94 weight publisher deployment\n")
     assert "current validator guide" in readme
     assert "historical release reconstruction" in readme
     assert "systemctl" not in readme

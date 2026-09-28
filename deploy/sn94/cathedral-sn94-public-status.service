@@ -1,0 +1,56 @@
+[Unit]
+Description=Publish sanitized Cathedral SN94 validator status
+After=cathedral-validator-sn94.service
+# This unit is paired with cathedral-validator-sn94.service and reads the event
+# sanitized status log that unit writes. If the validator has not produced a
+# status record, systemd skips this publisher instead of emitting invented
+# health data.
+ConditionPathExists=/var/log/cathedral-validator/validator-status.jsonl
+
+[Service]
+Type=oneshot
+# polaris owns /var/lib/cathedral-public-evidence/logs on the live host and is
+# the account that writes it today. ReadWritePaths= below controls the mount
+# namespace, not file permissions, so a unit running as any other identity gets
+# EACCES on its own output directory unless something first chowns a tree the
+# producer is actively writing. Running as the real writer avoids that chown.
+User=polaris
+Group=polaris
+# Granted at runtime rather than by static membership in the sysusers file, so
+# this tree never has to declare or assume the producer's account.
+SupplementaryGroups=cathedral-validator-log
+ExecStart=/usr/bin/python3.12 -I -E -s /usr/local/libexec/cathedral-sn94-release status
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RemoveIPC=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Reads the sanitized projection only. The raw journal is 0600 and is not
+# reachable by this unit even with the shared group.
+ReadOnlyPaths=/var/log/cathedral-validator/validator-status.jsonl
+ReadOnlyPaths=/var/lib/cathedral-public-evidence/index.json
+# Optional. release.json exists only once a root-signed release has been
+# sealed, and it is absent on the host today. An unprefixed ReadOnlyPaths= on a
+# missing path fails the mount namespace setup and takes the whole unit down,
+# which would turn "no sealed release yet" into "status publishing is broken".
+# The '-' prefix degrades that to a missing input the publisher can report.
+ReadOnlyPaths=-/var/lib/cathedral-public-evidence/release.json
+ReadWritePaths=/var/lib/cathedral-public-evidence/logs

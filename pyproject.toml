@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cathedral-scaffold"
 version = "4.0.0-rc.11"
-description = "Cathedral SN39 direct confidential-compute validator"
+description = "Cathedral SN94 direct confidential-compute validator"
 requires-python = ">=3.11"
 # Validator-runtime deps only. The supported validator discovers miner fleets,
 # verifies their machines locally, and writes its own vector to Bittensor.
@@ -65,7 +65,7 @@ test = [
 # the cathedralconfidential -> cathedral-compute rename). The `integration`
 # extra below already uses `git+https://...@<commit-sha>`, which is immune
 # because a commit SHA addresses the tree rather than an archive's bytes. This
-# extra cannot follow it yet: sn39-reproduction.lock installs under pip
+# extra cannot follow it yet: sn94-reproduction.lock installs under pip
 # hash-checking, and a VCS URL cannot carry `--hash=`. Tracked separately.
 provenance = [
     "cathedral @ https://github.com/cathedralai/cathedral-compute/archive/26ebdbb885746f1835ea67ff314e384b4838560f.tar.gz#sha256=559dd8e347dcf635a76d4f930f251184fa09948ad3173ba36211a967c1f5d46e",

@@ -10,7 +10,7 @@ from importlib import metadata
 
 import pytest
 
-from scaffold import sn39_public_reproduction, validator_thin
+from scaffold import sn94_public_reproduction, validator_thin
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -133,27 +133,27 @@ def test_compute_release_pin_is_coherent_across_every_authority_site() -> None:
         "https://github.com/cathedralai/cathedral-compute/archive/"
         f"{COMPUTE_REVISION}.tar.gz"
     )
-    lock_path = ROOT / "requirements/sn39-reproduction.lock"
+    lock_path = ROOT / "requirements/sn94-reproduction.lock"
     lock_text = lock_path.read_text(encoding="utf-8")
     lock_digest = "sha256:" + hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    builder = runpy.run_path(str(ROOT / "scripts/build_sn39_release_manifest.py"))
+    builder = runpy.run_path(str(ROOT / "scripts/build_sn94_release_manifest.py"))
 
     assert archive_url in lock_text
     assert f"--hash=sha256:{COMPUTE_ARCHIVE_SHA256}" in lock_text
     assert builder["EXPECTED_CATHEDRAL_URL"] == archive_url
     assert builder["EXPECTED_CATHEDRAL_ARCHIVE_SHA256"] == COMPUTE_ARCHIVE_SHA256
-    assert validator_thin.SN39_PRODUCER_REVISION == COMPUTE_REVISION
-    assert sn39_public_reproduction.EXPECTED_PRODUCER_REVISION == COMPUTE_REVISION
+    assert validator_thin.SN94_PRODUCER_REVISION == COMPUTE_REVISION
+    assert sn94_public_reproduction.EXPECTED_PRODUCER_REVISION == COMPUTE_REVISION
     assert (
-        sn39_public_reproduction.EXPECTED_STARTUP["provenance_source_revision"]
+        sn94_public_reproduction.EXPECTED_STARTUP["provenance_source_revision"]
         == COMPUTE_REVISION
     )
     assert (
-        sn39_public_reproduction.EXPECTED_RELEASE_PINS["reproduction_dependencies"]
+        sn94_public_reproduction.EXPECTED_RELEASE_PINS["reproduction_dependencies"]
         == lock_digest
     )
 
-    for relative in ("config/validator-thin-sn39-relay.toml",):
+    for relative in ("config/validator-thin-sn94-relay.toml",):
         config = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
         assert config["provenance"]["source_revision"] == COMPUTE_REVISION
 
@@ -161,7 +161,7 @@ def test_compute_release_pin_is_coherent_across_every_authority_site() -> None:
 def test_release_builder_binds_required_public_key_files(
     tmp_path: pathlib.Path,
 ) -> None:
-    builder = runpy.run_path(str(ROOT / "scripts/build_sn39_release_manifest.py"))
+    builder = runpy.run_path(str(ROOT / "scripts/build_sn94_release_manifest.py"))
     validate = builder["validate_installed_release_files"]
     install_root = pathlib.Path("/etc/cathedral-validator/provenance")
     assert builder["PROVENANCE_INSTALL_ROOT"] == install_root

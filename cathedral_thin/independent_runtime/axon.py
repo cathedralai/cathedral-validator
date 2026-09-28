@@ -1,4 +1,4 @@
-"""Read-only SN39 axon types and metagraph parsing.
+"""Read-only SN94 axon types and metagraph parsing.
 
 This module deliberately contains no wallet loader, nonce lookup, extrinsic
 builder, journal, or submission transport.  Fleet previews import their chain

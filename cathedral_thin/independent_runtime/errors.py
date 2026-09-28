@@ -12,7 +12,7 @@ class WorkersApiError(IndependentLiveError):
 
 
 class ChainClientError(IndependentLiveError):
-    """The Finney / SN39 client could not snapshot or submit."""
+    """The Finney / SN94 client could not snapshot or submit."""
 
 
 class QuoteVerifyError(IndependentLiveError):

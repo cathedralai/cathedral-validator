@@ -360,7 +360,7 @@ def test_the_derived_units_are_the_integer_clause_count():
     assert not isinstance(units, float)
 
 
-def test_a_non_canonical_instance_is_not_sn39_work():
+def test_a_non_canonical_instance_is_not_sn94_work():
     """A bounded customer job is somebody else's economics, not a smaller unit."""
     instance = SatInstance(n_vars=3, clauses=[[1, 2, 3], [-1, 2, 3]])
     item = SatWorkItem(

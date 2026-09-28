@@ -491,7 +491,7 @@ def cybergym_score_snapshot(
     now = now or datetime.now(timezone.utc)
     network = os.environ.get(NETWORK_ENV, "finney")
     try:
-        netuid = int(os.environ.get(NETUID_ENV, "39"))
+        netuid = int(os.environ.get(NETUID_ENV, "94"))
     except (TypeError, ValueError):
         # A malformed NETUID env is a misconfiguration, not a data condition. The
         # adapter's contract is to never raise, so report an empty (share-burning)

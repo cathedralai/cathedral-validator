@@ -31,7 +31,7 @@ from scaffold.publisher import (
 from scaffold.publisher.store import Store, _MIGRATIONS, _sqlite_exec_migration
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 SECRET = "adapter-test-hmac-secret"
 PRODUCER = "5Producer"
 UNITS = "level_weighted_verified_solves"

@@ -576,7 +576,7 @@ def _score_body(args: argparse.Namespace) -> int:
 
 def _add_issue_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--network", default="finney")
-    parser.add_argument("--netuid", type=int, default=39)
+    parser.add_argument("--netuid", type=int, default=94)
     parser.add_argument("--source-epoch", type=int, required=True)
     parser.add_argument("--wallet-name", default="miner")
     parser.add_argument("--wallet-hotkey", default="default")
@@ -611,7 +611,7 @@ def _add_issue_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_verification_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--network", default="finney")
-    parser.add_argument("--netuid", type=int, default=39)
+    parser.add_argument("--netuid", type=int, default=94)
     parser.add_argument("--current-block", type=int, required=True)
     parser.add_argument("--max-age-seconds", type=int, default=3600)
     parser.add_argument("--max-future-seconds", type=int, default=30)
@@ -640,7 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
         "authorize", help="sign a miner-targeted inference request as a validator"
     )
     authorize.add_argument("--network", default="finney")
-    authorize.add_argument("--netuid", type=int, default=39)
+    authorize.add_argument("--netuid", type=int, default=94)
     authorize.add_argument("--source-epoch", type=int, required=True)
     authorize.add_argument("--wallet-name", default="validator")
     authorize.add_argument("--wallet-hotkey", default="default")
@@ -692,7 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle", help="build a content-addressed receipt bundle"
     )
     bundle.add_argument("--network", default="finney")
-    bundle.add_argument("--netuid", type=int, default=39)
+    bundle.add_argument("--netuid", type=int, default=94)
     bundle.add_argument("--source-epoch", type=int, required=True)
     bundle.add_argument("--generated-at", default="")
     bundle.add_argument("--valid-until", required=True)

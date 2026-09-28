@@ -1,7 +1,7 @@
 """Capture a ``cathedral_candidate_snapshot_v1`` from finalized chain state.
 
 This is the ONE supported producer command for candidate snapshots: it reads
-the SN39 metagraph at a finalized block through the operator's own subtensor
+the SN94 metagraph at a finalized block through the operator's own subtensor
 connection, records exactly {network, netuid, block, block_hash, hotkeys},
 and writes the document atomically. The confidential exporter then binds this
 exact snapshot (digest, block, hash, full sorted hotkey set) into the signed
@@ -12,7 +12,7 @@ Only hotkeys are recorded — never machine identity, endpoints, or stake.
 
 Usage::
 
-    cathedral-candidate-snapshot --network finney --netuid 39 \
+    cathedral-candidate-snapshot --network finney --netuid 94 \
         --output candidate-snapshot.json [--block N]
 
 Without ``--block`` the metagraph's own current block is captured; pass an
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cathedral-candidate-snapshot",
         description=(
-            "capture a cathedral_candidate_snapshot_v1 from finalized SN39 chain state"
+            "capture a cathedral_candidate_snapshot_v1 from finalized SN94 chain state"
         ),
     )
     parser.add_argument("--network", required=True)

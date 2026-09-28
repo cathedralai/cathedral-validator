@@ -6,7 +6,7 @@ Run this BEFORE re-pinning a validator from ``validated_supply_v1`` to
 a v3-pinned validator will accept; non-zero means re-pinning now would fail closed
 to the burn UID from the first tick.
 
-Why it exists. Rolling to v3 is a coordinated re-pin across every SN39 validator
+Why it exists. Rolling to v3 is a coordinated re-pin across every SN94 validator
 (``validator_thin`` refuses v3 while pinned to v1, by design). If one operator
 re-pins before the publisher is emitting v3 -- or the publisher flips to v3 before
 the operators re-pin -- that validator rejects every vector and sinks its whole
@@ -21,7 +21,7 @@ It deliberately calls the validator's OWN ``vector_to_uid_weights`` with
 v3-pinned validator performs on its first tick.
 
 Usage:
-    python scripts/assert_live_v3_contract.py --network finney --netuid 39
+    python scripts/assert_live_v3_contract.py --network finney --netuid 94
     python scripts/assert_live_v3_contract.py --publisher https://api.cathedral.computer
     python scripts/assert_live_v3_contract.py --json
     python scripts/assert_live_v3_contract.py --offline vector.json   # a captured feed
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--publisher", default=DEFAULT_PUBLISHER)
     parser.add_argument("--network", default="finney")
-    parser.add_argument("--netuid", type=int, default=39)
+    parser.add_argument("--netuid", type=int, default=94)
     parser.add_argument("--offline", help="read the vector from a JSON file instead of the network")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             wire.verify_signature(
                 payload,
                 public_key_hex=validator_thin.DEFAULT_PUBLIC_KEY_HEX,
-                expected_key_id=validator_thin.SN39_WEIGHT_POLICY_KEY_ID,
+                expected_key_id=validator_thin.SN94_WEIGHT_POLICY_KEY_ID,
             )
             wire.invariant_check(
                 payload,

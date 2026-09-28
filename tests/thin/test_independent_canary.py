@@ -304,7 +304,7 @@ def test_a_synthetic_composed_vector_submits_once_through_the_transport(tmp_path
     assert receipt.call == MECHANISM_WEIGHTS_CALL
     assert receipt.receipt == RECEIPT
     assert receipt.kwargs == {
-        "netuid": 39,
+        "netuid": 94,
         "mecid": 0,
         "dests": [MINER_UID, BURN_UID],
         "weights": [32767, 32768],

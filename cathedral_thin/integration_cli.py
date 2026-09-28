@@ -12,7 +12,7 @@ opens a chain client and never calls set_weights. It is a preview, exactly as
 Bundle shape:
 
     {
-      "network": "finney", "netuid": 39, "source_epoch": 11,
+      "network": "finney", "netuid": 94, "source_epoch": 11,
       "now": "2026-07-25T12:30:00Z",              # config verification time (UTC)
       "now_iso": "2026-07-25T12:30:00.000000Z",   # receipt freshness time
       "burn_config": { ...signed cathedral_burn_config_v1... },

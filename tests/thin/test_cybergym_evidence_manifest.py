@@ -24,15 +24,15 @@ def test_the_schema_string_is_pinned():
 
 
 def test_the_empty_manifest_digest_is_deterministic():
-    a = ev.empty_digest(network="finney", netuid=39, source_epoch=11)
-    b = ev.empty_digest(network="finney", netuid=39, source_epoch=11)
+    a = ev.empty_digest(network="finney", netuid=94, source_epoch=11)
+    b = ev.empty_digest(network="finney", netuid=94, source_epoch=11)
     assert a == b
     expected = hashlib.sha256(
         json.dumps(
             {
                 "schema": ev.SCHEMA,
                 "network": "finney",
-                "netuid": 39,
+                "netuid": 94,
                 "source_epoch": 11,
                 "entries": [],
             },
@@ -49,10 +49,10 @@ def test_entry_order_does_not_change_the_digest():
         {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"},
     ]
     forward = ev.manifest_digest(
-        network="finney", netuid=39, source_epoch=11, entries=rows
+        network="finney", netuid=94, source_epoch=11, entries=rows
     )
     backward = ev.manifest_digest(
-        network="finney", netuid=39, source_epoch=11, entries=list(reversed(rows))
+        network="finney", netuid=94, source_epoch=11, entries=list(reversed(rows))
     )
     assert forward == backward
 
@@ -65,13 +65,13 @@ def test_equivalent_amounts_digest_identically(a, b):
     # digest and the two sides cannot disagree over 12 vs 12.0.
     left = ev.manifest_digest(
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         entries=[{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": a}],
     )
     right = ev.manifest_digest(
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         entries=[{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": b}],
     )
@@ -83,7 +83,7 @@ def test_equivalent_amounts_digest_identically(a, b):
     [("network", "test"), ("netuid", 1), ("source_epoch", 12)],
 )
 def test_the_digest_is_audience_and_epoch_bound(field, value):
-    base = dict(network="finney", netuid=39, source_epoch=11)
+    base = dict(network="finney", netuid=94, source_epoch=11)
     rows = [{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"}]
     other = dict(base)
     other[field] = value
@@ -103,20 +103,20 @@ def test_the_digest_is_audience_and_epoch_bound(field, value):
 )
 def test_an_unusable_amount_is_refused(row):
     with pytest.raises(ev.EvidenceManifestError):
-        ev.manifest_digest(network="finney", netuid=39, source_epoch=11, entries=[row])
+        ev.manifest_digest(network="finney", netuid=94, source_epoch=11, entries=[row])
 
 
 def test_a_duplicate_entry_is_refused():
     row = {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"}
     with pytest.raises(ev.EvidenceManifestError):
         ev.manifest_digest(
-            network="finney", netuid=39, source_epoch=11, entries=[row, dict(row)]
+            network="finney", netuid=94, source_epoch=11, entries=[row, dict(row)]
         )
 
 
 def test_changing_any_committed_field_changes_the_digest():
     base = [{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"}]
-    d0 = ev.manifest_digest(network="finney", netuid=39, source_epoch=11, entries=base)
+    d0 = ev.manifest_digest(network="finney", netuid=94, source_epoch=11, entries=base)
     for field, value in (
         ("miner_hotkey", "5B"),
         ("receipt_id", "r2"),
@@ -125,7 +125,7 @@ def test_changing_any_committed_field_changes_the_digest():
         changed = [dict(base[0], **{field: value})]
         assert (
             ev.manifest_digest(
-                network="finney", netuid=39, source_epoch=11, entries=changed
+                network="finney", netuid=94, source_epoch=11, entries=changed
             )
             != d0
         ), f"{field} must be committed"
