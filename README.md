@@ -139,6 +139,31 @@ not replace finalized chain verification. The service log is
   the service. The exact steps are in
   [Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write).
 
+- `machine verification round is not fully proven` means a verifier returned
+  INFRA (it could not reach a verdict: collateral, a timeout, unreadable
+  output), so nothing was written and the last weights stay on chain, rather
+  than zeroing machines for what may be a local outage. When the message adds
+  that `CATHEDRAL_INFRA_HALT=scoped` would have written the round, the verifier
+  passed another machine of that TEE kind in the same round, so it was at least
+  partly working. The INFRA may still be a partial outage (Intel collateral is
+  per platform, AMD's per chip, and a verifier timeout is INFRA too), or it may
+  come from one miner's evidence, which today can stop every miner's weights.
+
+  To write such rounds, opt in with a drop-in (not in `direct.env`, which
+  setup compares byte for byte):
+
+  ```
+  # /etc/systemd/system/cathedral-validator-direct.service.d/infra-halt.conf
+  [Service]
+  Environment=CATHEDRAL_INFRA_HALT=scoped
+  ```
+
+  then `sudo systemctl daemon-reload` and restart the service. With it, an
+  INFRA machine earns zero for that round, and a miner whose own axon machine
+  is INFRA earns zero for its whole fleet (its fleet list is never fetched).
+  In a partial outage that means honest machines lose that round's share to
+  the machines that passed. A round with no PASS of an INFRA kind still halts.
+
 Never delete or replace the journal to clear an error. The journal location,
 pause and resume, and the recovery rules are in
 [Validator auto-update](docs/AUTO_UPDATE.md).
