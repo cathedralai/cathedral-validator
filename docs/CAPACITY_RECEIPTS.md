@@ -54,10 +54,15 @@ optional; the rest are required.
   admitted (admit_bare_metal is off)`; it still appears in the rows, and in the inventory as
   unhealthy with that reason. When on, bare metal is valued at the table's `bare_metal` rates.
 - `recheck_max_mib` (0 to 64): `0` turns the recheck off. Otherwise the validator recomputes one
-  sampled challenge lane per receipt whose lane needs at most this many MiB. It starts no new
-  lane after a minute, so a cycle spends at most about a minute plus one lane (a 64 MiB lane takes
-  several seconds). The reference implementation is pure Python, so real lanes (gigabytes each)
-  are skipped for now.
+  sampled challenge lane per receipt whose lane needs at most this many MiB, and marks the rest
+  `skipped`. It starts no new lane after a minute, so a cycle spends at most about a minute plus
+  one lane. **In practice the recheck is off for now, whatever this is set to.** The library
+  refuses any claim with less than a 512 MiB lane per vCPU (`MIN_LANE_BYTES`), so every real lane
+  is at least 512 MiB, above the 64 MiB cap, and every receipt is `skipped`. The cap is not
+  raised to fit one: the recheck runs the library's pure-Python reference (about 1.5 µs per
+  step), and the smallest lane (16.7M blocks, 33.5M steps) takes about a minute, the whole
+  budget, holding 512 MiB, and can't be stopped once started. Rechecking real receipts waits for
+  a native checker; until then the prober's own sampled check is what verifies the lanes.
 
 Without the variable nothing runs. A policy that does not load, for any reason, is reported
 once at start (`"capacity_shadow": {"status": "DISABLED"}`) and the validator carries on as

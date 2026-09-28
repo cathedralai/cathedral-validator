@@ -97,6 +97,7 @@ def _receipt(
     if tee_kind is _DEFAULT:
         tee_kind = "tdx" if kind == "tee" else None
     spec = ch.spec_for(SEED, vcpus=vcpus, memory_gib=memory_gib)
+    deadline_ms = min(60_000, ch.max_deadline_ms(spec))
     count = sample_count or ch.required_samples(spec.lanes)
     lanes = ch.sample_lanes(spec, DIGEST, SAMPLE_NONCE, count)
     outputs = {lane: bytes([lane % 256]) * 32 for lane in lanes}
@@ -122,8 +123,8 @@ def _receipt(
         sample_nonce=SAMPLE_NONCE,
         sample_count=count,
         sampled_outputs=outputs,
-        deadline_ms=60_000,
-        timings_ms={"create": 900, "exec": 40_000, "delete": 300},
+        deadline_ms=deadline_ms,
+        timings_ms={"create": 900, "exec": deadline_ms * 2 // 3, "delete": 300},
         issued_at=NOW,
         valid_for=timedelta(minutes=30),
         prober_key_id=key_id,
@@ -421,7 +422,33 @@ def test_a_repeated_box_an_unknown_hotkey_and_a_small_box_are_refused() -> None:
     }
 
 
-def test_a_sampled_lane_is_recomputed_within_the_memory_budget() -> None:
+def test_no_real_lane_fits_the_recheck_budget() -> None:
+    # The library refuses any claim with less than MIN_LANE_BYTES of lane per
+    # vCPU, and the pure-Python recheck is capped below that, so every receipt a
+    # prober can issue today is skipped: the recheck is off until a native
+    # checker exists. Raising the cap past the floor must revisit that decision
+    # (docs/CAPACITY_RECEIPTS.md, recheck_max_mib).
+    assert cs.MAX_RECHECK_MIB << 20 < ch.MIN_LANE_BYTES
+    # 8 vCPUs over 5 GiB is the floor exactly: one 512 MiB lane per vCPU.
+    spec = ch.spec_for(SEED, vcpus=8, memory_gib=5)
+    assert spec.blocks * ch.BLOCK_BYTES == ch.MIN_LANE_BYTES
+    smallest = _receipt(vcpus=8, memory_gib=5)
+    scored = _score([smallest], policy=_policy(recheck_max_mib=cs.MAX_RECHECK_MIB))
+    assert scored["rows"][0]["recheck"] == "skipped"
+    assert scored["rows"][0]["verdict"] == cs.ACCEPTED
+    assert scored["recheck_failures"] == 0
+
+
+@pytest.fixture
+def small_lanes(monkeypatch):
+    """Lower the library's lane floor so a test lane is small enough to
+    recompute. This exercises the recheck machinery, kept for a native checker;
+    no real receipt has lanes this small."""
+
+    monkeypatch.setattr(ch, "MIN_LANE_BYTES", 1 << 20)
+
+
+def test_a_sampled_lane_is_recomputed_within_the_memory_budget(small_lanes) -> None:
     # 512 lanes over 1 GiB keeps each lane about 1.6 MiB, small enough to recompute.
     honest = _receipt(box_id="honest", vcpus=512, memory_gib=1, real_outputs=True)
     forged = _receipt(box_id="forged", hardware="f1" * 32, vcpus=512, memory_gib=1)
@@ -438,7 +465,9 @@ def test_a_sampled_lane_is_recomputed_within_the_memory_budget() -> None:
     assert off["rows"][0]["recheck"] == "off" and off["accepted"] == 1
 
 
-def test_a_recheck_that_raises_refuses_only_that_receipt(monkeypatch) -> None:
+def test_a_recheck_that_raises_refuses_only_that_receipt(
+    small_lanes, monkeypatch
+) -> None:
     def lane_output(spec, lane):
         raise MemoryError
 
@@ -456,7 +485,7 @@ def test_a_recheck_that_raises_refuses_only_that_receipt(monkeypatch) -> None:
     assert scored["units"] == [[3, TEE_6_24]]
 
 
-def test_the_recheck_stops_at_its_time_budget() -> None:
+def test_the_recheck_stops_at_its_time_budget(small_lanes) -> None:
     forged = _receipt(vcpus=512, memory_gib=1)
     ticks = iter([0.0, cs.RECHECK_BUDGET_SECONDS + 1])
     scored = cs.score_receipts(

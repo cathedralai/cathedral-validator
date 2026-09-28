@@ -14,7 +14,10 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 * refuse a box id seen twice, and hardware claimed under two hotkeys; keep one
   box per hardware id for a single hotkey;
 * optionally recompute one sampled challenge lane per receipt, within a memory
-  and time budget;
+  and time budget. The recheck runs the library's pure-Python reference, and
+  the budget is smaller than the library's smallest lane (MIN_LANE_BYTES), so
+  today every admissible receipt is ``skipped``: the recheck is effectively off
+  until a native checker exists (docs/CAPACITY_RECEIPTS.md);
 * value each box at the market price of its verified capacity, from a price
   table the SN94 owner signs and the policy pins.
 
@@ -56,6 +59,13 @@ MAX_POLICY_BYTES = 128 * 1024
 MAX_FEED_BYTES = 1_048_576
 MAX_RECEIPTS = 1024
 MAX_KEYS = 16
+# The recheck recomputes a lane with the library's pure-Python reference, which
+# needs the lane's whole memory and about 1.5 us per step. The library refuses
+# claims with less than MIN_LANE_BYTES (512 MiB) of lane per vCPU, and such a
+# lane takes about a minute in pure Python, the whole time budget, with no way to
+# stop it once started. So the cap stays well below one real lane: every
+# receipt a current prober can issue is "skipped", and the recheck is off in
+# effect until a native checker exists. The machinery stays for that checker.
 MAX_RECHECK_MIB = 64
 RECHECK_BUDGET_SECONDS = 60.0
 MAX_EVENT_ROWS = 32
