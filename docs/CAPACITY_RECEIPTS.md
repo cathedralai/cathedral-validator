@@ -9,6 +9,27 @@ never changes the weights the validator writes.
 are deferred, not removed: their receipts are still verified and shown, but they earn nothing
 unless the policy sets `"admit_bare_metal": true`.
 
+**Receipt v2.** Receipts use cathedral-sandbox's schema `cathedral_capacity_receipt_v2`. A TEE
+box's receipt carries the `evidence` the prober verified before it took the box's hardware id;
+a bare-metal receipt carries `"evidence": null`, and the prober signs one only when told to
+(`sign_receipt(..., allow_bare_metal=True)`). A v1 receipt, or a TEE receipt without well-formed
+evidence, does not verify and is refused on its own. The evidence is:
+
+| field | what it is |
+| --- | --- |
+| `evidence_kind` | the box's TEE kind, `tdx` or `sev_snp` |
+| `evidence_sha256` | SHA-256 of the raw quote or report the prober verified |
+| `measurement` | the launch measurement: `tdx-measurement-sha256:<64 hex>`, or SEV-SNP's 96 hex |
+| `verifier_digest` | `sha256:<64 hex>` of the verifier that checked it |
+| `tls_spki_sha256` | SHA-256 of the SPKI of the TLS key the quote's REPORT_DATA binds |
+
+The prober gets it from the library's admission (`cathedral.capacity.admission.admit`): the
+quote's REPORT_DATA must bind the prober's nonce, the miner hotkey and the TLS key it saw on the
+sandbox API connection (`report_data_v2`), and a host already admitted as another box is
+refused, so no evidence exists for it and no receipt can be signed. A validator cannot
+re-verify the quote from the receipt; `evidence_sha256` lets it audit one later against the
+prober's archive.
+
 ## Turn it on
 
 Set `CATHEDRAL_CAPACITY_POLICY` to the absolute path of a policy file, for example in
@@ -32,12 +53,13 @@ The file must be a regular file (not a symlink) and not world-writable:
   "inventory_path": "/var/lib/cathedral-validator/capacity-inventory.json",
   "admit_bare_metal": false,
   "minimum_price_table_sequence": 1,
-  "price_table_digest": "<64 hex: the table's digest, optional>"
+  "price_table_digest": "<64 hex: the table's digest, optional>",
+  "measurement_policies": ["/etc/cathedral-validator/tdx-measurement-policy.json"]
 }
 ```
 
-`inventory_path`, `admit_bare_metal`, `minimum_price_table_sequence` and `price_table_digest` are
-optional; the rest are required.
+`inventory_path`, `admit_bare_metal`, `minimum_price_table_sequence`, `price_table_digest` and
+`measurement_policies` are optional; the rest are required.
 
 - `prober_keys`: take them only from the SN94 owner's published prober attestation.
 - `price_keys` and `price_table`: the owner's price-table key and the signed table. The table is
@@ -56,6 +78,18 @@ optional; the rest are required.
   off, a bare-metal receipt that verifies is refused with the reason `bare-metal boxes are not
   admitted (admit_bare_metal is off)`; it still appears in the rows, and in the inventory as
   unhealthy with that reason. When on, bare metal is valued at the table's `bare_metal` rates.
+- `measurement_policies` (optional; one or two absolute paths): measurement allowlists for the
+  TEE evidence, at most one per TEE kind. Each file is the direct validator's TDX measurement
+  policy (#256), `{"schema": "cathedral_tdx_measurement_policy_v1", "mode": "shadow" | "enforce",
+  "allowed_measurements": [...]}`, so the same file can serve both, or the SEV-SNP variant
+  `cathedral_snp_measurement_policy_v1` with 96-hex measurements. Files are read like this policy
+  (a regular file, not a symlink, not world-writable) and parsed by the library's
+  `admission.parse_policy`, so they need a cathedral-sandbox with `cathedral.capacity.admission`.
+  In `enforce`, a TEE receipt whose measurement is not listed is refused with the reason `the TEE
+  evidence measurement is not on the enforced measurement allowlist`; in `shadow` it is accepted
+  and only recorded (`measurement_allowed: false`). A kind with no policy is recorded, never
+  checked. Without the key nothing is checked. Each file's mode and digest appear in the record
+  as `measurement_policies`, since this policy's own digest covers only the paths.
 - `recheck_max_mib` (0 to 64): `0` turns the recheck off. Otherwise the validator recomputes one
   sampled challenge lane per receipt whose lane needs at most this many MiB, and marks the rest
   `skipped`. It starts no new lane after a minute, so a cycle spends at most about a minute plus
@@ -87,7 +121,9 @@ validator:
    error's type name and message, cut to 200 characters, or the library's message for a receipt
    it rejects) and the rest of the round is scored as usual. One malformed receipt never fails
    the round; `KeyboardInterrupt` and `SystemExit` still stop the validator;
-3. refuses bare-metal boxes unless `admit_bare_metal` is on;
+3. refuses bare-metal boxes unless `admit_bare_metal` is on, and, with an enforced measurement
+   policy, TEE boxes whose evidence measurement is not listed. A box refused for either takes
+   no part in the next step, so it can't knock out an admitted box sharing its box id or hardware;
 4. refuses a box that appears twice and hardware claimed under two hotkeys (both earn nothing),
    and counts one box per hardware id for a single hotkey (the more valuable one). The hardware
    id kind is fixed by the box: `tdx_platform` for TDX (derived from the digest in the strict
@@ -101,8 +137,11 @@ validator:
 The result is logged as its own line after the cycle's line, `{"anchor_block": ...,
 "capacity_shadow": {...}}`. It holds the status, the policy digest, the table's sequence, the
 per-reason refusal counts, `units` (`[uid, value]`), and the first 32 receipt rows
-(`rows_omitted` counts the rest; each verified row carries `kind` and `tee_kind`, which is
-`tdx`, `sev_snp`, or `null` for bare metal), so the line stays small. Recovery cycles get no record. An
+(`rows_omitted` counts the rest), so the line stays small: with evidence in every row it stays
+under 40 KB, below journald's default 48 KiB line limit. Each verified row carries `kind` and
+`tee_kind` (`tdx`, `sev_snp`, or `null` for bare metal), its `evidence` (the five fields above;
+`null` for bare metal), and `measurement_allowed` (`true` or `false` against the policy for its
+TEE kind, `null` when there is none). Recovery cycles get no record. An
 error becomes `"status": "FAILED"`, never a failed cycle.
 
 ## The inventory
@@ -117,10 +156,13 @@ of every box this validator has seen:
   while `admit_bare_metal` is off);
 - `missing`: seen before but absent this cycle. It is dropped after 24 quiet cycles.
 
-Each box records its hotkey, UID, kind, TEE kind, hardware id, capacity, value, and first and last seen.
+Each box records its hotkey, UID, kind, TEE kind, hardware id, capacity, value, the `evidence` and
+`measurement_allowed` of its latest receipt (kept while the box is missing, so it shows what the
+box last ran), and first and last seen.
 When the feed carries one box id in several rows, the inventory keeps an accepted row, else a
-row refused for any reason but bare metal not being admitted, else the first row; so a
-bare-metal receipt reusing a TEE box's id never hides the TEE box or its reason.
+row refused for any reason but the box not being admitted (bare metal while it is off, or an
+unlisted measurement under enforce), else the first row; so a not-admitted receipt reusing a
+box's id never hides that box or its reason.
 A receipt that does not verify names no box anyone can trust, so it never appears. The file is
 replaced atomically (mode 600). A file that can't be read, or that is for another netuid, starts
 a new inventory. A write failure shows as `"inventory": {"status": "FAILED"}` in the shadow
@@ -140,6 +182,9 @@ control plane that routes them, so the inventory has no such field. The control 
 `GET /v1/pool` combines this kind of health view with its own assignments.
 
 ## Not yet
+
+- The validator records the evidence but cannot re-verify a quote from a receipt; auditing
+  `evidence_sha256` against the prober's quote archive is a later step.
 
 - Bare-metal boxes earn only with `admit_bare_metal`; admitting them by default waits until
   the TEE path is established.

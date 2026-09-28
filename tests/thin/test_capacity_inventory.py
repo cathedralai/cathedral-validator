@@ -125,6 +125,9 @@ def test_a_not_admitted_bare_metal_row_ranks_below_any_other_row_for_its_id() ->
     accepted = _row("x", kind="tee", tee_kind="tdx")
     for rows in ([bare, tee, accepted], [accepted, tee, bare]):
         assert _cycle(None, rows)["boxes"]["x"]["status"] == inv.HEALTHY
+    unlisted = _row("x", verdict="REFUSED", kind="tee", reason=inv.MEASUREMENT_REFUSED)
+    for rows in ([unlisted, tee], [tee, unlisted]):
+        assert _cycle(None, rows)["boxes"]["x"]["reason"] == tee["reason"]
 
 
 def test_an_inventory_for_another_netuid_or_schema_starts_over() -> None:
@@ -153,6 +156,30 @@ def test_the_aggregate_names_no_box_hotkey_or_hardware() -> None:
     }
     text = json.dumps(doc["aggregate"])
     assert "box-" not in text and "hk-a" not in text and "f0f0" not in text
+
+
+def test_a_box_keeps_the_evidence_of_its_latest_receipt() -> None:
+    evidence = {
+        "evidence_kind": "tdx",
+        "evidence_sha256": "e1" * 32,
+        "measurement": "tdx-measurement-sha256:" + "a1" * 32,
+        "verifier_digest": "sha256:" + "5e" * 32,
+        "tls_spki_sha256": "7a" * 32,
+    }
+    tee = {"kind": "tee", "tee_kind": "tdx", "hardware_id_kind": "tdx_platform"}
+    first = _cycle(
+        None, [_row(**tee, evidence=evidence, measurement_allowed=True), _row("bare")]
+    )
+    assert first["boxes"]["box-1"]["evidence"] == evidence
+    assert first["boxes"]["box-1"]["measurement_allowed"] is True
+    assert first["boxes"]["bare"]["evidence"] is None
+    newer = {**evidence, "evidence_sha256": "e2" * 32}
+    second = _cycle(first, [_row(**tee, evidence=newer)], round_=8, minutes=25)
+    assert second["boxes"]["box-1"]["evidence"] == newer
+    third = _cycle(second, [], round_=9, minutes=50)
+    assert third["boxes"]["box-1"]["status"] == inv.MISSING
+    assert third["boxes"]["box-1"]["evidence"] == newer  # last seen
+    assert "e2e2" not in json.dumps(third["aggregate"])
 
 
 def test_the_box_count_is_bounded_keeping_this_cycles_boxes(monkeypatch) -> None:

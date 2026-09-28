@@ -9,6 +9,14 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 * verify each receipt against the pinned prober keys (signature, netuid,
   nonce, round, freshness, and that the challenge proves the capacity paid
   for);
+* record each TEE receipt's evidence (receipt v2: the SHA-256 of the quote or
+  report the prober verified, its launch measurement, the verifier's digest
+  and the attested TLS key's SPKI hash) in its row and in the inventory;
+* optionally check that measurement against the owner's measurement policy
+  files (cathedral-validator #256's ``cathedral_tdx_measurement_policy_v1``,
+  and the SEV-SNP variant from the library's admission module): in
+  ``enforce`` an unlisted measurement is refused, in ``shadow`` it is only
+  recorded;
 * refuse bare-metal boxes unless the policy sets ``admit_bare_metal`` (TEE
   boxes come first; bare metal is deferred);
 * refuse a box id seen twice, and hardware claimed under two hotkeys; keep one
@@ -38,7 +46,7 @@ import re
 import secrets
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -46,6 +54,8 @@ from typing import Any, Callable, Iterable, Mapping
 from cathedral_thin.independent.canonical import PolicyBundleError, parse_strict_json
 from cathedral_thin.independent_runtime.capacity_inventory import (
     BARE_METAL_REFUSED,
+    MEASUREMENT_REFUSED,
+    NOT_ADMITTED,
     record_cycle,
 )
 from cathedral_thin.independent.fetch_policy import (
@@ -93,10 +103,19 @@ _OPTIONAL_POLICY_KEYS = frozenset(
         "admit_bare_metal",
         "minimum_price_table_sequence",
         "price_table_digest",
+        "measurement_policies",
     }
 )
 MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
 BARE_METAL = "bare_metal"
+# What a v2 TEE receipt's evidence carries (cathedral.capacity.receipt.ReceiptEvidence).
+EVIDENCE_FIELDS = (
+    "evidence_kind",
+    "evidence_sha256",
+    "measurement",
+    "verifier_digest",
+    "tls_spki_sha256",
+)
 
 ACCEPTED = "ACCEPTED"
 
@@ -115,6 +134,17 @@ def _library() -> tuple[Any, Any, Any]:
     return challenge, pricing, receipt
 
 
+def _admission() -> Any:
+    try:
+        from cathedral.capacity import admission  # noqa: PLC0415
+    except ImportError as exc:
+        raise CapacityPolicyError(
+            "measurement_policies needs a cathedral-sandbox with"
+            " cathedral.capacity.admission"
+        ) from exc
+    return admission
+
+
 @dataclass(frozen=True)
 class CapacityPolicy:
     mode: str
@@ -127,6 +157,8 @@ class CapacityPolicy:
     admit_bare_metal: bool = False
     minimum_price_table_sequence: int = 1
     price_table_digest: str | None = None
+    # tee_kind -> the library's MeasurementPolicy; empty means record only.
+    measurement_policies: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -175,6 +207,35 @@ def _ed25519_keys(value: object, label: str) -> dict[str, Any]:
             )
         keys[key_id] = Ed25519PublicKey.from_public_bytes(bytes.fromhex(raw))
     return keys
+
+
+def _measurement_policies(value: object) -> dict[str, Any]:
+    """One measurement policy file per TEE kind, in #256's format, read as
+    safely as the capacity policy itself and parsed by the library."""
+
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 2
+        or any(not isinstance(item, str) for item in value)
+    ):
+        raise CapacityPolicyError(
+            "measurement_policies must list one or two measurement policy paths"
+        )
+    admission = _admission()
+    policies: dict[str, Any] = {}
+    for path in value:
+        try:
+            parsed = admission.parse_policy(_safe_bytes(Path(path)))
+        except admission.AdmissionError as exc:
+            raise CapacityPolicyError(f"measurement policy {path}: {exc}") from exc
+        except CapacityPolicyError as exc:
+            raise CapacityPolicyError(f"measurement policy {path}: {exc}") from exc
+        if parsed.kind in policies:
+            raise CapacityPolicyError(
+                f"measurement_policies names two {parsed.kind} policies"
+            )
+        policies[parsed.kind] = parsed
+    return policies
 
 
 def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
@@ -257,6 +318,11 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError(
             "inventory_path must be an absolute path to a .json file"
         )
+    measurement_policies = (
+        _measurement_policies(document["measurement_policies"])
+        if "measurement_policies" in document
+        else {}
+    )
     return CapacityPolicy(
         mode=document["mode"],
         receipts_url=url,
@@ -268,6 +334,7 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         admit_bare_metal=admit_bare_metal,
         minimum_price_table_sequence=minimum_sequence,
         price_table_digest=pinned_digest,
+        measurement_policies=measurement_policies,
     )
 
 
@@ -307,6 +374,12 @@ def _short(exc: BaseException) -> str:
     text = str(exc)
     name = type(exc).__name__
     return (f"{name}: {text}" if text else name)[:MAX_ERROR_CHARS]
+
+
+def _evidence_row(evidence: Any) -> dict[str, str] | None:
+    if evidence is None:
+        return None
+    return {name: getattr(evidence, name) for name in EVIDENCE_FIELDS}
 
 
 def score_receipts(
@@ -352,9 +425,22 @@ def score_receipts(
                 "value": policy.price_table.value(
                     kind=parsed.kind, vcpus=parsed.vcpus, memory_gib=parsed.memory_gib
                 ),
+                # A v2 receipt carries evidence exactly for a TEE box; the
+                # library refuses a TEE receipt without it.
+                "evidence": _evidence_row(parsed.evidence),
+                "measurement_allowed": None,
                 "recheck": "off",
                 "verdict": ACCEPTED,
             }
+            measurement_policy = (
+                policy.measurement_policies.get(parsed.evidence.evidence_kind)
+                if parsed.evidence is not None
+                else None
+            )
+            if measurement_policy is not None:
+                row["measurement_allowed"] = measurement_policy.allows(
+                    parsed.evidence.measurement
+                )
         except receipt_lib.ReceiptError as exc:
             rows.append({"verdict": "REFUSED", "reason": str(exc)[:MAX_ERROR_CHARS]})
             continue
@@ -366,6 +452,11 @@ def score_receipts(
         if parsed.kind == BARE_METAL and not policy.admit_bare_metal:
             row["verdict"] = "REFUSED"
             row["reason"] = BARE_METAL_REFUSED
+        elif (
+            row["measurement_allowed"] is False and measurement_policy.mode == "enforce"
+        ):
+            row["verdict"] = "REFUSED"
+            row["reason"] = MEASUREMENT_REFUSED
         rows.append(row)
         verified.append((row, parsed))
 
@@ -377,9 +468,10 @@ def score_receipts(
     by_box: dict[str, list[dict[str, Any]]] = {}
     by_hardware: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row, _parsed in verified:
-        if row.get("reason") == BARE_METAL_REFUSED:
+        if row.get("reason") in NOT_ADMITTED:
             # A box that is not admitted takes no part in dedup, so a cheap
-            # bare-metal receipt cannot knock out a TEE box sharing its box id.
+            # bare-metal receipt (or a TEE box running an unlisted image)
+            # cannot knock out an admitted box sharing its box id or hardware.
             continue
         by_box.setdefault(row["box_id"], []).append(row)
         by_hardware.setdefault(
@@ -483,6 +575,12 @@ class CapacityShadow:
             "currency": self.policy.price_table.currency,
             "unit": "micro-currency per hour",
         }
+        measurement_policies = getattr(self.policy, "measurement_policies", None)
+        if measurement_policies:
+            head["measurement_policies"] = {
+                kind: {"mode": item.mode, "digest": item.digest}
+                for kind, item in sorted(measurement_policies.items())
+            }
         try:
             nonce = secrets.token_hex(32)
             raw = self._fetch(f"{self.policy.receipts_url}/{netuid}/{nonce}")

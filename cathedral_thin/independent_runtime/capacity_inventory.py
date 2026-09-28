@@ -9,10 +9,16 @@ quiet, without trusting the control plane's own view:
 * ``healthy``: its receipt this cycle verified and was accepted;
 * ``unhealthy``: its receipt verified but was refused (a duplicate, hardware
   claimed under two hotkeys, a failed recheck, a box too small to use, a
-  hotkey that is not a serving miner, or a bare-metal box while the policy
-  admits only TEE boxes), with the reason;
+  hotkey that is not a serving miner, a bare-metal box while the policy
+  admits only TEE boxes, or a measurement an enforced allowlist does not
+  list), with the reason;
 * ``missing``: seen before, but no receipt this cycle. After MISSING_CYCLES
   quiet cycles the box is dropped.
+
+Each box keeps the TEE evidence of its latest receipt (receipt v2: the quote
+or report digest, launch measurement, verifier digest and attested TLS key
+hash; None for bare metal), so an operator can audit which image a box ran
+when it was last seen.
 
 A receipt that does not verify names no box anyone can trust, so it never
 enters the inventory. Which sandboxes are *assigned* to a box is known only to
@@ -41,10 +47,17 @@ HEALTHY = "healthy"
 UNHEALTHY = "unhealthy"
 MISSING = "missing"
 MISSING_CYCLES = 24
-# The reason capacity_shadow gives a verified bare-metal receipt while the
-# policy leaves admit_bare_metal off. Defined here so the inventory can rank
-# such a row below any other row for the same box id.
+# The reasons capacity_shadow gives a verified receipt whose box is not
+# admitted: bare metal while the policy leaves admit_bare_metal off, and a TEE
+# measurement an enforced allowlist does not list. Such a receipt takes no part
+# in dedup (a box that is not admitted cannot knock out an admitted one sharing
+# its box id or hardware), and the inventory ranks its row below any other row
+# for the same box id. Defined here so both modules share them.
 BARE_METAL_REFUSED = "bare-metal boxes are not admitted (admit_bare_metal is off)"
+MEASUREMENT_REFUSED = (
+    "the TEE evidence measurement is not on the enforced measurement allowlist"
+)
+NOT_ADMITTED = frozenset({BARE_METAL_REFUSED, MEASUREMENT_REFUSED})
 MAX_BOXES = 4096
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 _BOX_FIELDS = (
@@ -57,6 +70,10 @@ _BOX_FIELDS = (
     "vcpus",
     "memory_gib",
     "value",
+    # the TEE evidence of the box's latest receipt (None for bare metal), and
+    # whether its measurement is on the measurement allowlist (None: no policy)
+    "evidence",
+    "measurement_allowed",
 )
 
 
@@ -73,7 +90,7 @@ def _row_rank(row: Mapping[str, Any]) -> int:
 
     if row.get("verdict") == "ACCEPTED":
         return 2
-    if row.get("reason") == BARE_METAL_REFUSED:
+    if row.get("reason") in NOT_ADMITTED:
         return 0
     return 1
 
@@ -107,9 +124,9 @@ def update_inventory(
         if box_id in boxes and rank <= ranks[box_id]:
             # A box the feed carried twice keeps its first row, unless a later
             # row ranks higher: an accepted row above any refused one, and any
-            # refused row above a not-admitted bare-metal one (a bare-metal
-            # receipt reusing a TEE box's id must not hide the TEE box, nor
-            # the TEE box's own refusal reason).
+            # refused row above a not-admitted one (a not-admitted receipt
+            # reusing a box's id must not hide that box, nor its own refusal
+            # reason).
             continue
         ranks[box_id] = rank
         old = old_boxes.get(box_id)
