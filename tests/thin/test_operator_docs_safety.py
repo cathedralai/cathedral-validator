@@ -340,7 +340,8 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     # Operating detail that left the README lives here.
     assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
     assert (
-        "direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json" in guide
+        "direct-writer/finney-sn<netuid>-mechanism-0/<validator-hotkey>/state.json"
+        in guide
     )
     assert "`RestartPreventExitStatus=2 3`" in guide
     # The one command that clears a failed on-chain write, run as the service
