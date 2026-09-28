@@ -8,8 +8,9 @@ quiet, without trusting the control plane's own view:
 
 * ``healthy``: its receipt this cycle verified and was accepted;
 * ``unhealthy``: its receipt verified but was refused (a duplicate, hardware
-  claimed under two hotkeys, a failed recheck, a box too small to use, or a
-  hotkey that is not a serving miner), with the reason;
+  claimed under two hotkeys, a failed recheck, a box too small to use, a
+  hotkey that is not a serving miner, or a bare-metal box while the policy
+  admits only TEE boxes), with the reason;
 * ``missing``: seen before, but no receipt this cycle. After MISSING_CYCLES
   quiet cycles the box is dropped.
 
@@ -46,6 +47,7 @@ _BOX_FIELDS = (
     "miner_hotkey",
     "uid",
     "kind",
+    "tee_kind",
     "hardware_id_kind",
     "hardware_id",
     "vcpus",

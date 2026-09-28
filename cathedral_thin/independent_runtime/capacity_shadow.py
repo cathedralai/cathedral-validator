@@ -9,6 +9,8 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 * verify each receipt against the pinned prober keys (signature, netuid,
   nonce, round, freshness, and that the challenge proves the capacity paid
   for);
+* refuse bare-metal boxes unless the policy sets ``admit_bare_metal`` (TEE
+  boxes come first; bare metal is deferred);
 * refuse a box id seen twice, and hardware claimed under two hotkeys; keep one
   box per hardware id for a single hotkey;
 * optionally recompute one sampled challenge lane per receipt, within a memory
@@ -18,7 +20,9 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 
 It only records. Its result goes into the cycle event after the weight write
 has returned, and nothing it computes reaches the plan, so it never changes
-who is paid. An error becomes a ``FAILED`` record, never a failed cycle.
+who is paid. An error becomes a ``FAILED`` record, never a failed cycle, and a
+receipt that makes verification or valuation raise anything is refused on its
+own, never failing the round.
 
 Without ``CATHEDRAL_CAPACITY_POLICY`` (a path) nothing runs.
 """
@@ -70,7 +74,17 @@ _POLICY_KEYS = frozenset(
         "recheck_max_mib",
     }
 )
-_OPTIONAL_POLICY_KEYS = frozenset({"inventory_path"})
+_OPTIONAL_POLICY_KEYS = frozenset(
+    {
+        "inventory_path",
+        "admit_bare_metal",
+        "minimum_price_table_sequence",
+        "price_table_digest",
+    }
+)
+MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
+BARE_METAL = "bare_metal"
+BARE_METAL_REFUSED = "bare-metal boxes are not admitted (admit_bare_metal is off)"
 
 ACCEPTED = "ACCEPTED"
 
@@ -98,6 +112,9 @@ class CapacityPolicy:
     recheck_max_mib: int
     digest: str
     inventory_path: Path | None = None
+    admit_bare_metal: bool = False
+    minimum_price_table_sequence: int = 1
+    price_table_digest: str | None = None
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -176,9 +193,35 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError("receipts_url must not end with /")
     prober_keys = _ed25519_keys(document["prober_keys"], "prober_keys")
     price_keys = _ed25519_keys(document["price_keys"], "price_keys")
+    admit_bare_metal = document.get("admit_bare_metal", False)
+    if not isinstance(admit_bare_metal, bool):
+        raise CapacityPolicyError("admit_bare_metal must be true or false")
+    # The signed table sits in this local file, so these two guard against
+    # pasting in an older signed table (or a different one at the same sequence).
+    minimum_sequence = document.get("minimum_price_table_sequence", 1)
+    if (
+        not isinstance(minimum_sequence, int)
+        or isinstance(minimum_sequence, bool)
+        or not 1 <= minimum_sequence <= MAX_PRICE_TABLE_SEQUENCE
+    ):
+        raise CapacityPolicyError(
+            "minimum_price_table_sequence must be an integer from 1 to"
+            f" {MAX_PRICE_TABLE_SEQUENCE}"
+        )
+    pinned_digest = document.get("price_table_digest")
+    if pinned_digest is not None and (
+        not isinstance(pinned_digest, str) or _HEX64.fullmatch(pinned_digest) is None
+    ):
+        raise CapacityPolicyError(
+            "price_table_digest must be 64 lowercase hex characters"
+        )
     try:
         table = pricing.load_price_table(
-            document["price_table"], owner_keys=price_keys, now=now
+            document["price_table"],
+            owner_keys=price_keys,
+            now=now,
+            minimum_sequence=minimum_sequence,
+            pinned_digest=pinned_digest,
         )
     except pricing.PriceTableError as exc:
         raise CapacityPolicyError(f"price_table: {exc}") from exc
@@ -210,6 +253,9 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         recheck_max_mib=recheck,
         digest="sha256:" + hashlib.sha256(bytes(raw)).hexdigest(),
         inventory_path=Path(inventory) if inventory is not None else None,
+        admit_bare_metal=admit_bare_metal,
+        minimum_price_table_sequence=minimum_sequence,
+        price_table_digest=pinned_digest,
     )
 
 
@@ -260,7 +306,11 @@ def score_receipts(
     now: datetime,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    """Verify, deduplicate, recheck and value one round's receipts."""
+    """Verify, deduplicate, recheck and value one round's receipts.
+
+    Each receipt is contained on its own: whatever verifying or valuing it
+    raises refuses that receipt and the round goes on.
+    """
 
     challenge, _pricing, receipt_lib = _library()
     rows: list[dict[str, Any]] = []
@@ -275,24 +325,31 @@ def score_receipts(
                 now=now,
                 expected_round=round_,
             )
+            row = {
+                "box_id": parsed.box_id,
+                "miner_hotkey": parsed.miner_hotkey,
+                "uid": hotkey_to_uid.get(parsed.miner_hotkey),
+                "kind": parsed.kind,
+                "tee_kind": parsed.tee_kind,
+                "hardware_id_kind": parsed.hardware_id_kind,
+                "hardware_id": parsed.hardware_id,
+                "vcpus": parsed.vcpus,
+                "memory_gib": parsed.memory_gib,
+                "value": policy.price_table.value(
+                    kind=parsed.kind, vcpus=parsed.vcpus, memory_gib=parsed.memory_gib
+                ),
+                "recheck": "off",
+                "verdict": ACCEPTED,
+            }
         except receipt_lib.ReceiptError as exc:
             rows.append({"verdict": "REFUSED", "reason": str(exc)[:MAX_ERROR_CHARS]})
             continue
-        row = {
-            "box_id": parsed.box_id,
-            "miner_hotkey": parsed.miner_hotkey,
-            "uid": hotkey_to_uid.get(parsed.miner_hotkey),
-            "kind": parsed.kind,
-            "hardware_id_kind": parsed.hardware_id_kind,
-            "hardware_id": parsed.hardware_id,
-            "vcpus": parsed.vcpus,
-            "memory_gib": parsed.memory_gib,
-            "value": policy.price_table.value(
-                kind=parsed.kind, vcpus=parsed.vcpus, memory_gib=parsed.memory_gib
-            ),
-            "recheck": "off",
-            "verdict": ACCEPTED,
-        }
+        except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
+            rows.append({"verdict": "REFUSED", "reason": type(exc).__name__})
+            continue
+        if parsed.kind == BARE_METAL and not policy.admit_bare_metal:
+            row["verdict"] = "REFUSED"
+            row["reason"] = BARE_METAL_REFUSED
         rows.append(row)
         verified.append((row, parsed))
 
@@ -342,10 +399,13 @@ def score_receipts(
         lanes = sorted(parsed.sampled_outputs)
         pick = hashlib.sha256(bytes.fromhex(nonce) + row["box_id"].encode()).digest()
         lane = lanes[int.from_bytes(pick[:8], "big") % len(lanes)]
-        if (
-            challenge.lane_output(parsed.challenge, lane)
-            == parsed.sampled_outputs[lane]
-        ):
+        try:
+            recomputed = challenge.lane_output(parsed.challenge, lane)
+        except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
+            row["recheck"] = "error"
+            refuse(row, type(exc).__name__)
+            continue
+        if recomputed == parsed.sampled_outputs[lane]:
             row["recheck"] = "passed"
         else:
             row["recheck"] = "failed"

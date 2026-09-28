@@ -19,6 +19,7 @@ def _row(box_id="box-1", verdict="ACCEPTED", **changes):
         "miner_hotkey": "hk-a",
         "uid": 3,
         "kind": "bare_metal",
+        "tee_kind": None,
         "hardware_id_kind": "probe_fingerprint",
         "hardware_id": "f0" * 32,
         "vcpus": 8,
@@ -44,7 +45,12 @@ def _cycle(previous, rows, round_=7, minutes=0, netuid=94):
 
 
 def test_boxes_are_healthy_unhealthy_or_missing_by_what_this_validator_saw() -> None:
-    first = _cycle(None, [_row(), _row("box-2", verdict="REFUSED", kind="tee", uid=5)])
+    first = _cycle(
+        None,
+        [_row(), _row("box-2", verdict="REFUSED", kind="tee", tee_kind="tdx", uid=5)],
+    )
+    assert first["boxes"]["box-2"]["tee_kind"] == "tdx"
+    assert first["boxes"]["box-1"]["tee_kind"] is None
     assert first["boxes"]["box-1"]["status"] == inv.HEALTHY
     assert first["boxes"]["box-1"]["streak"] == 1
     assert first["boxes"]["box-2"]["status"] == inv.UNHEALTHY
