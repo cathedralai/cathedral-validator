@@ -86,19 +86,25 @@ def test_a_quiet_box_is_dropped_after_missing_cycles() -> None:
     assert _cycle(doc, [], round_=99)["boxes"] == {}
 
 
-def test_unverified_receipts_never_enter_and_a_repeated_box_keeps_its_first_row() -> (
+def test_unverified_receipts_never_enter_and_a_repeated_box_prefers_its_accepted_row() -> (
     None
 ):
+    # Scoring refuses both rows of a box the feed carries twice, so an accepted
+    # duplicate only happens beside a refused, not-admitted bare-metal receipt
+    # reusing the id: the accepted row must win. Two refused rows keep the first.
     doc = _cycle(
         None,
         [
             {"verdict": "REFUSED", "reason": "receipt signature does not verify"},
             _row("twice", verdict="REFUSED"),
             _row("twice"),
+            _row("both-refused", verdict="REFUSED", reason="first"),
+            _row("both-refused", verdict="REFUSED", reason="second"),
         ],
     )
-    assert list(doc["boxes"]) == ["twice"]
-    assert doc["boxes"]["twice"]["status"] == inv.UNHEALTHY
+    assert list(doc["boxes"]) == ["both-refused", "twice"]
+    assert doc["boxes"]["twice"]["status"] == inv.HEALTHY
+    assert doc["boxes"]["both-refused"]["reason"] == "first"
 
 
 def test_an_inventory_for_another_netuid_or_schema_starts_over() -> None:

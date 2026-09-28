@@ -361,6 +361,10 @@ def score_receipts(
     by_box: dict[str, list[dict[str, Any]]] = {}
     by_hardware: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row, _parsed in verified:
+        if row.get("reason") == BARE_METAL_REFUSED:
+            # A box that is not admitted takes no part in dedup, so a cheap
+            # bare-metal receipt cannot knock out a TEE box sharing its box id.
+            continue
         by_box.setdefault(row["box_id"], []).append(row)
         by_hardware.setdefault(
             (row["hardware_id_kind"], row["hardware_id"]), []

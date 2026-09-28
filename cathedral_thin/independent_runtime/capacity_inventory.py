@@ -86,9 +86,14 @@ def update_inventory(
     boxes: dict[str, dict[str, Any]] = {}
     for row in rows:
         box_id = row.get("box_id")
-        if not isinstance(box_id, str) or box_id in boxes:
-            # An unverified receipt names no trustworthy box, and a box the feed
-            # carried twice keeps its first (refused) row.
+        if not isinstance(box_id, str):
+            continue  # an unverified receipt names no trustworthy box
+        if box_id in boxes and (
+            boxes[box_id]["status"] == HEALTHY or row.get("verdict") != "ACCEPTED"
+        ):
+            # A box the feed carried twice keeps its first row, unless a later
+            # row for it was accepted (a refused, not-admitted bare-metal
+            # receipt reusing a TEE box's id must not hide the TEE box).
             continue
         old = old_boxes.get(box_id)
         old = old if isinstance(old, Mapping) else {}

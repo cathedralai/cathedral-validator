@@ -296,6 +296,22 @@ def test_bare_metal_is_refused_by_default_and_tee_still_earns() -> None:
     }
 
 
+def test_a_refused_bare_metal_receipt_cannot_knock_out_a_tee_box_with_its_id() -> None:
+    # Review of T1: a cheap bare-metal receipt reusing a TEE box's id used to
+    # make both "carried more than once", zeroing the TEE box.
+    scored = _score(
+        [
+            _receipt(box_id="victim", kind="bare_metal", hardware="b0" * 32),
+            _receipt(box_id="victim", hotkey=HOTKEY_B, hardware="aa" * 32),
+        ]
+    )
+    assert scored["units"] == [[5, TEE_6_24]]
+    assert scored["refused"] == {cs.BARE_METAL_REFUSED: 1}
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert doc["boxes"]["victim"]["status"] == inv.HEALTHY
+    assert doc["boxes"]["victim"]["kind"] == "tee"
+
+
 def test_one_receipt_that_breaks_verification_or_valuation_is_contained(
     monkeypatch,
 ) -> None:
