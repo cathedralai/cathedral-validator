@@ -15,8 +15,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import NETUID
+from cathedral_thin.independent_runtime import direct_writer as writer_runtime
+from cathedral_thin.independent_runtime import telemetry_exporter
 from cathedral_thin.independent_runtime import updater as updater_module
 from cathedral_thin.independent_runtime.direct_writer import direct_state_scope
 from cathedral_thin.independent_runtime.updater import (
@@ -212,3 +215,89 @@ def test_status_refuses_a_missing_or_malformed_netuid(monkeypatch, tmp_path, bod
 
     with pytest.raises(status.StatusUnavailable, match="netuid"):
         status._direct_scope()
+
+
+# Runtime ---------------------------------------------------------------------
+
+SIGNER = Keypair.create_from_uri("//Alice")
+
+
+def test_one_hotkey_never_runs_two_processes_even_on_different_subnets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    first = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=NETUID
+    )
+    other_subnet = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=OTHER_NETUID
+    )
+    assert first.state_path != other_subnet.state_path
+
+    with first.process_locked():
+        with pytest.raises(
+            writer_runtime.DirectSubmissionAmbiguous,
+            match="signer process lock",
+        ):
+            with other_subnet.process_locked():
+                pass
+    with other_subnet.process_locked():
+        pass
+
+    signer_lock = tmp_path / "signers" / SIGNER.ss58_address / "process.lock"
+    assert signer_lock.is_file()
+    assert signer_lock.stat().st_mode & 0o777 == 0o600
+
+
+def test_signer_lock_refuses_a_group_accessible_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    (tmp_path / "signers").mkdir(mode=0o700)
+    (tmp_path / "signers").chmod(0o750)
+    writer = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=NETUID
+    )
+
+    with pytest.raises(writer_runtime.DirectValidatorError, match="owner-controlled"):
+        with writer.process_locked():
+            pass
+
+
+@pytest.mark.parametrize(
+    ("flag", "environment", "expected"),
+    [
+        (None, {"CATHEDRAL_VALIDATOR_NETUID": str(OTHER_NETUID)}, OTHER_NETUID),
+        (str(OTHER_NETUID), {}, OTHER_NETUID),
+        (str(NETUID), {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)}, NETUID),
+    ],
+    ids=["environment", "flag", "both-agree"],
+)
+def test_exporter_checks_events_against_the_configured_netuid(
+    flag, environment, expected
+):
+    assert telemetry_exporter._configured_netuid(flag, environment) == expected
+
+
+@pytest.mark.parametrize(
+    ("flag", "environment", "message"),
+    [
+        (None, {}, "no netuid is configured"),
+        (
+            str(OTHER_NETUID),
+            {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)},
+            "disagrees",
+        ),
+        (f"0{NETUID}", {}, "canonical decimal u16"),
+        (None, {"CATHEDRAL_VALIDATOR_NETUID": "65536"}, "canonical decimal u16"),
+    ],
+    ids=["unconfigured", "disagreeing", "leading-zero", "past-u16"],
+)
+def test_exporter_refuses_an_unusable_netuid(flag, environment, message):
+    with pytest.raises(telemetry_exporter.TelemetryExportError, match=message):
+        telemetry_exporter._configured_netuid(flag, environment)
+
+
+def test_exporter_unit_reads_the_validator_netuid():
+    unit = (
+        ROOT / "deploy/validator-telemetry/cathedral-validator-telemetry.service"
+    ).read_text("ascii")
+    assert "EnvironmentFile=/etc/cathedral-validator/direct.env" in unit.splitlines()

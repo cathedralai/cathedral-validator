@@ -500,9 +500,13 @@ jobs:
           sudo install -o nobody -m 0444 \
             "$GITHUB_WORKSPACE/tests/release_smoke/run_real_validator.py" \
             /tmp/cathedral-validator-release-smoke.py
+          sudo install -o nobody -m 0444 \
+            "$GITHUB_WORKSPACE/deploy/validator-update/direct.env.example" \
+            /tmp/cathedral-validator-direct.env.example
           cd /tmp
           sudo -u nobody env \
             HOME=/tmp/cathedral-validator-nobody-home \
+            CATHEDRAL_RELEASE_SMOKE_DIRECT_ENV=/tmp/cathedral-validator-direct.env.example \
             CATHEDRAL_RELEASE_SMOKE_PEX_ROOT=/tmp/cathedral-validator-pex-root \
             CATHEDRAL_RELEASE_SMOKE_CHECKOUT="$GITHUB_WORKSPACE" \
             PEX_ROOT=/tmp/cathedral-validator-pex-root \

@@ -441,7 +441,7 @@ def test_compiled_netuid_journal_is_byte_identical_to_where_hosts_keep_it() -> N
     service_root = Path(homes[0]) / writer_runtime.DIRECT_STATE_ROOT.relative_to(
         Path.home()
     )
-    relative = canonical_state_path(VALIDATOR).relative_to(
+    relative = canonical_state_path(VALIDATOR, netuid=NETUID).relative_to(
         writer_runtime.DIRECT_STATE_ROOT
     )
     journal = service_root / relative
@@ -474,7 +474,7 @@ def test_explicit_compiled_netuid_and_no_netuid_share_one_journal(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
-    implicit = DirectWeightWriter(subtensor=object(), keypair=VALIDATOR)
+    implicit = DirectWeightWriter(subtensor=object(), keypair=VALIDATOR, netuid=NETUID)
     explicit = DirectWeightWriter(subtensor=object(), keypair=VALIDATOR, netuid=NETUID)
 
     assert implicit.netuid == explicit.netuid == NETUID
@@ -1229,14 +1229,34 @@ def _stub_cli(monkeypatch, tmp_path: Path, seen: dict[str, int]) -> None:
     monkeypatch.setattr(runtime, "run_direct_cycle", cycle)
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ((), (f"--netuid={NETUID}",), ("--netuid", str(NETUID))),
-    ids=("absent", "equals-compiled", "separate-compiled"),
-)
-def test_cli_runs_the_compiled_netuid_when_the_flag_is_absent_or_equal(
-    tmp_path: Path, monkeypatch, flag: tuple[str, ...]
+def _sources(netuid: int) -> tuple[tuple[dict[str, str], tuple[str, ...]], ...]:
+    """Environment and flags that each configure ``netuid``."""
+
+    value = str(netuid)
+    return (
+        ({"CATHEDRAL_VALIDATOR_NETUID": value}, ()),
+        ({}, (f"--netuid={value}",)),
+        ({}, ("--netuid", value)),
+        ({"CATHEDRAL_VALIDATOR_NETUID": value}, (f"--netuid={value}",)),
+    )
+
+
+SOURCE_IDS = ("environment", "flag", "separate-flag", "both-agree")
+
+
+def _configure(monkeypatch, environment: dict[str, str]) -> None:
+    monkeypatch.delenv("CATHEDRAL_VALIDATOR_NETUID", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+
+@NETUIDS
+@pytest.mark.parametrize("source", range(4), ids=SOURCE_IDS)
+def test_cli_runs_the_configured_netuid(
+    tmp_path: Path, monkeypatch, netuid: int, source: int
 ) -> None:
+    environment, flag = _sources(netuid)[source]
+    _configure(monkeypatch, environment)
     seen: dict[str, int] = {}
     _stub_cli(monkeypatch, tmp_path, seen)
 
@@ -1251,7 +1271,7 @@ def test_cli_runs_the_compiled_netuid_when_the_flag_is_absent_or_equal(
         )
         == 0
     )
-    assert seen == {"writer": NETUID, "spool": NETUID, "cycle": NETUID}
+    assert seen == {"writer": netuid, "spool": netuid, "cycle": netuid}
 
 
 def _refuse_any_runtime_work(monkeypatch) -> None:
@@ -1265,52 +1285,61 @@ def _refuse_any_runtime_work(monkeypatch) -> None:
         )
 
 
-def test_cli_refuses_another_netuid_before_any_verifier_wallet_or_chain(
-    monkeypatch,
-) -> None:
+def test_cli_refuses_to_start_without_a_configured_netuid(monkeypatch) -> None:
+    _configure(monkeypatch, {})
     _refuse_any_runtime_work(monkeypatch)
 
     with pytest.raises(SystemExit) as refused:
-        runtime.main([*CLI_ARGS, f"--netuid={OTHER_NETUID}"])
+        runtime.main(list(CLI_ARGS))
 
     # A message, not an integer: the interpreter exits with status 1, which the
     # unit restarts, like every other configuration refusal in main().
     message = refused.value.code
     assert isinstance(message, str)
-    assert message.startswith(
-        f"--netuid {OTHER_NETUID} is not the netuid this release was built for "
-        f"({NETUID}); non-default netuids arrive with a later release"
+    assert message.startswith("no netuid is configured")
+
+
+def test_cli_refuses_a_flag_that_disagrees_with_direct_env(monkeypatch) -> None:
+    _configure(monkeypatch, {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)})
+    _refuse_any_runtime_work(monkeypatch)
+
+    with pytest.raises(SystemExit) as refused:
+        runtime.main([*CLI_ARGS, f"--netuid={OTHER_NETUID}"])
+
+    assert refused.value.code == (
+        f"--netuid {OTHER_NETUID} disagrees with CATHEDRAL_VALIDATOR_NETUID={NETUID}"
     )
 
 
-@pytest.mark.parametrize(
-    "value",
-    (
-        "",
-        "netuid",
-        f"+{NETUID}",
-        f"-{NETUID}",
-        f" {NETUID}",
-        f"0{NETUID}",
-        f"{NETUID}.0",
-        str(MAX_NETUID + 1),
-        "".join(chr(0x0660 + int(digit)) for digit in str(NETUID)),
-    ),
-    ids=(
-        "empty",
-        "word",
-        "plus",
-        "minus",
-        "space",
-        "leading-zero",
-        "decimal-point",
-        "past-u16",
-        "non-ascii-digits",
-    ),
+MALFORMED_NETUIDS = (
+    "",
+    "netuid",
+    f"+{NETUID}",
+    f"-{NETUID}",
+    f" {NETUID}",
+    f"0{NETUID}",
+    f"{NETUID}.0",
+    str(MAX_NETUID + 1),
+    "".join(chr(0x0660 + int(digit)) for digit in str(NETUID)),
 )
-def test_cli_refuses_a_malformed_netuid_as_configuration(
+MALFORMED_IDS = (
+    "empty",
+    "word",
+    "plus",
+    "minus",
+    "space",
+    "leading-zero",
+    "decimal-point",
+    "past-u16",
+    "non-ascii-digits",
+)
+
+
+@pytest.mark.parametrize("value", MALFORMED_NETUIDS, ids=MALFORMED_IDS)
+def test_cli_refuses_a_malformed_netuid_flag_as_configuration(
     monkeypatch, value: str
 ) -> None:
+    _configure(monkeypatch, {})
     _refuse_any_runtime_work(monkeypatch)
 
     with pytest.raises(SystemExit, match="canonical decimal u16") as refused:
@@ -1318,7 +1347,22 @@ def test_cli_refuses_a_malformed_netuid_as_configuration(
     assert isinstance(refused.value.code, str)
 
 
+@pytest.mark.parametrize("value", MALFORMED_NETUIDS, ids=MALFORMED_IDS)
+def test_cli_refuses_a_malformed_direct_env_netuid_as_configuration(
+    monkeypatch, value: str
+) -> None:
+    _configure(monkeypatch, {"CATHEDRAL_VALIDATOR_NETUID": value})
+    _refuse_any_runtime_work(monkeypatch)
+
+    with pytest.raises(
+        SystemExit, match="CATHEDRAL_VALIDATOR_NETUID must be a canonical decimal u16"
+    ) as refused:
+        runtime.main(list(CLI_ARGS))
+    assert isinstance(refused.value.code, str)
+
+
 def test_cli_refuses_a_repeated_netuid(monkeypatch) -> None:
+    _configure(monkeypatch, {})
     _refuse_any_runtime_work(monkeypatch)
 
     with pytest.raises(SystemExit, match="only once") as refused:
@@ -1332,20 +1376,19 @@ RECORD_ARGS = (
 )
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ((), (f"--netuid={NETUID}",), ("--netuid", str(NETUID))),
-    ids=("absent", "equals-compiled", "separate-compiled"),
-)
+@NETUIDS
+@pytest.mark.parametrize("source", range(4), ids=SOURCE_IDS)
 def test_record_command_hands_the_configured_netuid_to_its_writer(
-    monkeypatch, capsys, flag: tuple[str, ...]
+    monkeypatch, capsys, netuid: int, source: int
 ) -> None:
     """The record command finds the journal the validator's writer keeps.
 
-    It takes ``--netuid`` exactly as the validator does, so the writer it
+    It resolves the netuid exactly as the validator does, so the writer it
     proves and records with is scoped to the same subnet.
     """
 
+    environment, flag = _sources(netuid)[source]
+    _configure(monkeypatch, environment)
     seen: list[int] = []
 
     class Writer:
@@ -1367,29 +1410,36 @@ def test_record_command_hands_the_configured_netuid_to_its_writer(
     monkeypatch.setattr(record_cli, "DirectWeightWriter", Writer)
 
     assert runtime.main([*RECORD_ARGS, *flag]) == record_cli.EXIT_RECORDED
-    assert seen == [NETUID]
+    assert seen == [netuid]
     assert json.loads(capsys.readouterr().out)["status"] == record_cli.STATUS_RECORDED
 
 
 @pytest.mark.parametrize(
-    ("value", "message"),
+    ("environment", "value", "message"),
     (
-        (str(OTHER_NETUID), "not the netuid this release was built for"),
-        (f"0{NETUID}", "canonical decimal u16"),
+        ({}, None, "no netuid is configured"),
+        (
+            {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)},
+            str(OTHER_NETUID),
+            "disagrees with CATHEDRAL_VALIDATOR_NETUID",
+        ),
+        ({}, f"0{NETUID}", "canonical decimal u16"),
     ),
-    ids=("another", "malformed"),
+    ids=("unconfigured", "disagreeing", "malformed"),
 )
-def test_record_command_refuses_another_netuid_before_chain_access(
-    monkeypatch, value: str, message: str
+def test_record_command_refuses_an_unusable_netuid_before_chain_access(
+    monkeypatch, environment: dict[str, str], value: str | None, message: str
 ) -> None:
+    _configure(monkeypatch, environment)
     monkeypatch.setattr(
         record_cli,
         "make_subtensor",
         lambda *_args, **_kwargs: pytest.fail("record command reached the chain"),
     )
+    flag = () if value is None else (f"--netuid={value}",)
 
     with pytest.raises(SystemExit, match=message) as refused:
-        runtime.main([*RECORD_ARGS, f"--netuid={value}"])
+        runtime.main([*RECORD_ARGS, *flag])
     assert isinstance(refused.value.code, str)
 
 
@@ -1399,6 +1449,11 @@ def test_refused_netuid_exits_with_the_restartable_status_not_the_argparse_one()
     """The unit never restarts status 2, so a configuration refusal avoids it."""
 
     assert "RestartPreventExitStatus=2" in UNIT.read_text(encoding="utf-8")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name != "CATHEDRAL_VALIDATOR_NETUID"
+    }
     completed = subprocess.run(
         [
             sys.executable,
@@ -1407,17 +1462,17 @@ def test_refused_netuid_exits_with_the_restartable_status_not_the_argparse_one()
             "from cathedral_thin.independent_runtime.direct_validator import main\n"
             "sys.exit(main(sys.argv[1:]))\n",
             *CLI_ARGS,
-            f"--netuid={OTHER_NETUID}",
         ],
         capture_output=True,
         text=True,
         timeout=300,
         cwd=ROOT,
+        env=environment,
         check=False,
     )
 
     assert completed.returncode == 1, completed.stderr
-    assert "non-default netuids arrive with a later release" in completed.stderr
+    assert "no netuid is configured" in completed.stderr
 
 
 def test_telemetry_arguments_file_warns_against_carrying_the_netuid() -> None:

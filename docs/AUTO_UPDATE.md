@@ -298,13 +298,14 @@ sudo systemd-run --pipe --wait --collect \
   --setenv=HOME=/var/lib/cathedral-validator \
   --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
-  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+  --network=finney --netuid=YOUR_NETUID --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
 ```
 
 `--network` takes the same value as the unit's `ExecStart` and is checked the
-same way the validator checks it. `--netuid` is accepted exactly as the
-validator accepts it; leave it out unless the unit passes one, so the command
-reads the same journal the validator writes. The command loads no key, and
+same way the validator checks it. `--netuid` must be the
+`CATHEDRAL_VALIDATOR_NETUID` value in `/etc/cathedral-validator/direct.env`, so
+the command reads the same journal the validator writes; `systemd-run` does not
+load that file, and the command refuses to run without a netuid. The command loads no key, and
 never signs or broadcasts. It:
 
 1. refuses unless the validator process, the cycle lock it shares with the

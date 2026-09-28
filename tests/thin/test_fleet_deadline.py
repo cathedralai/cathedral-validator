@@ -246,6 +246,7 @@ def _score(
         verifier_adapter=_adapter(qvl_cost),
         snp_verifier=snp_verifier,
         cycle_deadline_monotonic=cycle_deadline_monotonic,
+        netuid=NETUID,
     )
 
 
