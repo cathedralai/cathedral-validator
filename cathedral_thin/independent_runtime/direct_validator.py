@@ -1003,7 +1003,9 @@ def _add_netuid_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-validator")
+    # No abbreviations: a later flag must never change what a shortened flag
+    # means, and a shortened flag fails the same way on every release.
+    parser = argparse.ArgumentParser(prog="cathedral-validator", allow_abbrev=False)
     _add_network_argument(parser)
     _add_netuid_argument(parser)
     parser.add_argument("--wallet-name", default="validator")

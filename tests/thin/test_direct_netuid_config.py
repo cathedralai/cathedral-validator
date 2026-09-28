@@ -18,6 +18,7 @@ import pytest
 from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import NETUID
+from cathedral_thin.independent_runtime import direct_validator as runtime
 from cathedral_thin.independent_runtime import direct_writer as writer_runtime
 from cathedral_thin.independent_runtime import telemetry_exporter
 from cathedral_thin.independent_runtime import updater as updater_module
@@ -301,3 +302,70 @@ def test_exporter_unit_reads_the_validator_netuid():
         ROOT / "deploy/validator-telemetry/cathedral-validator-telemetry.service"
     ).read_text("ascii")
     assert "EnvironmentFile=/etc/cathedral-validator/direct.env" in unit.splitlines()
+
+
+# Unit -----------------------------------------------------------------------
+
+DIRECT_UNIT = ROOT / "deploy/validator-update/cathedral-validator-direct.service"
+
+
+def test_unit_passes_the_direct_env_netuid_exactly_once():
+    lines = DIRECT_UNIT.read_text("ascii").splitlines()
+    assert "EnvironmentFile=/etc/cathedral-validator/direct.env" in lines
+    (exec_start,) = [line for line in lines if line.startswith("ExecStart=")]
+    arguments = exec_start.split()
+    assert [a for a in arguments if a.startswith("--netuid")] == [
+        "--netuid=${CATHEDRAL_VALIDATOR_NETUID}"
+    ]
+    assert "StartLimitBurst=5" in lines
+
+
+def test_unit_with_an_empty_netuid_is_a_restartable_configuration_refusal(
+    monkeypatch,
+):
+    """An unset variable expands to an empty value, which is refused with
+    status 1 before any key, verifier or chain access."""
+
+    monkeypatch.delenv("CATHEDRAL_VALIDATOR_NETUID", raising=False)
+    monkeypatch.setattr(
+        runtime,
+        "load_direct_validator_verifier",
+        lambda *_args: pytest.fail("verifier loaded before the netuid gate"),
+    )
+    with pytest.raises(SystemExit, match="canonical decimal u16") as refused:
+        runtime.main(
+            [
+                "--qvl=/reviewed/qvl",
+                "--snp-policy=/reviewed/snp-policy.json",
+                "--snpguest=/reviewed/snpguest",
+                f"--expected-hotkey={SIGNER.ss58_address}",
+                "--once",
+                "--confirm-direct-write",
+                "--netuid=",
+            ]
+        )
+    assert isinstance(refused.value.code, str)
+
+
+REQUIRED_ARGUMENTS = [
+    "--qvl=/reviewed/qvl",
+    "--snp-policy=/reviewed/snp-policy.json",
+    "--snpguest=/reviewed/snpguest",
+    "--expected-hotkey=5Validator",
+]
+
+
+def test_validator_parser_accepts_the_full_flags():
+    options = runtime._parser().parse_args(
+        [*REQUIRED_ARGUMENTS, "--network=finney", "--netuid=7", "--wallet-name=v"]
+    )
+    assert options.netuid == ["7"]
+
+
+@pytest.mark.parametrize(
+    "flag", ["--netu=7", "--netw=finney", "--wallet-n=v", "--interval=5"]
+)
+def test_validator_refuses_abbreviated_flags(flag):
+    with pytest.raises(SystemExit) as refused:
+        runtime._parser().parse_args([*REQUIRED_ARGUMENTS, flag])
+    assert refused.value.code == 2
