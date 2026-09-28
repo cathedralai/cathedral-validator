@@ -4,6 +4,10 @@ Requires=cathedral-validator-boot-reconcile.service
 Wants=network-online.target
 After=network-online.target cathedral-validator-boot-reconcile.service
 Conflicts=cathedral-validator-sn39.service cathedral-validator-sn39-relay.service cathedral-confidential-validator.service cathedral-confidential-validator-sn39.service cathedral-validator-sn94.service cathedral-validator-sn94-relay.service cathedral-confidential-validator-sn94.service
+# A configuration refusal exits 1 and is restarted; after five failed starts
+# in ten minutes the unit stays failed instead of looping, so it is noticed.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 AssertPathExists=/etc/cathedral-validator/direct.env
 AssertPathExists=/etc/cathedral-validator/identity.env
 AssertPathExists=/etc/cathedral-validator/validator-hotkey

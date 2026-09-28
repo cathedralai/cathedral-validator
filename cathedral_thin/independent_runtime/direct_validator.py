@@ -22,14 +22,14 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .capacity_shadow import (
     CAPACITY_POLICY_ENV,
@@ -297,7 +297,7 @@ class ValidatorNotEligible(DirectValidatorError):
 def finalized_serving_miners_snapshot(
     subtensor: Any,
     keypair: Any,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> FinalizedMetagraphSnapshot:
     """Read every serving miner at one finalized head.
 
@@ -305,9 +305,7 @@ def finalized_serving_miners_snapshot(
     permit does not make a UID a validator: see the comment at the filter.
 
     The snapshot records ``netuid``, so the plan, writer, and telemetry built
-    from it name the subnet that was actually read. The default is the compiled
-    netuid for callers that predate the setting; the validator's entry point
-    always passes the value it resolved.
+    from it name the subnet that was actually read.
     """
 
     netuid = require_netuid(netuid)
@@ -1033,7 +1031,7 @@ def run_direct_cycle(
     snp_verifier: SnpProductionVerifier | None = None,
     tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
-    netuid: int = NETUID,
+    netuid: int,
     pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
@@ -1042,9 +1040,8 @@ def run_direct_cycle(
     ``DirectWeightWriter`` always supplies the per-signer flock.
 
     ``netuid`` is the subnet this cycle reads, challenges on behalf of, and
-    hands to the writer, which refuses a plan for any subnet but its own. The
-    default is the compiled netuid for callers that predate the setting;
-    ``main`` always passes the value it resolved.
+    hands to the writer, which refuses a plan for any subnet but its own.
+    ``main`` passes the value it resolved from configuration.
     """
 
     netuid = require_netuid(netuid)
@@ -1102,8 +1099,8 @@ def _add_netuid_argument(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="NETUID",
         help=(
-            "subnet to validate; this release accepts only the netuid it was "
-            "built for, which is also what omitting the flag selects"
+            "subnet to validate; defaults to CATHEDRAL_VALIDATOR_NETUID from "
+            "direct.env, and must agree with it when both are given"
         ),
     )
 
@@ -1157,23 +1154,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configured_netuid(values: Sequence[str] | None) -> int:
-    """Resolve ``--netuid`` for a release that runs only its compiled netuid.
+def _configured_netuid(
+    values: Sequence[str] | None, environ: Mapping[str, str] | None = None
+) -> int:
+    """Resolve the one subnet to validate; see ``testnet.configured_netuid``."""
 
-    An absent flag behaves exactly as before the flag existed. A value is
-    parsed here rather than by argparse because an argparse error exits with
-    status 2, which the unit's ``RestartPreventExitStatus=2`` never restarts.
-    Every refusal below is a ``SystemExit`` message, status 1, like the other
-    configuration refusals in ``main``.
-
-    Any value other than the compiled netuid is refused for now. The updater
-    and the status tool still spell out the journal directory for the compiled
-    netuid, and the updater's cycle lock sits beside that journal. A writer on
-    another netuid would journal and lock where neither of them looks, so an
-    update could activate in the middle of a signing cycle.
-    """
-
-    return configured_netuid(list(values) if values is not None else None)
+    return configured_netuid(list(values) if values is not None else None, environ)
 
 
 def _capacity_shadow_from_environment() -> CapacityShadow | None:

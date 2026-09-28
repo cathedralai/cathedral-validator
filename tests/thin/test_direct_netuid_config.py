@@ -15,8 +15,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import NETUID
+from cathedral_thin.independent_runtime import direct_writer as writer_runtime
+from cathedral_thin.independent_runtime import telemetry_exporter
 from cathedral_thin.independent_runtime import updater as updater_module
 from cathedral_thin.independent_runtime.direct_writer import direct_state_scope
 from cathedral_thin.independent_runtime.updater import (
@@ -212,3 +215,125 @@ def test_status_refuses_a_missing_or_malformed_netuid(monkeypatch, tmp_path, bod
 
     with pytest.raises(status.StatusUnavailable, match="netuid"):
         status._direct_scope()
+
+
+# Runtime ---------------------------------------------------------------------
+
+SIGNER = Keypair.create_from_uri("//Alice")
+
+
+def test_one_hotkey_never_runs_two_processes_even_on_different_subnets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    first = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=NETUID
+    )
+    other_subnet = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=OTHER_NETUID
+    )
+    assert first.state_path != other_subnet.state_path
+
+    with first.process_locked():
+        with pytest.raises(
+            writer_runtime.DirectSubmissionAmbiguous,
+            match="signer process lock",
+        ):
+            with other_subnet.process_locked():
+                pass
+    with other_subnet.process_locked():
+        pass
+
+    signer_lock = tmp_path / "signers" / SIGNER.ss58_address / "process.lock"
+    assert signer_lock.is_file()
+    assert signer_lock.stat().st_mode & 0o777 == 0o600
+
+
+def test_signer_lock_refuses_a_group_accessible_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
+    (tmp_path / "signers").mkdir(mode=0o700)
+    (tmp_path / "signers").chmod(0o750)
+    writer = writer_runtime.DirectWeightWriter(
+        subtensor=object(), keypair=SIGNER, netuid=NETUID
+    )
+
+    with pytest.raises(writer_runtime.DirectValidatorError, match="owner-controlled"):
+        with writer.process_locked():
+            pass
+
+
+EXPORTER_ARGS = (
+    "--spool=/nonexistent/events.jsonl",
+    "--endpoint=https://collector.invalid/v1/ingest",
+    "--ingest-token-file=/nonexistent/token",
+    "--sites-authorization-file=/nonexistent/sites",
+    "--reader-group=cathedral-telemetry",
+)
+
+
+def _run_exporter(monkeypatch, capsys, flag, environment):
+    """Run the exporter's main() up to the spool read and report its netuid."""
+
+    monkeypatch.delenv("CATHEDRAL_VALIDATOR_NETUID", raising=False)
+    monkeypatch.delenv("CATHEDRAL_TESTNET", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        telemetry_exporter.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=0)
+    )
+    seen = []
+
+    def stop_at_spool(_spool, *, expected_reader_gid, netuid):
+        seen.append(netuid)
+        raise telemetry_exporter.TelemetryExportError("stopped at the spool")
+
+    monkeypatch.setattr(telemetry_exporter, "latest_telemetry_event", stop_at_spool)
+    argv = list(EXPORTER_ARGS) + ([] if flag is None else [f"--netuid={flag}"])
+    assert telemetry_exporter.main(argv) == 1
+    return seen, capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("flag", "environment", "expected"),
+    [
+        (None, {"CATHEDRAL_VALIDATOR_NETUID": str(OTHER_NETUID)}, OTHER_NETUID),
+        (str(OTHER_NETUID), {}, OTHER_NETUID),
+        (str(NETUID), {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)}, NETUID),
+    ],
+    ids=["environment", "flag", "both-agree"],
+)
+def test_exporter_checks_events_against_the_configured_netuid(
+    monkeypatch, capsys, flag, environment, expected
+):
+    seen, _output = _run_exporter(monkeypatch, capsys, flag, environment)
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize(
+    ("flag", "environment", "message"),
+    [
+        (None, {}, "no netuid is configured"),
+        (
+            str(OTHER_NETUID),
+            {"CATHEDRAL_VALIDATOR_NETUID": str(NETUID)},
+            "disagrees",
+        ),
+        (f"0{NETUID}", {}, "canonical decimal u16"),
+        (None, {"CATHEDRAL_VALIDATOR_NETUID": "65536"}, "canonical decimal u16"),
+    ],
+    ids=["unconfigured", "disagreeing", "leading-zero", "past-u16"],
+)
+def test_exporter_refuses_an_unusable_netuid(
+    monkeypatch, capsys, flag, environment, message
+):
+    seen, output = _run_exporter(monkeypatch, capsys, flag, environment)
+    assert seen == []
+    assert '"status": "FAILED"' in output
+    assert message in output
+
+
+def test_exporter_unit_reads_the_validator_netuid():
+    unit = (
+        ROOT / "deploy/validator-telemetry/cathedral-validator-telemetry.service"
+    ).read_text("ascii")
+    assert "EnvironmentFile=/etc/cathedral-validator/direct.env" in unit.splitlines()

@@ -306,6 +306,7 @@ def collect_preview(options: argparse.Namespace) -> dict[str, Any]:
         keypair=snapshot.keypair,
         anchor_hash=snapshot.block_hash,
         verifier_adapter=adapter,
+        netuid=NETUID,
     )
     return build_preview_document(
         snapshot=snapshot, round_result=result, qvl_digest=verifier.digest
