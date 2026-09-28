@@ -4,6 +4,11 @@ The independent composer will not pay from an unpinned mock. This verifier
 hashes the on-disk binary and that digest is the ``qvl_digest`` pin. The child
 must print JSON with ``intel_verified`` and ``report_data_match`` both the
 boolean ``true``, matching the production TDX verifier contract.
+
+Exit status ``3`` with nothing on stdout is the verifier's report that Intel's
+collateral service did not answer. It says nothing about the miner, so it is
+INFRA, like an AMD key-server outage on the SNP path. Every other nonzero exit
+is FAIL. Verifier releases before that contract never exit ``3``.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ DIRECT_VALIDATOR_QVL_DIGEST = (
 MAX_OUTPUT = 1_048_576
 MAX_BINARY_BYTES = 64 * 1024 * 1024
 TIMEOUT_SECONDS = 30
+COLLATERAL_UNAVAILABLE_EXIT = 3
 
 
 def digest_file(path: Path) -> str:
@@ -194,6 +200,8 @@ class SubprocessQuoteVerifier:
         if not self._source_unchanged():
             return QuoteVerdict.INFRA, None
         if len(completed.stdout) + len(completed.stderr) > MAX_OUTPUT:
+            return QuoteVerdict.INFRA, None
+        if completed.returncode == COLLATERAL_UNAVAILABLE_EXIT and not completed.stdout:
             return QuoteVerdict.INFRA, None
         if completed.returncode != 0:
             return QuoteVerdict.FAIL, None
