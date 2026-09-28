@@ -240,8 +240,16 @@ The direct writer keeps its journal at:
 
 ```text
 /var/lib/cathedral-validator/.local/state/cathedral-validator/
-  direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json
+  direct-writer/finney-sn<netuid>-mechanism-0/<validator-hotkey>/state.json
 ```
+
+`<netuid>` is `CATHEDRAL_VALIDATOR_NETUID` in `/etc/cathedral-validator/direct.env`,
+which setup copies from the signed example. The updater, the status tool and
+the boot gate read it there to find the journal and the cycle lock beside it,
+and refuse to run while it is missing or malformed. A bootstrap that brings
+this setting rewrites a `direct.env` that is exactly the previous signed
+example to exactly the new one, which adds only the netuid every earlier
+runtime was built for; it never touches a file an operator changed.
 
 Never delete or replace the journal to clear an error. The service uses
 `RestartPreventExitStatus=2 3`, so a contradiction (exit code 2) and a failed

@@ -427,8 +427,10 @@ def test_compiled_netuid_journal_is_byte_identical_to_where_hosts_keep_it() -> N
         "deploy/validator-update/cathedral-validator-status",
     )
     scope = direct_state_scope(NETUID)
-    assert scope == updater.DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT.name
-    assert scope == status.DIRECT_SCOPE.name
+    assert updater.direct_journal_scope_root(NETUID) == (
+        updater.DIRECT_WRITER_STATE_ROOT / scope
+    )
+    assert status.DIRECT_WRITER_STATE_ROOT == updater.DIRECT_WRITER_STATE_ROOT
 
     homes = [
         line.removeprefix("Environment=HOME=")
@@ -444,9 +446,28 @@ def test_compiled_netuid_journal_is_byte_identical_to_where_hosts_keep_it() -> N
     )
     journal = service_root / relative
     assert os.fsencode(journal) == os.fsencode(
-        updater.direct_writer_journal_path(VALIDATOR.ss58_address)
+        updater.direct_writer_journal_path(
+            VALIDATOR.ss58_address,
+            scope_root=updater.direct_journal_scope_root(NETUID),
+        )
     )
-    assert os.fsencode(journal.parent.parent) == os.fsencode(status.DIRECT_SCOPE)
+    assert os.fsencode(journal.parent.parent) == os.fsencode(
+        status.DIRECT_WRITER_STATE_ROOT / scope
+    )
+
+
+def test_signed_direct_example_configures_the_netuid_hosts_already_run() -> None:
+    """The example setup copies, and the bootstrap migrates hosts to, names
+    exactly the netuid every earlier runtime signed for, so an existing
+    journal and any pending intent keep matching after the migration."""
+
+    example = (ROOT / "deploy/validator-update/direct.env.example").read_text("ascii")
+    assignments = [
+        line
+        for line in example.splitlines()
+        if line.startswith("CATHEDRAL_VALIDATOR_NETUID=")
+    ]
+    assert assignments == [f"CATHEDRAL_VALIDATOR_NETUID={NETUID}"]
 
 
 def test_explicit_compiled_netuid_and_no_netuid_share_one_journal(
