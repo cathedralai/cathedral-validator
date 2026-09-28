@@ -82,6 +82,7 @@ EXIT_FINALIZED_FAILED_STOPPED = 3
 FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
 STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
 RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
+POOL_INVENTORY_COMMAND = "pool-inventory"
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -560,6 +561,7 @@ def _run_direct_cycle_unlocked(
     netuid: int,
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
+    pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
@@ -666,6 +668,24 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if pool_inventory is not None:
+        try:
+            from .pool_inventory import publish_cycle_inventory
+
+            inventory_path, inventory_network = pool_inventory
+            inventory_id = publish_cycle_inventory(
+                inventory_path,
+                snapshot=snapshot,
+                result=result,
+                healthy_rows=_positive_machine_rows(result, snapshot.miners),
+                network=inventory_network,
+                keypair=keypair,
+            )
+            event["pool_inventory"] = {"status": "PUBLISHED", "inventory_id": inventory_id}
+        except Exception:
+            # The inventory is a public projection of this round. Failing to
+            # write it never changes the round, its weights, or its receipt.
+            event["pool_inventory"] = {"status": "FAILED"}
     if getattr(receipt, "status", None) == STATUS_EXPIRED:
         # The writer proved these bytes can never land and nothing was
         # written, so there is no finalized receipt for telemetry; a prior
@@ -776,6 +796,7 @@ def run_direct_cycle(
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
+    pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -810,6 +831,7 @@ def run_direct_cycle(
             netuid=netuid,
             snp_verifier=snp_verifier,
             telemetry_sink=telemetry_sink,
+            pool_inventory=pool_inventory,
         )
 
 
@@ -867,6 +889,11 @@ def _parser() -> argparse.ArgumentParser:
         "--snpguest",
         required=True,
         help="pinned AMD snpguest verifier",
+    )
+    parser.add_argument(
+        "--pool-inventory",
+        type=Path,
+        help="publish a signed inventory of the scored pool to this path each cycle",
     )
     parser.add_argument(
         "--telemetry-spool",
@@ -932,6 +959,11 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [POOL_INVENTORY_COMMAND]:
+        # Read-only: serves or verifies the published file; loads no key.
+        from .pool_inventory import main as pool_inventory_main
+
+        return pool_inventory_main(arguments[1:])
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
         # The operator's recovery command ships in the same signed release
         # entrypoint. It loads no key and never signs or broadcasts.
@@ -996,6 +1028,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         keypair=keypair,
         netuid=netuid,
     )
+    pool_inventory: tuple[Path, str] | None = None
+    if options.pool_inventory is not None:
+        if (
+            not options.pool_inventory.is_absolute()
+            or ".." in options.pool_inventory.parts
+            or not options.pool_inventory.parent.is_dir()
+        ):
+            raise SystemExit("--pool-inventory must be an absolute path in an existing directory")
+        pool_inventory = (options.pool_inventory, options.network)
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
             "--telemetry-spool and --telemetry-reader-group must be supplied together"
@@ -1109,6 +1150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     telemetry_sink=telemetry_sink,
                     report_recovery=_print_event,
                     netuid=netuid,
+                    pool_inventory=pool_inventory,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionFinalizedFailure as exc:
