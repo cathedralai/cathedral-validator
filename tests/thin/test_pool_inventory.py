@@ -18,7 +18,9 @@ import cathedral_thin.independent_runtime.direct_validator as runtime
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime import pool_inventory as inventory
 from cathedral_thin.independent_runtime.axon import ServingAxon
-from cathedral_thin.independent_runtime.direct_contract import FinalizedMetagraphSnapshot
+from cathedral_thin.independent_runtime.direct_contract import (
+    FinalizedMetagraphSnapshot,
+)
 from cathedral_thin.independent_runtime.fleet_score import MultiComputeRound
 from cathedral_thin.independent_runtime.qvl import DIRECT_VALIDATOR_QVL_DIGEST
 
@@ -32,7 +34,9 @@ AXON = ServingAxon(19, MINER, "1.1.1.1", 8081)
 NOW = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
 
 
-def _row(marker: str, *, paid: bool = True, ok: bool = True, **extra) -> dict[str, object]:
+def _row(
+    marker: str, *, paid: bool = True, ok: bool = True, **extra
+) -> dict[str, object]:
     row: dict[str, object] = {
         "uid": 19,
         "hotkey": MINER,
@@ -66,7 +70,9 @@ def _round(*rows: dict[str, object]) -> MultiComputeRound:
                 "endpoints": [row["endpoint"] for row in rows],
             },
         ),
-        verified_units={MINER: sum(int(row["counted_units"]) for row in paid)} if paid else {},
+        verified_units={MINER: sum(int(row["counted_units"]) for row in paid)}
+        if paid
+        else {},
         pass_count=len(paid),
         qvl_infra_count=0,
         feature_blocked=False,
@@ -90,7 +96,14 @@ def _snapshot() -> FinalizedMetagraphSnapshot:
 ROWS = (
     _row("a"),
     _row("b", paid=False, sat_error="SatWorkError: " + "x" * 400),
-    _row("c", paid=False, ok=False, error="ConnectionRefusedError: refused", tee_kind=None, machine_id=None),
+    _row(
+        "c",
+        paid=False,
+        ok=False,
+        error="ConnectionRefusedError: refused",
+        tee_kind=None,
+        machine_id=None,
+    ),
 )
 
 
@@ -117,9 +130,15 @@ def test_each_probed_machine_is_healthy_unverified_or_unreachable():
     assert states["https://1.1.19.b:8081"]["state"] == "unverified"
     assert len(states["https://1.1.19.b:8081"]["reason"]) == inventory.MAX_REASON_CHARS
     assert states["https://1.1.19.c:8081"]["state"] == "unreachable"
-    assert states["https://1.1.19.c:8081"]["reason"].startswith("ConnectionRefusedError")
+    assert states["https://1.1.19.c:8081"]["reason"].startswith(
+        "ConnectionRefusedError"
+    )
     assert document["totals"] == {
-        "miners": 1, "machines": 3, "available": 2, "healthy": 1, "assigned": 0,
+        "miners": 1,
+        "machines": 3,
+        "available": 2,
+        "healthy": 1,
+        "assigned": 0,
     }
     assert document["assignment_source"] is None
     assert document["netuid"] == NETUID
@@ -142,8 +161,16 @@ def test_a_signed_inventory_verifies_and_any_edit_breaks_it():
 
     forged = json.loads(json.dumps(signed))
     forged["signature"]["value_base64"] = inventory.sign_pool_inventory(
-        {**_document(), "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address},
-         "inventory_id": inventory._inventory_id({**_document(), "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address}})},
+        {
+            **_document(),
+            "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address},
+            "inventory_id": inventory._inventory_id(
+                {
+                    **_document(),
+                    "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address},
+                }
+            ),
+        },
         keypair=OTHER_KEY,
     )["signature"]["value_base64"]
     with pytest.raises(inventory.PoolInventoryError, match="verification failed"):
@@ -204,7 +231,9 @@ def test_the_read_only_server_serves_only_the_inventory(tmp_path: Path):
             urllib.request.urlopen(base + "/v1/other", timeout=5)
         assert other.value.code == 404
         with pytest.raises(urllib.error.HTTPError) as posted:
-            urllib.request.urlopen(urllib.request.Request(base + inventory.ROUTE, data=b"{}"), timeout=5)
+            urllib.request.urlopen(
+                urllib.request.Request(base + inventory.ROUTE, data=b"{}"), timeout=5
+            )
         assert posted.value.code == 501
     finally:
         server.shutdown()
@@ -224,14 +253,20 @@ def test_the_verify_command_reports_valid_and_invalid_files(tmp_path: Path, caps
 
 
 def _cycle(monkeypatch, tmp_path: Path, inventory_path: Path):
-    receipt = SimpleNamespace(status="CONFIRMED", as_document=lambda: {"status": "CONFIRMED"})
+    receipt = SimpleNamespace(
+        status="CONFIRMED", as_document=lambda: {"status": "CONFIRMED"}
+    )
     writer = SimpleNamespace(
         recover=lambda: None,
         submit=lambda plan, **_kwargs: receipt,
         netuid=NETUID,
     )
-    monkeypatch.setattr(runtime, "finalized_serving_miners_snapshot", lambda *_args: _snapshot())
-    monkeypatch.setattr(runtime, "score_multicompute_round", lambda **_kwargs: _round(*ROWS))
+    monkeypatch.setattr(
+        runtime, "finalized_serving_miners_snapshot", lambda *_args: _snapshot()
+    )
+    monkeypatch.setattr(
+        runtime, "score_multicompute_round", lambda **_kwargs: _round(*ROWS)
+    )
     return runtime.run_direct_cycle(
         subtensor=object(),
         keypair=VALIDATOR_KEY,
@@ -243,20 +278,25 @@ def _cycle(monkeypatch, tmp_path: Path, inventory_path: Path):
     )
 
 
-def test_a_cycle_publishes_the_signed_inventory_after_its_write(monkeypatch, tmp_path: Path):
+def test_a_cycle_publishes_the_signed_inventory_after_its_write(
+    monkeypatch, tmp_path: Path
+):
     target = tmp_path / "pool-inventory.json"
     event = _cycle(monkeypatch, tmp_path, target)
     published = inventory.verify_pool_inventory(json.loads(target.read_bytes()))
     assert event["status"] == "CONFIRMED"
     assert event["pool_inventory"] == {
-        "status": "PUBLISHED", "inventory_id": published["inventory_id"],
+        "status": "PUBLISHED",
+        "inventory_id": published["inventory_id"],
     }
     assert published["totals"]["healthy"] == 1
     assert event["wire_uids"] == [19]
 
 
 def test_an_inventory_failure_never_changes_the_cycle(monkeypatch, tmp_path: Path):
-    event = _cycle(monkeypatch, tmp_path, tmp_path / "missing-dir" / "pool-inventory.json")
+    event = _cycle(
+        monkeypatch, tmp_path, tmp_path / "missing-dir" / "pool-inventory.json"
+    )
     assert event["status"] == "CONFIRMED"
     assert event["pool_inventory"] == {"status": "FAILED"}
     assert event["wire_uids"] == [19]

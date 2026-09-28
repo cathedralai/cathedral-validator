@@ -109,14 +109,16 @@ def build_pool_inventory(
 
     if generated_at.tzinfo is None or generated_at.utcoffset() != UTC.utcoffset(None):
         raise PoolInventoryError("inventory time must be UTC")
-    healthy = {
-        (int(row["uid"]), str(row["endpoint"])) for row in healthy_rows
-    }
+    healthy = {(int(row["uid"]), str(row["endpoint"])) for row in healthy_rows}
     machines: list[dict[str, Any]] = []
     for row in rows:
         uid = row.get("uid")
         endpoint = row.get("endpoint")
-        if isinstance(uid, bool) or not isinstance(uid, int) or not isinstance(endpoint, str):
+        if (
+            isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or not isinstance(endpoint, str)
+        ):
             raise PoolInventoryError("probed machine has no uid or endpoint")
         key = (uid, endpoint)
         if key in healthy:
@@ -149,7 +151,9 @@ def build_pool_inventory(
         "netuid": netuid,
         "anchor": {"block_number": block_number, "block_hash": block_hash},
         "validator": {"uid": validator_uid, "hotkey": validator_hotkey},
-        "generated_at": generated_at.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at.replace(microsecond=0).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
         "totals": {
             "miners": miner_count,
             "machines": len(machines),
@@ -178,9 +182,13 @@ def sign_pool_inventory(document: Mapping[str, Any], *, keypair: Any) -> dict[st
     ):
         raise PoolInventoryError("inventory signer does not match the validator hotkey")
     try:
-        signature = bytes(keypair.sign(SIGNING_DOMAIN + signed["inventory_id"].encode("ascii")))
+        signature = bytes(
+            keypair.sign(SIGNING_DOMAIN + signed["inventory_id"].encode("ascii"))
+        )
     except Exception as exc:
-        raise PoolInventoryError("validator hotkey could not sign the inventory") from exc
+        raise PoolInventoryError(
+            "validator hotkey could not sign the inventory"
+        ) from exc
     if len(signature) != 64:
         raise PoolInventoryError("inventory signature must be 64 bytes")
     signed["signature"] = {
@@ -203,7 +211,9 @@ def verify_pool_inventory(document: object) -> dict[str, Any]:
         not isinstance(totals, dict)
         or frozenset(totals) != _TOTAL_KEYS
         or not isinstance(machines, list)
-        or any(not isinstance(m, dict) or frozenset(m) != _MACHINE_KEYS for m in machines)
+        or any(
+            not isinstance(m, dict) or frozenset(m) != _MACHINE_KEYS for m in machines
+        )
         or any(m["state"] not in _STATES for m in machines)
     ):
         raise PoolInventoryError("inventory machines or totals are invalid")
@@ -349,7 +359,9 @@ def main(argv: Sequence[str]) -> int:
 
     import argparse
 
-    parser = argparse.ArgumentParser(prog="cathedral-validator pool-inventory", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog="cathedral-validator pool-inventory", allow_abbrev=False
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="serve the signed inventory read-only")
     serve.add_argument("--inventory", required=True, type=Path)
@@ -360,7 +372,9 @@ def main(argv: Sequence[str]) -> int:
     options = parser.parse_args(list(argv))
     if options.command == "verify":
         try:
-            document = verify_pool_inventory(json.loads(read_pool_inventory(options.inventory)))
+            document = verify_pool_inventory(
+                json.loads(read_pool_inventory(options.inventory))
+            )
         except (PoolInventoryError, ValueError) as exc:
             print(f"POOL_INVENTORY_INVALID: {exc}")
             return 1

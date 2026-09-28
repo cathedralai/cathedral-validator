@@ -681,7 +681,10 @@ def _run_direct_cycle_unlocked(
                 network=inventory_network,
                 keypair=keypair,
             )
-            event["pool_inventory"] = {"status": "PUBLISHED", "inventory_id": inventory_id}
+            event["pool_inventory"] = {
+                "status": "PUBLISHED",
+                "inventory_id": inventory_id,
+            }
         except Exception:
             # The inventory is a public projection of this round. Failing to
             # write it never changes the round, its weights, or its receipt.
@@ -1035,7 +1038,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             or ".." in options.pool_inventory.parts
             or not options.pool_inventory.parent.is_dir()
         ):
-            raise SystemExit("--pool-inventory must be an absolute path in an existing directory")
+            raise SystemExit(
+                "--pool-inventory must be an absolute path in an existing directory"
+            )
         pool_inventory = (options.pool_inventory, options.network)
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
