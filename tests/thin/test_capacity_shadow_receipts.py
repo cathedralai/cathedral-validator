@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import hashlib
 import json
@@ -93,9 +94,14 @@ def _receipt(
     key=PROBER,
     key_id="prober-1",
     sample_count=None,
+    hardware_id_kind=None,
 ):
     if tee_kind is _DEFAULT:
         tee_kind = "tdx" if kind == "tee" else None
+    if tee_kind == "tdx":
+        # A TDX box's hardware id comes from the digest in the strict
+        # verifier's stable_platform_id, as the prober derives it.
+        hardware = receipt.tdx_hardware_id(f"tdx-platform-sha256:{hardware}")
     spec = ch.spec_for(SEED, vcpus=vcpus, memory_gib=memory_gib)
     deadline_ms = min(60_000, ch.max_deadline_ms(spec))
     count = sample_count or ch.required_samples(spec.lanes)
@@ -129,6 +135,12 @@ def _receipt(
         valid_for=timedelta(minutes=30),
         prober_key_id=key_id,
     )
+    if hardware_id_kind is not None:
+        # sign_receipt refuses a body of the wrong kind, so a forged one is
+        # signed by hand: only the validator's verification may reject it.
+        body["box"]["hardware_id_kind"] = hardware_id_kind
+        signature = key.sign(receipt.canonical_bytes(body))
+        return {**body, "signature": base64.b64encode(signature).decode()}
     return receipt.sign_receipt(body, key)
 
 
@@ -273,6 +285,19 @@ def test_with_admit_bare_metal_on_every_verified_box_is_valued_per_uid() -> None
         "sev_snp",
     ]
     assert rows["box-4"]["hardware_id_kind"] == "chip_id"
+    assert rows["box-3"]["hardware_id_kind"] == "tdx_platform"
+    assert rows["box-3"]["hardware_id"] == receipt.tdx_hardware_id(
+        "tdx-platform-sha256:" + "aa" * 32
+    )
+
+
+def test_a_tdx_receipt_keyed_by_ppid_is_refused() -> None:
+    scored = _score([_receipt(hardware_id_kind="ppid"), _receipt(box_id="box-2")])
+    assert scored["accepted"] == 1 and scored["units"] == [[3, TEE_6_24]]
+    assert list(scored["refused"]) == [
+        "hardware_id_kind must be tdx_platform for tdx, chip_id for sev_snp and"
+        " probe_fingerprint for bare metal"
+    ]
 
 
 def test_bare_metal_is_refused_by_default_and_tee_still_earns() -> None:
@@ -559,7 +584,7 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     fetch = _feed(
         [],
         lambda nonce: [
-            _receipt(box_id=f"box-{i}", hardware=f"{i:064x}", nonce=nonce)
+            _receipt(box_id=f"box-{i}", hardware=f"{i + 1:064x}", nonce=nonce)
             for i in range(count)
         ],
     )
@@ -585,7 +610,7 @@ def test_each_record_updates_the_inventory_file(tmp_path) -> None:
     fetch = _feed(
         [],
         lambda nonce: [
-            _receipt(box_id=f"box-{i}", hardware=f"{i:064x}", nonce=nonce)
+            _receipt(box_id=f"box-{i}", hardware=f"{i + 1:064x}", nonce=nonce)
             for i in range(count)
         ],
     )

@@ -85,7 +85,10 @@ validator:
    round is scored as usual. One malformed receipt never fails the round;
 3. refuses bare-metal boxes unless `admit_bare_metal` is on;
 4. refuses a box that appears twice and hardware claimed under two hotkeys (both earn nothing),
-   and counts one box per hardware id for a single hotkey (the more valuable one);
+   and counts one box per hardware id for a single hotkey (the more valuable one). The hardware
+   id kind is fixed by the box: `tdx_platform` for TDX (derived from the digest in the strict
+   verifier's `stable_platform_id`, `tdx-platform-sha256:<64 lowercase hex>`), `chip_id` for SEV-SNP,
+   and `probe_fingerprint` for bare metal. The library rejects any other kind, `ppid` included;
 5. refuses hotkeys that aren't serving miners on this netuid, and boxes smaller than every
    consumer profile (for example SN120's or SN81's minimum shape);
 6. values each remaining box as `vcpus × vcpu_hour[kind] + memory_gib × gib_hour`, in
