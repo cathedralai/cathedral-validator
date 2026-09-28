@@ -5,7 +5,7 @@ v2_submit_events rows, published so anyone can independently re-verify:
 "this miner (hotkey + coldkey when resolvable) solved this specific
 challenge with this solver at this time".
 
-SN39's per-miner challenges are hotkey-salted (unique per miner), so
+SN94's per-miner challenges are hotkey-salted (unique per miner), so
 publishing the miner's own answer post-verification does not leak anything
 another miner could replay.
 

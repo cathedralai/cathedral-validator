@@ -732,7 +732,7 @@ def test_setup_refuses_coldkey_and_conflicting_writer_before_mutation(
         _configure(coldkey, policy, _setup_runner([]))
 
     def conflicting(command, **_kwargs):
-        if command[-1] == "cathedral-validator-sn39-relay.service":
+        if command[-1] == "cathedral-validator-sn94-relay.service":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=3, stdout="", stderr="")
 
@@ -784,7 +784,7 @@ def test_setup_conflict_check_reads_the_unit_file_state_not_the_exit_code(
     inner = _setup_runner(calls)
 
     def runner(command, **kwargs):
-        if command[-1] == "cathedral-validator-sn39.service":
+        if command[-1] == "cathedral-validator-sn94.service":
             if command[1] == "is-enabled":
                 return SimpleNamespace(returncode=returncode, stdout=state, stderr="")
             if command[1] == "is-active":
@@ -801,7 +801,7 @@ def test_setup_conflict_check_reads_the_unit_file_state_not_the_exit_code(
     assert [
         "/usr/bin/systemctl",
         "is-enabled",
-        "cathedral-validator-sn39.service",
+        "cathedral-validator-sn94.service",
     ] not in calls
     assert not any(
         command[1] == "is-enabled" and "--quiet" in command for command in calls
@@ -884,7 +884,7 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         / "state"
         / "cathedral-validator"
         / "direct-writer"
-        / "finney-sn39-mechanism-0"
+        / "finney-sn94-mechanism-0"
     )
     monkeypatch.setattr(status, "ETC", etc)
     monkeypatch.setattr(status, "INSTALL_ROOT", install)
@@ -917,7 +917,7 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         ),
     )
     kwargs = {
-        "netuid": 39,
+        "netuid": 94,
         "mecid": 0,
         "dests": [41],
         "weights": [65535],

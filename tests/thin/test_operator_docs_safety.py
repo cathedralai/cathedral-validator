@@ -56,8 +56,8 @@ def test_false_launch_design_page_is_not_active() -> None:
     assert not (ROOT / "REVIEW.md").exists()
     assert not (ROOT / "docs" / "PROVENANCE_CATCHUP.md").exists()
     assert not (ROOT / "deploy" / "publisher" / "init-clean-journal.sh").exists()
-    assert not (ROOT / "deploy" / "sn39" / "wallet-host-quickstart.sh").exists()
-    assert not (ROOT / "deploy" / "sn39" / "docker").exists()
+    assert not (ROOT / "deploy" / "sn94" / "wallet-host-quickstart.sh").exists()
+    assert not (ROOT / "deploy" / "sn94" / "docker").exists()
 
 
 def test_readme_is_the_small_public_guide() -> None:
@@ -96,7 +96,7 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "sudo cathedral-validator-setup" in guide
     assert "--confirm-direct-write" in guide
     assert "sudo cathedral-validator-status" in guide
-    assert "deploy/sn39/install-validator" not in guide
+    assert "deploy/sn94/install-validator" not in guide
     assert "does not download a weight vector" in words
     assert "scored every serving miner" not in guide
     assert "finds serving miners" in guide
@@ -294,7 +294,7 @@ def test_old_validator_page_is_only_a_compatibility_pointer() -> None:
 
 
 def test_former_public_installer_is_a_fail_closed_tombstone() -> None:
-    path = ROOT / "deploy" / "sn39" / "install-validator"
+    path = ROOT / "deploy" / "sn94" / "install-validator"
     source = path.read_text(encoding="utf-8")
     assert os.access(path, os.X_OK)
     subprocess.run(["bash", "-n", str(path)], check=True)
@@ -302,7 +302,7 @@ def test_former_public_installer_is_a_fail_closed_tombstone() -> None:
     assert result.returncode == 2
     assert "RETIRED" in result.stderr
     assert "No files or services were changed" in result.stderr
-    assert "cathedral-validator-sn39-relay.service" not in source
+    assert "cathedral-validator-sn94-relay.service" not in source
     assert "--relay" not in source
     assert "systemctl" not in source
     assert "install " not in source
@@ -320,7 +320,7 @@ def test_active_operator_surfaces_exclude_removed_commands() -> None:
         "cathedral-publisher-serve",
         "cathedral-candidate-snapshot",
         "--relay --release",
-        "cathedral-validator-sn39-relay.service",
+        "cathedral-validator-sn94-relay.service",
     )
     for path in active:
         text = path.read_text(encoding="utf-8")
@@ -340,7 +340,7 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     # Operating detail that left the README lives here.
     assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
     assert (
-        "direct-writer/finney-sn39-mechanism-0/<validator-hotkey>/state.json" in guide
+        "direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json" in guide
     )
     assert "`RestartPreventExitStatus=2 3`" in guide
     # The one command that clears a failed on-chain write, run as the service
@@ -399,10 +399,10 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
 def test_retired_guides_are_only_historical_pointers() -> None:
     for relative in (
         "docs/PROVENANCE.md",
-        "docs/SN39_MULTICOMPUTE.md",
+        "docs/SN94_MULTICOMPUTE.md",
         "docs/VIOLET_EXTERNAL_SCORES.md",
         "deploy/publisher/README.md",
-        "deploy/sn39/README.md",
+        "deploy/sn94/README.md",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert text.startswith("# Retired"), relative

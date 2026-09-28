@@ -60,7 +60,7 @@ def _snapshot(*, second: plan.Neuron | None = None) -> plan.FinalizedSnapshot:
 
 def test_contract_pins_dedicated_second_hotkey() -> None:
     assert plan.NETWORK == "finney"
-    assert (plan.NETUID, plan.MECID, plan.UID30) == (39, 0, 30)
+    assert (plan.NETUID, plan.MECID, plan.UID30) == (94, 0, 30)
     assert plan.SECOND_MINER_WALLET_HOTKEY == "serge_sat_test_2"
     assert plan.SECOND_MINER_HOTKEY == (
         "5Ct2DBJPULeQxGmFiKrpGvvWuYVxgYEX8tRfNjWYRga8VRbq"
@@ -350,7 +350,7 @@ def test_retired_cli_help_does_not_advertise_the_old_preview(capsys) -> None:
     assert "cathedral-validator" in help_text
     assert "cathedral-uid30-fleet-preview" not in help_text
     assert "{preview}" not in help_text
-    assert "read finalized SN39 state" not in help_text
+    assert "read finalized SN94 state" not in help_text
 
 
 def test_module_has_no_chain_mutation_call_site() -> None:

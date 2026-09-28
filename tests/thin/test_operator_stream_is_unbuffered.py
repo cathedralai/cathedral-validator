@@ -1,13 +1,13 @@
 """The operator stream must surface while the validator is still running.
 
-`journalctl -fu cathedral-validator-sn39-relay` is the first thing any operator
+`journalctl -fu cathedral-validator-sn94-relay` is the first thing any operator
 runs, and until this was fixed it showed them nothing for hours.
 
 Every supported way of running this validator puts a PIPE on stdout: systemd's
 journal, `nohup`, `tmux | tee`, `docker logs`. Python's default for a non-tty
 stdout is an 8192-byte BLOCK buffer, and a tick emits a few hundred bytes, so a
 live validator filled roughly one buffer every few hours. Measured on a running
-SN39 relay, same PID throughout: the flush at 15:11:21 carried content stamped
+SN94 relay, same PID throughout: the flush at 15:11:21 carried content stamped
 12:10:35, and the window 11:44:48 -> 15:11:21 (3h26m) produced zero journal
 lines while the JSONL recorded seven successful WEIGHTS_SUBMITTED events.
 
@@ -18,7 +18,7 @@ harm -- SIGTERM does not flush, so the restart DISCARDS the buffered evidence
 that everything was fine, costs a write cycle, and drops them into receipt
 recovery.
 
-The fix has to live in the process. The SN39 release launcher `execve`s a
+The fix has to live in the process. The SN94 release launcher `execve`s a
 curated environment, so an operator's own `PYTHONUNBUFFERED` -- from a systemd
 drop-in, a shell, a compose file -- never reaches the child; and the unit's
 digest is bound in the release manifest's `external_files`, so they cannot edit
@@ -39,7 +39,7 @@ import textwrap
 import pytest
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
-_LAUNCHER_PATH = _REPO / "deploy" / "sn39" / "cathedral-sn39-release-launcher.py"
+_LAUNCHER_PATH = _REPO / "deploy" / "sn94" / "cathedral-sn94-release-launcher.py"
 
 # Deliberately far apart: a loaded CI box may take many seconds to start an
 # interpreter, and the child must be nowhere near exiting when we give up.
@@ -125,10 +125,10 @@ def test_output_reaches_the_reader_before_the_process_exits():
     ("argv", "expected_target"),
     [
         (["continuous"], "scaffold.cli"),
-        (["status"], "scripts/publish_sn39_validator_status.py"),
+        (["status"], "scripts/publish_sn94_validator_status.py"),
         (
             ["finalize", f"/var/lib/cathedral-validator/journal-{'a' * 64}.json"],
-            "scripts/finalize_sn39_public_release.py",
+            "scripts/finalize_sn94_public_release.py",
         ),
     ],
 )
@@ -137,12 +137,12 @@ def test_the_release_launcher_passes_dash_u_for_every_mode(
 ):
     """Belt to `cli.main`'s braces, and the only cover for the script modes.
 
-    `scripts/publish_sn39_validator_status.py` and
-    `scripts/finalize_sn39_public_release.py` never call `cli.main`, so `-u` is
+    `scripts/publish_sn94_validator_status.py` and
+    `scripts/finalize_sn94_public_release.py` never call `cli.main`, so `-u` is
     the whole fix for them.
     """
     spec = importlib.util.spec_from_file_location(
-        "_sn39_release_launcher_buffering", _LAUNCHER_PATH
+        "_sn94_release_launcher_buffering", _LAUNCHER_PATH
     )
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
@@ -188,7 +188,7 @@ def test_the_release_launcher_passes_dash_u_for_every_mode(
 
 def test_verify_checks_the_install_without_execing_the_validator(monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location(
-        "_sn39_release_launcher_verify", _LAUNCHER_PATH
+        "_sn94_release_launcher_verify", _LAUNCHER_PATH
     )
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)

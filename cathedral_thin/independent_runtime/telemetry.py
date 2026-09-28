@@ -1,4 +1,4 @@
-"""Sanitized, non-blocking telemetry for the direct SN39 validator.
+"""Sanitized, non-blocking telemetry for the direct SN94 validator.
 
 The score path owns the facts in this document.  The exporter only transports
 the already-sanitized snapshot and has no wallet, chain client, evidence, TLS

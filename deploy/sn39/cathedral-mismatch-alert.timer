@@ -1,7 +1,0 @@
-[Unit]
-Description=Check SN39 validator liveness and shadow-audit verdicts every 10 minutes
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=10min
-[Install]
-WantedBy=timers.target

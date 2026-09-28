@@ -1,0 +1,82 @@
+# Cathedral SN94 mainnet configuration for a public validator.
+#
+# This is the only recurring operator profile. It relays Cathedral's signed
+# weight vector from the public HTTPS origin (api.cathedral.computer). An origin
+# host may compose the vector locally, but the validator still fetches the
+# published HTTPS feed through this same profile.
+#
+# This profile relays Cathedral's signed weight vector: fetch it, verify it
+# against the pinned weight-policy key, and submit exactly those numbers. It
+# never originates weights, so it has no launch of its own to complete.
+#
+# The public installer ships this profile byte-for-byte and the immutable
+# launcher refuses edits. The operator supplies only a hotkey file. Every
+# trust-bearing value below is checked against release constants before a
+# submission. Removed authority and loopback profiles are not production modes.
+
+[network]
+name = "finney"
+netuid = 94
+# Your own wallet. These are local labels; the release pins the resolved
+# on-chain identity, not the wallet name.
+wallet_name = "validator"
+validator_hotkey = "default"
+
+[publisher]
+url = "https://api.cathedral.computer"
+
+[weight_policy]
+public_key_hex = "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26" # pragma: allowlist secret
+key_id = "cathedral-weight-policy"
+require_policy = "validated_supply_v1"
+state_file = "/var/lib/cathedral-validator/thin-state.json"
+
+[weights]
+interval_secs = 1500
+# Leave at 0. The durable journal already fences thin reservations to one per
+# strictly increasing published policy_version, so this is a redundant local
+# ceiling. Raising it later after attempts are recorded invalidates the
+# journal's budget record.
+max_submissions = 0
+
+[runtime]
+# Owner-only, mode 0700, created by the service install.
+root = "/var/lib/cathedral-validator"
+
+[provenance]
+# The recurring CLI accepts shadow only. There is no mode key to select. The
+# full-provenance audit runs in the background and never changes the submitted
+# signed vector.
+evidence_url = "https://api.cathedral.computer/v1/evidence"
+registry_keys = "config/provenance/registry-keys.json"
+registry_keys_digest = "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
+report_keys = "config/provenance/report-keys.json"
+report_keys_digest = "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
+index_keys = "config/provenance/index-keys.json"
+index_keys_digest = "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
+verifier_digest = "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
+source_revision = "26ebdbb885746f1835ea67ff314e384b4838560f" # pragma: allowlist secret
+mechanism = "validated_supply_v1"
+burn_hotkey = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi" # pragma: allowlist secret
+# controlled_dir and verifier_binary are deliberately absent: the raw TDX
+# evidence package is Cathedral-controlled, so the shadow audit reports
+# receipts_only here and still never delays or blocks the thin submission.
+
+[launch]
+# A relay performs no launch transaction.
+require_full_provenance_for_broadcast = false
+# The SN94 launch is a subnet-level event that happened once. A relay cannot
+# perform its own, so requiring a per-validator completed launch would make
+# this profile unrunnable. Setting this false is refused for a host holding the
+# controlled launch material.
+require_completed_launch_for_broadcast = false
+# Weight-originating hosts (holding launch material) additionally need the
+# documented waiver below or the runtime contract refuses the relay opt-out;
+# public validators have no launch material and are unaffected by it.
+beta_skip_launch_ceremony = true
+
+[logs]
+jsonl = "/var/log/cathedral-validator/validator-events.jsonl"
+# Sanitized allowlisted projection read by the public status service. The raw
+# journal above remains owner-only.
+status_jsonl = "/var/log/cathedral-validator/validator-status.jsonl"

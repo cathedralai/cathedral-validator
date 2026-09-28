@@ -1,4 +1,4 @@
-"""No-write proof for consolidating verified machines behind one SN39 UID.
+"""No-write proof for consolidating verified machines behind one SN94 UID.
 
 The command records the current UID30 row and independently scores every
 weighted serving UID. It renders a singleton target only for the canonical
@@ -31,7 +31,7 @@ from cathedral_thin.independent.constants import (
     INTEL_COLLATERAL,
     MECID,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     W,
 )
 from cathedral_thin.independent.errors import IndependentValidatorError
@@ -188,7 +188,7 @@ def _require_chain_continuity(
 ) -> None:
     if fresh.block_number < evidence.block_number:
         raise UID30FleetPreviewError("finalized chain moved backward during proof")
-    if fresh.block_number - evidence.block_number > SN39_MORTAL_PERIOD_BLOCKS:
+    if fresh.block_number - evidence.block_number > SN94_MORTAL_PERIOD_BLOCKS:
         raise UID30FleetPreviewError("fleet proof exceeded its finalized-head window")
     if (
         fresh.genesis_hash != evidence.genesis_hash

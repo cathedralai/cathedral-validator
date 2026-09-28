@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "finney"))
     parser.add_argument(
-        "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "39"))
+        "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "94"))
     )
     parser.add_argument(
         "--wallet-name", default=os.environ.get("BT_WALLET_NAME", "validator")

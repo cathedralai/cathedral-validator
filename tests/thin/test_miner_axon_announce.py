@@ -51,7 +51,7 @@ def endpoint_proof(**overrides) -> axon.EndpointProof:
         "hotkey": axon.MINER_HOTKEY,
         "validator_hotkey": axon.VALIDATOR_HOTKEY,
         "ip": SERVICE_IP,
-        "port": axon.SN39_HTTPS_PORT,
+        "port": axon.SN94_HTTPS_PORT,
         "qvl": "PASS",
         "qvl_digest": LAUNCH_QVL_DIGEST,
         "sat_units": 20,
@@ -203,7 +203,7 @@ def finalized_predecessor(tmp_path: Path, monkeypatch):
         block=102,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SERVICE_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     announce(
@@ -227,7 +227,7 @@ def successor_review(tmp_path: Path, *, block: int = 230, ip: str = SUCCESSOR_IP
         block=block,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SERVICE_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     proof = endpoint_proof(
@@ -295,7 +295,7 @@ def persisted_finalized_successor(tmp_path: Path, monkeypatch):
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     result = announce(
@@ -491,9 +491,9 @@ def test_preview_refuses_unproven_or_misbound_endpoint(proof, tmp_path):
 @pytest.mark.parametrize(
     ("ip", "port"),
     [
-        ("127.0.0.1", axon.SN39_HTTPS_PORT),
+        ("127.0.0.1", axon.SN94_HTTPS_PORT),
         ("8.8.8.8", 8443),
-        ("2001:4860:4860::8888", axon.SN39_HTTPS_PORT),
+        ("2001:4860:4860::8888", axon.SN94_HTTPS_PORT),
     ],
 )
 def test_preview_refuses_nonpublic_ipv4_or_wrong_port(ip, port, tmp_path):
@@ -665,7 +665,7 @@ def test_digest_authorized_announcement_calls_only_serve_axon_and_reads_back(
     served = miner_state(
         block=102,
         ip=SERVICE_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     states = StateSequence(
@@ -693,7 +693,7 @@ def test_digest_authorized_announcement_calls_only_serve_axon_and_reads_back(
     assert result["retry_allowed"] is False
     assert result["readback"]["axon"] == {
         "ip": SERVICE_IP,
-        "port": axon.SN39_HTTPS_PORT,
+        "port": axon.SN94_HTTPS_PORT,
         "is_serving": True,
     }
     assert len(calls) == 1
@@ -707,7 +707,7 @@ def test_digest_authorized_announcement_calls_only_serve_axon_and_reads_back(
         "wait_for_inclusion",
         "wait_for_finalization",
     }
-    assert call["netuid"] == 39
+    assert call["netuid"] == 94
     assert call["period"] == axon.ANNOUNCEMENT_PERIOD_BLOCKS
     assert call["wait_for_finalization"] is True
     assert call["axon"].external_ip == SERVICE_IP
@@ -1136,7 +1136,7 @@ def test_one_finalized_successor_preserves_exact_predecessor_lineage(
             block=232,
             uid=axon.FINALIZED_SUCCESSOR_UID,
             ip=SUCCESSOR_IP,
-            port=axon.SN39_HTTPS_PORT,
+            port=axon.SN94_HTTPS_PORT,
             serving=True,
         ),
     )
@@ -1193,7 +1193,7 @@ def test_final_successor_recovery_accepts_receipt_at_stored_final_block(
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     calls = []
@@ -1248,7 +1248,7 @@ def test_final_successor_recovery_rejects_stale_or_forked_stored_final(
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     announce(
@@ -1604,7 +1604,7 @@ def test_successor_is_single_use_and_cannot_cycle(tmp_path, monkeypatch):
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     announce(
@@ -1667,7 +1667,7 @@ def test_successor_lagging_target_readback_stays_ambiguous(tmp_path, monkeypatch
         block=229,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
 
@@ -1709,7 +1709,7 @@ def test_successor_null_receipt_block_accepts_later_canonical_readback_and_is_id
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     calls = []
@@ -1765,7 +1765,7 @@ def test_successor_stale_success_receipt_is_recovered_only_by_exact_readback(
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
 
@@ -1804,7 +1804,7 @@ def test_successor_numbered_receipt_without_hash_recovers_by_exact_readback(
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     response = SimpleNamespace(
@@ -1983,7 +1983,7 @@ def test_successor_crash_after_replace_leaves_recoverable_linked_intent(
                 block=233,
                 uid=axon.FINALIZED_SUCCESSOR_UID,
                 ip=SUCCESSOR_IP,
-                port=axon.SN39_HTTPS_PORT,
+                port=axon.SN94_HTTPS_PORT,
                 serving=True,
             )
         ),
@@ -2046,7 +2046,7 @@ def test_corrupted_persisted_successor_intent_is_ambiguous_never_no_write(
                     block=233,
                     uid=axon.FINALIZED_SUCCESSOR_UID,
                     ip=SUCCESSOR_IP,
-                    port=axon.SN39_HTTPS_PORT,
+                    port=axon.SN94_HTTPS_PORT,
                     serving=True,
                 )
             ),
@@ -2202,7 +2202,7 @@ def test_generation2_preserves_baseline_to_generation1_to_generation2_lineage(
         block_number=402,
         block_hash=chain_hash(402),
         ip=axon.UID124_GENERATION2_ENDPOINT_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         is_serving=True,
     )
     calls = []
@@ -2568,7 +2568,7 @@ def test_every_persisted_successor_invariant_corruption_is_ambiguous_no_rewrite(
             block=232,
             uid=axon.FINALIZED_SUCCESSOR_UID,
             ip=SUCCESSOR_IP,
-            port=axon.SN39_HTTPS_PORT,
+            port=axon.SN94_HTTPS_PORT,
             serving=True,
         ).artifact()
     elif corruption == "retry_allowed":
@@ -2670,7 +2670,7 @@ def test_finalized_successor_status_shape_corruption_is_ambiguous_no_rewrite(
             corrupted["readback"] = json.loads(json.dumps(corrupted["preflight"]))
             corrupted["readback"]["axon"] = {
                 "ip": SUCCESSOR_IP,
-                "port": axon.SN39_HTTPS_PORT,
+                "port": axon.SN94_HTTPS_PORT,
                 "is_serving": True,
             }
         elif corruption == "receipt_equals_preflight":
@@ -2753,7 +2753,7 @@ def test_successor_recovery_persistence_failure_remains_ambiguous(
                     block=233,
                     uid=axon.FINALIZED_SUCCESSOR_UID,
                     ip=SUCCESSOR_IP,
-                    port=axon.SN39_HTTPS_PORT,
+                    port=axon.SN94_HTTPS_PORT,
                     serving=True,
                 )
             ),
@@ -2774,7 +2774,7 @@ def test_successor_final_persistence_failure_recovers_without_second_call(
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     original_write = axon._write_state
@@ -2941,7 +2941,7 @@ def test_successor_refuses_malformed_or_wrong_pin_predecessor(
     else:
         predecessor["preflight"]["axon"] = {
             "ip": SERVICE_IP,
-            "port": axon.SN39_HTTPS_PORT,
+            "port": axon.SN94_HTTPS_PORT,
             "is_serving": True,
         }
     journal_path.write_bytes(axon._canonical_json_bytes(predecessor))
@@ -2982,7 +2982,7 @@ def test_finalized_successor_is_pinned_to_uid124_before_unlock_or_call(
         block=102,
         uid=17,
         ip=SERVICE_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     announce(
@@ -3094,7 +3094,7 @@ def test_successor_noncanonical_target_readback_stays_ambiguous(tmp_path, monkey
         block=232,
         uid=axon.FINALIZED_SUCCESSOR_UID,
         ip=SUCCESSOR_IP,
-        port=axon.SN39_HTTPS_PORT,
+        port=axon.SN94_HTTPS_PORT,
         serving=True,
     )
     noncanonical_target = replace(noncanonical_target, block_hash=chain_hash(999))
@@ -3167,7 +3167,7 @@ def test_finalized_state_requires_exact_registered_coldkey_and_strict_axon():
     good = FinalizedSubtensor(FakeMetagraph())
     state = axon.finalized_miner_state(good)
     assert state.uid == 17
-    assert good.calls == [(39, True, 100)]
+    assert good.calls == [(94, True, 100)]
 
     with pytest.raises(axon.MinerAxonError, match="registered exactly once"):
         axon.finalized_miner_state(

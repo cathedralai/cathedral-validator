@@ -32,7 +32,7 @@ def _body(
     scores: list[dict],
     *,
     network: str = "finney",
-    netuid=39,
+    netuid=94,
 ) -> bytes:
     report = {
         "source": "cathedral_confidential_tdx",

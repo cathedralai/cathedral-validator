@@ -46,8 +46,8 @@ BANNED_NAMES = frozenset(
     {
         "fetch_vector",
         "set_weights_on_chain",
-        "_submit_exact_sn39_extrinsic",
-        "_authorize_sn39_chain_submission",
+        "_submit_exact_sn94_extrinsic",
+        "_authorize_sn94_chain_submission",
         "_reverify_reserved_signed_vector",
         "compose_integrated",
         "compose_vector",

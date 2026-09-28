@@ -26,7 +26,7 @@ What earns, and what does not:
   field is shape-checked so a malformed body is refused, and then discarded. A
   miner claiming 999 earns the clause count or nothing;
 * only canonical audit work. This lineage pays for the instance it generated
-  itself; a customer job arriving on this path is not SN39 work and is refused
+  itself; a customer job arriving on this path is not SN94 work and is refused
   rather than priced.
 
 The validator does NOT solve. Deriving the instance from a planted assignment

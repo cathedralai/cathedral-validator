@@ -1020,7 +1020,7 @@ class OrderRecordingSubtensor:
         return "0x" + "cd" * 32
 
     def metagraph(self, netuid: int, block: int | None = None):
-        assert netuid == 39
+        assert netuid == 94
         self.calls.append("metagraph" if block is None else f"metagraph:{block}")
         self.metagraph_blocks.append(block)
         if block is not None and not self.archive:
@@ -1135,7 +1135,7 @@ class RunnerSubtensor:
         return "0x" + "cd" * 32
 
     def metagraph(self, netuid: int, block: int | None = None):
-        assert netuid == 39
+        assert netuid == 94
         self.metagraph_blocks.append(block)
         uids = [BURN_UID, MINER_UID, *(uid for uid, _hotkey in self.extra_miners)]
         hotkeys = [BURN_HOTKEY, BOB, *(hotkey for _uid, hotkey in self.extra_miners)]

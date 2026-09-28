@@ -1,4 +1,4 @@
-"""Read-only launch plan for Cathedral's dedicated second SN39 miner.
+"""Read-only launch plan for Cathedral's dedicated second SN94 miner.
 
 This module deliberately has no wallet loader and no chain mutation path.  It
 reads one finalized Finney snapshot, proves the fixed public identities, and
@@ -33,7 +33,7 @@ from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH
 
 SCHEMA = "cathedral_sn39_second_miner_equal_plan_v1"
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 MECID = 0
 UID30 = 30
 HTTPS_PROTOCOL = 4
@@ -170,7 +170,7 @@ def _neuron_rows(metagraph: Any) -> tuple[Neuron, ...]:
         last_updates = [int(value) for value in listify(metagraph.last_update)]
         axons = list(metagraph.axons)
     except Exception as exc:
-        raise SecondMinerPlanError("SN39 metagraph fields are unavailable") from exc
+        raise SecondMinerPlanError("SN94 metagraph fields are unavailable") from exc
     lengths = {
         len(uids),
         len(hotkeys),
@@ -180,7 +180,7 @@ def _neuron_rows(metagraph: Any) -> tuple[Neuron, ...]:
         len(axons),
     }
     if len(lengths) != 1:
-        raise SecondMinerPlanError("SN39 metagraph identity arrays are ragged")
+        raise SecondMinerPlanError("SN94 metagraph identity arrays are ragged")
     rows: list[Neuron] = []
     for uid, hotkey, coldkey, permit, last_update, axon in zip(
         uids, hotkeys, coldkeys, permits, last_updates, axons
@@ -229,7 +229,7 @@ def read_finalized_snapshot(
     except SecondMinerPlanError:
         raise
     except Exception as exc:
-        raise SecondMinerPlanError("finalized SN39 read failed") from exc
+        raise SecondMinerPlanError("finalized SN94 read failed") from exc
     return read_snapshot_at(
         subtensor=subtensor,
         block_number=finalized_number,
@@ -279,7 +279,7 @@ def read_snapshot_at(
         metagraph_block = _nonnegative(metagraph_block, label="metagraph block")
         if metagraph_block != block_number:
             raise SecondMinerPlanError(
-                "SN39 metagraph is not at the requested snapshot block"
+                "SN94 metagraph is not at the requested snapshot block"
             )
         weights = substrate.query(
             module="SubtensorModule",
@@ -290,7 +290,7 @@ def read_snapshot_at(
     except SecondMinerPlanError:
         raise
     except Exception as exc:
-        raise SecondMinerPlanError("requested SN39 snapshot read failed") from exc
+        raise SecondMinerPlanError("requested SN94 snapshot read failed") from exc
     return FinalizedSnapshot(
         block_number=block_number,
         block_hash=block_hash,
@@ -303,10 +303,10 @@ def read_snapshot_at(
 def _one(rows: tuple[Neuron, ...], hotkey: str, *, required: bool) -> Neuron | None:
     matches = [row for row in rows if row.hotkey == hotkey]
     if len(matches) > 1:
-        raise SecondMinerPlanError(f"hotkey {hotkey} occupies multiple SN39 UIDs")
+        raise SecondMinerPlanError(f"hotkey {hotkey} occupies multiple SN94 UIDs")
     if not matches:
         if required:
-            raise SecondMinerPlanError(f"required hotkey {hotkey} is not on SN39")
+            raise SecondMinerPlanError(f"required hotkey {hotkey} is not on SN94")
         return None
     return matches[0]
 
@@ -353,7 +353,7 @@ def build_plan(snapshot: FinalizedSnapshot) -> dict[str, Any]:
     second = _one(snapshot.neurons, SECOND_MINER_HOTKEY, required=False)
     assert validator is not None and primary is not None
     if validator.uid != UID30 or validator.coldkey != CATHEDRAL_COLDKEY:
-        raise SecondMinerPlanError("Cathedral validator is not the pinned SN39 UID30")
+        raise SecondMinerPlanError("Cathedral validator is not the pinned SN94 UID30")
     if validator.validator_permit is not True:
         raise SecondMinerPlanError("Cathedral UID30 does not have a validator permit")
     if primary.coldkey != CATHEDRAL_COLDKEY:

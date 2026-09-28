@@ -780,7 +780,7 @@ if [[ ! "$TEST_HOTKEY" =~ ^5[1-9A-HJ-NP-Za-km-z]{47}$ ]]; then
   exit 2
 fi
 chmod 0600 "$OPERATOR_HOTKEY"
-readonly JOURNAL="/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn39-mechanism-0/${TEST_HOTKEY}/state.json"
+readonly JOURNAL="/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn94-mechanism-0/${TEST_HOTKEY}/state.json"
 printf '%s\n' "$SNP_POLICY_JSON" >"$OPERATOR_POLICY"
 chmod 0600 "$OPERATOR_POLICY"
 OPERATOR_HOTKEY_SHA="$(shasum -a 256 "$OPERATOR_HOTKEY" | cut -d' ' -f1)"

@@ -171,7 +171,7 @@ class SnapshotSubtensor:
         self.value = metagraph or Metagraph()
 
     def metagraph(self, netuid: int, *, block: int) -> Metagraph:
-        assert netuid == 39
+        assert netuid == 94
         assert block == ANCHOR_NUMBER
         return self.value
 
@@ -721,7 +721,7 @@ class WriterSubstrate:
                             "call_module": "SubtensorModule",
                             "call_function": "set_mechanism_weights",
                             "call_args": [
-                                {"name": "netuid", "value": 39},
+                                {"name": "netuid", "value": 94},
                                 {"name": "mecid", "value": 0},
                                 {"name": "dests", "value": self.expected_uids},
                                 {"name": "weights", "value": weights},
@@ -748,7 +748,7 @@ class WriterSubstrate:
             assert block_hash == self.block_hash(self.sign_head)
             return self.owner.stake_threshold
         if storage_function == "WeightsVersionKey":
-            assert params == [39]
+            assert params == [94]
             assert block_hash == self.block_hash(self.sign_head)
             return 0
         assert storage_function == "Weights"
@@ -790,7 +790,7 @@ class WriterSubtensor:
     _get_block_hash = Subtensor._get_block_hash
 
     def metagraph(self, netuid: int, *, block: int) -> Metagraph:
-        assert netuid == 39
+        assert netuid == 94
         block_hash = self.get_block_hash(block)
         self.metagraph_reads.append((block, block_hash))
         if block_hash in self.substrate.orphans.values():
@@ -815,7 +815,7 @@ class WriterSubtensor:
     def get_metagraph_info(
         self, netuid: int, mechid: int, *, block: int
     ) -> SimpleNamespace:
-        assert (netuid, mechid) == (39, 0)
+        assert (netuid, mechid) == (94, 0)
         graph = self.metagraph(netuid, block=block)
         size = max(graph.uids) + 1
         hotkeys = [""] * size
@@ -904,7 +904,7 @@ def test_writer_uses_one_canonical_signer_network_path(
 
     assert first.state_path == second.state_path == canonical_state_path(FakeKeypair())
     assert first.state_path == (
-        tmp_path / "finney-sn39-mechanism-0" / VALIDATOR / "state.json"
+        tmp_path / "finney-sn94-mechanism-0" / VALIDATOR / "state.json"
     )
 
 

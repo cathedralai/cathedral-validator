@@ -27,7 +27,7 @@ import pytest
 from scaffold import provenance_audit as pa
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 GENERATED_AT = "2026-08-04T12:00:00+00:00"
 
 

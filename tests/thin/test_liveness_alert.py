@@ -1,6 +1,6 @@
 """The alert must be red when the validator is dead, not green when it is blind.
 
-The failure that costs an SN39 operator money is the quiet one: the validator
+The failure that costs an SN94 operator money is the quiet one: the validator
 stops writing weights. A crashed process, a wedged RPC, a full disk, a
 deregistered hotkey or a mistyped ``--jsonl`` path all look the same from
 outside — the journal stops growing — and for a while none of them had a
@@ -30,7 +30,7 @@ from scaffold import health
 from scaffold.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ALERT_SCRIPT = REPO_ROOT / "deploy" / "sn39" / "cathedral-mismatch-check"
+ALERT_SCRIPT = REPO_ROOT / "deploy" / "sn94" / "cathedral-mismatch-check"
 TICK = 1500.0
 
 

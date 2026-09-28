@@ -81,25 +81,25 @@ FINNEY_GENESIS_HASH = (
     "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
 )
 
-# Every trust-bearing field in the supported SN39 profile is immutable in the
+# Every trust-bearing field in the supported SN94 profile is immutable in the
 # release, not merely a convenient config default.
-SN39_PUBLISHER_URL = "https://api.cathedral.computer"
-SN39_EVIDENCE_URL = "https://api.cathedral.computer/v1/evidence"
-SN39_WEIGHT_POLICY_KEY_ID = "cathedral-weight-policy"
-SN39_REGISTRY_KEYS_DIGEST = (
+SN94_PUBLISHER_URL = "https://api.cathedral.computer"
+SN94_EVIDENCE_URL = "https://api.cathedral.computer/v1/evidence"
+SN94_WEIGHT_POLICY_KEY_ID = "cathedral-weight-policy"
+SN94_REGISTRY_KEYS_DIGEST = (
     "sha256:5fb8f00cd2541606927373f596c2ba77d4ce485df0539f4afd5091858af48512"
 )
-SN39_REPORT_KEYS_DIGEST = (
+SN94_REPORT_KEYS_DIGEST = (
     "sha256:30e438fff5b0508402b233eb5eec590a834882801a552edbbf7e62e45cf98c70"
 )
-SN39_INDEX_KEYS_DIGEST = (
+SN94_INDEX_KEYS_DIGEST = (
     "sha256:1e35b9ce36b3da3362a88feb93dfa90f1fe03ab7c42e902b13ac3789324f7611"
 )
-SN39_VERIFIER_DIGEST = (
+SN94_VERIFIER_DIGEST = (
     "sha256:8292b085e4dbe228f8ffd2ec7046a1c0f1324ff5e7a29d1574ce16963f9b098f"
 )
-SN39_PRODUCER_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
-# The burn destination must be the LIVE SN39 subnet owner. The broadcast path
+SN94_PRODUCER_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
+# The burn destination must be the LIVE SN94 subnet owner. The broadcast path
 # refuses to sign when this hotkey is not the owner on the finalized head
 # ("requires the pinned burn hotkey to remain the live subnet owner"), which is
 # deliberate: a stale pin would keep paying an address the subnet has moved off.
@@ -112,25 +112,25 @@ SN39_PRODUCER_REVISION = "26ebdbb885746f1835ea67ff314e384b4838560f"
 #
 # 2026-08-14: owner moved 5G3qVaXz... (uid 204) -> 5GP7c3fF... (uid 136).
 SN39_BURN_HOTKEY = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi"
-SN39_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
-SN39_LAUNCH_CONTROLLED_DIR = Path(
-    "/var/lib/cathedral-validator-controlled-sn39/current"
+SN94_STATE_FILE = Path("/var/lib/cathedral-validator/thin-state.json")
+SN94_LAUNCH_CONTROLLED_DIR = Path(
+    "/var/lib/cathedral-validator-controlled-sn94/current"
 )
-SN39_LAUNCH_VERIFIER_BINARY = Path("/opt/cathedral-sn39/bin/cathedral-tdx-verifier")
-SN39_LAUNCH_APPROVAL_FILE = Path("/etc/cathedral-validator/sn39-launch-approval.json")
-SN39_LAUNCH_APPROVAL_SCHEMA = "cathedral_sn39_launch_approval_v1"
-SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS = 64
-SN39_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
-SN39_LAUNCH_APPROVAL_OWNER_UID = 0
-SN39_RELEASE_SHA_ENV = "CATHEDRAL_SN39_RELEASE_SHA"
-SN39_LAUNCH_CONFIG_DIGEST_ENV = "CATHEDRAL_SN39_LAUNCH_CONFIG_SHA256"
-SN39_INSTALLED_RELEASE_ROOT = Path("/opt/cathedral-sn39/releases")
-SN39_INSTALLED_VENV_ROOT = Path("/opt/cathedral-sn39/venvs")
-SN39_INSTALLED_MANIFEST = Path("/etc/cathedral-validator/sn39-release-manifest.json")
-SN39_INSTALLED_CONFIG = Path("/etc/cathedral-validator/validator-thin-sn39-relay.toml")
-SN39_SYSTEMD_UNIT = "cathedral-validator-sn39-relay.service"
-SN39_PROC_INIT_COMM = Path("/proc/1/comm")
-SN39_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+SN94_LAUNCH_VERIFIER_BINARY = Path("/opt/cathedral-sn94/bin/cathedral-tdx-verifier")
+SN94_LAUNCH_APPROVAL_FILE = Path("/etc/cathedral-validator/sn94-launch-approval.json")
+SN94_LAUNCH_APPROVAL_SCHEMA = "cathedral_sn39_launch_approval_v1"
+SN94_LAUNCH_APPROVAL_LIFETIME_BLOCKS = 64
+SN94_LAUNCH_APPROVAL_MAX_BYTES = 256 * 1024
+SN94_LAUNCH_APPROVAL_OWNER_UID = 0
+SN94_RELEASE_SHA_ENV = "CATHEDRAL_SN94_RELEASE_SHA"
+SN94_LAUNCH_CONFIG_DIGEST_ENV = "CATHEDRAL_SN94_LAUNCH_CONFIG_SHA256"
+SN94_INSTALLED_RELEASE_ROOT = Path("/opt/cathedral-sn94/releases")
+SN94_INSTALLED_VENV_ROOT = Path("/opt/cathedral-sn94/venvs")
+SN94_INSTALLED_MANIFEST = Path("/etc/cathedral-validator/sn94-release-manifest.json")
+SN94_INSTALLED_CONFIG = Path("/etc/cathedral-validator/validator-thin-sn94-relay.toml")
+SN94_SYSTEMD_UNIT = "cathedral-validator-sn94-relay.service"
+SN94_PROC_INIT_COMM = Path("/proc/1/comm")
+SN94_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 
 
 def installed_recurring_context() -> bool:
@@ -141,36 +141,36 @@ def installed_recurring_context() -> bool:
     same shell commands into weight submissions.
     """
 
-    release_sha = os.environ.get(SN39_RELEASE_SHA_ENV, "")
-    config_digest = os.environ.get(SN39_LAUNCH_CONFIG_DIGEST_ENV, "")
+    release_sha = os.environ.get(SN94_RELEASE_SHA_ENV, "")
+    config_digest = os.environ.get(SN94_LAUNCH_CONFIG_DIGEST_ENV, "")
     if (
         re.fullmatch(r"[0-9a-f]{40}", release_sha) is None
         or re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None
     ):
         return False
-    expected_release = SN39_INSTALLED_RELEASE_ROOT / release_sha
-    expected_venv = SN39_INSTALLED_VENV_ROOT / release_sha
+    expected_release = SN94_INSTALLED_RELEASE_ROOT / release_sha
+    expected_venv = SN94_INSTALLED_VENV_ROOT / release_sha
     try:
-        manifest = json.loads(SN39_INSTALLED_MANIFEST.read_text("utf-8"))
+        manifest = json.loads(SN94_INSTALLED_MANIFEST.read_text("utf-8"))
         actual_config_digest = (
-            "sha256:" + hashlib.sha256(SN39_INSTALLED_CONFIG.read_bytes()).hexdigest()
+            "sha256:" + hashlib.sha256(SN94_INSTALLED_CONFIG.read_bytes()).hexdigest()
         )
         return bool(
             isinstance(manifest, dict)
             and manifest.get("schema") == "cathedral_sn39_release_install_v3"
             and manifest.get("release_sha") == release_sha
             and isinstance(manifest.get("external_files"), dict)
-            and manifest["external_files"].get(str(SN39_INSTALLED_CONFIG))
+            and manifest["external_files"].get(str(SN94_INSTALLED_CONFIG))
             == config_digest
             and actual_config_digest == config_digest
             and Path.cwd().resolve(strict=True) == expected_release.resolve(strict=True)
             and Path(sys.prefix).resolve(strict=True)
             == expected_venv.resolve(strict=True)
             and os.getppid() == 1
-            and SN39_PROC_INIT_COMM.read_text("utf-8").strip() == "systemd"
+            and SN94_PROC_INIT_COMM.read_text("utf-8").strip() == "systemd"
             and any(
-                line.rpartition(":")[2].endswith(f"/{SN39_SYSTEMD_UNIT}")
-                for line in SN39_PROC_SELF_CGROUP.read_text("utf-8").splitlines()
+                line.rpartition(":")[2].endswith(f"/{SN94_SYSTEMD_UNIT}")
+                for line in SN94_PROC_SELF_CGROUP.read_text("utf-8").splitlines()
             )
         )
     except (OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
@@ -367,7 +367,7 @@ EXPIRED_WITHOUT_INCLUSION = "expired_without_inclusion"
 # a fresh finalized head and re-proves signature, freshness, rollback fence,
 # contract, burn invariants and UID mapping safety, so this is a retry budget
 # only: the pre-sign check itself stays exact.
-SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
+SN94_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 
 # Retrying IMMEDIATELY made those 8 attempts one attempt tried 8 times.
 #
@@ -400,7 +400,7 @@ SN39_PRE_SIGN_HEAD_DRIFT_RETRIES = 8
 # offset still correlates, and only full-period coverage makes the next sample
 # independent of the phase that just lost. Not a cryptographic draw; this only
 # has to be unpredictable with respect to block arrival.
-SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS = 12.0
+SN94_PRE_SIGN_HEAD_DRIFT_JITTER_SECS = 12.0
 
 # Exhausting that budget is a TIMING outcome, not a fault: nothing was
 # reserved, nothing was signed, and the very next attempt from a fresh
@@ -413,8 +413,8 @@ SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS = 12.0
 # the sequence that just lost. It is capped to a few CONSECUTIVE re-arms so a
 # genuinely wedged chain falls back to the daemon's own cadence instead of
 # retrying forever at the short interval.
-SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS = 60
-SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE = 3
+SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS = 60
+SN94_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE = 3
 
 
 def _head_drift_phase_offset(width_secs: float) -> float:
@@ -804,7 +804,7 @@ def _read_root_launch_approval(path: Path) -> dict[str, Any]:
         parent_info = os.fstat(parent)
         if (
             not stat_module.S_ISDIR(parent_info.st_mode)
-            or parent_info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+            or parent_info.st_uid != SN94_LAUNCH_APPROVAL_OWNER_UID
             or stat_module.S_IMODE(parent_info.st_mode) & 0o022
         ):
             raise wire.VectorError("launch approval directory is not root-controlled")
@@ -822,7 +822,7 @@ def _read_root_launch_approval(path: Path) -> dict[str, Any]:
             info = os.fstat(descriptor)
             if (
                 not stat_module.S_ISREG(info.st_mode)
-                or info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+                or info.st_uid != SN94_LAUNCH_APPROVAL_OWNER_UID
                 or stat_module.S_IMODE(info.st_mode) & 0o022
             ):
                 raise wire.VectorError(
@@ -830,13 +830,13 @@ def _read_root_launch_approval(path: Path) -> dict[str, Any]:
                 )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                payload = handle.read(SN39_LAUNCH_APPROVAL_MAX_BYTES + 1)
+                payload = handle.read(SN94_LAUNCH_APPROVAL_MAX_BYTES + 1)
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
     finally:
         os.close(parent)
-    if len(payload) > SN39_LAUNCH_APPROVAL_MAX_BYTES:
+    if len(payload) > SN94_LAUNCH_APPROVAL_MAX_BYTES:
         raise wire.VectorError("launch approval exceeds its bounded size")
     return _strict_launch_approval_bytes(payload)
 
@@ -848,7 +848,7 @@ def _write_root_launch_approval(path: Path, document: dict[str, Any]) -> None:
     if not path.is_absolute():
         raise wire.VectorError("launch approval output path must be absolute")
     payload = _canonical_json_bytes(document) + b"\n"
-    if len(payload) > SN39_LAUNCH_APPROVAL_MAX_BYTES:
+    if len(payload) > SN94_LAUNCH_APPROVAL_MAX_BYTES:
         raise wire.VectorError("launch approval exceeds its bounded size")
     try:
         parent = os.open(
@@ -867,7 +867,7 @@ def _write_root_launch_approval(path: Path, document: dict[str, Any]) -> None:
         info = os.fstat(parent)
         if (
             not stat_module.S_ISDIR(info.st_mode)
-            or info.st_uid != SN39_LAUNCH_APPROVAL_OWNER_UID
+            or info.st_uid != SN94_LAUNCH_APPROVAL_OWNER_UID
             or stat_module.S_IMODE(info.st_mode) & 0o022
         ):
             raise wire.VectorError(
@@ -1317,11 +1317,11 @@ def _authority_lane_transition_authorized(
     if identity.get("operator_declared_authority") is True:
         return bool(
             identity.get("network") == "finney"
-            and identity.get("netuid") == 39
+            and identity.get("netuid") == 94
             and identity.get("validator_hotkey")
             == state.get("submission_validator_hotkey")
             and state.get("submission_genesis_hash") == FINNEY_GENESIS_HASH
-            and state.get("provenance_netuid") == 39
+            and state.get("provenance_netuid") == 94
         )
     authorization = identity.get("continuous_authorization")
     if not isinstance(authorization, dict):
@@ -1330,10 +1330,10 @@ def _authority_lane_transition_authorized(
     launch_attempt_ids = state.get("submission_launch_attempt_ids")
     return bool(
         identity.get("network") == "finney"
-        and identity.get("netuid") == 39
+        and identity.get("netuid") == 94
         and identity.get("validator_hotkey") == state.get("submission_validator_hotkey")
         and state.get("submission_genesis_hash") == FINNEY_GENESIS_HASH
-        and state.get("provenance_netuid") == 39
+        and state.get("provenance_netuid") == 94
         and state.get("submission_launch_status") == "finalized"
         and state.get("submission_continuous_enabled") is True
         and isinstance(launch_attempt_id, str)
@@ -2404,7 +2404,7 @@ def _revalidate_launch_after_rewarded_set_replay(
         wallet_name=args.wallet_name,
         wallet_hotkey=args.wallet_hotkey,
     )
-    _validate_resolved_chain_contract(args, fresh, require_sn39_identity=True)
+    _validate_resolved_chain_contract(args, fresh, require_sn94_identity=True)
     _bind_submission_identity(args, fresh)
     if fresh.block is None:
         raise wire.VectorError("fresh launch preflight has no finalized block")
@@ -2479,7 +2479,7 @@ def _revalidate_launch_after_rewarded_set_replay(
         or not isinstance(burn_snapshot, dict)
     ):
         raise wire.VectorError(
-            "fresh launch mapping differs from the immutable SN39 release boundary"
+            "fresh launch mapping differs from the immutable SN94 release boundary"
         )
     rewarded_hotkey = signed_rows[0].get("miner_hotkey")
     burn_hotkey = burn_snapshot.get("burn_hotkey")
@@ -2550,9 +2550,9 @@ def _launch_release_config_identity(args: Any) -> dict[str, Any]:
         raise wire.VectorError(
             "launch preflight requires the immutable launch-config digest"
         )
-    if approval_file != SN39_LAUNCH_APPROVAL_FILE:
+    if approval_file != SN94_LAUNCH_APPROVAL_FILE:
         raise wire.VectorError(
-            "launch approval path differs from the immutable SN39 profile"
+            "launch approval path differs from the immutable SN94 profile"
         )
     try:
         source_digest = (
@@ -2702,7 +2702,7 @@ def _build_launch_approval(
             "launch approval requires a canonical finalized block and hash"
         )
     body = {
-        "schema": SN39_LAUNCH_APPROVAL_SCHEMA,
+        "schema": SN94_LAUNCH_APPROVAL_SCHEMA,
         "bindings": _launch_approval_bindings(
             args,
             payload=payload,
@@ -2714,7 +2714,7 @@ def _build_launch_approval(
         "reviewed_finalized_block": preflight.block,
         "reviewed_finalized_hash": str(preflight.finalized_hash).lower(),
         "approval_valid_until_block": (
-            preflight.block + SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS
+            preflight.block + SN94_LAUNCH_APPROVAL_LIFETIME_BLOCKS
         ),
     }
     return {**body, "approval_digest": _sha256_document(body)}
@@ -2738,14 +2738,14 @@ def _validate_launch_approval_envelope(
     valid_until = body["approval_valid_until_block"]
     reviewed_hash = body["reviewed_finalized_hash"]
     if (
-        body["schema"] != SN39_LAUNCH_APPROVAL_SCHEMA
+        body["schema"] != SN94_LAUNCH_APPROVAL_SCHEMA
         or not isinstance(body["bindings"], dict)
         or isinstance(reviewed_block, bool)
         or not isinstance(reviewed_block, int)
         or reviewed_block <= 0
         or isinstance(valid_until, bool)
         or not isinstance(valid_until, int)
-        or valid_until != reviewed_block + SN39_LAUNCH_APPROVAL_LIFETIME_BLOCKS
+        or valid_until != reviewed_block + SN94_LAUNCH_APPROVAL_LIFETIME_BLOCKS
         or not isinstance(reviewed_hash, str)
         or _CHAIN_HASH_RE.fullmatch(reviewed_hash) is None
         or document["approval_digest"] != _sha256_document(body)
@@ -2789,7 +2789,7 @@ def _require_launch_approval(
     if (
         preflight.block is None
         or preflight.block < reviewed_block
-        or preflight.block + SN39_MORTAL_PERIOD_BLOCKS > valid_until
+        or preflight.block + SN94_MORTAL_PERIOD_BLOCKS > valid_until
         or _CHAIN_HASH_RE.fullmatch(str(preflight.finalized_hash).lower()) is None
     ):
         raise wire.VectorError(
@@ -2843,7 +2843,7 @@ def _require_launch_journal_available(state: dict[str, Any]) -> None:
 
 def run_launch_preflight(args: Any, *, approval_out: Path) -> dict[str, Any]:
     """Run the exact launch gate read-only and emit a bounded operator approval."""
-    if approval_out != SN39_LAUNCH_APPROVAL_FILE:
+    if approval_out != SN94_LAUNCH_APPROVAL_FILE:
         raise wire.VectorError(
             "launch preflight output differs from the immutable approval path"
         )
@@ -2870,7 +2870,7 @@ def run_launch_preflight(args: Any, *, approval_out: Path) -> dict[str, Any]:
         wallet_name=args.wallet_name,
         wallet_hotkey=args.wallet_hotkey,
     )
-    _validate_resolved_chain_contract(args, preflight, require_sn39_identity=True)
+    _validate_resolved_chain_contract(args, preflight, require_sn94_identity=True)
     _bind_submission_identity(args, preflight)
     uid_weights = vector_to_uid_weights(
         payload,
@@ -3260,13 +3260,13 @@ REQUIRE_POLICY_CHOICES = (
     REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
 )
 
-# The weight policies the SN39 mainnet trust profile admits — a CLOSED set of
+# The weight policies the SN94 mainnet trust profile admits — a CLOSED set of
 # exactly two named contracts, not "any validated_supply", not "anything in
 # REQUIRE_POLICY_CHOICES".
 #
 # The trust profile exists so a tampered config cannot redirect mainnet weights,
 # and it does that by comparing every pinned field to one literal. Exactly one
-# field needs two admissible values, because SN39's allocation is meant to roll
+# field needs two admissible values, because SN94's allocation is meant to roll
 # from the launch contract (90% validated supply / 10% burn) to v3 (70% Intel
 # TDX / 30% CyberGym / 0% fixed burn) as a deliberate, coordinated re-pin. Every
 # other field of the profile stays single-equality strict.
@@ -3274,8 +3274,8 @@ REQUIRE_POLICY_CHOICES = (
 # Membership, not a predicate: adding a third economy has to be an edit to this
 # tuple in a reviewed commit, exactly as adding one to the profile would be.
 # confidential_primary_v1 is NOT here — it is a valid CLI pin for other subnets,
-# but it is not an SN39 mainnet posture.
-SN39_PINNED_REQUIRE_POLICIES = (
+# but it is not an SN94 mainnet posture.
+SN94_PINNED_REQUIRE_POLICIES = (
     REQUIRE_POLICY_VALIDATED_SUPPLY_V1,
     REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
 )
@@ -4145,7 +4145,7 @@ def _strict_zero_burn_uid30_fleet_contract(
     if (
         lane != "authority"
         or identity.get("network") != "finney"
-        or identity.get("netuid") != 39
+        or identity.get("netuid") != 94
         or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
         or identity.get("validator_hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         or identity.get("fleet_consolidation_schema") != SN39_UID30_FLEET_SCHEMA
@@ -4342,7 +4342,7 @@ def _strict_zero_burn_uid30_successor_contract(
         lane != "authority"
         or identity.get("network") != "finney"
         or type(identity.get("netuid")) is not int
-        or identity.get("netuid") != 39
+        or identity.get("netuid") != 94
         or type(identity.get("validator_uid")) is not int
         or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
         or identity.get("validator_hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
@@ -4467,7 +4467,7 @@ def _strict_zero_burn_uid30_owner_legacy(
         lane != "authority"
         or identity.get("network") != "finney"
         or type(identity.get("netuid")) is not int
-        or identity.get("netuid") != 39
+        or identity.get("netuid") != 94
         or type(identity.get("validator_uid")) is not int
         or identity.get("validator_uid") != SN39_UID30_LAUNCH_VALIDATOR_UID
         or identity.get("validator_hotkey") != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
@@ -4545,7 +4545,7 @@ def _classify_zero_burn_uid30_historical_weights(
     """Prove the exact UID30 mechanism-0 storage row at inclusion.
 
     A decoded successful extrinsic proves what the signer asked the chain to do.
-    The historical storage row proves what SN39 retained for UID30 at the same
+    The historical storage row proves what SN94 retained for UID30 at the same
     finalized block. Archive/RPC failures remain inconclusive so recovery stays
     fenced, while a concrete non-exact row is a terminal contradiction.
     """
@@ -4568,7 +4568,7 @@ def _classify_zero_burn_uid30_historical_weights(
             module="SubtensorModule",
             storage_function="Weights",
             params=[
-                get_mechid_storage_index(39, 0),
+                get_mechid_storage_index(94, 0),
                 SN39_UID30_LAUNCH_VALIDATOR_UID,
             ],
             block_hash=block_hash,
@@ -4601,7 +4601,7 @@ CHAIN_OPERATION_DEADLINE_SECS = 180.0
 # A write is refused unless its evidence remains valid beyond the entire
 # synchronous SDK deadline plus an explicit clock/RPC margin. The mortal era
 # is intentionally short and is also bounded by the evidence block window.
-SN39_MIN_VALIDITY_MARGIN_SECS = 60.0
+SN94_MIN_VALIDITY_MARGIN_SECS = 60.0
 
 # The one NOT_PROVEN reason that is a WAIT rather than a fault: the receipt's
 # block exists and is canonical, but the finalized head has not reached it yet.
@@ -4628,11 +4628,11 @@ RECEIPT_FINALITY_POLL_SECS = 4.0
 # tightens the UID replacement-safety proof rather than loosening it. At the
 # live subnet state that means a worst case of 16 evictions against a rewarded
 # target proven safe to an eviction depth of 112.
-SN39_MORTAL_PERIOD_BLOCKS = 16
+SN94_MORTAL_PERIOD_BLOCKS = 16
 # A launch write must finalize comfortably before the next epoch. UID targets
 # are separately proven replacement-safe for the complete mortal era; there is
 # deliberately no automatic second/corrective weight write.
-SN39_EPOCH_FINALITY_MARGIN_BLOCKS = 32
+SN94_EPOCH_FINALITY_MARGIN_BLOCKS = 32
 
 
 @dataclass(frozen=True)
@@ -4644,7 +4644,7 @@ class InclusionPolicy:
     valid_from_time: datetime
     valid_until_time: datetime
     require_commit_reveal_disabled: bool = True
-    mortal_period_blocks: int = SN39_MORTAL_PERIOD_BLOCKS
+    mortal_period_blocks: int = SN94_MORTAL_PERIOD_BLOCKS
     expected_next_epoch_start_block: int | None = None
 
 
@@ -4748,7 +4748,7 @@ def _require_inclusion_policy_ready(
         raise wire.VectorError(
             "submission time is outside the evidence inclusion window"
         )
-    minimum = CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+    minimum = CHAIN_OPERATION_DEADLINE_SECS + SN94_MIN_VALIDITY_MARGIN_SECS
     if (policy.valid_until_time - moment).total_seconds() < minimum:
         raise wire.VectorError(
             "evidence validity remaining is shorter than the bounded submission "
@@ -4782,7 +4782,7 @@ def _require_inclusion_policy_ready(
     remaining = preflight.blocks_until_next_epoch
     next_epoch = preflight.next_epoch_start_block
     required_epoch_room = (
-        policy.mortal_period_blocks + SN39_EPOCH_FINALITY_MARGIN_BLOCKS
+        policy.mortal_period_blocks + SN94_EPOCH_FINALITY_MARGIN_BLOCKS
     )
     # One refusal, but six distinct reasons — and they call for opposite
     # operator responses. "The tick landed 15 blocks from the epoch boundary"
@@ -4817,7 +4817,7 @@ def _require_inclusion_policy_ready(
             f"only {remaining} block(s) remain in this epoch; a submission "
             f"needs {required_epoch_room} "
             f"({policy.mortal_period_blocks} mortal + "
-            f"{SN39_EPOCH_FINALITY_MARGIN_BLOCKS} finality margin) to prove "
+            f"{SN94_EPOCH_FINALITY_MARGIN_BLOCKS} finality margin) to prove "
             "mortal inclusion and finalized verification. This clears itself "
             f"at block {next_epoch}"
         )
@@ -4869,7 +4869,7 @@ def _chain_weight_cooldown_standdown_seconds(preflight: ChainPreflight) -> float
 
     Derived from the chain's own `weights_rate_limit` so the bound scales with
     whatever the subnet actually configures, rather than pinning a constant
-    that is only right for today's SN39.
+    that is only right for today's SN94.
     """
     rate_limit = preflight.weights_rate_limit
     if (
@@ -5016,7 +5016,7 @@ def _prove_target_hotkey_rotation(
             and call.get("call_module") == "SubtensorModule"
             and call.get("call_function") == "swap_hotkey_v2"
             and _chain_call_arg(call, "new_hotkey") == target_hotkey
-            and _chain_call_arg(call, "netuid") == 39
+            and _chain_call_arg(call, "netuid") == 94
         ):
             matching.append((index, observed))
     if len(matching) != 1:
@@ -5082,7 +5082,7 @@ def _prove_target_hotkey_rotation(
             and event_data["attributes"].get("coldkey") == coldkey
             and event_data["attributes"].get("old_hotkey") == old_hotkey
             and event_data["attributes"].get("new_hotkey") == target_hotkey
-            and event_data["attributes"].get("netuid") == 39
+            and event_data["attributes"].get("netuid") == 94
         ):
             matching_events.append(event_data)
     if len(matching_events) != 1:
@@ -5102,7 +5102,7 @@ def _prove_target_hotkey_rotation(
         "coldkey": coldkey,
         "old_hotkey": old_hotkey,
         "new_hotkey": target_hotkey,
-        "netuid": 39,
+        "netuid": 94,
         "keep_stake": keep_stake,
         "event": "HotkeySwappedOnSubnet",
     }
@@ -5117,7 +5117,7 @@ def _require_uid_mapping_stability(
     if (
         isinstance(mortal_period_blocks, bool)
         or not isinstance(mortal_period_blocks, int)
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
         or not uid_hotkeys
     ):
         raise wire.VectorError("UID stability check has an invalid mortal vector")
@@ -5142,7 +5142,7 @@ def _require_uid_mapping_stability(
     # the exact rotation-lock state of every target and refuse any target whose
     # coldkey has a pending ownership transfer. A live rotation lock is proven
     # end to end when one exists, but it is not required to submit: only the
-    # target coldkey owner can rotate a target, both SN39 targets are
+    # target coldkey owner can rotate a target, both SN94 targets are
     # operator-controlled, and requiring a live lock would force a fresh
     # rotation to a new hotkey before every single broadcast.
     finney = str(preflight.genesis_hash).lower() == FINNEY_GENESIS_HASH
@@ -5273,7 +5273,7 @@ def _require_uid_mapping_stability(
                 )
             raw_last_swap = storage_value(
                 "LastHotkeySwapOnNetuid",
-                [39, coldkey],
+                [94, coldkey],
             )
             try:
                 last_swap_block = int(raw_last_swap)
@@ -5308,15 +5308,15 @@ def _require_uid_mapping_stability(
                     coldkey=coldkey,
                     target_hotkey=hotkey,
                 )
-                successor = storage_value("HotkeySuccessor", [39, hotkey])
-                root = storage_value("HotkeyRoot", [39, hotkey])
+                successor = storage_value("HotkeySuccessor", [94, hotkey])
+                root = storage_value("HotkeyRoot", [94, hotkey])
                 old_successor = storage_value(
                     "HotkeySuccessor",
-                    [39, receipt["old_hotkey"]],
+                    [94, receipt["old_hotkey"]],
                 )
                 old_root = storage_value(
                     "HotkeyRoot",
-                    [39, receipt["old_hotkey"]],
+                    [94, receipt["old_hotkey"]],
                 )
                 expected_root = (
                     str(old_root)
@@ -5408,7 +5408,7 @@ def _require_exact_uid30_fleet_safety(safety: object) -> dict[str, Any]:
         or not isinstance(rotation, Mapping)
         or rotation.get("status") != PASS
         or type(rotation.get("mortal_period_blocks")) is not int
-        or rotation.get("mortal_period_blocks") != SN39_MORTAL_PERIOD_BLOCKS
+        or rotation.get("mortal_period_blocks") != SN94_MORTAL_PERIOD_BLOCKS
         or observed != expected
     ):
         raise wire.VectorError(
@@ -5633,7 +5633,7 @@ def _vector_inclusion_policy(
         raise wire.VectorError("signed vector inclusion requires a finalized block")
     policy = InclusionPolicy(
         valid_from_block=preflight.block,
-        valid_until_block=preflight.block + SN39_MORTAL_PERIOD_BLOCKS,
+        valid_until_block=preflight.block + SN94_MORTAL_PERIOD_BLOCKS,
         valid_from_time=wire._parse_canonical_utc(
             payload.get("generated_at"),
             field="generated_at",
@@ -5734,7 +5734,7 @@ def _validate_chain_constraints(
 ) -> None:
     if preflight.commit_reveal_enabled:
         raise wire.VectorError(
-            "SN39 release proof requires a directly applied set_mechanism_weights "
+            "SN94 release proof requires a directly applied set_mechanism_weights "
             "extrinsic; commit-reveal is enabled, so refusing before submission"
         )
     positive = [float(value) for value in uid_weights.values() if float(value) > 0.0]
@@ -5761,7 +5761,7 @@ def _require_no_validator_compute_reward(
     validator_weight = float(uid_weights.get(preflight.validator_uid, 0.0))
     if validator_weight > 0.0 and preflight.validator_uid != burn_uid:
         raise wire.VectorError(
-            "SN39 validator hotkey cannot receive validated-compute weight"
+            "SN94 validator hotkey cannot receive validated-compute weight"
         )
 
 
@@ -5968,7 +5968,7 @@ def _chain_preflight_unbounded(
         owner_immortal_rows = owner_immortal_rows[:immune_owner_uids_limit]
     owner_immortal_hotkeys = {row[2] for row in owner_immortal_rows}
     free_uid_slots = max_uids - len(uids)
-    maximum_era_registrations = max_regs_per_block * SN39_MORTAL_PERIOD_BLOCKS
+    maximum_era_registrations = max_regs_per_block * SN94_MORTAL_PERIOD_BLOCKS
     if max_regs_per_block == 0:
         uid_mapping_stable_until_block = raw_next_epoch_start
     else:
@@ -5980,7 +5980,7 @@ def _chain_preflight_unbounded(
         hotkey
         for hotkey, registered_at in zip(hotkeys, registration_blocks)
         if registered_at + immunity_period
-        >= finalized_block + SN39_MORTAL_PERIOD_BLOCKS
+        >= finalized_block + SN94_MORTAL_PERIOD_BLOCKS
     }
     prunable_nonimmune_count = sum(
         registered_at + immunity_period <= finalized_block
@@ -6016,7 +6016,7 @@ def _chain_preflight_unbounded(
     # a mid-era maturer is only guaranteed prunable for part of the era, so
     # counting it as a body in front of the target would be optimistic.
     era_prunable_count = sum(
-        registered_at + immunity_period <= finalized_block + SN39_MORTAL_PERIOD_BLOCKS
+        registered_at + immunity_period <= finalized_block + SN94_MORTAL_PERIOD_BLOCKS
         and hotkey not in owner_immortal_hotkeys
         for hotkey, registered_at in zip(hotkeys, registration_blocks)
     )
@@ -6591,7 +6591,7 @@ def _classify_finalized_receipt(
             inclusion_map = dict(zip(inclusion_uids, inclusion_hotkeys))
             inclusion_permits = (
                 [bool(value) for value in inclusion_metagraph.validator_permit]
-                if netuid == 39
+                if netuid == 94
                 else []
             )
             complete_bindings = (
@@ -6599,7 +6599,7 @@ def _classify_finalized_receipt(
                 and len(inclusion_map) == len(inclusion_uids)
                 and _finalized_block(getattr(inclusion_metagraph, "block", None))
                 == block_number
-                and (netuid != 39 or len(inclusion_permits) == len(inclusion_hotkeys))
+                and (netuid != 94 or len(inclusion_permits) == len(inclusion_hotkeys))
             )
         except (AttributeError, TypeError, ValueError) as exc:
             return _receipt_verdict(
@@ -6616,7 +6616,7 @@ def _classify_finalized_receipt(
         inclusion_bindings_ok = all(
             inclusion_map.get(uid) == hotkey for uid, hotkey in uid_hotkeys.items()
         )
-        if netuid == 39:
+        if netuid == 94:
             validator_indexes = [
                 index
                 for index, hotkey in enumerate(inclusion_hotkeys)
@@ -6731,11 +6731,11 @@ def _reverify_reserved_signed_vector(
     payload = identity.get("signed_vector")
     if not isinstance(payload, dict):
         raise wire.VectorError(
-            "SN39 thin reservation carries no signed vector to re-verify"
+            "SN94 thin reservation carries no signed vector to re-verify"
         )
     if _sha256_document(payload) != identity.get("signed_vector_sha256"):
         raise wire.VectorError(
-            "SN39 reserved signed vector does not hash to its reserved digest"
+            "SN94 reserved signed vector does not hash to its reserved digest"
         )
     # Re-load the fence rather than trusting the reservation's policy_version.
     # The fence only advances after a successful write (_write_state_fenced
@@ -6756,17 +6756,17 @@ def _reverify_reserved_signed_vector(
         )
     except Exception as exc:
         raise wire.VectorError(
-            "SN39 reserved signed vector fails signature, wire invariant, or "
+            "SN94 reserved signed vector fails signature, wire invariant, or "
             f"rollback re-verification: {stable_error(exc)}"
         ) from exc
     if _validated_supply_meta(payload) is None:
         raise wire.VectorError(
-            "SN39 reserved signed vector carries no fixed 90/10 supply contract"
+            "SN94 reserved signed vector carries no fixed 90/10 supply contract"
         )
     burn_hotkey = (payload.get("burn_snapshot") or {}).get("burn_hotkey")
     if burn_hotkey != SN39_BURN_HOTKEY or identity.get("burn_hotkey") != burn_hotkey:
         raise wire.VectorError(
-            "SN39 reserved signed vector does not burn to the pinned hotkey"
+            "SN94 reserved signed vector does not burn to the pinned hotkey"
         )
     # Same call the tick used to produce what is about to be written, so a
     # reservation cannot redirect the allocation while keeping a valid payload.
@@ -6785,7 +6785,7 @@ def _reverify_reserved_signed_vector(
         for uid in reverified_uid_weights
     ):
         raise wire.VectorError(
-            "SN39 chain call differs from the allocation its reserved signed "
+            "SN94 chain call differs from the allocation its reserved signed "
             "vector derives"
         )
 
@@ -6868,7 +6868,7 @@ def _authorize_reviewed_uid30_fleet_submission(
         or state.get("submission_pending_proof_status") is not None
         or state.get("submission_active_lane") != "authority"
         or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
-        or state.get("provenance_netuid") != 39
+        or state.get("provenance_netuid") != 94
         or state.get("submission_validator_hotkey")
         != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         or state.get("submission_pending_reviewed_uid30_contract")
@@ -6987,13 +6987,13 @@ def _authorize_reviewed_uid30_fleet_submission(
         version_floor = substrate.query(
             module="SubtensorModule",
             storage_function="WeightsVersionKey",
-            params=[39],
+            params=[94],
             block_hash=current_hash,
         )
         current = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=current_hash,
         )
         historical_hash = str(
@@ -7002,7 +7002,7 @@ def _authorize_reviewed_uid30_fleet_submission(
         historical = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
         )
     except wire.VectorError:
@@ -7027,7 +7027,7 @@ def _authorize_reviewed_uid30_fleet_submission(
         block_hash=SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
         block_number=SN39_UID30_FLEET_PREDECESSOR_BLOCK,
         validator_hotkey=SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
-        netuid=39,
+        netuid=94,
         version_key=SN39_UID30_LAUNCH_VERSION_KEY,
         wire_uids=[
             SN39_UID30_FLEET_PREDECESSOR_SECOND_UID,
@@ -7125,7 +7125,7 @@ def _authorize_reviewed_uid30_submission(
             or state.get("submission_pending_receipt_candidate") is not None
             or state.get("submission_pending_proof_status") is not None
             or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
-            or state.get("provenance_netuid") != 39
+            or state.get("provenance_netuid") != 94
             or state.get("submission_validator_hotkey")
             != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
             or preflight.genesis_hash != FINNEY_GENESIS_HASH
@@ -7169,7 +7169,7 @@ def _authorize_reviewed_uid30_submission(
         or state.get("submission_pending_proof_status") is not None
         or state.get("submission_active_lane") != "authority"
         or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
-        or state.get("provenance_netuid") != 39
+        or state.get("provenance_netuid") != 94
         or state.get("submission_validator_hotkey")
         != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         or preflight.genesis_hash != FINNEY_GENESIS_HASH
@@ -7337,13 +7337,13 @@ def _authorize_reviewed_uid30_submission(
         version_floor = substrate.query(
             module="SubtensorModule",
             storage_function="WeightsVersionKey",
-            params=[39],
+            params=[94],
             block_hash=str(preflight.finalized_hash).lower(),
         )
         current = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=str(preflight.finalized_hash).lower(),
         )
         historical_hash = str(
@@ -7352,7 +7352,7 @@ def _authorize_reviewed_uid30_submission(
         historical = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH,
         )
     except wire.VectorError:
@@ -7372,7 +7372,7 @@ def _authorize_reviewed_uid30_submission(
         block_hash=SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK_HASH,
         block_number=SN39_UID30_SUCCESSOR_PREDECESSOR_BLOCK,
         validator_hotkey=SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
-        netuid=39,
+        netuid=94,
         version_key=SN39_UID30_LAUNCH_VERSION_KEY,
         wire_uids=[SN39_UID30_SUCCESSOR_PREDECESSOR_UID],
         wire_weights=[65535],
@@ -7407,7 +7407,7 @@ def _authorize_reviewed_uid30_submission(
         )
 
 
-def _authorize_sn39_chain_submission(
+def _authorize_sn94_chain_submission(
     args: Any | None,
     *,
     uid_weights: dict[int, float],
@@ -7419,7 +7419,7 @@ def _authorize_sn39_chain_submission(
     preflight: ChainPreflight,
     inclusion_policy: InclusionPolicy | None,
 ) -> None:
-    """Authorize the sole repository SN39 writer at its lowest call boundary.
+    """Authorize the sole repository SN94 writer at its lowest call boundary.
 
     Callers cannot reach the irreversible extrinsic by importing this module
     and calling ``set_weights_on_chain`` directly.  A write must carry the
@@ -7430,7 +7430,7 @@ def _authorize_sn39_chain_submission(
     """
     if args is None:
         raise wire.VectorError(
-            "SN39 chain submission requires an authorized validator runtime"
+            "SN94 chain submission requires an authorized validator runtime"
         )
     if (
         not bool(getattr(args, "broadcast", False))
@@ -7442,7 +7442,7 @@ def _authorize_sn39_chain_submission(
         or getattr(args, "wallet_hotkey", None) != wallet_hotkey
     ):
         raise wire.VectorError(
-            "SN39 chain call differs from its authorized runtime contract"
+            "SN94 chain call differs from its authorized runtime contract"
         )
     _validate_runtime_contract(args)
     _validate_resolved_chain_contract(args, preflight)
@@ -7453,7 +7453,7 @@ def _authorize_sn39_chain_submission(
         != str(preflight.genesis_hash).lower()
     ):
         raise wire.VectorError(
-            "SN39 chain call is not bound to the prepared signer and genesis"
+            "SN94 chain call is not bound to the prepared signer and genesis"
         )
 
     state = _read_state(_submission_state_path(args))
@@ -7479,7 +7479,7 @@ def _authorize_sn39_chain_submission(
         or not (ordinary_lane or authorized_transition)
     ):
         raise wire.VectorError(
-            "SN39 chain submission has no exact durable state-machine reservation"
+            "SN94 chain submission has no exact durable state-machine reservation"
         )
     try:
         reserved_uid_weights = {
@@ -7489,7 +7489,7 @@ def _authorize_sn39_chain_submission(
             int(uid): str(hotkey) for uid, hotkey in identity["uid_hotkeys"]
         }
     except (KeyError, TypeError, ValueError) as exc:
-        raise wire.VectorError("SN39 submission reservation is malformed") from exc
+        raise wire.VectorError("SN94 submission reservation is malformed") from exc
     exact_weights = set(reserved_uid_weights) == set(uid_weights) and all(
         math.isclose(
             reserved_uid_weights[uid],
@@ -7504,17 +7504,17 @@ def _authorize_sn39_chain_submission(
     }
     if (
         identity.get("network") != "finney"
-        or identity.get("netuid") != 39
+        or identity.get("netuid") != 94
         or identity.get("validator_hotkey") != preflight.validator_hotkey
         or not exact_weights
         or not exact_hotkeys
     ):
         raise wire.VectorError(
-            "SN39 chain call differs from its exact durable reservation"
+            "SN94 chain call differs from its exact durable reservation"
         )
     if not isinstance(inclusion_policy, InclusionPolicy):
         raise wire.VectorError(
-            "SN39 chain submission requires an inclusion-time evidence policy"
+            "SN94 chain submission requires an inclusion-time evidence policy"
         )
     try:
         _require_inclusion_policy_ready(inclusion_policy, preflight)
@@ -7534,18 +7534,18 @@ def _authorize_sn39_chain_submission(
     )
     if identity.get("uid_safety") != observed_uid_safety:
         raise wire.VectorError(
-            "SN39 UID/hotkey safety differs from its exact durable reservation"
+            "SN94 UID/hotkey safety differs from its exact durable reservation"
         )
     if identity.get("inclusion_policy") != _inclusion_policy_identity(inclusion_policy):
         raise wire.VectorError(
-            "SN39 inclusion policy differs from its durable reservation"
+            "SN94 inclusion policy differs from its durable reservation"
         )
     if (
         preflight.block is None
         or identity.get("next_epoch_start_block") != preflight.next_epoch_start_block
     ):
         raise wire.VectorError(
-            "SN39 exact next epoch differs from its durable reservation"
+            "SN94 exact next epoch differs from its durable reservation"
         )
     if lane == "thin":
         # Applies to relay, thin-continuous, and launch alike: all three relay a
@@ -7563,7 +7563,7 @@ def _authorize_sn39_chain_submission(
 
     launch = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     if not launch and not _continuous_transition_required(args):
-        # Relay: this runtime owes SN39 no launch of its own, so there is no
+        # Relay: this runtime owes SN94 no launch of its own, so there is no
         # recurring-write authorization to re-prove. Everything that makes the
         # write safe still ran above (pinned trust profile, verified signature,
         # exact durable reservation, UID/epoch/inclusion safety). Refuse a call
@@ -7584,7 +7584,7 @@ def _authorize_sn39_chain_submission(
             not in (None, f"{lane}_bounded")
         ):
             raise wire.VectorError(
-                "SN39 relay chain call claims launch or recurring-write "
+                "SN94 relay chain call claims launch or recurring-write "
                 "authority it cannot present"
             )
         return
@@ -7609,11 +7609,11 @@ def _authorize_sn39_chain_submission(
             != authorization.max_attempts
         ):
             raise wire.VectorError(
-                "SN39 continuous chain call lacks its pre-reservation "
+                "SN94 continuous chain call lacks its pre-reservation "
                 "root-signed recurring-write authorization and durable budget"
             )
         try:
-            from scaffold import sn39_continuous_authorization as recurring
+            from scaffold import sn94_continuous_authorization as recurring
 
             reverified = recurring.verify_authorization(
                 expected={
@@ -7657,7 +7657,7 @@ def _authorize_sn39_chain_submission(
             )
         except Exception as exc:
             raise wire.VectorError(
-                "SN39 recurring-write authorization signature, bytes, expiry, "
+                "SN94 recurring-write authorization signature, bytes, expiry, "
                 "or scope changed before the chain boundary"
             ) from exc
         return
@@ -7680,7 +7680,7 @@ def _authorize_sn39_chain_submission(
         or rewarded != replayed
     ):
         raise wire.VectorError(
-            "SN39 launch chain call lacks its one-shot rewarded-set raw-replay gate"
+            "SN94 launch chain call lacks its one-shot rewarded-set raw-replay gate"
         )
     approval = _require_launch_approval(
         args,
@@ -7698,7 +7698,7 @@ def _authorize_sn39_chain_submission(
     }
     if identity.get("launch_approval") != expected_approval_identity:
         raise wire.VectorError(
-            "SN39 launch reservation differs from its root-controlled approval"
+            "SN94 launch reservation differs from its root-controlled approval"
         )
     expected_freshness_boundary = _require_launch_evidence_after_rotations(
         payload=identity.get("signed_vector") or {},
@@ -7717,7 +7717,7 @@ def _authorize_sn39_chain_submission(
         full.get("vector_agrees") is True,
         full.get("rewarded_hotkeys") == sorted(rewarded),
         full.get("raw_replayed_hotkeys") == sorted(replayed),
-        full.get("verifier_digest") == SN39_VERIFIER_DIGEST,
+        full.get("verifier_digest") == SN94_VERIFIER_DIGEST,
         full.get("verifier_binary_digest")
         == getattr(audit, "verifier_binary_digest", None),
         isinstance(full.get("verifier_binary_digest"), str),
@@ -7726,12 +7726,12 @@ def _authorize_sn39_chain_submission(
         isinstance(full.get("report_signing_key_id"), str),
         full.get("signed_index") == getattr(audit, "signed_index", None),
         isinstance(full.get("signed_index"), dict),
-        full.get("source_revision") == SN39_PRODUCER_REVISION,
+        full.get("source_revision") == SN94_PRODUCER_REVISION,
         full.get("freshness_boundary") == expected_freshness_boundary,
     )
     if not all(full_matches_audit):
         raise wire.VectorError(
-            "SN39 launch reservation does not match the synchronous rewarded-set "
+            "SN94 launch reservation does not match the synchronous rewarded-set "
             "raw replay"
         )
 
@@ -7793,7 +7793,7 @@ def _require_reviewed_uid30_successor_finalized_descendant(
         or expected_weights != wire_weights
         or wire_weights != [65535, 65535]
         or version_key != SN39_UID30_LAUNCH_VERSION_KEY
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
     ):
         raise wire.VectorError(
             "UID30 successor descendant differs from its exact reviewed contract"
@@ -7808,7 +7808,7 @@ def _require_reviewed_uid30_successor_finalized_descendant(
         < mortal_period_blocks * 3
         or not (inclusion.valid_from_time <= moment < inclusion.valid_until_time)
         or (inclusion.valid_until_time - moment).total_seconds()
-        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+        < CHAIN_OPERATION_DEADLINE_SECS + SN94_MIN_VALIDITY_MARGIN_SECS
     ):
         raise wire.VectorError(
             "UID30 successor descendant lacks reviewed time, block, or epoch room"
@@ -7871,13 +7871,13 @@ def _require_reviewed_uid30_successor_finalized_descendant(
             live_uid_raw = substrate.query(
                 module="SubtensorModule",
                 storage_function="Uids",
-                params=[39, hotkey],
+                params=[94, hotkey],
                 block_hash=latest_finalized_hash,
             )
             live_hotkey_raw = substrate.query(
                 module="SubtensorModule",
                 storage_function="Keys",
-                params=[39, uid],
+                params=[94, uid],
                 block_hash=latest_finalized_hash,
             )
             live_uid = getattr(live_uid_raw, "value", live_uid_raw)
@@ -7891,14 +7891,14 @@ def _require_reviewed_uid30_successor_finalized_descendant(
         current_weights_raw = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=latest_finalized_hash,
         )
         current_weights = getattr(current_weights_raw, "value", current_weights_raw)
         version_floor_raw = substrate.query(
             module="SubtensorModule",
             storage_function="WeightsVersionKey",
-            params=[39],
+            params=[94],
             block_hash=latest_finalized_hash,
         )
         version_floor = getattr(version_floor_raw, "value", version_floor_raw)
@@ -7916,35 +7916,35 @@ def _require_reviewed_uid30_successor_finalized_descendant(
         if hasattr(stake_threshold, "item"):
             stake_threshold = stake_threshold.item()
         latest_commit_reveal = preflight.subtensor.commit_reveal_enabled(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_owner = preflight.subtensor.get_subnet_owner_hotkey(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_min_weights = preflight.subtensor.min_allowed_weights(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_max_weight = preflight.subtensor.max_weight_limit(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_next_epoch = preflight.subtensor.get_next_epoch_start_block(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_rate_limit = preflight.subtensor.weights_rate_limit(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_mechanism_count = preflight.subtensor.get_mechanism_count(
-            39,
+            94,
             block=latest_finalized_block,
         )
         info = preflight.subtensor.get_metagraph_info(
-            39,
+            94,
             0,
             block=latest_finalized_block,
         )
@@ -8198,7 +8198,7 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
         or wire_uids != [SN39_UID30_FLEET_TARGET_UID]
         or wire_weights != [65535]
         or version_key != SN39_UID30_LAUNCH_VERSION_KEY
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
         or preflight.block is None
         or preflight.block <= 0
         or drift <= 0
@@ -8243,7 +8243,7 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
         or inclusion.require_commit_reveal_disabled is not True
         or not (inclusion.valid_from_time <= moment < inclusion.valid_until_time)
         or (inclusion.valid_until_time - moment).total_seconds()
-        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+        < CHAIN_OPERATION_DEADLINE_SECS + SN94_MIN_VALIDITY_MARGIN_SECS
     ):
         raise wire.VectorError(
             "UID30 fleet descendant lacks reviewed time, block, or epoch room"
@@ -8322,13 +8322,13 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
             live_uid_raw = substrate.query(
                 module="SubtensorModule",
                 storage_function="Uids",
-                params=[39, hotkey],
+                params=[94, hotkey],
                 block_hash=latest_finalized_hash,
             )
             live_hotkey_raw = substrate.query(
                 module="SubtensorModule",
                 storage_function="Keys",
-                params=[39, uid],
+                params=[94, uid],
                 block_hash=latest_finalized_hash,
             )
             live_uid = getattr(live_uid_raw, "value", live_uid_raw)
@@ -8339,14 +8339,14 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
         current_weights_raw = substrate.query(
             module="SubtensorModule",
             storage_function="Weights",
-            params=[get_mechid_storage_index(39, 0), 30],
+            params=[get_mechid_storage_index(94, 0), 30],
             block_hash=latest_finalized_hash,
         )
         current_weights = getattr(current_weights_raw, "value", current_weights_raw)
         version_floor_raw = substrate.query(
             module="SubtensorModule",
             storage_function="WeightsVersionKey",
-            params=[39],
+            params=[94],
             block_hash=latest_finalized_hash,
         )
         version_floor = getattr(version_floor_raw, "value", version_floor_raw)
@@ -8360,35 +8360,35 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
         if hasattr(stake_threshold, "item"):
             stake_threshold = stake_threshold.item()
         latest_commit_reveal = preflight.subtensor.commit_reveal_enabled(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_owner = preflight.subtensor.get_subnet_owner_hotkey(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_min_weights = preflight.subtensor.min_allowed_weights(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_max_weight = preflight.subtensor.max_weight_limit(
-            netuid=39,
+            netuid=94,
             block=latest_finalized_block,
         )
         latest_next_epoch = preflight.subtensor.get_next_epoch_start_block(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_rate_limit = preflight.subtensor.weights_rate_limit(
-            39,
+            94,
             block=latest_finalized_block,
         )
         latest_mechanism_count = preflight.subtensor.get_mechanism_count(
-            39,
+            94,
             block=latest_finalized_block,
         )
         info = preflight.subtensor.get_metagraph_info(
-            39,
+            94,
             0,
             block=latest_finalized_block,
         )
@@ -8452,10 +8452,10 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
             return getattr(observed, "value", observed)
 
         latest_min_nonimmune = strict_int_field(
-            storage_value("MinNonImmuneUids", [39]),
+            storage_value("MinNonImmuneUids", [94]),
             "minimum nonimmune UIDs",
         )
-        latest_owner_coldkey = str(storage_value("SubnetOwner", [39]) or "")
+        latest_owner_coldkey = str(storage_value("SubnetOwner", [94]) or "")
         raw_owned_hotkeys = storage_value(
             "OwnedHotkeys",
             [latest_owner_coldkey],
@@ -8464,7 +8464,7 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
             raise ValueError("owned hotkeys are not a sequence")
         latest_owned_hotkeys = [str(value) for value in raw_owned_hotkeys]
         latest_owner_limit = strict_int_field(
-            storage_value("ImmuneOwnerUidsLimit", [39]),
+            storage_value("ImmuneOwnerUidsLimit", [94]),
             "immune owner UID limit",
         )
         raw_swap_interval = substrate.get_constant(
@@ -8492,7 +8492,7 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
         for uid, hotkey in sorted(expected_predecessor_hotkeys.items()):
             coldkey = str(storage_value("Owner", [hotkey]) or "")
             last_swap = strict_int_field(
-                storage_value("LastHotkeySwapOnNetuid", [39, coldkey]),
+                storage_value("LastHotkeySwapOnNetuid", [94, coldkey]),
                 "last hotkey swap block",
             )
             pending_coldkey_swap = storage_value(
@@ -8729,7 +8729,7 @@ def _require_reviewed_uid30_fleet_finalized_descendant(
     end_block, end_hash = _finalized_chain_head(preflight.subtensor)
     if (end_block, end_hash) != (latest_finalized_block, latest_finalized_hash):
         raise _RetryablePreSignHeadDrift(
-            "SN39 finalized head advanced during UID30 fleet descendant validation; "
+            "SN94 finalized head advanced during UID30 fleet descendant validation; "
             "refusing before signing"
         )
 
@@ -8764,7 +8764,7 @@ def _require_reviewed_uid30_finalized_descendant(
         or latest_finalized_block >= preflight.block + mortal_period_blocks
     ):
         raise _RetryablePreSignHeadDrift(
-            "SN39 finalized head moved outside the reviewed UID30 launch window; "
+            "SN94 finalized head moved outside the reviewed UID30 launch window; "
             "refusing before signing"
         )
 
@@ -8891,7 +8891,7 @@ def _require_reviewed_uid30_finalized_descendant(
     )
     if (
         state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
-        or state.get("provenance_netuid") != 39
+        or state.get("provenance_netuid") != 94
         or state.get("submission_validator_hotkey")
         != SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         or state.get("submission_pending_launch_attempt") is not True
@@ -8969,7 +8969,7 @@ def _require_reviewed_uid30_finalized_descendant(
             < inclusion_policy.valid_until_time
         )
         or (inclusion_policy.valid_until_time - moment).total_seconds()
-        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+        < CHAIN_OPERATION_DEADLINE_SECS + SN94_MIN_VALIDITY_MARGIN_SECS
     ):
         raise wire.VectorError(
             "UID30 descendant signing lacks the reviewed time, block, or epoch room"
@@ -9048,7 +9048,7 @@ def _require_reviewed_uid30_finalized_descendant(
         target_hotkey_raw = substrate.query(
             module="SubtensorModule",
             storage_function="Keys",
-            params=[39, target_uid],
+            params=[94, target_uid],
             block_hash=latest_finalized_hash,
         )
         target_hotkey = getattr(target_hotkey_raw, "value", target_hotkey_raw)
@@ -9082,7 +9082,7 @@ def _require_uid30_descendant_signing_window(
     signing_block, signing_hash = _finalized_chain_head(preflight.subtensor)
     if (signing_block, signing_hash) != validated_head:
         raise _RetryablePreSignHeadDrift(
-            "SN39 finalized head advanced after bounded descendant validation; "
+            "SN94 finalized head advanced after bounded descendant validation; "
             "refusing before signing"
         )
     if reviewed_uid30 is None:
@@ -9098,14 +9098,14 @@ def _require_uid30_descendant_signing_window(
             < signing_policy.valid_until_time
         )
         or (signing_policy.valid_until_time - signing_moment).total_seconds()
-        < CHAIN_OPERATION_DEADLINE_SECS + SN39_MIN_VALIDITY_MARGIN_SECS
+        < CHAIN_OPERATION_DEADLINE_SECS + SN94_MIN_VALIDITY_MARGIN_SECS
     ):
         raise wire.VectorError(
             "UID30 descendant signing evidence time window expired before signature"
         )
 
 
-def _submit_exact_sn39_extrinsic(
+def _submit_exact_sn94_extrinsic(
     preflight: ChainPreflight,
     *,
     runtime_contract: Any,
@@ -9117,11 +9117,11 @@ def _submit_exact_sn39_extrinsic(
     mortal_period_blocks: int,
     allow_reviewed_uid30_finalized_descendant: bool = False,
 ) -> Any:
-    """Sign one pinned-era SN39 call and journal its hash before broadcast.
+    """Sign one pinned-era SN94 call and journal its hash before broadcast.
 
     The generic SDK weight helper chooses its mortal-era reference block inside
     the signing call. That head can be later than the finalized block whose UID
-    mappings and evidence window were authorized. SN39 therefore composes the
+    mappings and evidence window were authorized. SN94 therefore composes the
     same pallet call directly, pins the era to the proven finalized block, and
     fsyncs the exact signed hash and nonce before submitting it. A restart can
     identify this transaction cryptographically and never has to infer it from
@@ -9133,15 +9133,15 @@ def _submit_exact_sn39_extrinsic(
     if (
         preflight.block is None
         or preflight.block <= 0
-        or netuid != 39
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or netuid != 94
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
         or len(wire_uids) != len(wire_weights)
         or not wire_uids
     ):
-        raise wire.VectorError("SN39 exact signing contract is malformed")
+        raise wire.VectorError("SN94 exact signing contract is malformed")
     substrate = getattr(preflight.subtensor, "substrate", None)
     if substrate is None:
-        raise wire.VectorError("SN39 exact signing has no substrate interface")
+        raise wire.VectorError("SN94 exact signing has no substrate interface")
     latest_finalized_block, latest_finalized_hash = _finalized_chain_head(
         preflight.subtensor
     )
@@ -9153,7 +9153,7 @@ def _submit_exact_sn39_extrinsic(
     if not exact_finalized_head:
         if allow_reviewed_uid30_finalized_descendant is not True:
             raise _RetryablePreSignHeadDrift(
-                "SN39 finalized head advanced after preflight; refusing before signing"
+                "SN94 finalized head advanced after preflight; refusing before signing"
             )
         _require_reviewed_uid30_finalized_descendant(
             preflight,
@@ -9222,9 +9222,9 @@ def _submit_exact_sn39_extrinsic(
         )
     nonce = substrate.get_account_next_index(preflight.wallet.hotkey.ss58_address)
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
-        raise wire.VectorError("SN39 validator nonce is malformed")
+        raise wire.VectorError("SN94 validator nonce is malformed")
     # A relay has no recurring-write authorization and therefore no signed
-    # nonce window to check. The launch runtime and any runtime that owes SN39
+    # nonce window to check. The launch runtime and any runtime that owes SN94
     # a launch still must present one before the account nonce is used.
     if (
         not bool(
@@ -9244,10 +9244,10 @@ def _submit_exact_sn39_extrinsic(
         )
         if not isinstance(authorization, ContinuousAuthorization):
             raise wire.VectorError(
-                "SN39 recurring submission has no signed nonce allowance"
+                "SN94 recurring submission has no signed nonce allowance"
             )
         try:
-            from scaffold import sn39_continuous_authorization as recurring
+            from scaffold import sn94_continuous_authorization as recurring
 
             recurring.assert_nonce_ready(
                 authorization,
@@ -9255,7 +9255,7 @@ def _submit_exact_sn39_extrinsic(
             )
         except Exception as exc:
             raise wire.VectorError(
-                "SN39 validator account nonce is outside the signed recurring-write "
+                "SN94 validator account nonce is outside the signed recurring-write "
                 "allowance"
             ) from exc
     unlocked = ExtrinsicResponse.unlock_wallet(
@@ -9264,7 +9264,7 @@ def _submit_exact_sn39_extrinsic(
         "hotkey",
     )
     if getattr(unlocked, "success", None) is not True:
-        raise wire.VectorError("SN39 validator hotkey could not be unlocked")
+        raise wire.VectorError("SN94 validator hotkey could not be unlocked")
     if validated_descendant_head is not None:
         # Unlocking may wait for an operator. Repeat the lightweight head and
         # evidence-time check after that wait so no prompt-sized gap reaches
@@ -9294,9 +9294,9 @@ def _submit_exact_sn39_extrinsic(
     try:
         extrinsic_hash = f"0x{signed.extrinsic_hash.hex()}".lower()
     except (AttributeError, TypeError, ValueError) as exc:
-        raise wire.VectorError("SN39 signed extrinsic has no canonical hash") from exc
+        raise wire.VectorError("SN94 signed extrinsic has no canonical hash") from exc
     if _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None:
-        raise wire.VectorError("SN39 signed extrinsic hash is malformed")
+        raise wire.VectorError("SN94 signed extrinsic hash is malformed")
     _record_pending_broadcast_intent(
         runtime_contract,
         attempt_id=attempt_id,
@@ -9317,20 +9317,20 @@ def _submit_exact_sn39_extrinsic(
     if returned_hash != extrinsic_hash:
         if _CHAIN_HASH_RE.fullmatch(returned_hash) is not None:
             raise _PostSignedSubmissionMismatch(
-                "SN39 submission receipt differs from its pre-journaled signed hash"
+                "SN94 submission receipt differs from its pre-journaled signed hash"
             )
         raise _PendingReceiptNotProven(
-            "SN39 submit returned no canonical receipt hash; the exact signed "
+            "SN94 submit returned no canonical receipt hash; the exact signed "
             "attempt remains fenced for restart-only proof"
         )
     receipt_success = getattr(receipt, "is_success", None)
     if receipt_success is False:
         raise _PostSignedSubmissionMismatch(
-            "SN39 signed transaction finalized without successful execution"
+            "SN94 signed transaction finalized without successful execution"
         )
     if receipt_success is not True:
         raise _PendingReceiptNotProven(
-            "SN39 submit returned no provable execution result; the exact signed "
+            "SN94 submit returned no provable execution result; the exact signed "
             "attempt remains fenced for restart-only proof"
         )
     return receipt
@@ -9397,8 +9397,8 @@ def set_weights_on_chain(
                 wallet_hotkey=wallet_hotkey,
                 deadline_secs=deadline_secs,
             )
-        if broadcast and netuid == 39:
-            _authorize_sn39_chain_submission(
+        if broadcast and netuid == 94:
+            _authorize_sn94_chain_submission(
                 runtime_contract,
                 uid_weights=uid_weights,
                 uid_hotkeys=uid_hotkeys,
@@ -9412,7 +9412,7 @@ def set_weights_on_chain(
         _validate_chain_constraints(uid_weights, preflight)
         mortal_period = (
             inclusion_policy.mortal_period_blocks
-            if broadcast and netuid == 39 and inclusion_policy is not None
+            if broadcast and netuid == 94 and inclusion_policy is not None
             else 128
         )
         if not broadcast:
@@ -9423,7 +9423,7 @@ def set_weights_on_chain(
             )
             return ChainSubmission(success=True)
         with _chain_operation_deadline("weight submission", deadline_secs):
-            if netuid == 39:
+            if netuid == 94:
                 state = (
                     _read_state(_submission_state_path(runtime_contract))
                     if runtime_contract is not None
@@ -9436,11 +9436,11 @@ def set_weights_on_chain(
                     or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
                 ):
                     raise wire.VectorError(
-                        "SN39 authorized call has no durable pending attempt"
+                        "SN94 authorized call has no durable pending attempt"
                     )
                 primary_call_started = True
                 _mark_tick_reached_chain_call(runtime_contract)
-                receipt = _submit_exact_sn39_extrinsic(
+                receipt = _submit_exact_sn94_extrinsic(
                     preflight,
                     runtime_contract=runtime_contract,
                     attempt_id=attempt_id,
@@ -9453,8 +9453,8 @@ def set_weights_on_chain(
                 resp = receipt
                 ok = True
             else:
-                # Non-SN39 callers retain the standard SDK helper. The exact
-                # signer/journal path above is the sole SN39 write primitive.
+                # Non-SN94 callers retain the standard SDK helper. The exact
+                # signer/journal path above is the sole SN94 write primitive.
                 from bittensor.core.extrinsics.weights import set_weights_extrinsic
                 from bittensor.core.settings import version_as_int
 
@@ -9525,14 +9525,14 @@ def set_weights_on_chain(
                     block_number=receipt_block_number,
                     finalized=False,
                 )
-                if netuid == 39:
+                if netuid == 94:
                     if (
                         runtime_contract is None
                         or not isinstance(attempt_id, str)
                         or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
                     ):
                         raise wire.VectorError(
-                            "SN39 successful call has no durable pending attempt"
+                            "SN94 successful call has no durable pending attempt"
                         )
                     _record_pending_submission_receipt(
                         runtime_contract,
@@ -9563,7 +9563,7 @@ def set_weights_on_chain(
                     inclusion_policy=inclusion_policy,
                     reason_out=proof_reason,
                 )
-                if netuid == 39 and isinstance(attempt_id, str):
+                if netuid == 94 and isinstance(attempt_id, str):
                     _record_pending_proof_status(
                         runtime_contract,
                         attempt_id=attempt_id,
@@ -9591,7 +9591,7 @@ def set_weights_on_chain(
     except Exception as exc:
         unsigned_aborted = False
         if (
-            netuid == 39
+            netuid == 94
             and runtime_contract is not None
             and isinstance(attempt_id, str)
         ):
@@ -9612,7 +9612,7 @@ def set_weights_on_chain(
         _lifecycle(event, f"uids={len(ordered)} reason={type(exc).__name__}")
         if (
             event == "CHAIN ambiguous"
-            and netuid == 39
+            and netuid == 94
             and runtime_contract is not None
             and not isinstance(
                 exc,
@@ -9655,9 +9655,9 @@ def set_weights_on_chain(
                 "CHAIN ambiguous",
                 f"uids={len(ordered)} success=True receipt_identity=incomplete",
             )
-            if netuid == 39:
+            if netuid == 94:
                 raise _PendingReceiptNotProven(
-                    "the successful SN39 response has no complete canonical receipt "
+                    "the successful SN94 response has no complete canonical receipt "
                     "identity; the exact signed attempt remains fenced"
                 ) from exc
             raise
@@ -9757,7 +9757,7 @@ def _chain_connection(network: str):
     connection built and dropped therefore strands a socket and a file
     descriptor for the remaining life of the process.
 
-    The validator builds several of these per tick. Measured on SN39 mainnet
+    The validator builds several of these per tick. Measured on SN94 mainnet
     at 4 stranded descriptors per 25-minute tick (~10/hour), which walks a
     long-running validator into its RLIMIT_NOFILE ceiling (1024 by default)
     in about three days. Past that it cannot open a socket at all, so it
@@ -9821,7 +9821,7 @@ def _validated_historical_hotkeys(raw_hotkeys, *, metagraph_block, requested_blo
 
 
 def _historical_metagraph_lookup(network: str, netuid: int):
-    """A callable resolving the SN39 metagraph AT a historical block to its
+    """A callable resolving the SN94 metagraph AT a historical block to its
     exact hotkey set via the validator's own subtensor connection
     (Subtensor.metagraph(netuid, block=block)). Returns None when the
     history is unavailable, malformed, or not actually at the requested
@@ -9860,7 +9860,7 @@ def _metagraph_snapshot(
         mapping = {hk: int(uid) for uid, hk in zip(mg.uids.tolist(), mg.hotkeys)}
     if commit_reveal_enabled:
         raise wire.VectorError(
-            "SN39 release health requires commit-reveal disabled at the "
+            "SN94 release health requires commit-reveal disabled at the "
             "finalized snapshot"
         )
     if _finalized_block(mg_block) != finalized_block:
@@ -10406,23 +10406,23 @@ def _validate_resolved_chain_contract(
     args: Any,
     preflight: ChainPreflight,
     *,
-    require_sn39_identity: bool = False,
+    require_sn94_identity: bool = False,
 ) -> None:
-    """Enforce the SN39 contract against the connected chain, not its label."""
+    """Enforce the SN94 contract against the connected chain, not its label."""
     if (
-        (not bool(getattr(args, "broadcast", False)) and not require_sn39_identity)
+        (not bool(getattr(args, "broadcast", False)) and not require_sn94_identity)
         or bool(getattr(args, "offline", False))
-        or int(getattr(args, "netuid", -1)) != 39
+        or int(getattr(args, "netuid", -1)) != 94
     ):
         return
     genesis_hash = str(preflight.genesis_hash).lower()
     if genesis_hash != FINNEY_GENESIS_HASH:
         raise wire.VectorError(
-            "SN39 broadcast is supported only on the pinned Finney genesis"
+            "SN94 broadcast is supported only on the pinned Finney genesis"
         )
     if str(getattr(args, "network", "")).strip().lower() != "finney":
         raise wire.VectorError(
-            "Finney SN39 broadcast requires the `finney` signed-vector audience "
+            "Finney SN94 broadcast requires the `finney` signed-vector audience "
             "even when a self-hosted RPC endpoint is used"
         )
     # Same closed two-value set as the startup trust profile, re-checked here
@@ -10430,9 +10430,9 @@ def _validate_resolved_chain_contract(
     # single-equality on v1, a re-pin to v3 would clear the startup profile and
     # then die at chain preflight on every tick — a validator that starts
     # cleanly and never writes.
-    if getattr(args, "require_policy", None) not in SN39_PINNED_REQUIRE_POLICIES:
+    if getattr(args, "require_policy", None) not in SN94_PINNED_REQUIRE_POLICIES:
         raise wire.VectorError(
-            "Finney SN39 broadcast requires the validated_supply_v1 or "
+            "Finney SN94 broadcast requires the validated_supply_v1 or "
             "validated_supply_v3 policy"
         )
     if preflight.min_allowed_weights != 1 or not math.isclose(
@@ -10442,11 +10442,11 @@ def _validate_resolved_chain_contract(
         abs_tol=1e-12,
     ):
         raise wire.VectorError(
-            "Finney SN39 broadcast requires min_allowed_weights=1 and "
+            "Finney SN94 broadcast requires min_allowed_weights=1 and "
             "max_weight_limit=1.0 so revocation can fail safe to burn"
         )
     if preflight.commit_reveal_enabled:
-        raise wire.VectorError("Finney SN39 broadcast requires commit-reveal disabled")
+        raise wire.VectorError("Finney SN94 broadcast requires commit-reveal disabled")
     expected_burn_hotkey = getattr(args, "provenance_burn_hotkey", None)
     if (
         not isinstance(expected_burn_hotkey, str)
@@ -10455,12 +10455,12 @@ def _validate_resolved_chain_contract(
         or preflight.hotkey_to_uid.get(expected_burn_hotkey) is None
     ):
         raise wire.VectorError(
-            "Finney SN39 broadcast requires the pinned burn hotkey to remain "
+            "Finney SN94 broadcast requires the pinned burn hotkey to remain "
             "the live subnet owner"
         )
     if _submission_runtime_root(args) != _VALIDATOR_RUNTIME_ROOT:
         raise wire.VectorError(
-            "Finney SN39 broadcast requires the canonical owner-only "
+            "Finney SN94 broadcast requires the canonical owner-only "
             f"runtime root {_VALIDATOR_RUNTIME_ROOT}"
         )
 
@@ -10523,7 +10523,7 @@ def _prepare_tick_preflight(args: Any) -> None:
 #
 # 512 is more than five times that 96-attempt ceiling, so
 # `submission_finalized_id` survives even if five consecutive fully spent
-# authorizations expired without a single inclusion. At the live SN39 rate (77
+# authorizations expired without a single inclusion. At the live SN94 rate (77
 # signed attempts in ~9 days) it is about two months of history and caps the
 # field near 37 KB. Both ids that ARE looked up are pinned explicitly at the
 # call site regardless of the window, so the size is a retention choice rather
@@ -10673,14 +10673,14 @@ def _reserve_common_submission(
     recurring_required = bool(
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
-        and int(getattr(args, "netuid", -1)) == 39
+        and int(getattr(args, "netuid", -1)) == 94
         and not launch_attempt
         and _continuous_transition_required(args)
         and not successor
     )
     if recurring_required and not isinstance(authorization, ContinuousAuthorization):
         raise ValueError(
-            "SN39 recurring reservation lacks a separate signed authorization"
+            "SN94 recurring reservation lacks a separate signed authorization"
         )
     if isinstance(authorization, ContinuousAuthorization):
         authorization_identity = _continuous_authorization_identity(authorization)
@@ -11231,7 +11231,7 @@ def _record_pending_broadcast_intent(
         or isinstance(era_reference_block, bool)
         or not isinstance(era_reference_block, int)
         or era_reference_block <= 0
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
         or isinstance(version_key, bool)
         or not isinstance(version_key, int)
         or version_key < 0
@@ -11531,7 +11531,7 @@ def _recover_common_finalized_submission(
         ) from exc
     if (
         identity.get("network") != "finney"
-        or identity.get("netuid") != 39
+        or identity.get("netuid") != 94
         or state.get("submission_genesis_hash") != FINNEY_GENESIS_HASH
         or identity.get("validator_hotkey") != state.get("submission_validator_hotkey")
         or intent_era_reference_block != identity.get("mapping_block")
@@ -11564,7 +11564,7 @@ def _recover_common_finalized_submission(
         or isinstance(intent_era_reference_block, bool)
         or not isinstance(intent_era_reference_block, int)
         or intent_era_reference_block <= 0
-        or intent_mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or intent_mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
         or isinstance(intent_version_key, bool)
         or not isinstance(intent_version_key, int)
         or any(
@@ -11812,7 +11812,7 @@ def _locate_pending_broadcast_receipt(
         or isinstance(era_reference_block, bool)
         or not isinstance(era_reference_block, int)
         or era_reference_block <= 0
-        or mortal_period_blocks != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal_period_blocks != SN94_MORTAL_PERIOD_BLOCKS
     ):
         return NOT_PROVEN, None
     matches: list[ChainSubmission] = []
@@ -12190,7 +12190,7 @@ def _recover_pending_launch_receipt(
             or isinstance(intent_mortal_period, bool)
             or not isinstance(intent_mortal_period, int)
             or intent_mortal_period != inclusion_policy.mortal_period_blocks
-            or intent_mortal_period != SN39_MORTAL_PERIOD_BLOCKS
+            or intent_mortal_period != SN94_MORTAL_PERIOD_BLOCKS
             or isinstance(version_key, bool)
             or not isinstance(version_key, int)
             or version_key < 0
@@ -12212,7 +12212,7 @@ def _recover_pending_launch_receipt(
                 era_reference_block=intent_era_reference_block,
                 mortal_period_blocks=intent_mortal_period,
                 validator_hotkey=preflight.validator_hotkey,
-                netuid=39,
+                netuid=94,
                 version_key=version_key,
                 wire_uids=wire_uids,
                 wire_weights=wire_weights,
@@ -12268,7 +12268,7 @@ def _recover_pending_launch_receipt(
             raise wire.VectorError("pending receipt candidate is malformed") from exc
         if (
             identity.get("network") != "finney"
-            or identity.get("netuid") != 39
+            or identity.get("netuid") != 94
             or identity.get("validator_hotkey") != preflight.validator_hotkey
             or state.get("submission_genesis_hash") != preflight.genesis_hash
             or _CHAIN_HASH_RE.fullmatch(extrinsic_hash) is None
@@ -12295,7 +12295,7 @@ def _recover_pending_launch_receipt(
                     block_hash=block_hash,
                     block_number=block_number,
                     validator_hotkey=preflight.validator_hotkey,
-                    netuid=39,
+                    netuid=94,
                     version_key=version_key,
                     wire_uids=wire_uids,
                     wire_weights=wire_weights,
@@ -12569,7 +12569,7 @@ def _match_signed_public_release_to_launch(
         public_result.get("historical_launch") == PASS,
         public_result.get("evidence_checkpoint") == PASS,
         release.get("network") == identity.get("network") == "finney",
-        release.get("netuid") == identity.get("netuid") == 39,
+        release.get("netuid") == identity.get("netuid") == 94,
         launch.get("vector_id") == identity.get("vector_id"),
         launch.get("policy_version") == identity.get("policy_version"),
         launch.get("signed_vector_sha256") == identity.get("signed_vector_sha256"),
@@ -12596,7 +12596,7 @@ def _match_signed_public_release_to_launch(
         broadcast_intent == state.get("submission_launch_broadcast_intent"),
         broadcast_intent.get("extrinsic_hash") == extrinsic.get("hash"),
         broadcast_intent.get("era_reference_block") == mapping.get("block"),
-        broadcast_intent.get("mortal_period_blocks") == SN39_MORTAL_PERIOD_BLOCKS,
+        broadcast_intent.get("mortal_period_blocks") == SN94_MORTAL_PERIOD_BLOCKS,
         broadcast_intent.get("version_key") == extrinsic.get("version_key"),
         broadcast_intent.get("wire_uids") == extrinsic.get("uids"),
         broadcast_intent.get("wire_weights") == extrinsic.get("weights_u16"),
@@ -12658,7 +12658,7 @@ def reconcile_launch_transition(args: Any) -> dict[str, Any]:
     _validate_resolved_chain_contract(
         args,
         preflight,
-        require_sn39_identity=True,
+        require_sn94_identity=True,
     )
     _bind_submission_identity(args, preflight)
     with _submission_tick_lock(args, lane="thin"):
@@ -12706,9 +12706,9 @@ def reconcile_launch_transition(args: Any) -> dict[str, Any]:
         ):
             raise wire.VectorError("finalized launch identity differs from the chain")
         try:
-            from scaffold import sn39_public_reproduction
+            from scaffold import sn94_public_reproduction
 
-            public_result = sn39_public_reproduction.verify_public_release()
+            public_result = sn94_public_reproduction.verify_public_release()
             public_seal = _match_signed_public_release_to_launch(
                 public_result=public_result,
                 state=state,
@@ -12801,9 +12801,9 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
     if not isinstance(identity, dict):
         raise wire.VectorError("continuous launch identity is missing")
     try:
-        from scaffold import sn39_public_reproduction
+        from scaffold import sn94_public_reproduction
 
-        public_result = sn39_public_reproduction.verify_public_release()
+        public_result = sn94_public_reproduction.verify_public_release()
         public_seal = _match_signed_public_release_to_launch(
             public_result=public_result,
             state=state,
@@ -12862,7 +12862,7 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
         else "thin"
     )
     try:
-        from scaffold import sn39_continuous_authorization as recurring
+        from scaffold import sn94_continuous_authorization as recurring
 
         verified = recurring.verify_authorization(
             expected={
@@ -12903,8 +12903,8 @@ def _require_continuous_launch_transition(args: Any) -> ContinuousAuthorization:
     )
 
 
-def _sn39_launch_lineage(args: Any) -> bool | None:
-    """Report whether this runtime's own journal records an SN39 launch.
+def _sn94_launch_lineage(args: Any) -> bool | None:
+    """Report whether this runtime's own journal records an SN94 launch.
 
     Returns None when the canonical signer/genesis identity is not resolved
     yet. The journal is addressed BY that identity, so before it is bound the
@@ -12953,13 +12953,13 @@ def _sn39_launch_lineage(args: Any) -> bool | None:
     )
 
 
-def _sn39_launch_obligation(args: Any) -> bool:
-    """Does THIS runtime owe SN39 its own completed one-shot launch?
+def _sn94_launch_obligation(args: Any) -> bool:
+    """Does THIS runtime owe SN94 its own completed one-shot launch?
 
     The mainnet launch is a subnet-level event, not a per-validator one. A
     public validator that only relays Cathedral's signed vector can never
     satisfy a per-validator launch gate, so an unconditional gate locks every
-    operator except Cathedral out of SN39 entirely. The obligation therefore
+    operator except Cathedral out of SN94 entirely. The obligation therefore
     tracks the things an operator cannot simply restate in a config file:
 
       1. the internal ``provenance="authority"`` marker retained for bounded
@@ -12977,9 +12977,9 @@ def _sn39_launch_obligation(args: Any) -> bool:
     if bool(getattr(args, "require_full_provenance_for_broadcast", False)):
         return True
     for path in (
-        SN39_LAUNCH_CONTROLLED_DIR,
-        SN39_LAUNCH_VERIFIER_BINARY,
-        SN39_LAUNCH_APPROVAL_FILE,
+        SN94_LAUNCH_CONTROLLED_DIR,
+        SN94_LAUNCH_VERIFIER_BINARY,
+        SN94_LAUNCH_APPROVAL_FILE,
     ):
         try:
             os.stat(path)
@@ -12990,19 +12990,19 @@ def _sn39_launch_obligation(args: Any) -> bool:
             # launch material; refusing the broadcast is the safe direction.
             return True
         return True
-    return _sn39_launch_lineage(args) is True
+    return _sn94_launch_lineage(args) is True
 
 
 def _continuous_transition_required(args: Any) -> bool:
     if (
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
-        and int(getattr(args, "netuid", -1)) == 39
-        and _sn39_launch_obligation(args)
+        and int(getattr(args, "netuid", -1)) == 94
+        and _sn94_launch_obligation(args)
         and not bool(getattr(args, "beta_skip_launch_ceremony", False))
     ):
         # No operator-controlled label, endpoint, config, or direct CLI
-        # invocation may weaken the SN39 transition requirement for a runtime
+        # invocation may weaken the SN94 transition requirement for a runtime
         # that originates weights or holds/has held launch material.
         #
         # BETA ESCAPE, deliberate and narrow. `beta_skip_launch_ceremony`
@@ -13021,12 +13021,12 @@ def _continuous_transition_required(args: Any) -> bool:
     explicit = getattr(args, "require_completed_launch_for_broadcast", None)
     if explicit is not None:
         return bool(explicit)
-    # This asks "is this an SN39 mainnet posture?", not "is this the launch
+    # This asks "is this an SN94 mainnet posture?", not "is this the launch
     # contract?". Both admitted pins are that posture, so both carry the
     # continuous-authorization obligation. Left as single equality on v1, a
     # re-pin to v3 would SILENTLY DROP the obligation — a real weakening bought
     # with a one-word config change, and one nothing else would report.
-    return getattr(args, "require_policy", None) in SN39_PINNED_REQUIRE_POLICIES
+    return getattr(args, "require_policy", None) in SN94_PINNED_REQUIRE_POLICIES
 
 
 @contextlib.contextmanager
@@ -13170,28 +13170,28 @@ def _validate_runtime_contract(args: Any) -> None:
         )
     launch_gate = bool(getattr(args, "require_full_provenance_for_broadcast", False))
     launch_preflight = bool(getattr(args, "launch_preflight", False))
-    sn39_broadcast = (
+    sn94_broadcast = (
         bool(getattr(args, "broadcast", False))
         and not bool(getattr(args, "offline", False))
-        and int(getattr(args, "netuid", -1)) == 39
+        and int(getattr(args, "netuid", -1)) == 94
     )
-    sn39_launch_profile = (
-        int(getattr(args, "netuid", -1)) == 39
+    sn94_launch_profile = (
+        int(getattr(args, "netuid", -1)) == 94
         and not bool(getattr(args, "offline", False))
-        and (sn39_broadcast or launch_preflight)
+        and (sn94_broadcast or launch_preflight)
     )
-    if sn39_launch_profile:
+    if sn94_launch_profile:
         pinned = {
             "network": "finney",
-            "publisher_url": SN39_PUBLISHER_URL,
+            "publisher_url": SN94_PUBLISHER_URL,
             "public_key_hex": DEFAULT_PUBLIC_KEY_HEX,
-            "key_id": SN39_WEIGHT_POLICY_KEY_ID,
-            "evidence_url": SN39_EVIDENCE_URL,
-            "provenance_registry_keys_digest": SN39_REGISTRY_KEYS_DIGEST,
-            "provenance_report_keys_digest": SN39_REPORT_KEYS_DIGEST,
-            "provenance_index_keys_digest": SN39_INDEX_KEYS_DIGEST,
-            "provenance_verifier_digest": SN39_VERIFIER_DIGEST,
-            "provenance_source_revision": SN39_PRODUCER_REVISION,
+            "key_id": SN94_WEIGHT_POLICY_KEY_ID,
+            "evidence_url": SN94_EVIDENCE_URL,
+            "provenance_registry_keys_digest": SN94_REGISTRY_KEYS_DIGEST,
+            "provenance_report_keys_digest": SN94_REPORT_KEYS_DIGEST,
+            "provenance_index_keys_digest": SN94_INDEX_KEYS_DIGEST,
+            "provenance_verifier_digest": SN94_VERIFIER_DIGEST,
+            "provenance_source_revision": SN94_PRODUCER_REVISION,
             "provenance_mechanism": MECHANISM_DEFAULT,
             "provenance_burn_hotkey": SN39_BURN_HOTKEY,
         }
@@ -13213,22 +13213,22 @@ def _validate_runtime_contract(args: Any) -> None:
         # MECHANISM_ACCEPTED already admits v2/v3 evidence under a v1 pin, and
         # MECHANISM_BURN_FRACTION is looked up by the operator's own pin, so
         # widening it here would move the burn contract, not the evidence.
-        if getattr(args, "require_policy", None) not in SN39_PINNED_REQUIRE_POLICIES:
+        if getattr(args, "require_policy", None) not in SN94_PINNED_REQUIRE_POLICIES:
             mismatches.append("require_policy")
-        if Path(str(getattr(args, "state_file", ""))) != SN39_STATE_FILE:
+        if Path(str(getattr(args, "state_file", ""))) != SN94_STATE_FILE:
             mismatches.append("state_file")
         provenance_mode = getattr(args, "provenance", "shadow") or "shadow"
         if provenance_mode not in {"shadow", "authority"}:
             mismatches.append("provenance")
         if mismatches:
             raise wire.VectorError(
-                "SN39 mainnet broadcast differs from the immutable trust "
+                "SN94 mainnet broadcast differs from the immutable trust "
                 f"profile: {', '.join(sorted(set(mismatches)))}"
             )
         runtime_root = _submission_runtime_root(args)
         if runtime_root != _VALIDATOR_RUNTIME_ROOT:
             raise wire.VectorError(
-                "SN39 mainnet broadcast requires the canonical owner-only "
+                "SN94 mainnet broadcast requires the canonical owner-only "
                 f"runtime root {_VALIDATOR_RUNTIME_ROOT}"
             )
         # A pure relay carries Cathedral's signature to the pinned netuid and
@@ -13237,7 +13237,7 @@ def _validate_runtime_contract(args: Any) -> None:
         # originates weights or holds launch material still must set it.
         if (
             not launch_gate
-            and _sn39_launch_obligation(args)
+            and _sn94_launch_obligation(args)
             and not bool(getattr(args, "require_completed_launch_for_broadcast", False))
             # Same beta waiver as _continuous_transition_required. Without it
             # here the waiver is self-cancelling: clearing the gate flag to
@@ -13245,7 +13245,7 @@ def _validate_runtime_contract(args: Any) -> None:
             and not bool(getattr(args, "beta_skip_launch_ceremony", False))
         ):
             raise wire.VectorError(
-                "SN39 broadcast from a weight-originating or launch-capable "
+                "SN94 broadcast from a weight-originating or launch-capable "
                 "runtime requires the completed-launch gate"
             )
     if not launch_gate:
@@ -13261,13 +13261,13 @@ def _validate_runtime_contract(args: Any) -> None:
     ]
     launch_paths_match = (
         Path(str(getattr(args, "provenance_controlled_dir", "")))
-        == SN39_LAUNCH_CONTROLLED_DIR
+        == SN94_LAUNCH_CONTROLLED_DIR
         and Path(str(getattr(args, "provenance_verifier_binary", "")))
-        == SN39_LAUNCH_VERIFIER_BINARY
+        == SN94_LAUNCH_VERIFIER_BINARY
     )
     approval_path_match = (
         Path(str(getattr(args, "launch_approval_file", "")))
-        == SN39_LAUNCH_APPROVAL_FILE
+        == SN94_LAUNCH_APPROVAL_FILE
     )
     launch_action_matches = (
         launch_preflight
@@ -13484,7 +13484,7 @@ def run(args) -> int:
                 tick_ok = tick(args)
                 break
             except _RetryablePreSignHeadDrift as e:
-                if pre_sign_head_drift_retries >= SN39_PRE_SIGN_HEAD_DRIFT_RETRIES:
+                if pre_sign_head_drift_retries >= SN94_PRE_SIGN_HEAD_DRIFT_RETRIES:
                     head_drift_exhausted = True
                     render.outcome(
                         False, f"head drift, retries exhausted: {stable_error(e)}"
@@ -13511,7 +13511,7 @@ def run(args) -> int:
                     status=NOT_PROVEN,
                     detail=str(e)[:512],
                     retry=pre_sign_head_drift_retries,
-                    retry_limit=SN39_PRE_SIGN_HEAD_DRIFT_RETRIES,
+                    retry_limit=SN94_PRE_SIGN_HEAD_DRIFT_RETRIES,
                     remediation=(
                         "The unsigned reservation was safely released. Rebuilding "
                         "the complete tick from a fresh finalized head now."
@@ -13531,7 +13531,7 @@ def run(args) -> int:
                 # wait, so the only cost is latency inside a tick that would
                 # otherwise be abandoned.
                 phase_offset = _head_drift_phase_offset(
-                    SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS
+                    SN94_PRE_SIGN_HEAD_DRIFT_JITTER_SECS
                 )
                 if phase_offset > 0.0:
                     time.sleep(phase_offset)
@@ -13681,7 +13681,7 @@ def run(args) -> int:
         # the daemon's configured cadence exactly as before.
         if head_drift_exhausted and (
             consecutive_head_drift_rearms
-            < SN39_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
+            < SN94_PRE_SIGN_HEAD_DRIFT_REARM_MAX_CONSECUTIVE
         ):
             consecutive_head_drift_rearms += 1
             # Never lengthen a short interval: a fast cadence already re-arms
@@ -13691,10 +13691,10 @@ def run(args) -> int:
             # so on its own it re-arms onto the same phase it just failed at.
             # The offset is what delivers the independence this re-arm was
             # always documented as having.
-            rearm_secs = min(SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs)
+            rearm_secs = min(SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS, args.interval_secs)
             time.sleep(
                 rearm_secs
-                + _head_drift_phase_offset(SN39_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
+                + _head_drift_phase_offset(SN94_PRE_SIGN_HEAD_DRIFT_JITTER_SECS)
             )
             continue
         consecutive_head_drift_rearms = 0
@@ -13730,7 +13730,7 @@ def build_parser() -> argparse.ArgumentParser:
         "public entrypoint; the network label is kept for signing. "
         f"Defaults to ${CHAIN_ENDPOINT_ENV}.",
     )
-    p.add_argument("--netuid", type=int, default=39)
+    p.add_argument("--netuid", type=int, default=94)
     p.add_argument(
         "--wallet-name", default=os.environ.get("BT_WALLET_NAME", "validator")
     )
@@ -13758,7 +13758,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("CATHEDRAL_VALIDATOR_MAX_SUBMISSIONS", "0")),
         help="optional local durable-attempt ceiling; 0 disables this extra "
-        "ceiling, but SN39 recurring writes still require a separately signed "
+        "ceiling, but SN94 recurring writes still require a separately signed "
         "bounded authorization; launch canary requires 1",
     )
     p.add_argument("--once", action="store_true", help="single tick, then exit")
@@ -13888,7 +13888,7 @@ def main() -> int:
         p.error(
             "manual recurring starts are retired because older no-flag commands "
             "were non-writing. Install and start the system service with "
-            "deploy/sn39/install-validator"
+            "deploy/sn94/install-validator"
         )
     configured_mode = os.environ.get("CATHEDRAL_VALIDATOR_PROVENANCE", "").strip()
     if configured_mode and configured_mode.lower() != "shadow":

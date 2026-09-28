@@ -1,9 +1,9 @@
 [Unit]
-Description=Cathedral SN39 direct validator
+Description=Cathedral SN94 direct validator
 Requires=cathedral-validator-boot-reconcile.service
 Wants=network-online.target
 After=network-online.target cathedral-validator-boot-reconcile.service
-Conflicts=cathedral-validator-sn39.service cathedral-validator-sn39-relay.service cathedral-confidential-validator.service cathedral-confidential-validator-sn39.service
+Conflicts=cathedral-validator-sn39.service cathedral-validator-sn39-relay.service cathedral-confidential-validator.service cathedral-confidential-validator-sn39.service cathedral-validator-sn94.service cathedral-validator-sn94-relay.service cathedral-confidential-validator-sn94.service
 AssertPathExists=/etc/cathedral-validator/direct.env
 AssertPathExists=/etc/cathedral-validator/identity.env
 AssertPathExists=/etc/cathedral-validator/validator-hotkey

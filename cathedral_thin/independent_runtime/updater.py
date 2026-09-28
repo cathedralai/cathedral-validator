@@ -62,7 +62,7 @@ MAX_TREE_FILES = 20_000
 MAX_TREE_BYTES = 1_073_741_824
 DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT = Path(
     "/var/lib/cathedral-validator/.local/state/cathedral-validator/"
-    "direct-writer/finney-sn39-mechanism-0"
+    "direct-writer/finney-sn94-mechanism-0"
 )
 DEFAULT_IDENTITY_FILE = Path("/etc/cathedral-validator/identity.env")
 _HEX = frozenset("0123456789abcdef")

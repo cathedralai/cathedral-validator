@@ -1045,7 +1045,7 @@ def _classify_stale_vector(
     # condition: a publisher that has STOPPED advancing, or an on-path replay of
     # a genuinely-signed older vector. Because the recurring thin tick submits
     # the signed vector regardless of what the audit concludes, an unbounded
-    # rule would let SN39 weights sit pinned to an old epoch for as long as that
+    # rule would let SN94 weights sit pinned to an old epoch for as long as that
     # epoch stayed in the index's bounded recent window — roughly eight hours —
     # while emitting only the non-alerting stale event. That is a real failure
     # becoming invisible on the one path whose sole defense is the alarm.
@@ -1363,7 +1363,7 @@ def run_audit(
             candidate_snapshot = manifest["candidate_set"]
             # Independent HISTORICAL chain cross-checks: strict replay
             # assurance requires the manifest's candidate set to EXACTLY
-            # equal the SN39 metagraph AT candidate_set.block, and the
+            # equal the SN94 metagraph AT candidate_set.block, and the
             # anchored hash to equal get_block_hash(block). The current
             # metagraph proves nothing about the anchored epoch; a subset
             # check would still admit omission. Unavailable or malformed

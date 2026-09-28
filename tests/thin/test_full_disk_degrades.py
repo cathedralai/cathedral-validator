@@ -82,7 +82,7 @@ def _run_args(tmp_path, journal, **overrides) -> SimpleNamespace:
         once=True,
         interval_secs=0,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         publisher_url="https://api.cathedral.computer",

@@ -1,0 +1,204 @@
+#!/bin/bash
+# The SN94 validator's alert of last resort. Exits non-zero — which is the
+# alert, because the systemd unit failing IS the notification — when ANY of
+# these is true of the event journal:
+#
+#   1. it is missing, is not a regular file, is unreadable, is empty with no
+#      rotated generation beside it, or holds no parseable record (fail closed:
+#      a check that cannot see the validator must never report that the
+#      validator is fine);
+#   2. its newest record is older than 3 tick intervals (the validator is
+#      stopped, wedged, or writing somewhere else);
+#   3. no tick has COMPLETED in the last 4 tick intervals — no
+#      WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, or WEIGHT_COOLDOWN_SKIPPED — which a
+#      validator that has silently stopped
+#      writing weights looks like. A restart is given one grace window, dated
+#      from the FIRST restart since the last completed tick, so a crash loop
+#      cannot keep renewing it;
+#   4. the shadow audit flagged a vector mismatch in the last 30 minutes; or
+#   5. the shadow audit FAILed its last two consecutive audits inside a
+#      90-minute window, with no completed audit since (#64).
+#
+# Rules 1-3 exist because rules 4 and 5 alone were green for a dead validator:
+# both greps returned zero matches for a journal that no longer existed, and
+# zero matches read as "nothing wrong". The expensive failure on SN94 is not a
+# bad vector, it is no vector at all, and it used to have no detector.
+#
+# Tick interval defaults to the shipped 1500s ([weights].interval_secs). Set
+# CATHEDRAL_TICK_SECS to match your config if you changed it; the windows are
+# tick multiples so a faster validator is declared dead sooner, not later.
+#
+# `cathedral-validator status --config <cfg>` applies these same five rules and
+# prints the detail behind them. This script is the unattended half.
+set -u
+# Every window here is decided by comparing ISO-8601 timestamp strings, so the
+# collation the comparison uses must not depend on the host's locale.
+export LC_ALL=C
+
+EVENTS="${1:-/var/log/cathedral-validator/validator-events.jsonl}"
+# The one rotated generation deploy/sn94/cathedral-validator.logrotate keeps
+# uncompressed, via `delaycompress`. That fragment rotates with `copytruncate`,
+# because the validator holds its journal descriptor open for the life of the
+# process, so straight after a rotation the live journal really is empty and
+# stays that way until the next event — up to a full tick interval later.
+# Reading only the live file across that window would report a healthy
+# validator as blind (rule 1) or as stopped (rule 2). Reading the rotated
+# generation too is what keeps the newest record visible; it is never required
+# to exist, and its absence is never itself an alert.
+ROTATED="$EVENTS.1"
+TICK_SECS="${CATHEDRAL_TICK_SECS:-1500}"
+
+alert() {
+  echo "ALERT: $*"
+  exit 1
+}
+
+case "$TICK_SECS" in
+  '' | *[!0-9]*)
+    alert "CATHEDRAL_TICK_SECS must be a whole number of seconds; got '$TICK_SECS'"
+    ;;
+esac
+[ "$TICK_SECS" -gt 0 ] || alert "CATHEDRAL_TICK_SECS must be greater than zero"
+
+STALE_SECS=$((TICK_SECS * 3))
+LIVENESS_SECS=$((TICK_SECS * 4))
+
+# Rule 1 — fail closed. Each condition names its own fix, because "monitoring
+# is green" and "monitoring is blind" must never look the same to an operator.
+[ -e "$EVENTS" ] || alert "event journal '$EVENTS' does not exist — this check is blind. Point it at the path the validator's --jsonl / [logs].jsonl actually names."
+[ -f "$EVENTS" ] || alert "event journal '$EVENTS' is not a regular file — this check is blind."
+[ -r "$EVENTS" ] || alert "event journal '$EVENTS' is not readable by $(id -un 2>/dev/null || echo "this user") — this check is blind. The journal is owner-only 0600 by design; run the timer as a user that can read it."
+# Empty is still blind — unless a rotation just emptied it, in which case the
+# rotated generation still holds the records rules 2-5 need. Everything after
+# this decides on timestamps, so an empty live journal beside a STALE rotated
+# one is caught by rule 2 with a far more useful message than "is empty".
+if [ ! -s "$EVENTS" ] && [ ! -s "$ROTATED" ]; then
+  alert "event journal '$EVENTS' is empty — this check is blind. The validator has never written a record here."
+fi
+
+# One bounded read of the tail, reused by every rule below: no rule here looks
+# back further than 90 minutes. A read error on the LIVE journal is an alert,
+# not a silent zero; the rotated generation is optional, so an unreadable one
+# is skipped rather than fatal — the live path above already proved this check
+# can see the validator's own file.
+TAIL=$(tail -n 5000 -- "$EVENTS") || alert "event journal '$EVENTS' could not be read — this check is blind."
+if [ -f "$ROTATED" ] && [ -r "$ROTATED" ] && [ -s "$ROTATED" ]; then
+  # Oldest first, so the rule 5 streak still walks the journal in order.
+  ROTATED_TAIL=$(tail -n 5000 -- "$ROTATED") && TAIL=$(printf '%s\n%s' "$ROTATED_TAIL" "$TAIL")
+fi
+
+# Seconds-resolution UTC cutoff, comparable against a record's ts prefix.
+cutoff() { date -u -d "-$1 seconds" "+%Y-%m-%dT%H:%M:%S"; }
+
+# Newest ts among the named events (ERE alternation), or empty if none.
+latest() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"($1)\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1
+}
+
+# The FIRST STARTUP strictly after $1 (or the oldest one seen, when $1 is
+# empty): the restart that began the current stretch with no completed tick.
+first_startup_since() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"STARTUP\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort |
+    awk -v live="$1" 'live == "" || substr($0,1,19) > substr(live,1,19) {print; exit}'
+}
+
+# True when timestamp $1 is strictly before cutoff $2, at seconds resolution.
+older_than() {
+  awk -v t="$1" -v c="$2" 'BEGIN { exit !(substr(t, 1, 19) < substr(c, 1, 19)) }'
+}
+
+count_since() {
+  printf '%s\n' "$TAIL" |
+    grep -E "\"event\": *\"$1\"" |
+    grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 |
+    awk -v c="$2" "substr(\$0,1,19) >= c" | wc -l
+}
+
+# Rule 2 — the journal must still be growing.
+NEWEST=$(printf '%s\n' "$TAIL" | grep -oE '"ts": *"[0-9T:.Z-]+"' | cut -d\" -f4 | sort | tail -1)
+[ -n "$NEWEST" ] || alert "event journal '$EVENTS' holds no parseable event record — this check is blind."
+STALE_CUTOFF=$(cutoff "$STALE_SECS")
+if older_than "$NEWEST" "$STALE_CUTOFF"; then
+  alert "event journal has not grown since $NEWEST, more than 3 tick intervals ($((STALE_SECS / 60))m) — the validator is stopped, wedged, or writing to a different path. Check: systemctl status the active validator unit"
+fi
+
+# Rule 3 — liveness. A tick that submitted, dry-ran, or was declined by the
+# subnet's weight rate limit has completed; only the absence of every one means
+# the loop is not running.
+LIVENESS_EVENTS='WEIGHTS_SUBMITTED|WEIGHTS_DRY_RUN|WEIGHT_COOLDOWN_SKIPPED'
+LIVE_TS=$(latest "$LIVENESS_EVENTS")
+LIVE_CUTOFF=$(cutoff "$LIVENESS_SECS")
+# A process that (re)started inside the window has not been given a full window
+# to finish its first tick. Rule 2 still catches one that started and hung, a
+# whole tick interval sooner than this rule would.
+#
+# The grace runs from the FIRST restart since the last completed tick, not the
+# newest one. A crash-restart loop writes a STARTUP on every crash and never
+# completes a tick, so grace measured from the newest STARTUP is renewed by the
+# crashes themselves: a six-hour loop reported "starting up" and exited 0,
+# while the same crashes kept rule 2's journal-growth check green. Granted once
+# from the first restart, the grace expires and rule 3 says what is true.
+START_TS=$(first_startup_since "$LIVE_TS")
+WARMING=0
+if [ -n "$START_TS" ] && ! older_than "$START_TS" "$LIVE_CUTOFF"; then
+  WARMING=1
+fi
+if [ "$WARMING" -eq 0 ] && { [ -z "$LIVE_TS" ] || older_than "$LIVE_TS" "$LIVE_CUTOFF"; }; then
+  if [ -z "$LIVE_TS" ]; then
+    SEEN="there is none in this journal at all"
+  else
+    SEEN="the last one was at $LIVE_TS"
+  fi
+  alert "no completed tick (WEIGHTS_SUBMITTED, WEIGHTS_DRY_RUN, WEIGHT_COOLDOWN_SKIPPED) in the last $((LIVENESS_SECS / 60))m — $SEEN. The validator is not writing weights."
+fi
+
+# Rule 4 — any PROVENANCE_VECTOR_MISMATCH in the last 30 minutes.
+# Match the event FIELD, not the bare name: PROVENANCE_VECTOR_STALE_EPOCH is a
+# different event and must never alert. That one means the audit re-verified
+# the signed vector IN FULL against the older epoch it names (signed manifest,
+# report body digest, recomputed shares) and found it correct there — the
+# publisher's ~60s serving race against the 311s epoch, self-resolving. Only a
+# vector that could NOT be re-verified that way stays a mismatch, and that is
+# what this alert is for.
+CUTOFF=$(cutoff 1800)
+RECENT=$(count_since "PROVENANCE_VECTOR_MISMATCH" "$CUTOFF")
+if [ "$RECENT" -gt 0 ]; then
+  alert "$RECENT PROVENANCE_VECTOR_MISMATCH event(s) within 30m — the audit disagreed with an accepted vector"
+fi
+
+# Rule 5 (#64) — persistent audit failure: the unbroken run of FAILs at the END
+# of the last 90 minutes (~3 audit cycles) is two or more. A single FAIL never
+# alerts; any completed audit after the FAILs clears it.
+#
+# Recovery is "the next audit completed with any outcome other than FAIL", NOT
+# "a PASS". PROVENANCE_AUDIT_PASS is emitted only when the audit reaches the
+# configured min_assurance (default rewarded_set_proven). A public validator
+# (config/validator-thin-sn94-relay.toml) ships no controlled raw-evidence
+# package and no evidence group, so its audit is receipts_only and its steady
+# state is PROVENANCE_AUDIT_NOT_PROVEN on EVERY tick, permanently, by design —
+# it never emits a PASS at all. Keying recovery on PASS therefore reduced this
+# rule to "one FAIL in 90 minutes alerts" on every relay, so a single
+# publisher-side blip paged the operator with a claim ("failing for 90m") that
+# was not true.
+CUTOFF90=$(cutoff 5400)
+# One "<ts-to-the-minute> <OUTCOME>" line per completed audit in the window, in
+# journal order. Matches the event FIELD for the same reason rule 4 does.
+TIMELINE=$(printf '%s\n' "$TAIL" |
+  grep -E "\"event\": *\"PROVENANCE_AUDIT_(PASS|FAIL|NOT_PROVEN)\"" |
+  sed -nE 's/.*"ts": *"([0-9-]{10}T[0-9]{2}:[0-9]{2})[^"]*".*"event": *"PROVENANCE_AUDIT_([A-Z_]+)".*/\1 \2/p' |
+  awk -v c="$CUTOFF90" '$1 >= c {print $2}')
+# Length of the unbroken run of FAILs at the end of that window.
+STREAK=$(printf '%s\n' "$TIMELINE" | awk '$1=="FAIL" {n+=1; next} $1!="" {n=0} END {print n+0}')
+if [ "$STREAK" -ge 2 ]; then
+  alert "shadow audit FAILed its last $STREAK consecutive audits within 90m with no completed audit since — the audit is not recovering on its own"
+fi
+
+if [ "$WARMING" -eq 1 ]; then
+  echo "validator starting up (STARTUP at $START_TS, first tick not yet complete); no recent mismatch; shadow audit not persistently failing"
+else
+  echo "validator alive (last completed tick at $LIVE_TS); no recent mismatch; shadow audit not persistently failing"
+fi

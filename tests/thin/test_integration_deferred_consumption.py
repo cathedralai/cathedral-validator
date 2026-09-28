@@ -59,7 +59,7 @@ def _preview(fx, receipts, ledger, allocations=BOTH_FUNDED, version=1, **kw):
         key_registry=fx.registry,
         receipts=receipts,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=fx.source_epoch,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -78,7 +78,7 @@ def _preview(fx, receipts, ledger, allocations=BOTH_FUNDED, version=1, **kw):
 
 
 def test_a_zero_allocation_lane_cannot_pay_and_does_not_burn_the_token():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt(subject="5CpuMiner", work_units="30")
     ledger = durable_ledger()
 
@@ -103,7 +103,7 @@ def test_a_zero_allocation_lane_cannot_pay_and_does_not_burn_the_token():
 
 def test_a_receipt_kept_by_a_zero_lane_still_earns_once_the_lane_is_funded():
     """The whole point of not burning the token: the receipt is still spendable."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt(subject="5CpuMiner", work_units="30")
     ledger = durable_ledger()
 
@@ -142,7 +142,7 @@ def test_the_audit_reports_the_consumption_that_happened():
     of an authoritative pass that had in fact consumed all of them. The audit is
     the activation evidence; it denied every consumption it made.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     out = _preview(
         fx,
@@ -157,7 +157,7 @@ def test_the_audit_reports_the_consumption_that_happened():
 
 
 def test_an_inspection_pass_reports_no_consumption_and_makes_none():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     out = _preview(
         fx,
@@ -186,7 +186,7 @@ def test_a_cross_lane_replay_does_not_suppress_the_miners_other_receipt():
     receipt in that lane was refused naming a receipt that lane never credited.
     Whether it bit depended on how two sha256 receipt ids happened to sort.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     miner = "5CpuMiner"
     # `a` sorts below `b`, which is the ordering the defect needed.
     a, b = sorted(
@@ -221,7 +221,7 @@ def test_a_cross_lane_replay_does_not_suppress_the_miners_other_receipt():
 
 
 def test_the_outcome_does_not_depend_on_submission_order():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     miner = "5CpuMiner"
     a = fx.cpu_receipt(subject=miner, work_units="20")
     b = fx.cpu_receipt(subject=miner, work_units="22")
@@ -261,7 +261,7 @@ def test_a_composer_consume_failure_is_a_preview_level_failure(monkeypatch):
     receipt that falls out of the real pass is known to have lost its credit to the
     ledger rather than to a rule.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     real_consume = ledger.consume
 
@@ -286,7 +286,7 @@ def test_a_composer_consume_failure_is_a_preview_level_failure(monkeypatch):
 
 def test_a_ledger_that_forgets_a_consume_it_reported_is_refused(monkeypatch):
     """Fail-open: a consume that is not kept leaves the receipt creditable again."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     real_consume = ledger.consume
 
@@ -321,7 +321,7 @@ def test_the_contract_pin_must_offer_the_deferred_path(monkeypatch):
         raise AssertionError("must not be reached")
 
     monkeypatch.setattr(itf, "compose_integrated", composer_without_the_ledger)
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(
         ig.IntegrationUnavailable, match="compose_integrated is missing"
     ):

@@ -134,7 +134,7 @@ an unattested receipt and prints `creditable_as_verified_work=false`.
 
 ```bash
 python -m cathedral_thin.verifyml_cli run-local \
-  --network finney --netuid 39 \
+  --network finney --netuid 94 \
   --source-epoch <EPOCH> \
   --wallet-name miner --wallet-hotkey default \
   --validator-hotkey <VALIDATOR_HOTKEY> \
@@ -148,7 +148,7 @@ python -m cathedral_thin.verifyml_cli run-local \
   -- /usr/local/bin/llama-cli -m '{model_path}' -f '{input_path}' -n 64
 
 python -m cathedral_thin.verifyml_cli verify \
-  --network finney --netuid 39 --current-block <BLOCK> \
+  --network finney --netuid 94 --current-block <BLOCK> \
   --receipt receipt.json --allow-unattested \
   --input-reveal prompt.txt --parameters-reveal parameters.json \
   --output-reveal output.txt
@@ -162,7 +162,7 @@ validator hotkey that the miner must use unchanged:
 
 ```bash
 python -m cathedral_thin.verifyml_cli authorize \
-  --network finney --netuid 39 \
+  --network finney --netuid 94 \
   --source-epoch <EPOCH> \
   --wallet-name validator --wallet-hotkey default \
   --miner-hotkey <MINER_HOTKEY> \
@@ -179,7 +179,7 @@ artifact using the values printed above:
 
 ```bash
 python -m cathedral_thin.verifyml_cli issue \
-  --network finney --netuid 39 \
+  --network finney --netuid 94 \
   --source-epoch <SAME_EPOCH> \
   --wallet-name miner --wallet-hotkey default \
   --validator-hotkey <VALIDATOR_HOTKEY> \
@@ -203,7 +203,7 @@ match:
 
 ```bash
 python -m cathedral_thin.verifyml_cli verify \
-  --network finney --netuid 39 --current-block <BLOCK> \
+  --network finney --netuid 94 --current-block <BLOCK> \
   --expected-validator-hotkey <VALIDATOR_HOTKEY> \
   --receipt receipt.json --attestation-evidence quote.bin \
   --allow-model-digest sha256:<WEIGHTS> \
@@ -223,14 +223,14 @@ its result must bind the exact report data and policy digest.
 
 ```bash
 python -m cathedral_thin.verifyml_cli bundle \
-  --network finney --netuid 39 --source-epoch 1 \
+  --network finney --netuid 94 --source-epoch 1 \
   --valid-from-block <FIRST> --valid-until-block <EXCLUSIVE_LAST> \
   --valid-until 2026-07-19T13:00:00.000000Z \
   --receipt receipt-a.json --receipt receipt-b.json \
   --output inference-bundle.json
 
 python -m cathedral_thin.verifyml_cli score-body \
-  --network finney --netuid 39 --current-block <BLOCK> \
+  --network finney --netuid 94 --current-block <BLOCK> \
   --bundle inference-bundle.json \
   --checkpoint state/verifyml-bundle-checkpoint.json \
   --evidence sha256:<QUOTE_A>=quote-a.bin \
@@ -300,7 +300,7 @@ publish its own class policy.
 - Signed but unattested receipts are not production useful-work evidence.
 - An independently verified real TDX quote has not yet been recorded for this
   schema.
-- The current SN39 validator hotkey is not registered/permitted, so it cannot
+- The current SN94 validator hotkey is not registered/permitted, so it cannot
   provide live mainnet scoring or set weights today.
 - No weight broadcast, registration, TAO spend, or merge is implied by the
   receipt tooling.

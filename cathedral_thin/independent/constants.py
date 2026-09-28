@@ -1,4 +1,4 @@
-"""Pinned constants for the independent SN39 composer (`independent_v1`).
+"""Pinned constants for the independent SN94 composer (`independent_v1`).
 
 Everything the composer treats as chain or policy truth lives here, in one
 module, so a review can read the whole pin set at once. Nothing in this package
@@ -22,7 +22,7 @@ H = 10**12
 # u16 weight budget the chain expects a mechanism weight vector to sum to.
 W = 65535
 
-NETUID = 39
+NETUID = 94
 # The chain stores a netuid as a u16. A configured value outside this bound can
 # never name a subnet, so every place that accepts one refuses it outright.
 MAX_NETUID = 2**16 - 1
@@ -31,7 +31,7 @@ VERSION_KEY = 10005000
 TEMPO_BLOCKS = 360
 # Transaction mortality, in blocks, measured from the SIGNED head -- not from
 # the anchor. Mixing the two makes the extrinsic dead on arrival.
-SN39_MORTAL_PERIOD_BLOCKS = 16
+SN94_MORTAL_PERIOD_BLOCKS = 16
 # The direct writer's own mortal era, in blocks. It names no subnet; the
 # direct path reads only this, and the legacy writers keep the pin above.
 MORTAL_PERIOD_BLOCKS = 16
@@ -221,7 +221,7 @@ __all__ = [
     "POLICY_SIGNATURE_THRESHOLD",
     "POLICY_USER_AGENT",
     "REFUSE_HOTKEYS",
-    "SN39_MORTAL_PERIOD_BLOCKS",
+    "SN94_MORTAL_PERIOD_BLOCKS",
     "TEMPO_BLOCKS",
     "UID30_MINER_HOTKEY",
     "UID30_VALIDATOR_HOTKEY",

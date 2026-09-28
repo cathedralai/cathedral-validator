@@ -7,7 +7,7 @@ hold together:
 1. A missing parent directory is created, owner-only. Every shipped example
    logs under a per-operator directory that nothing else provisions, so
    refusing to create it turns a copied config into a traceback for no gain.
-2. A parent directory this process cannot create — the shipped SN39 profiles
+2. A parent directory this process cannot create — the shipped SN94 profiles
    log to ``/var/log/cathedral-validator``, which the service install owns —
    raises `EventLogPathError` naming the directory and both fixes. A raw
    ``FileNotFoundError`` from inside ``os.open`` names neither the setting
@@ -132,7 +132,7 @@ def test_the_cli_prints_the_fix_instead_of_a_traceback(tmp_path, monkeypatch, ca
     config.write_text(
         "[network]\n"
         'name = "finney"\n'
-        "netuid = 39\n"
+        "netuid = 94\n"
         "[weight_policy]\n"
         f'public_key_hex = "{"a" * 64}"\n'
         "[logs]\n"

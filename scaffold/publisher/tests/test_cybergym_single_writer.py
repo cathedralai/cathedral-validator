@@ -1,9 +1,9 @@
 """The CyberGym lane must not add a second weight writer.
 
-The subnet has exactly one path that can submit weights to SN39:
+The subnet has exactly one path that can submit weights to SN94:
 ``scaffold.validator_thin.set_weights_on_chain``, which calls
-``set_weights_extrinsic`` behind an SN39 authorization gate. Everything else in
-this repository is artifact-only or hard-refuses SN39. These tests pin that
+``set_weights_extrinsic`` behind an SN94 authorization gate. Everything else in
+this repository is artifact-only or hard-refuses SN94. These tests pin that
 invariant against the CyberGym bridge, which composes weights and therefore sits
 one step away from being turned into a writer by a well-meaning follow-up.
 """
@@ -46,12 +46,12 @@ def test_exactly_one_module_calls_the_weight_extrinsic():
     assert hits == ["scaffold/validator_thin.py"]
 
 
-def test_legacy_thin_runtime_refuses_sn39_submission():
+def test_legacy_thin_runtime_refuses_sn94_submission():
     """``cathedral_thin/validator.py`` ships a bittensor-capable runtime whose
     ``submit_weights`` calls ``self.subtensor.set_weights`` indirectly (through
     ``asyncio.to_thread``), so the extrinsic-symbol scan above cannot see it.
-    Pin its SN39 refusal behaviourally: on netuid 39 it raises before ever
-    touching the subtensor, so the CyberGym vector cannot be laundered to SN39
+    Pin its SN94 refusal behaviourally: on netuid 94 it raises before ever
+    touching the subtensor, so the CyberGym vector cannot be laundered to SN94
     through this second writer either."""
     import asyncio
     from types import SimpleNamespace
@@ -64,12 +64,12 @@ def test_legacy_thin_runtime_refuses_sn39_submission():
         wallet=object(),
         subtensor=SimpleNamespace(set_weights=lambda **kwargs: calls.append(kwargs)),
         dendrite=object(),
-        netuid=39,
+        netuid=94,
         mev_protection=False,
         commit_reveal_version=4,
     )
     pending = SimpleNamespace(uids=[1], weights=[1.0])
-    with pytest.raises(ThinSubnetError, match="disabled on SN39"):
+    with pytest.raises(ThinSubnetError, match="disabled on SN94"):
         asyncio.run(runtime.submit_weights(pending))
     assert calls == []
 
@@ -126,12 +126,12 @@ def test_cybergym_modules_import_no_chain_surface(module):
     assert "from ..chain" not in code
 
 
-def test_artifact_only_weight_stage_still_refuses_sn39():
+def test_artifact_only_weight_stage_still_refuses_sn94():
     """The legacy mechanism weight stage stays hard-refusing, so composing a
-    CyberGym vector can never be laundered into an SN39 submission through it."""
+    CyberGym vector can never be laundered into an SN94 submission through it."""
     with pytest.raises(mechanism_weightset.UnsafeNetworkError):
         mechanism_weightset.set_weights(
-            {1: 1.0}, netuid=39, network="test", signing_key_hex="11" * 32,
+            {1: 1.0}, netuid=94, network="test", signing_key_hex="11" * 32,
         )
     with pytest.raises(mechanism_weightset.UnsafeNetworkError):
         mechanism_weightset.set_weights(
@@ -154,11 +154,11 @@ def test_artifact_only_weight_stage_never_broadcasts():
     assert called == []
 
 
-def test_legacy_scaffold_chain_still_refuses_sn39():
-    client = chain.ChainClient(network="test", netuid=39, broadcast=True)
+def test_legacy_scaffold_chain_still_refuses_sn94():
+    client = chain.ChainClient(network="test", netuid=94, broadcast=True)
     result = client.set_weights(chain.WeightVector(by_uid={1: 1.0}, by_label={}))
     assert result["submitted"] is False
-    assert "SN39" in result["reason"]
+    assert "SN94" in result["reason"]
 
 
 def test_bridge_returns_weights_and_never_submits(tmp_path, monkeypatch):

@@ -216,17 +216,17 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
     if state.blocks_since_last_update != state.block_number - state.last_update:
         raise UID30LaunchError("UID30 last_update and cooldown distance disagree")
     if state.mechanism_count <= MECID:
-        raise UID30LaunchError("SN39 mechanism 0 does not exist")
+        raise UID30LaunchError("SN94 mechanism 0 does not exist")
     if state.min_allowed_weights != MIN_ALLOWED_WEIGHTS:
-        raise UID30LaunchError("SN39 min_allowed_weights differs from the launch pin")
+        raise UID30LaunchError("SN94 min_allowed_weights differs from the launch pin")
     if not math.isclose(
         state.max_weight_limit, MAX_WEIGHT_LIMIT, rel_tol=0.0, abs_tol=0.0
     ):
-        raise UID30LaunchError("SN39 max_weight_limit differs from the launch pin")
+        raise UID30LaunchError("SN94 max_weight_limit differs from the launch pin")
     if state.commit_reveal_enabled is not COMMIT_REVEAL_ENABLED:
-        raise UID30LaunchError("SN39 commit-reveal state differs from the launch pin")
+        raise UID30LaunchError("SN94 commit-reveal state differs from the launch pin")
     if state.weights_version_key != 0 and VERSION_KEY < state.weights_version_key:
-        raise UID30LaunchError("the pinned weight version is not accepted by SN39")
+        raise UID30LaunchError("the pinned weight version is not accepted by SN94")
     if state.miner_hotkey != MINER_HOTKEY:
         raise UID30LaunchError("the launch target is not the pinned Cathedral miner")
     if state.subnet_owner_hotkey in {UID30_HOTKEY, MINER_HOTKEY}:
@@ -241,7 +241,7 @@ def validate_chain_state(state: UID30ChainState) -> UID30ChainState:
         state.next_epoch_start_block
         != state.block_number + state.blocks_until_next_epoch
     ):
-        raise UID30LaunchError("SN39 next-epoch facts disagree")
+        raise UID30LaunchError("SN94 next-epoch facts disagree")
     if (
         not isinstance(state.uid_safety, Mapping)
         or state.uid_safety.get("status") != "read_only_current_mapping_only"
@@ -284,7 +284,7 @@ def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:
             getattr(metagraph, "block", None), label="metagraph block"
         )
         if metagraph_block != block:
-            raise UID30LaunchError("SN39 metagraph is not at the finalized head")
+            raise UID30LaunchError("SN94 metagraph is not at the finalized head")
         raw_uids = (
             metagraph.uids.tolist()
             if hasattr(metagraph.uids, "tolist")
@@ -296,15 +296,15 @@ def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:
         hotkeys = [str(value) for value in list(metagraph.hotkeys)]
         permits = list(metagraph.validator_permit)
         if not (len(uids) == len(hotkeys) == len(permits)):
-            raise UID30LaunchError("SN39 metagraph identity arrays are inconsistent")
+            raise UID30LaunchError("SN94 metagraph identity arrays are inconsistent")
         if len(set(uids)) != len(uids) or len(set(hotkeys)) != len(hotkeys):
-            raise UID30LaunchError("SN39 metagraph repeats a UID or hotkey")
+            raise UID30LaunchError("SN94 metagraph repeats a UID or hotkey")
         hotkey_to_uid = dict(zip(hotkeys, uids))
         uid_to_hotkey = dict(zip(uids, hotkeys))
         validator_hotkey = str(wallet.hotkey.ss58_address)
         validator_uid = hotkey_to_uid.get(validator_hotkey)
         if isinstance(validator_uid, bool) or not isinstance(validator_uid, int):
-            raise UID30LaunchError("validator hotkey is not registered on SN39")
+            raise UID30LaunchError("validator hotkey is not registered on SN94")
         validator_index = uids.index(validator_uid)
         if (
             _strict_bool(
@@ -323,7 +323,7 @@ def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:
         )
         weights_rate_limit = _strict_nonnegative_int(
             subtensor.weights_rate_limit(NETUID, block=block),
-            label="SN39 weight cooldown",
+            label="SN94 weight cooldown",
         )
         blocks_since_update = _strict_nonnegative_int(
             subtensor.blocks_since_last_update(NETUID, validator_uid, block=block),
@@ -331,7 +331,7 @@ def _read_preflight(*, chain_endpoint: str | None = None) -> UID30ReadPreflight:
         )
         commit_reveal = _strict_bool(
             subtensor.commit_reveal_enabled(netuid=NETUID, block=block),
-            label="SN39 commit-reveal state",
+            label="SN94 commit-reveal state",
         )
         preflight = UID30ReadPreflight(
             wallet=wallet,
@@ -388,12 +388,12 @@ def read_uid30_chain_state(
             raise UID30LaunchError("chain preflight resolved the wrong genesis")
         info = selected.subtensor.get_metagraph_info(NETUID, MECID, block=block)
         if info is None:
-            raise UID30LaunchError("SN39 metagraph info is unavailable")
+            raise UID30LaunchError("SN94 metagraph info is unavailable")
         info_block = _strict_nonnegative_int(
             getattr(info, "block", None), label="metagraph block"
         )
         if info_block != block:
-            raise UID30LaunchError("SN39 metagraph info is not at the finalized head")
+            raise UID30LaunchError("SN94 metagraph info is not at the finalized head")
         hotkeys = [str(value) for value in list(info.hotkeys)]
         axons = list(info.axons)
         permits = list(info.validator_permit)
@@ -409,7 +409,7 @@ def read_uid30_chain_state(
             == len(total_stakes)
             == len(last_updates)
         ):
-            raise UID30LaunchError("SN39 metagraph eligibility arrays are inconsistent")
+            raise UID30LaunchError("SN94 metagraph eligibility arrays are inconsistent")
         if selected.validator_uid < 0 or selected.validator_uid >= len(hotkeys):
             raise UID30LaunchError("UID30 index is outside the metagraph")
         if hotkeys[selected.validator_uid] != selected.validator_hotkey:
@@ -428,7 +428,7 @@ def read_uid30_chain_state(
         )
         mechanism_count = _strict_nonnegative_int(
             selected.subtensor.get_mechanism_count(NETUID, block=block),
-            label="SN39 mechanism count",
+            label="SN94 mechanism count",
         )
         weights_version_key = _strict_nonnegative_int(
             selected.subtensor.substrate.query(
@@ -437,12 +437,12 @@ def read_uid30_chain_state(
                 params=[NETUID],
                 block_hash=block_hash,
             ),
-            label="SN39 weight version",
+            label="SN94 weight version",
         )
         miner_uid = selected.hotkey_to_uid.get(MINER_HOTKEY)
         if isinstance(miner_uid, bool) or not isinstance(miner_uid, int):
             raise UID30LaunchError(
-                "the pinned Cathedral miner is not registered on SN39"
+                "the pinned Cathedral miner is not registered on SN94"
             )
         # This proof is intentionally not chain-write authority.  It binds the
         # current finalized bidirectional mapping only and makes no mortal-era
@@ -478,7 +478,7 @@ def read_uid30_chain_state(
                 label="blocks since UID30 update",
             ),
             weights_rate_limit=_strict_nonnegative_int(
-                selected.weights_rate_limit, label="SN39 weight cooldown"
+                selected.weights_rate_limit, label="SN94 weight cooldown"
             ),
             mechanism_count=mechanism_count,
             weights_version_key=weights_version_key,

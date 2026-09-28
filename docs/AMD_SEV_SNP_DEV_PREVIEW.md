@@ -64,7 +64,7 @@ mode-0600 file. Replace every illustrative endpoint, certificate path, measureme
 review challenge, scoring window, UID, and hotkey before use.
 
 - `environment` must equal `development`.
-- `network` and `netuid` are pinned to `finney` and `39` for signed worker
+- `network` and `netuid` are pinned to `finney` and `94` for signed worker
   request compatibility. The command does not query the chain.
 - `validator_hotkey` must equal the public address of
   `validator_wallet.name` plus `validator_wallet.hotkey`.

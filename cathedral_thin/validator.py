@@ -296,9 +296,9 @@ class BittensorRuntime:
         return owner
 
     async def submit_weights(self, pending: PendingVector) -> Any:
-        if self.netuid == 39:
+        if self.netuid == 94:
             raise ThinSubnetError(
-                "legacy SAT validator broadcasts are disabled on SN39 "
+                "legacy SAT validator broadcasts are disabled on SN94 "
                 "regardless of network label or RPC endpoint"
             )
         kwargs = {
@@ -910,7 +910,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the legacy Cathedral SAT validator on test/local subnets. "
-            "SN39 mainnet uses cathedral-validator."
+            "SN94 mainnet uses cathedral-validator."
         )
     )
     parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "local"))
@@ -983,10 +983,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.broadcast and args.netuid == 39:
+    if args.broadcast and args.netuid == 94:
         raise SystemExit(
-            "cathedral-thin-validator cannot broadcast on SN39; "
-            "use the immutable cathedral-validator SN39 release path"
+            "cathedral-thin-validator cannot broadcast on SN94; "
+            "use the immutable cathedral-validator SN94 release path"
         )
     if args.netuid < 0 or not 3 <= args.vars <= 4096 or not 1 <= args.clauses <= 20_000:
         raise SystemExit("invalid netuid or challenge dimensions")
@@ -1007,9 +1007,9 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    if args.broadcast and args.netuid == 39:
+    if args.broadcast and args.netuid == 94:
         raise ThinSubnetError(
-            "legacy SAT validator broadcasts are disabled on SN39 regardless "
+            "legacy SAT validator broadcasts are disabled on SN94 regardless "
             "of network label or RPC endpoint"
         )
     score_policy = (

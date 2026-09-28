@@ -278,7 +278,7 @@ def _demo_evaluation(
     task_raw = sign_task(
         make_task(
             network="local",
-            netuid=39,
+            netuid=94,
             source_epoch=1,
             task_class="agent_tool_policy",
             validator_hotkey=validator.ss58_address,
@@ -298,7 +298,7 @@ def _demo_evaluation(
     task = verify_task(
         task_raw,
         network="local",
-        netuid=39,
+        netuid=94,
         current_block=block,
         now=now,
     )
@@ -336,7 +336,7 @@ def _demo_policy(public_key: bytes) -> dict[str, Any]:
     return {
         "schema": "cathedral_score_policy_v1",
         "network": "local",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {
                 "allocation": allocations[class_id],
@@ -401,13 +401,13 @@ def run_demo() -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="cathedral-policy-demo-") as tmpdir:
         policy_path = Path(tmpdir) / "score-policy.json"
         policy_path.write_bytes(canonical_json(_demo_policy(public_key)))
-        policy = load_score_policy(policy_path, network="local", netuid=39)
+        policy = load_score_policy(policy_path, network="local", netuid=94)
         decisions = []
         for class_policy in policy.external_classes:
             body = score_report_body_from_evaluations(
                 evaluations,
                 network="local",
-                netuid=39,
+                netuid=94,
                 class_id=class_policy.class_id,
                 source_id=class_policy.source_id,
                 source_epoch=1,
@@ -423,7 +423,7 @@ def run_demo() -> dict[str, Any]:
                 sign_report(body, report_key),
                 class_policy,
                 network="local",
-                netuid=39,
+                netuid=94,
                 current_block=block,
                 now=now,
             )
@@ -445,7 +445,7 @@ def run_demo() -> dict[str, Any]:
         record, digest = decision_document(
             validator_hotkey=validator.ss58_address,
             network="local",
-            netuid=39,
+            netuid=94,
             round_id=1,
             block=block,
             policy_digest=policy.digest,
@@ -469,7 +469,7 @@ def run_demo() -> dict[str, Any]:
         "schema": "cathedral_verified_policy_demo_v1",
         "ok": True,
         "network": "local",
-        "netuid": 39,
+        "netuid": 94,
         "commodity": "compact evidence-bearing agent policy",
         "stages_exercised": [
             "validator_signed_task",

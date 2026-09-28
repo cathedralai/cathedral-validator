@@ -331,14 +331,14 @@ def test_the_empty_evidence_manifest_digest_is_deterministic():
     import json
 
     digest = contract.empty_evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=11
+        network="finney", netuid=94, source_epoch=11
     )
     expected = hashlib.sha256(
         json.dumps(
             {
                 "schema": contract.EVIDENCE_MANIFEST_SCHEMA,
                 "network": "finney",
-                "netuid": 39,
+                "netuid": 94,
                 "source_epoch": 11,
                 "entries": [],
             },
@@ -355,13 +355,13 @@ def test_the_evidence_manifest_is_order_and_format_independent():
         {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "3.50"},
     ]
     a = contract.evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=11, entries=rows
+        network="finney", netuid=94, source_epoch=11, entries=rows
     )
     b = contract.evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=11, entries=list(reversed(rows))
+        network="finney", netuid=94, source_epoch=11, entries=list(reversed(rows))
     )
     c = contract.evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=11,
+        network="finney", netuid=94, source_epoch=11,
         entries=[
             {"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "3.5"},
             {"miner_hotkey": "5B", "receipt_id": "r2", "work_units": "12.000"},
@@ -373,16 +373,16 @@ def test_the_evidence_manifest_is_order_and_format_independent():
 def test_the_evidence_manifest_is_audience_and_epoch_bound():
     rows = [{"miner_hotkey": "5A", "receipt_id": "r1", "work_units": "12"}]
     base = contract.evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=11, entries=rows
+        network="finney", netuid=94, source_epoch=11, entries=rows
     )
     assert base != contract.evidence_manifest_digest(
-        network="test", netuid=39, source_epoch=11, entries=rows
+        network="test", netuid=94, source_epoch=11, entries=rows
     )
     assert base != contract.evidence_manifest_digest(
         network="finney", netuid=1, source_epoch=11, entries=rows
     )
     assert base != contract.evidence_manifest_digest(
-        network="finney", netuid=39, source_epoch=12, entries=rows
+        network="finney", netuid=94, source_epoch=12, entries=rows
     )
 
 

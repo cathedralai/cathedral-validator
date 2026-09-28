@@ -1,4 +1,4 @@
-"""Durable direct SN39 weight writer with hash-only restart recovery.
+"""Durable direct SN94 weight writer with hash-only restart recovery.
 
 The signed extrinsic hash, nonce, era, exact call, and evidence identity reach
 disk before broadcast.  A restart with a pending intent only searches finalized
@@ -912,7 +912,7 @@ class DirectWeightWriter:
             _require_presign_time(presign_deadline, stage="eligibility preflight")
             rate_limit = _nonnegative_int(
                 self.subtensor.weights_rate_limit(self.netuid, block=block),
-                label="SN39 weight cooldown",
+                label="SN94 weight cooldown",
             )
             _require_presign_time(presign_deadline, stage="weight cooldown RPC")
             blocks_since = _nonnegative_int(
@@ -924,17 +924,17 @@ class DirectWeightWriter:
             _require_presign_time(presign_deadline, stage="last-update RPC")
             min_allowed = _nonnegative_int(
                 self.subtensor.min_allowed_weights(netuid=self.netuid, block=block),
-                label="SN39 minimum allowed weights",
+                label="SN94 minimum allowed weights",
             )
             _require_presign_time(presign_deadline, stage="minimum-weights RPC")
             commit_reveal = _strict_bool(
                 self.subtensor.commit_reveal_enabled(netuid=self.netuid, block=block),
-                label="SN39 commit-reveal state",
+                label="SN94 commit-reveal state",
             )
             _require_presign_time(presign_deadline, stage="commit-reveal RPC")
             mechanism_count = _nonnegative_int(
                 self.subtensor.get_mechanism_count(self.netuid, block=block),
-                label="SN39 mechanism count",
+                label="SN94 mechanism count",
             )
             _require_presign_time(presign_deadline, stage="mechanism-count RPC")
             metagraph = self.subtensor.metagraph(self.netuid, block=block)
@@ -960,7 +960,7 @@ class DirectWeightWriter:
             _require_presign_time(presign_deadline, stage="metagraph-info RPC")
             if info is None or int(getattr(info, "block", -1)) != block:
                 raise DirectValidatorError(
-                    "SN39 metagraph info is not at the finalized sign head"
+                    "SN94 metagraph info is not at the finalized sign head"
                 )
             info_hotkeys = [str(value) for value in list(info.hotkeys)]
             info_permits = tuple(
@@ -993,7 +993,7 @@ class DirectWeightWriter:
                     params=[self.netuid],
                     block_hash=fresh.block_hash,
                 ),
-                label="SN39 weight version",
+                label="SN94 weight version",
             )
             _require_presign_time(presign_deadline, stage="weight-version RPC")
         except DirectValidatorError:
@@ -1045,7 +1045,7 @@ class DirectWeightWriter:
                 "validator last update and cooldown distance disagree"
             )
         if rate_limit < MORTAL_PERIOD_BLOCKS:
-            raise DirectValidatorError("SN39 cooldown is shorter than the mortal era")
+            raise DirectValidatorError("SN94 cooldown is shorter than the mortal era")
         if blocks_since < rate_limit:
             raise DirectValidatorError(
                 "validator is inside the finalized weight cooldown"
@@ -1074,9 +1074,9 @@ class DirectWeightWriter:
         # `max_weight_limit()`, so a legacy stored value must not refuse a
         # write the chain accepts. It is not read.
         if commit_reveal is not COMMIT_REVEAL_ENABLED:
-            raise DirectValidatorError("SN39 commit-reveal policy blocks direct writes")
+            raise DirectValidatorError("SN94 commit-reveal policy blocks direct writes")
         if mechanism_count <= MECID:
-            raise DirectValidatorError("SN39 mechanism 0 is unavailable")
+            raise DirectValidatorError("SN94 mechanism 0 is unavailable")
         if version_key != 0 and VERSION_KEY < version_key:
             raise DirectValidatorError(
                 "direct weight version is below the chain minimum"

@@ -50,8 +50,8 @@ _FALSY = {"0", "false", "no", "off"}
 _TRUTHY = {"1", "true", "yes", "on"}
 _LEGACY_PRODUCTION_VALUES = {"prod", "production", "mainnet"}
 _SN39_BURN_HOTKEY = "5GP7c3fFazW9GXK8Up3qgu2DJBk8inu4aK9TZy3RuoSWVCMi"
-_SN39_WEIGHT_POLICY_KEY_ID = "cathedral-weight-policy"
-_SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX = (
+_SN94_WEIGHT_POLICY_KEY_ID = "cathedral-weight-policy"
+_SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX = (
     "10890a66aa752479cb3b634f366d7bd27c374324d83f88d2d6b69ab066f25e26"
 )
 
@@ -207,8 +207,8 @@ _PRODUCTION_PINNED_VALUES = {
     # An empty aggregate map selects the separately pinned tier-2 multiplier.
     "CATHEDRAL_WEIGHTS_TIER_WEIGHTS": "",
     "CATHEDRAL_WEIGHT_POLICY_NETWORK": "finney",
-    "CATHEDRAL_WEIGHT_POLICY_NETUID": "39",
-    "CATHEDRAL_WEIGHT_POLICY_KEY_ID": _SN39_WEIGHT_POLICY_KEY_ID,
+    "CATHEDRAL_WEIGHT_POLICY_NETUID": "94",
+    "CATHEDRAL_WEIGHT_POLICY_KEY_ID": _SN94_WEIGHT_POLICY_KEY_ID,
     "CATHEDRAL_WEIGHT_POLICY_BURN_HOTKEY": _SN39_BURN_HOTKEY,
     # Empty is intentional and must be explicit: production resolves the burn
     # UID from the pinned hotkey at each finalized metagraph read.
@@ -719,7 +719,7 @@ def effective_config_summary(
             "network": os.environ.get(
                 "CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney"
             ).strip(),
-            "netuid": os.environ.get("CATHEDRAL_WEIGHT_POLICY_NETUID", "39").strip(),
+            "netuid": os.environ.get("CATHEDRAL_WEIGHT_POLICY_NETUID", "94").strip(),
         },
         "economics": {
             "allocation_contract": (
@@ -1068,11 +1068,11 @@ def validate_env(*, signing_key_hex: str | None = None) -> list[str]:
                 "production requires a valid 32-byte Ed25519 weight-policy "
                 "signing key"
             )
-        elif derived_public_key != _SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX:
+        elif derived_public_key != _SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX:
             errors.append(
                 "production weight-policy signing key derives public key "
                 f"{derived_public_key}, but canonical validators pin "
-                f"{_SN39_WEIGHT_POLICY_PUBLIC_KEY_HEX}"
+                f"{_SN94_WEIGHT_POLICY_PUBLIC_KEY_HEX}"
             )
         for name in sorted(_PRODUCTION_FORBIDDEN_TRUTHY):
             raw = os.environ.get(name)

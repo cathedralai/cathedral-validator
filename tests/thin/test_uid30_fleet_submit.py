@@ -17,7 +17,7 @@ from cathedral_thin import uid30_fleet_submit as submit
 from cathedral_thin import uid30_launch as launch
 from cathedral_thin import uid30_state
 from cathedral_thin.independent.constants import (
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
@@ -51,7 +51,7 @@ def _preview() -> dict:
         "schema": preview.SCHEMA,
         "status": preview.STATUS,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "mechanism_id": 0,
         "evidence_anchor": {
             "block_number": EVIDENCE_BLOCK,
@@ -144,7 +144,7 @@ def _uid_safety(*, uid124_safe: bool = True) -> dict:
         "schema": "cathedral_sn39_uid_safety_v2",
         "rotation": {
             "status": canonical.PASS,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "targets": [
                 {
                     "uid": 8,
@@ -410,7 +410,7 @@ def test_read_fleet_state_binds_real_read_shape_to_full_write_safety(
         )
         monkeypatch.setattr(
             canonical,
-            "_submit_exact_sn39_extrinsic",
+            "_submit_exact_sn94_extrinsic",
             lambda *_args, **_kwargs: reached.append("sign"),
         )
 
@@ -439,7 +439,7 @@ def test_read_fleet_state_binds_real_read_shape_to_full_write_safety(
     assert calls == [
         {
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "wallet_name": "cathedral",
             "wallet_hotkey": "default",
             "connection_endpoint": submit.ARCHIVE_CHAIN_ENDPOINT,
@@ -529,6 +529,22 @@ def test_identity_is_exact_uid124_zero_burn_and_two_distinct_machines() -> None:
         canonical._strict_zero_burn_uid30_fleet_contract(changed, lane="authority")
 
 
+@pytest.fixture(autouse=True)
+def _reserved_journal_named_for_the_compiled_netuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The recorded filename is the identity digest of the real UID30 journal on
+    # the previous subnet, and it stays pinned in production. These tests
+    # exercise the reservation logic, so they use the journal this contract
+    # names at the compiled netuid, as they already do for the recorded digest.
+    contract = submit._submission_contract(preview_sha256="d" * 64)
+    monkeypatch.setattr(
+        canonical,
+        "SN39_UID30_SUCCESSOR_PREDECESSOR_JOURNAL_FILENAME",
+        f"journal-{canonical._submission_identity_digest(contract)}.json",
+    )
+
+
 def _fleet_descendant_case(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -578,7 +594,7 @@ def _fleet_descendant_case(
         {
             "mapping_block": original_block,
             "mapping_block_hash": original_hash,
-            "era_last_block": original_block + SN39_MORTAL_PERIOD_BLOCKS - 1,
+            "era_last_block": original_block + SN94_MORTAL_PERIOD_BLOCKS - 1,
             "hotkey_swap_on_subnet_interval": 100,
             "coldkey_swap_announcement_delay": 100,
         }
@@ -615,7 +631,7 @@ def _fleet_descendant_case(
         "owned_hotkeys": [],
         "immune_owner_uids_limit": 1,
         "free_uid_slots": 256 - len(info_hotkeys),
-        "maximum_era_registrations": SN39_MORTAL_PERIOD_BLOCKS,
+        "maximum_era_registrations": SN94_MORTAL_PERIOD_BLOCKS,
         "owner_immortal_hotkeys": [],
         "replacement_safe_hotkeys": sorted(
             {submit.PREDECESSOR_HOTKEY, submit.MINER_HOTKEY}
@@ -788,37 +804,37 @@ def _fleet_descendant_case(
 
         @staticmethod
         def commit_reveal_enabled(*, netuid: int, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["commit_reveal"]
 
         @staticmethod
         def get_subnet_owner_hotkey(netuid: int, *, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["owner"]
 
         @staticmethod
         def min_allowed_weights(*, netuid: int, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["min_weights"]
 
         @staticmethod
         def max_weight_limit(*, netuid: int, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["max_weight"]
 
         @staticmethod
         def get_next_epoch_start_block(netuid: int, *, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["next_epoch"]
 
         @staticmethod
         def weights_rate_limit(netuid: int, *, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["rate_limit"]
 
         @staticmethod
         def get_mechanism_count(netuid: int, *, block: int) -> object:
-            assert (netuid, block) == (39, latest_block)
+            assert (netuid, block) == (94, latest_block)
             return world["mechanism_count"]
 
         @staticmethod
@@ -828,7 +844,7 @@ def _fleet_descendant_case(
             *,
             block: int,
         ) -> SimpleNamespace:
-            assert (netuid, mechanism_id, block) == (39, 0, latest_block)
+            assert (netuid, mechanism_id, block) == (94, 0, latest_block)
             size = 125
             hotkeys = list(world["info_hotkeys"])
             for uid, hotkey in world["uid_to_hotkey"].items():  # type: ignore[union-attr]
@@ -918,7 +934,7 @@ def test_fleet_descendant_accepts_only_one_or_two_exact_child_heads(
         wire_uids=[124],
         wire_weights=[W],
         version_key=VERSION_KEY,
-        mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
         pending=pending,
     )
 
@@ -986,7 +1002,7 @@ def test_fleet_descendant_fails_closed_on_changed_chain_fact(
             wire_uids=[124],
             wire_weights=[W],
             version_key=VERSION_KEY,
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
             pending=pending,
         )
 
@@ -1040,7 +1056,7 @@ def test_unlock_head_advance_refuses_before_signature_intent_or_broadcast(
             "valid_from_time": launch._canonical_utc(now - timedelta(minutes=1)),
             "valid_until_time": launch._canonical_utc(now + timedelta(minutes=10)),
             "require_commit_reveal_disabled": True,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "expected_next_epoch_start_block": original_block + 200,
         },
     }
@@ -1106,15 +1122,15 @@ def test_unlock_head_advance_refuses_before_signature_intent_or_broadcast(
         canonical._RetryablePreSignHeadDrift,
         match="advanced after bounded descendant validation",
     ):
-        canonical._submit_exact_sn39_extrinsic(
+        canonical._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime_contract,
             attempt_id="sha256:" + "e" * 64,
-            netuid=39,
+            netuid=94,
             version_key=VERSION_KEY,
             wire_uids=[124],
             wire_weights=[W],
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
@@ -1156,7 +1172,7 @@ def test_unsigned_reservation_restores_exact_predecessor_bytes(
             },
         },
         "submission_genesis_hash": submit.FINNEY_GENESIS_HASH,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
         "submission_validator_hotkey": submit.UID30_HOTKEY,
     }
     predecessor_bytes = canonical._canonical_json_bytes(predecessor)
@@ -1210,7 +1226,7 @@ def test_unsigned_reservation_restores_exact_predecessor_bytes(
             "extrinsic_hash": "0x" + "f" * 64,
             "nonce": 7,
             "era_reference_block": identity["mapping_block"],
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": VERSION_KEY,
             "wire_uids": [124],
             "wire_weights": [W],
@@ -1243,7 +1259,7 @@ def test_canonical_presign_reproves_exact_predecessor_and_singleton(
             "valid_from_time": "2026-08-28T00:00:00.000Z",
             "valid_until_time": "2026-08-30T00:00:00.000Z",
             "require_commit_reveal_disabled": True,
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "expected_next_epoch_start_block": (
                 canonical.SN39_UID30_FLEET_PREDECESSOR_BLOCK + 200
             ),
@@ -1295,7 +1311,7 @@ def test_canonical_presign_reproves_exact_predecessor_and_singleton(
             },
         },
         "submission_genesis_hash": submit.FINNEY_GENESIS_HASH,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
         "submission_validator_hotkey": submit.UID30_HOTKEY,
     }
     predecessor_bytes = canonical._canonical_json_bytes(predecessor)
@@ -1526,7 +1542,7 @@ def test_archive_predecessor_gate_requires_exact_historical_call_and_storage(
     assert observed["query"] == {
         "module": "SubtensorModule",
         "storage_function": "Weights",
-        "params": [canonical.get_mechid_storage_index(39, 0), 30],
+        "params": [canonical.get_mechid_storage_index(94, 0), 30],
         "block_hash": canonical.SN39_UID30_FLEET_PREDECESSOR_BLOCK_HASH,
     }
     classify_args = observed["classify"]
@@ -1653,7 +1669,7 @@ def _prepare_submit_harness(
             raise submit_error
         return SimpleNamespace(receipt="receipt")
 
-    monkeypatch.setattr(canonical, "_submit_exact_sn39_extrinsic", chain_submit)
+    monkeypatch.setattr(canonical, "_submit_exact_sn94_extrinsic", chain_submit)
     submission = canonical.ChainSubmission(
         success=True,
         extrinsic_hash="0x" + "1" * 64,
@@ -1784,7 +1800,7 @@ def test_signed_uncertainty_is_one_attempt_and_never_retries(
 def test_recovery_source_has_no_submission_call() -> None:
     source = inspect.getsource(submit.recover_reviewed_fleet)
 
-    assert "_submit_exact_sn39_extrinsic" not in source
+    assert "_submit_exact_sn94_extrinsic" not in source
     assert "wallet" not in source
 
 
@@ -1841,7 +1857,7 @@ def test_signed_journal_identity_mismatch_is_ambiguous_not_no_write() -> None:
             "extrinsic_hash": "0x" + "1" * 64,
             "nonce": 9,
             "era_reference_block": identity["mapping_block"],
-            "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": VERSION_KEY,
             "wire_uids": [124],
             "wire_weights": [W],
@@ -1873,7 +1889,7 @@ def test_finalized_recovery_is_chain_read_only_and_proves_same_attempt(
         "extrinsic_hash": "0x" + "1" * 64,
         "nonce": 9,
         "era_reference_block": identity["mapping_block"],
-        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": VERSION_KEY,
         "wire_uids": [124],
         "wire_weights": [W],
@@ -1925,7 +1941,7 @@ def test_finalized_recovery_is_chain_read_only_and_proves_same_attempt(
     monkeypatch.setattr(submit, "_verify_later_finalized_heads", lambda **_k: later)
     monkeypatch.setattr(
         canonical,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_a, **_k: pytest.fail("recovery must never submit"),
     )
     monkeypatch.setattr(
@@ -1963,7 +1979,7 @@ def test_repeated_recovery_reports_consumed_expired_attempt_without_chain_access
         "extrinsic_hash": "0x" + "1" * 64,
         "nonce": 9,
         "era_reference_block": identity["mapping_block"],
-        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": VERSION_KEY,
         "wire_uids": [124],
         "wire_weights": [W],
@@ -2017,5 +2033,5 @@ def test_preview_module_stays_writer_free_after_submit_command_exists() -> None:
     source = inspect.getsource(preview)
 
     assert "uid30_fleet_submit" not in source
-    assert "_submit_exact_sn39_extrinsic" not in source
+    assert "_submit_exact_sn94_extrinsic" not in source
     assert "_reserve_common_submission" not in source

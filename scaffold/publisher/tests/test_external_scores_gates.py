@@ -197,14 +197,14 @@ def test_confidential_tdx_path_unchanged(monkeypatch):
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_SOURCE", "cathedral_confidential_tdx")
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_FRACTION", "0.05")
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
     ext_hk = "5CONF"
     base_hk = "5BASE"
     store = FakeStore(
         [(ext_hk, 1.0)],
         _meta([ext_hk, base_hk]),
         source="cathedral_confidential_tdx",
-        audience=("finney", 39),
+        audience=("finney", 94),
     )
     base = {base_hk: 1.0}
     out, meta = weights._apply_external_scores(store, base, now=_now())

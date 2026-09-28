@@ -79,7 +79,7 @@ def registration_body(
         "schema": "cathedral_owner_score_registration_v1",
         "network": "test",
         "source_netuid": 7,
-        "target_netuid": 39,
+        "target_netuid": 94,
         "owner_coldkey": owner.ss58_address,
         "delegate_hotkey": delegate.ss58_address,
         "source_id": "testnet_owner_source",
@@ -102,7 +102,7 @@ def verify(raw, policy, owner, delegate, checkpoint=None):
         raw,
         policy,
         network="test",
-        netuid=39,
+        netuid=94,
         current_block=1200,
         current_owner_coldkey=owner.ss58_address,
         registered_hotkeys={delegate.ss58_address: owner.ss58_address},
@@ -149,7 +149,7 @@ def test_registration_requires_current_owner_and_live_target_registration():
             raw,
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1200,
             current_owner_coldkey=other_owner.ss58_address,
             registered_hotkeys={delegate.ss58_address: owner.ss58_address},
@@ -160,7 +160,7 @@ def test_registration_requires_current_owner_and_live_target_registration():
             raw,
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1200,
             current_owner_coldkey=owner.ss58_address,
             registered_hotkeys={},
@@ -181,7 +181,7 @@ def test_registration_requires_current_owner_and_live_target_registration():
             raw,
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1200,
             current_owner_coldkey=owner.ss58_address,
             registered_hotkeys={delegate.ss58_address: other_owner.ss58_address},
@@ -250,7 +250,7 @@ def test_registered_policy_is_canonical_and_has_no_validator_pinned_report_key(
     document = {
         "schema": "cathedral_score_policy_v1",
         "network": "test",
-        "netuid": 39,
+        "netuid": 94,
         "classes": [
             {
                 "allocation": "1",
@@ -285,7 +285,7 @@ def test_registered_policy_is_canonical_and_has_no_validator_pinned_report_key(
     }
     path = tmp_path / "policy.json"
     path.write_bytes(canonical_json(document))
-    parsed = load_score_policy(path, network="test", netuid=39)
+    parsed = load_score_policy(path, network="test", netuid=94)
     external = parsed.external_classes[0]
     assert external.locations == (
         "https://reports.example/score-classes/confidential-compute.json",
@@ -296,7 +296,7 @@ def test_registered_policy_is_canonical_and_has_no_validator_pinned_report_key(
     document["classes"][0]["owner_registration"]["require_target_registration"] = False
     path.write_bytes(canonical_json(document))
     with pytest.raises(ThinSubnetError, match="must be true"):
-        load_score_policy(path, network="test", netuid=39)
+        load_score_policy(path, network="test", netuid=94)
 
 
 def test_registration_mirrors_reject_same_sequence_disagreement(monkeypatch):
@@ -319,7 +319,7 @@ def test_registration_mirrors_reject_same_sequence_disagreement(monkeypatch):
         load_best_owner_registration(
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1200,
             current_owner_coldkey=owner.ss58_address,
             registered_hotkeys={delegate.ss58_address: owner.ss58_address},
@@ -339,7 +339,7 @@ def test_registration_expiry_and_block_window_hold():
             raw,
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=1200,
             current_owner_coldkey=owner.ss58_address,
             registered_hotkeys={delegate.ss58_address: owner.ss58_address},
@@ -350,7 +350,7 @@ def test_registration_expiry_and_block_window_hold():
             raw,
             policy,
             network="test",
-            netuid=39,
+            netuid=94,
             current_block=2000,
             current_owner_coldkey=owner.ss58_address,
             registered_hotkeys={delegate.ss58_address: owner.ss58_address},
@@ -369,7 +369,7 @@ def test_contributor_cli_builds_bounded_body_and_checks_both_chain_roles():
             return SimpleNamespace(owner_coldkey=owner.ss58_address)
 
         def metagraph(self, netuid, *, lite):
-            assert (netuid, lite) == (39, True)
+            assert (netuid, lite) == (94, True)
             return SimpleNamespace(
                 hotkeys=[delegate.ss58_address], coldkeys=[owner.ss58_address]
             )
@@ -377,7 +377,7 @@ def test_contributor_cli_builds_bounded_body_and_checks_both_chain_roles():
     registered = registration_chain_preflight(
         subtensor=Chain(),
         source_netuid=7,
-        target_netuid=39,
+        target_netuid=94,
         owner_coldkey=owner.ss58_address,
         delegate_hotkey=delegate.ss58_address,
         block=1200,
@@ -386,7 +386,7 @@ def test_contributor_cli_builds_bounded_body_and_checks_both_chain_roles():
     body = build_registration_body(
         network="test",
         source_netuid=7,
-        target_netuid=39,
+        target_netuid=94,
         owner_coldkey=owner.ss58_address,
         delegate_hotkey=delegate.ss58_address,
         source_id="testnet_owner_source",
@@ -408,7 +408,7 @@ def test_contributor_cli_builds_bounded_body_and_checks_both_chain_roles():
         registration_chain_preflight(
             subtensor=Chain(),
             source_netuid=7,
-            target_netuid=39,
+            target_netuid=94,
             owner_coldkey=owner_key().ss58_address,
             delegate_hotkey=delegate.ss58_address,
             block=1200,

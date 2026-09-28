@@ -1,6 +1,6 @@
 # Publisher configuration
 
-The SN39 origin has one production posture:
+The SN94 origin has one production posture:
 
 ```text
 CATHEDRAL_ENV=production

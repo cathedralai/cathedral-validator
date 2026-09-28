@@ -1,6 +1,6 @@
 """The launcher must group-read the SANITIZED projection, never the raw journal.
 
-`04d6b3b` established the split and `deploy/sn39/cathedral-validator-sn39.service`
+`04d6b3b` established the split and `deploy/sn94/cathedral-validator-sn94.service`
 encodes it: the raw journal (hotkeys, receipts, caller-supplied fields) stays 0600,
 and only the sanitized status projection is group-readable by the public status
 service, which runs as a different account.
@@ -25,18 +25,18 @@ import pytest
 _LAUNCHER_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "deploy"
-    / "sn39"
-    / "cathedral-sn39-release-launcher.py"
+    / "sn94"
+    / "cathedral-sn94-release-launcher.py"
 )
-_spec = importlib.util.spec_from_file_location("_sn39_release_launcher", _LAUNCHER_PATH)
+_spec = importlib.util.spec_from_file_location("_sn94_release_launcher", _LAUNCHER_PATH)
 _launcher = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_launcher)
 
 _UNIT_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "deploy"
-    / "sn39"
-    / "cathedral-validator-sn39.service"
+    / "sn94"
+    / "cathedral-validator-sn94.service"
 )
 
 _CHILD_MODES = ("continuous",)

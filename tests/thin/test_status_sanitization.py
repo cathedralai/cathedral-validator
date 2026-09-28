@@ -1,6 +1,6 @@
 """The event-log permission and sanitization contract.
 
-Two properties, both load-bearing for the SN39 deploy contract:
+Two properties, both load-bearing for the SN94 deploy contract:
 
 1. The raw validator journal is private. It carries `hotkey` and arbitrary
    caller-supplied fields, so a reader group on it would expose whatever an

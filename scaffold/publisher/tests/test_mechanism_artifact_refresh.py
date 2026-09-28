@@ -3,7 +3,7 @@
 Covers the missing "scored -> weights" wiring: refresh runs only enabled artifact
 mechanisms, tolerates a not-yet-merged adapter (skips + logs, never errors), persists
 an empty vector as "contributes nothing", and the compose path inherits set_weights'
-mainnet/SN39 refusal so it can never write real weights.
+mainnet/SN94 refusal so it can never write real weights.
 
 Also pins the ordering the CyberGym closed-epoch gate depends on: an adapter that
 raises is skipped *before* put_scores, so a refusal preserves the last published
@@ -160,13 +160,13 @@ def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path, monkeypatch):
     secret = "refresh-e2e-secret"
     monkeypatch.setenv(contract.HMAC_SECRET_ENV, secret)
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
 
     data = Store(str(tmp_path / "publisher.db"))       # 0048/0049 create the tables
     generated = datetime.now(timezone.utc)             # inside the freshness window
     iso = generated.strftime("%Y-%m-%dT%H:%M:%S.") + f"{generated.microsecond // 1000:03d}Z"
     document = {
-        "producer_hotkey": "5Producer", "network": "finney", "netuid": 39,
+        "producer_hotkey": "5Producer", "network": "finney", "netuid": 94,
         "source_epoch": 7, "generated_at": iso, "complete": True,
         "score_units": "cybergym_points_v1", "scores": {"5Alice": 12.0},
         "evidence_sha256": "c" * 64,
@@ -180,19 +180,19 @@ def test_a_real_adapter_runs_end_to_end_through_refresh(tmp_path, monkeypatch):
         "score_count, generated_at_iso, received_at_iso, report_sha256, body_sha256, "
         "evidence_sha256, signature, report_json) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (rid, "finney", 39, 7, "5Producer", 1, "cybergym_points_v1", 1, iso, iso,
+        (rid, "finney", 94, 7, "5Producer", 1, "cybergym_points_v1", 1, iso, iso,
          digest, hashlib.sha256(body).hexdigest(), "c" * 64,
          "sha256=" + contract.body_hmac_hex(body, secret), body.decode("utf-8"))))
     data.write(lambda c: c.execute(
         "INSERT OR REPLACE INTO cybergym_scores"
         "(report_id, miner_hotkey, epoch, score, network, netuid, producer_hotkey, "
         "report_sha256, generated_at_iso, received_at_iso) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (rid, "5Alice", 7, 12.0, "finney", 39, "5Producer", digest, iso, iso)))
+        (rid, "5Alice", 7, 12.0, "finney", 94, "5Producer", digest, iso, iso)))
     data.write(lambda c: c.execute(
         "INSERT OR REPLACE INTO metagraph_hotkeys("
         "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
         ") VALUES (?,?,?,?,?,?,?)",
-        ("finney", 39, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
+        ("finney", 94, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
 
     store = _store()                                   # the OTHER database
     store.upsert_spec(_spec("cybergym_v0"))
@@ -216,20 +216,20 @@ def test_a_real_adapter_refuses_unauthenticated_rows(tmp_path, monkeypatch):
 
     monkeypatch.setenv(contract.HMAC_SECRET_ENV, "refresh-e2e-secret")
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
 
     data = Store(str(tmp_path / "publisher.db"))
     data.write(lambda c: c.execute(
         "INSERT OR REPLACE INTO cybergym_scores"
         "(report_id, miner_hotkey, epoch, score, network, netuid, producer_hotkey, "
         "report_sha256, generated_at_iso, received_at_iso) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("forged", "5Alice", 7, 99.0, "finney", 39, "5Producer", "0" * 64,
+        ("forged", "5Alice", 7, 99.0, "finney", 94, "5Producer", "0" * 64,
          "2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z")))
     data.write(lambda c: c.execute(
         "INSERT OR REPLACE INTO metagraph_hotkeys("
         "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
         ") VALUES (?,?,?,?,?,?,?)",
-        ("finney", 39, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
+        ("finney", 94, "5Alice", 4, "", 1, "2026-07-01T00:00:00.000Z")))
 
     store = _store()
     store.upsert_spec(_spec("cybergym_v0"))
@@ -316,9 +316,9 @@ def test_compose_and_publish_inherits_the_mainnet_refusal(monkeypatch):
     store = _store()
     store.upsert_spec(_spec("cybergym_v0"))
     monkeypatch.setattr(elig, "compose_eligible", lambda *a, **k: ({}, {}))
-    # real set_weights: hard-refuses finney / SN39 before doing anything
+    # real set_weights: hard-refuses finney / SN94 before doing anything
     with pytest.raises(ws.UnsafeNetworkError):
-        arf.compose_and_publish(store, netuid=39, network="finney", signing_key_hex="00" * 32,
+        arf.compose_and_publish(store, netuid=94, network="finney", signing_key_hex="00" * 32,
                                 adapters={"cybergym_v0": _adapter({7: 3.0})})
 
 

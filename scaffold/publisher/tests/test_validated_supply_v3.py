@@ -9,7 +9,7 @@ Covers:
   * fail-closed behavior: a v1-pinned validator REJECTS a v3 vector, v2 still
     requires 10% fixed burn, and authority/FULL mode refuses v3;
   * provenance acceptance-set widening (MECHANISM_ACCEPTED);
-  * the sn39 public-reproduction v3 dry-run acceptance helper;
+  * the sn94 public-reproduction v3 dry-run acceptance helper;
   * a cross-repo round trip: the vendored publisher composes a real signed v3
     vector and the validator independently maps it to UID weights.
 """
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 import pytest
 
 from scaffold import provenance_audit, validator_thin
-from scaffold import sn39_public_reproduction as repro
+from scaffold import sn94_public_reproduction as repro
 
 NOW = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
 V3_PIN = validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3
@@ -284,7 +284,7 @@ def test_provenance_accepts_v3_in_rollout_set() -> None:
     assert "validated_supply_v1" not in accepted["validated_supply_v3"]
 
 
-# ---- sn39 public-reproduction dry-run ----------------------------------------
+# ---- sn94 public-reproduction dry-run ----------------------------------------
 
 
 def _v3_submission() -> dict:
@@ -302,25 +302,25 @@ def _v3_submission() -> dict:
     }
 
 
-def test_sn39_v3_dry_run_accepts_zero_burn_split() -> None:
+def test_sn94_v3_dry_run_accepts_zero_burn_split() -> None:
     assert repro._assert_current_dry_run_v3(_v3_submission()) == "0.00"
 
 
-def test_sn39_v3_dry_run_rejects_nonzero_burn() -> None:
+def test_sn94_v3_dry_run_rejects_nonzero_burn() -> None:
     doc = _v3_submission()
     doc["burn_share"] = 0.1
     with pytest.raises(repro.ReproductionError, match="70/30/0"):
         repro._assert_current_dry_run_v3(doc)
 
 
-def test_sn39_v3_dry_run_rejects_share_drift() -> None:
+def test_sn94_v3_dry_run_rejects_share_drift() -> None:
     doc = _v3_submission()
     doc["intel_tdx_share"] = 0.90
     with pytest.raises(repro.ReproductionError, match="70/30/0"):
         repro._assert_current_dry_run_v3(doc)
 
 
-def test_sn39_v2_dry_run_helper_unchanged() -> None:
+def test_sn94_v2_dry_run_helper_unchanged() -> None:
     # The v2 90/10 helper still enforces the 2-uid boundary.
     submission = {
         "status": "PASS",
@@ -558,7 +558,7 @@ def test_v3_pin_with_shadow_provenance_does_not_trip_the_guard() -> None:
 
     args = SimpleNamespace(
         require_policy=validator_thin.REQUIRE_POLICY_VALIDATED_SUPPLY_V3,
-        provenance="shadow", max_submissions=0, broadcast=False, offline=True, netuid=39)
+        provenance="shadow", max_submissions=0, broadcast=False, offline=True, netuid=94)
     try:
         validator_thin._validate_runtime_contract(args)
     except validator_thin.wire.VectorError as exc:

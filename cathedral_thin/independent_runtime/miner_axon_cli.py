@@ -18,7 +18,7 @@ from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from .errors import IndependentLiveError
 from .miner_axon import (
     NETWORK,
-    SN39_HTTPS_PORT,
+    SN94_HTTPS_PORT,
     UID124_AXON_CONTRACT,
     MinerAxonContract,
     MinerAxonAmbiguous,
@@ -53,7 +53,7 @@ def _parser(
             "preview", help="write the default no-chain-write announcement artifact"
         )
         preview.add_argument("--ip", required=True, help="verified public miner IPv4")
-        preview.add_argument("--port", type=int, default=SN39_HTTPS_PORT)
+        preview.add_argument("--port", type=int, default=SN94_HTTPS_PORT)
         preview.add_argument("--qvl", required=True, help="pinned TDX QVL executable")
         preview.add_argument("--output", default=str(_contract_preview_path(contract)))
         preview.add_argument("--wallet-path", default=None)
@@ -90,7 +90,7 @@ def _parser(
 
     recover = sub.add_parser(
         "recover",
-        help="read finalized SN39 state for one ambiguous intent without resubmitting",
+        help="read finalized SN94 state for one ambiguous intent without resubmitting",
     )
     recover.add_argument("--preview", default=str(_contract_preview_path(contract)))
     recover.add_argument("--reviewed-sha256", required=True)
@@ -115,7 +115,7 @@ def _preview(
     try:
         import bittensor as bt
     except ImportError as exc:
-        raise MinerAxonError("bittensor is required for the live SN39 path") from exc
+        raise MinerAxonError("bittensor is required for the live SN94 path") from exc
     subtensor = make_subtensor(bt, network=NETWORK)
     wallet = _wallet(bt, path=options.wallet_path, wallet_hotkey=wallet_hotkey)
     _wallet_public_identity(wallet, contract=contract)
@@ -175,7 +175,7 @@ def run_contract_cli(
                 import bittensor as bt
             except ImportError as exc:
                 raise MinerAxonError(
-                    "bittensor is required for the live SN39 path"
+                    "bittensor is required for the live SN94 path"
                 ) from exc
             subtensor = make_subtensor(bt, network=NETWORK)
             wallet = _wallet(bt, path=options.wallet_path, wallet_hotkey=wallet_hotkey)
@@ -212,7 +212,7 @@ def run_contract_cli(
                 import bittensor as bt
             except ImportError as exc:
                 raise MinerAxonError(
-                    "bittensor is required for the live SN39 path"
+                    "bittensor is required for the live SN94 path"
                 ) from exc
             subtensor = make_subtensor(bt, network=NETWORK)
             result = dict(

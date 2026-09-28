@@ -34,7 +34,7 @@ lazily so a cycle with no enabled artifact spec opens no database at all.
 (``mechanism_eligibility.compose_eligible``), then hand it to
 ``mechanism_weightset.set_weights``, which builds + signs + publishes the NEXT preview
 artifact (served by ``GET /mechanisms/weights/next``), stays permanently DRY-RUN, and
-**hard-refuses mainnet / finney / SN39**. So this can never touch real SN39 weights —
+**hard-refuses mainnet / finney / SN94**. So this can never touch real SN94 weights —
 the immutable cathedral-validator release remains the sole path that submits weights.
 
 Guardrails (mirroring the SAT adapter): read-only except ``put_scores`` of the
@@ -170,8 +170,8 @@ def compose_and_publish(
 
     ``set_weights`` builds + signs + publishes the NEXT preview artifact, stays
     permanently DRY-RUN, and **raises ``UnsafeNetworkError`` on mainnet / finney /
-    SN39 before building anything** — so this composes previews for a testnet target
-    and never writes real SN39 weights. Returns ``(set_weights_result, compose_debug)``.
+    SN94 before building anything** — so this composes previews for a testnet target
+    and never writes real SN94 weights. Returns ``(set_weights_result, compose_debug)``.
 
     ``compose_eligible`` reads ``metagraph_hotkeys`` to build ``registered_uids``, so
     it needs the same publisher ``Store`` the adapters do — not the MechanismStore.

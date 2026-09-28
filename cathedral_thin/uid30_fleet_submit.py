@@ -33,7 +33,7 @@ from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
     MECID,
     NETUID,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
@@ -333,7 +333,7 @@ def validate_reviewed_preview(document: Mapping[str, Any]) -> dict[str, Any]:
     )
     if (
         recheck_block < evidence_block
-        or recheck_block - evidence_block > SN39_MORTAL_PERIOD_BLOCKS
+        or recheck_block - evidence_block > SN94_MORTAL_PERIOD_BLOCKS
         or set(current) != expected_current_keys
         or current.get("uid30_storage") != [[PREDECESSOR_UID, W], [TARGET_UID, W]]
         or current.get("burn_weight") != 0
@@ -567,7 +567,7 @@ def read_fleet_state() -> UID30FleetState:
         safety = canonical._require_uid_mapping_stability(
             base.preflight,
             expected_mapping,
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
         )
         safety = canonical._require_exact_uid30_fleet_safety(safety)
     except Exception as exc:
@@ -715,14 +715,14 @@ def _inclusion_policy(
     return {
         "valid_from_block": int(evidence["block_number"]),
         "valid_until_block": (
-            state.base.next_epoch_start_block - SN39_MORTAL_PERIOD_BLOCKS
+            state.base.next_epoch_start_block - SN94_MORTAL_PERIOD_BLOCKS
         ),
         "valid_from_time": launch._canonical_utc(now),
         "valid_until_time": launch._canonical_utc(
             now + timedelta(seconds=PREVIEW_VALIDITY_SECONDS)
         ),
         "require_commit_reveal_disabled": True,
-        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
         "expected_next_epoch_start_block": state.base.next_epoch_start_block,
     }
 
@@ -1107,7 +1107,7 @@ def submit_reviewed_fleet(
                 ) from exc
 
             try:
-                receipt = canonical._submit_exact_sn39_extrinsic(
+                receipt = canonical._submit_exact_sn94_extrinsic(
                     fresh_state.base.preflight,
                     runtime_contract=args,
                     attempt_id=attempt_id,
@@ -1115,7 +1115,7 @@ def submit_reviewed_fleet(
                     version_key=VERSION_KEY,
                     wire_uids=[TARGET_UID],
                     wire_weights=[W],
-                    mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+                    mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
                     allow_reviewed_uid30_finalized_descendant=True,
                 )
                 submission = launch._receipt_submission(receipt, state=fresh_state.base)
@@ -1255,7 +1255,7 @@ def _signed_record(
         type(nonce) is not int
         or nonce < 0
         or era_reference != identity.get("mapping_block")
-        or mortal != SN39_MORTAL_PERIOD_BLOCKS
+        or mortal != SN94_MORTAL_PERIOD_BLOCKS
         or version != VERSION_KEY
         or uids != [TARGET_UID]
         or weights != [W]

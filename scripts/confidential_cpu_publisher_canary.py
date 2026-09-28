@@ -517,7 +517,7 @@ def _run_canary_in_child(
     hotkey_to_uid: Mapping[str, int],
     *,
     network: str = "finney",
-    netuid: int = 39,
+    netuid: int = 94,
     burn_uid: int = 0,
     metagraph_age_secs: float = 0.0,
     egress_attempts: list[str],
@@ -789,7 +789,7 @@ def run_canary(
     hotkey_to_uid: Mapping[str, int],
     *,
     network: str = "finney",
-    netuid: int = 39,
+    netuid: int = 94,
     burn_uid: int = 0,
     _metagraph_age_secs: float = 0.0,
 ) -> dict[str, Any]:
@@ -898,7 +898,7 @@ def _isolated_child_main() -> int:
                 revoke_body,
                 mapping,
                 network=request.get("network", "finney"),
-                netuid=request.get("netuid", 39),
+                netuid=request.get("netuid", 94),
                 burn_uid=request.get("burn_uid", 0),
                 metagraph_age_secs=float(request.get("metagraph_age_secs", 0.0)),
                 egress_attempts=attempts,
@@ -983,7 +983,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--network", default="finney")
-    parser.add_argument("--netuid", type=_nonnegative_int, default=39)
+    parser.add_argument("--netuid", type=_nonnegative_int, default=94)
     parser.add_argument("--burn-uid", type=_nonnegative_int, default=0)
     return parser
 

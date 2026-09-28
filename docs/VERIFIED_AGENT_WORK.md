@@ -1,6 +1,6 @@
 # Cathedral Verified Agent Work
 
-Status: implemented local protocol and weight-composition proof; no SN39 chain
+Status: implemented local protocol and weight-composition proof; no SN94 chain
 write and no production TDX quote in this evidence set.
 
 ## Product in one sentence
@@ -155,7 +155,7 @@ Create a task and keep the hidden suite private until evaluation:
 
 ```bash
 python -m cathedral_thin.policy_cli issue \
-  --network finney --netuid 39 --current-block BLOCK \
+  --network finney --netuid 94 --current-block BLOCK \
   --source-epoch EPOCH --miner-hotkey MINER_SS58 \
   --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY \
   --spec config/verified-policy-task.example.json \
@@ -166,7 +166,7 @@ On the miner:
 
 ```bash
 python -m cathedral_thin.policy_cli mine \
-  --network finney --netuid 39 --current-block BLOCK \
+  --network finney --netuid 94 --current-block BLOCK \
   --wallet-name MINER_WALLET --wallet-hotkey MINER_HOTKEY \
   --task task.json --output artifact.json
 ```
@@ -175,7 +175,7 @@ Back on the validator:
 
 ```bash
 python -m cathedral_thin.policy_cli evaluate \
-  --network finney --netuid 39 --current-block BLOCK \
+  --network finney --netuid 94 --current-block BLOCK \
   --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY \
   --task task.json --artifact artifact.json \
   --hidden-suite hidden-suite.json --output evaluation.json
@@ -203,14 +203,14 @@ silently promoted to hardware-backed execution.
 
 ## Production gates
 
-Before assigning SN39 emissions to this work:
+Before assigning SN94 emissions to this work:
 
 1. Replace the toy task pack with a useful, versioned agent-policy dataset and
    independent hidden-suite generation.
 2. Run enough miners to measure class balance, leakage, latency, and score
    stability across repeated epochs.
 3. Exercise a real TDX quote and pinned verifier with the exact artifact output.
-4. Register a permitted SN39 validator and perform dry-run UID mapping at the
+4. Register a permitted SN94 validator and perform dry-run UID mapping at the
    intended block.
 5. Register at least one real source subnet owner and verify its report through
    the full owner-delegation path.

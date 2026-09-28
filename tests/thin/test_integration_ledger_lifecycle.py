@@ -68,7 +68,7 @@ def _preview(fx, receipts, ledger, **kw):
         key_registry=fx.registry,
         receipts=receipts,
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=fx.source_epoch,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -97,7 +97,7 @@ def _verdict(out):
 
 
 def test_a_replayed_receipt_is_refused_after_the_authoritative_pass():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
 
@@ -113,7 +113,7 @@ def test_a_replayed_receipt_is_refused_after_the_authoritative_pass():
 
 def test_ledger_state_survives_a_restart_and_still_refuses_the_replay(tmp_path):
     """The second preview runs on a ledger reopened from disk, as a restart does."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     path = str(tmp_path / "consumption.sqlite")
 
@@ -134,7 +134,7 @@ def test_ledger_state_survives_a_restart_and_still_refuses_the_replay(tmp_path):
 
 def test_the_next_epoch_still_passes_after_a_restart(tmp_path):
     """The durable claim fences one epoch, not the restarted validator forever."""
-    before_fx = IntegrationFixtures(source_epoch=11)
+    before_fx = IntegrationFixtures(netuid=94, source_epoch=11)
     path = str(tmp_path / "consumption.sqlite")
     before = ConsumptionLedger(path)
     assert (
@@ -149,7 +149,7 @@ def test_the_next_epoch_still_passes_after_a_restart(tmp_path):
     )
     before.close()
 
-    after_fx = IntegrationFixtures(source_epoch=12)
+    after_fx = IntegrationFixtures(netuid=94, source_epoch=12)
     after = ConsumptionLedger(path)
     out = _authoritative(
         after_fx,
@@ -162,7 +162,7 @@ def test_the_next_epoch_still_passes_after_a_restart(tmp_path):
 
 def test_a_refused_receipt_is_not_consumed_and_can_be_resubmitted(tmp_path):
     """A receipt the policy refuses must not burn its own replay token."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     ledger = ConsumptionLedger(str(tmp_path / "consumption.sqlite"))
 
@@ -196,7 +196,7 @@ def test_repeated_previews_return_an_identical_vector():
     second run, so the operator who checked their work twice saw a different, and
     wrong, answer. The default gate is a read.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipts = _one(fx, fx.cpu_receipt())
 
@@ -210,7 +210,7 @@ def test_repeated_previews_return_an_identical_vector():
 
 
 def test_inspection_mode_reports_itself_and_authoritative_mode_says_so():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipts = _one(fx, fx.cpu_receipt())
     assert _preview(fx, receipts, ledger)["gates"]["replay_mode"] == "inspection"
@@ -220,7 +220,7 @@ def test_inspection_mode_reports_itself_and_authoritative_mode_says_so():
 
 
 def test_the_authoritative_pass_records_and_a_later_inspection_sees_it():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipt = fx.cpu_receipt()
 
@@ -243,7 +243,7 @@ def test_the_authoritative_pass_records_and_a_later_inspection_sees_it():
 
 
 def test_a_second_authoritative_pass_for_the_same_epoch_fails_closed():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     first = fx.cpu_receipt(work_units="30")
     second = fx.cpu_receipt(work_units="31")
@@ -261,7 +261,7 @@ def test_authoritative_mode_refuses_without_a_real_epoch_ledger():
     no_replay = pytest.importorskip(
         "cathedral_distill.consumption_ledger"
     ).NO_REPLAY_LEDGER
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(ig.IntegrationPolicyError, match="authoritative pass requires"):
         _preview(
             fx,
@@ -274,7 +274,7 @@ def test_authoritative_mode_refuses_without_a_real_epoch_ledger():
 
 @pytest.mark.parametrize("value", ["false", "0", 1, {"consume": True}])
 def test_the_authoritative_mode_needs_a_real_boolean(value):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(ig.IntegrationPolicyError, match="must be the boolean"):
         _preview(
             fx, _one(fx, fx.cpu_receipt()), durable_ledger(), consume_receipts=value
@@ -293,7 +293,7 @@ def test_a_no_op_ledger_is_refused_instead_of_credited(monkeypatch):
     seam had nothing left to dedupe against, so a ledger whose `consume` silently
     did nothing let the same receipt earn twice.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)  # fails open
@@ -303,7 +303,7 @@ def test_a_no_op_ledger_is_refused_instead_of_credited(monkeypatch):
 
 
 def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypatch):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     ledger = durable_ledger()
     monkeypatch.setattr(ledger, "consume", lambda *_a, **_kw: None)
@@ -317,7 +317,7 @@ def test_a_no_op_ledger_cannot_credit_the_same_receipt_in_two_previews(monkeypat
 def test_a_failure_after_the_epoch_claim_stays_locked_for_operator_review(
     monkeypatch,
 ):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     ledger = durable_ledger()
     receipt = fx.cpu_receipt()
     real_consume = ledger.consume
@@ -347,7 +347,7 @@ def test_a_ledger_that_cannot_be_queried_is_refused_at_the_gate():
         def consume(self, *_a, **_kw):
             return None
 
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(ig.IntegrationLedgerError, match="is_consumed"):
         _preview(fx, _one(fx, fx.cpu_receipt()), WriteOnly())
 
@@ -361,7 +361,7 @@ def test_the_contract_no_replay_marker_counts_as_no_ledger():
     no_replay = pytest.importorskip(
         "cathedral_distill.consumption_ledger"
     ).NO_REPLAY_LEDGER
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(ig.IntegrationPolicyError, match="consumption_ledger"):
         _preview(fx, _one(fx, fx.cpu_receipt()), no_replay)
 
@@ -374,7 +374,7 @@ def test_the_contract_no_replay_marker_counts_as_no_ledger():
 
 def test_the_seam_credits_one_receipt_once_within_a_preview():
     """Deduplication is independent of the ledger, which is the second line."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     receipt = fx.cpu_receipt()
     out = _preview(
         fx,
@@ -408,7 +408,7 @@ def test_exactly_one_racing_authoritative_pass_claims_the_epoch(tmp_path):
     outcomes: list[str] = []
 
     def authoritative(index: int) -> None:
-        fx = IntegrationFixtures(source_epoch=11)
+        fx = IntegrationFixtures(netuid=94, source_epoch=11)
         barrier.wait()
         try:
             out = _authoritative(fx, _one(fx, fx.cpu_receipt()), ledgers[index])

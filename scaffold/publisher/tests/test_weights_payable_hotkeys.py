@@ -46,7 +46,7 @@ def _add_metagraph_hotkey(
             "INSERT OR REPLACE INTO metagraph_hotkeys("
             "network, netuid, hotkey, uid, coldkey, block, updated_at_iso"
             ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("finney", 39, hotkey, uid, "", 123, updated_at),
+            ("finney", 94, hotkey, uid, "", 123, updated_at),
         )
 
     store.write(write)
@@ -55,7 +55,7 @@ def _add_metagraph_hotkey(
 def _common_env(monkeypatch, mode: str) -> None:
     monkeypatch.setenv(weights.MODE_ENV, "flat_recent")
     monkeypatch.setenv(weights.NETWORK_ENV, "finney")
-    monkeypatch.setenv(weights.NETUID_ENV, "39")
+    monkeypatch.setenv(weights.NETUID_ENV, "94")
     monkeypatch.setenv(weights.PAYABLE_HOTKEYS_ENV, mode)
     monkeypatch.setenv(weights.PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV, "600")
     monkeypatch.setenv(weights.PERMINER_BONUS_MULT_ENV, "0")

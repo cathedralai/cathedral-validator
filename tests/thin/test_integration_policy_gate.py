@@ -94,7 +94,7 @@ def _preview(fx, *, allocation="0.90", burn="0.10", receipts=None, **kw):
         if receipts is not None
         else [ig.LaneReceipt(itf.KIND_COMPUTE_CPU, LANE_CPU, fx.cpu_receipt())],
         network="finney",
-        netuid=39,
+        netuid=94,
         source_epoch=11,
         now=NOW_DT,
         now_iso=NOW_ISO,
@@ -103,7 +103,7 @@ def _preview(fx, *, allocation="0.90", burn="0.10", receipts=None, **kw):
 
 
 def test_funded_lane_refuses_every_omitted_gate():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     with pytest.raises(ig.IntegrationPolicyError) as excinfo:
         _preview(fx, events=events)
@@ -119,7 +119,7 @@ def test_funded_lane_refuses_every_omitted_gate():
 
 @pytest.mark.parametrize("omit", ig.REQUIRED_REWARD_GATES)
 def test_each_single_omission_refuses_on_its_own(omit):
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     gates = _policy(fx)
     gates[omit] = None
     with pytest.raises(ig.IntegrationPolicyError, match=omit):
@@ -132,7 +132,7 @@ def test_a_policy_error_is_an_integration_error():
 
 
 def test_the_documented_opt_out_keeps_a_shadow_preview_usable():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     out = _preview(fx, allow_unpoliced_preview=True, events=events)
     assert out["audit"]["verdicts"]["pass"] == 1
@@ -150,7 +150,7 @@ def test_fully_policed_preview_reports_the_gates_its_receipts_actually_read():
     assurance in the one document an activation decision reads, and a
     `current_block=0` typo looked like an applied gate.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     events, buf = _logger()
     out = _preview(fx, events=events, **_policy(fx))
     assert out["audit"]["verdicts"]["pass"] == 1
@@ -179,7 +179,7 @@ def test_fully_policed_preview_reports_the_gates_its_receipts_actually_read():
 
 
 def test_a_lane_with_no_receipts_reports_no_gates_applied():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(fx, receipts=[], **_policy(fx))
     lane = out["gates"]["lanes"][LANE_CPU]
     assert lane["kinds"] == {}
@@ -207,13 +207,13 @@ def test_the_opt_out_refuses_anything_that_is_not_a_boolean(value):
     of what the value says. A value that is not literally True or False is refused
     rather than interpreted.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     with pytest.raises(ig.IntegrationPolicyError, match="must be the boolean"):
         _preview(fx, allow_unpoliced_preview=value)
 
 
 def test_the_opt_out_still_accepts_the_two_real_booleans():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     assert _preview(fx, allow_unpoliced_preview=True)["gates"]["unpoliced_preview"]
     with pytest.raises(ig.IntegrationPolicyError, match="previewed without"):
         _preview(fx, allow_unpoliced_preview=False)
@@ -221,7 +221,7 @@ def test_the_opt_out_still_accepts_the_two_real_booleans():
 
 def test_an_empty_measurement_allow_list_admits_nothing():
     """Every receipt carries exactly one measurement, so empty denies all of them."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(fx, **_policy(fx, allowed_measurements=frozenset()))
     assert out["gates"]["omitted_gates"] == []  # expressed, not omitted
     (receipt,) = out["audit"]["receipts"]
@@ -231,7 +231,7 @@ def test_an_empty_measurement_allow_list_admits_nothing():
 
 
 def test_an_empty_tcb_status_allow_list_admits_nothing():
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(fx, **_policy(fx, allowed_tcb_statuses=frozenset()))
     assert out["gates"]["omitted_gates"] == []
     (receipt,) = out["audit"]["receipts"]
@@ -247,7 +247,7 @@ def test_an_empty_advisory_allow_list_admits_only_advisory_free_receipts():
     policed reference fixtures rely on exactly that. A receipt that carries an
     advisory is refused until the advisory is named.
     """
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     advisory = "INTEL-SA-00615"
 
     clean = _preview(fx, **_policy(fx, allowed_advisories=frozenset()))
@@ -282,7 +282,7 @@ def test_an_empty_advisory_allow_list_admits_only_advisory_free_receipts():
 
 def test_an_unfunded_lane_needs_no_policy():
     """The gate is about reward. A zero-allocation lane cannot pay anyone."""
-    fx = IntegrationFixtures()
+    fx = IntegrationFixtures(netuid=94)
     out = _preview(fx, allocation="0.00", burn="1.00")
     assert out["gates"]["reward_lanes"] == []
     assert out["gates"]["lanes"][LANE_CPU]["reward_lane"] is False

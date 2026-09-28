@@ -29,7 +29,7 @@ python scripts/confidential_cpu_publisher_canary.py \
   --revoke-report /path/to/fresh-revoke-report.json \
   --uid-map '5RegisteredWorkerHotkey=17' \
   --network finney \
-  --netuid 39 \
+  --netuid 94 \
   --burn-uid 0
 ```
 

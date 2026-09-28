@@ -1,5 +1,5 @@
 """Default-OFF integration lane: independently verify Compute + Distill, PREVIEW one
-audited SN39 vector.
+audited SN94 vector.
 
 Issue cathedral-validator#1 makes this validator the single one that independently
 verifies both Compute (Intel TDX CPU and confidential-GPU) and Distill receipts and

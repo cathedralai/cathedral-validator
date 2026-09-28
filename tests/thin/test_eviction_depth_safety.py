@@ -18,7 +18,7 @@ import pytest
 
 from scaffold import validator_thin
 from scaffold.validator_thin import (
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     _drop_unprovable_targets,
     _eviction_depths,
 )
@@ -73,13 +73,13 @@ def test_ambiguous_ordering_counts_as_behind_the_target():
 
 
 def test_a_mature_miner_behind_older_zero_score_peers_is_deep():
-    # The live SN39 shape: a full subnet of zero-score neurons. The miner is
+    # The live SN94 shape: a full subnet of zero-score neurons. The miner is
     # deep only by virtue of peers REGISTERED BEFORE it, not by UID index.
     rows, metrics = _rows([(uid, 1_000 + uid) for uid in range(200)])
     depths = _eviction_depths(rows, metrics)
     assert depths["hk163"] == 163  # 163 older registrations ahead of it
     assert depths["hk0"] == 0
-    worst_case = SN39_MORTAL_PERIOD_BLOCKS  # 1 reg/block, zero free slots
+    worst_case = SN94_MORTAL_PERIOD_BLOCKS  # 1 reg/block, zero free slots
     assert depths["hk163"] >= worst_case
     assert depths["hk3"] < worst_case
 
@@ -106,7 +106,7 @@ def test_unprovable_target_is_excluded_not_aborted():
     result = validator_thin._require_uid_mapping_stability(
         _preflight({"safe"}),
         {1: "safe", 2: "unsafe"},
-        mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
     )
     assert result["excluded_hotkeys"] == ["unsafe"]
 
@@ -116,7 +116,7 @@ def test_no_safe_target_is_a_hard_failure():
         validator_thin._require_uid_mapping_stability(
             _preflight({"someone-else"}),
             {1: "safe", 2: "unsafe"},
-            mortal_period_blocks=SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=SN94_MORTAL_PERIOD_BLOCKS,
         )
 
 

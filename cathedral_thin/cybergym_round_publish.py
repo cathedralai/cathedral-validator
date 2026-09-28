@@ -1,6 +1,6 @@
 """Carry a finished round's scores to the publisher, which is what turns them into weights.
 
-The v2 round daemon does NOT set weights. SN39 has ONE weight vector -- the publisher composes the
+The v2 round daemon does NOT set weights. SN94 has ONE weight vector -- the publisher composes the
 compute lane's 0.70 with the CyberGym lane's 0.30 and sends a single `set_weights` -- so a producer
 that broadcast its own vector would be a second writer for the same subnet from the same hotkey,
 and the last writer would win. `FileWeightSink` is therefore the CORRECT local behaviour for a
@@ -49,7 +49,7 @@ class PublisherConfig:
     hmac_secret: str = ""
     producer_hotkey: str = ""
     network: str = "finney"
-    netuid: int = 39
+    netuid: int = 94
     timeout_seconds: float = 15.0
     allow_unattested: bool = False
 
@@ -61,7 +61,7 @@ class PublisherConfig:
             hmac_secret=os.environ.get("CYBERGYM_PUBLISH_HMAC_SECRET", "").strip(),
             producer_hotkey=os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "").strip(),
             network=os.environ.get("CYBERGYM_NETWORK", "finney").strip() or "finney",
-            netuid=int(os.environ.get("CYBERGYM_NETUID", "39")),
+            netuid=int(os.environ.get("CYBERGYM_NETUID", "94")),
             timeout_seconds=float(os.environ.get("CYBERGYM_PUBLISH_TIMEOUT", "15")),
         )
 

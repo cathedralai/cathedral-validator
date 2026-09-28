@@ -1,4 +1,4 @@
-# Retired SN39 weight publisher deployment
+# Retired SN94 weight publisher deployment
 
 This directory is not a supported validator installation path. Its files are
 retained only for historical release reconstruction.

@@ -59,7 +59,7 @@ def composed(tmp_path, *, economics=None):
 
 def test_the_call_shape_is_pinned():
     assert build_mechanism_weights_kwargs(dests=[136], weights=[65535]) == {
-        "netuid": 39,
+        "netuid": 94,
         "mecid": 0,
         "dests": [136],
         "weights": [65535],

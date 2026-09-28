@@ -1,2 +1,2 @@
 g cathedral-validator -
-u cathedral-validator - "Cathedral SN39 direct validator" /var/lib/cathedral-validator /usr/sbin/nologin
+u cathedral-validator - "Cathedral SN94 direct validator" /var/lib/cathedral-validator /usr/sbin/nologin

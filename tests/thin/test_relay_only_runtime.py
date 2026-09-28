@@ -37,12 +37,12 @@ def _serve_namespace(*, config: str | None = None) -> argparse.Namespace:
 
 
 def test_only_the_relay_profile_ships_and_the_release_binds_it() -> None:
-    assert not (ROOT / "config" / "validator-authority-sn39.toml").exists()
-    assert not (ROOT / "config" / "validator-selfcompose-sn39.toml").exists()
+    assert not (ROOT / "config" / "validator-authority-sn94.toml").exists()
+    assert not (ROOT / "config" / "validator-selfcompose-sn94.toml").exists()
     release_files = runpy.run_path(
-        str(ROOT / "scripts" / "build_sn39_release_manifest.py")
+        str(ROOT / "scripts" / "build_sn94_release_manifest.py")
     )["RELEASE_FILES"]
-    assert "config/validator-thin-sn39-relay.toml" in release_files
+    assert "config/validator-thin-sn94-relay.toml" in release_files
     assert all(
         "authority" not in path and "selfcompose" not in path for path in release_files
     )
@@ -134,16 +134,16 @@ def test_direct_module_environment_override_is_explicitly_refused(
 
 
 def test_legacy_manual_console_start_is_refused(monkeypatch, capsys) -> None:
-    monkeypatch.delenv(vt.SN39_RELEASE_SHA_ENV, raising=False)
-    monkeypatch.delenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
+    monkeypatch.delenv(vt.SN94_RELEASE_SHA_ENV, raising=False)
+    monkeypatch.delenv(vt.SN94_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
     monkeypatch.setattr(vt, "run", lambda _cfg: pytest.fail("manual start wrote"))
     assert cli.main(["serve"]) == 2
     assert "manual recurring starts are retired" in capsys.readouterr().err
 
 
 def test_legacy_manual_direct_start_is_refused(monkeypatch, capsys) -> None:
-    monkeypatch.delenv(vt.SN39_RELEASE_SHA_ENV, raising=False)
-    monkeypatch.delenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
+    monkeypatch.delenv(vt.SN94_RELEASE_SHA_ENV, raising=False)
+    monkeypatch.delenv(vt.SN94_LAUNCH_CONFIG_DIGEST_ENV, raising=False)
     monkeypatch.setattr(sys, "argv", ["validator_thin"])
     monkeypatch.setattr(vt, "run", lambda _cfg: pytest.fail("manual start wrote"))
     with pytest.raises(SystemExit) as caught:
@@ -162,7 +162,7 @@ def test_installed_context_binds_release_venv_manifest_and_config(
     release.mkdir(parents=True)
     venv.mkdir(parents=True)
     config = tmp_path / "validator.toml"
-    config.write_text("[network]\nnetuid = 39\n", encoding="utf-8")
+    config.write_text("[network]\nnetuid = 94\n", encoding="utf-8")
     digest = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
     manifest = tmp_path / "manifest.json"
     init_comm = tmp_path / "init-comm"
@@ -179,24 +179,24 @@ def test_installed_context_binds_release_venv_manifest_and_config(
     )
     init_comm.write_text("systemd\n", encoding="utf-8")
     self_cgroup.write_text(
-        f"0::/system.slice/{vt.SN39_SYSTEMD_UNIT}\n", encoding="utf-8"
+        f"0::/system.slice/{vt.SN94_SYSTEMD_UNIT}\n", encoding="utf-8"
     )
-    monkeypatch.setattr(vt, "SN39_INSTALLED_RELEASE_ROOT", release_root)
-    monkeypatch.setattr(vt, "SN39_INSTALLED_VENV_ROOT", venv_root)
-    monkeypatch.setattr(vt, "SN39_INSTALLED_MANIFEST", manifest)
-    monkeypatch.setattr(vt, "SN39_INSTALLED_CONFIG", config)
-    monkeypatch.setattr(vt, "SN39_PROC_INIT_COMM", init_comm)
-    monkeypatch.setattr(vt, "SN39_PROC_SELF_CGROUP", self_cgroup)
+    monkeypatch.setattr(vt, "SN94_INSTALLED_RELEASE_ROOT", release_root)
+    monkeypatch.setattr(vt, "SN94_INSTALLED_VENV_ROOT", venv_root)
+    monkeypatch.setattr(vt, "SN94_INSTALLED_MANIFEST", manifest)
+    monkeypatch.setattr(vt, "SN94_INSTALLED_CONFIG", config)
+    monkeypatch.setattr(vt, "SN94_PROC_INIT_COMM", init_comm)
+    monkeypatch.setattr(vt, "SN94_PROC_SELF_CGROUP", self_cgroup)
     monkeypatch.setattr(vt.os, "getppid", lambda: 1)
     monkeypatch.setattr(vt.sys, "prefix", str(venv))
     monkeypatch.chdir(release)
-    monkeypatch.setenv(vt.SN39_RELEASE_SHA_ENV, RELEASE_SHA)
-    monkeypatch.setenv(vt.SN39_LAUNCH_CONFIG_DIGEST_ENV, digest)
+    monkeypatch.setenv(vt.SN94_RELEASE_SHA_ENV, RELEASE_SHA)
+    monkeypatch.setenv(vt.SN94_LAUNCH_CONFIG_DIGEST_ENV, digest)
 
     assert vt.installed_recurring_context() is True
     config.write_text("[network]\nnetuid = 1\n", encoding="utf-8")
     assert vt.installed_recurring_context() is False
-    config.write_text("[network]\nnetuid = 39\n", encoding="utf-8")
+    config.write_text("[network]\nnetuid = 94\n", encoding="utf-8")
     self_cgroup.write_text("0::/user.slice/session.scope\n", encoding="utf-8")
     assert vt.installed_recurring_context() is False
 

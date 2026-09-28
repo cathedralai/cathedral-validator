@@ -58,10 +58,10 @@ def test_the_six_conditions_are_no_longer_one_raise():
 
 def test_the_required_room_is_still_mortal_plus_finality_margin():
     """The gate's arithmetic is unchanged — only its reporting."""
-    assert vt.SN39_EPOCH_FINALITY_MARGIN_BLOCKS == 32
-    assert vt.SN39_MORTAL_PERIOD_BLOCKS == 16
+    assert vt.SN94_EPOCH_FINALITY_MARGIN_BLOCKS == 32
+    assert vt.SN94_MORTAL_PERIOD_BLOCKS == 16
     body = _gate_source()
-    assert "policy.mortal_period_blocks + SN39_EPOCH_FINALITY_MARGIN_BLOCKS" in re.sub(
+    assert "policy.mortal_period_blocks + SN94_EPOCH_FINALITY_MARGIN_BLOCKS" in re.sub(
         r"\s+", " ", body
     )
 

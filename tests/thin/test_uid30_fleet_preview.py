@@ -374,7 +374,7 @@ def test_preview_cli_has_no_writer_surface():
         "get_account_nonce",
         "create_signed_extrinsic",
         "submit_extrinsic",
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         "submission_journal",
     ):
         assert forbidden not in source

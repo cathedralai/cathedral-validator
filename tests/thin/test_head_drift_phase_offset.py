@@ -39,7 +39,7 @@ def test_the_offset_stays_inside_one_block():
     draws = [vt._head_drift_phase_offset(BLOCK_SECS) for _ in range(2000)]
 
     assert all(0.0 <= d <= BLOCK_SECS for d in draws)
-    assert vt.SN39_PRE_SIGN_HEAD_DRIFT_RETRIES * BLOCK_SECS < 120.0
+    assert vt.SN94_PRE_SIGN_HEAD_DRIFT_RETRIES * BLOCK_SECS < 120.0
 
 
 def test_consecutive_offsets_differ():
@@ -69,4 +69,4 @@ def test_the_rearm_delay_alone_lands_on_the_same_phase():
     number of block times, and sleeping an exact multiple of the period returns
     to the same phase just as reliably as sleeping nothing.
     """
-    assert vt.SN39_PRE_SIGN_HEAD_DRIFT_REARM_SECS % BLOCK_SECS == 0
+    assert vt.SN94_PRE_SIGN_HEAD_DRIFT_REARM_SECS % BLOCK_SECS == 0

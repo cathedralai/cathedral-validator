@@ -1,6 +1,6 @@
 # Cathedral Validator boundary
 
-This repository is the sole source for Cathedral SN39 validator behavior.
+This repository is the sole source for Cathedral SN94 validator behavior.
 
 It owns:
 
@@ -12,7 +12,7 @@ It owns:
 
 Cathedral Compute supplies worker evidence. Cathedral Distill supplies receipt
 and lane contracts. Neither repository owns the validator wallet or submits
-SN39 weights.
+SN94 weights.
 
 Registration, uptime, hardware ownership, attestation, or a self-reported score
 does not earn weight. Only work which passes the active verification and policy

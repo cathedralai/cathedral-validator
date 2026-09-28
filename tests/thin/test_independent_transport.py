@@ -305,9 +305,9 @@ def test_an_unpinned_scalar_is_refused(tmp_path, field):
 
 
 @pytest.mark.parametrize("field", ["netuid", "mecid", "version_key"])
-@pytest.mark.parametrize("value", ["39", None, 39.0, True])
+@pytest.mark.parametrize("value", ["94", None, 94.0, True])
 def test_a_scalar_that_is_not_an_integer_is_refused(tmp_path, field, value):
-    """``int("39")`` would have coerced a string into the pin."""
+    """``int("94")`` would have coerced a string into the pin."""
     write_lock(tmp_path)
     subtensor = FakeSubtensor()
     transport = transport_for(tmp_path, subtensor=subtensor)

@@ -217,7 +217,7 @@ def configured_audience() -> tuple[str, int]:
     """The exact (network, netuid) an ingested report must declare.
 
     Fails closed exactly like ``external_scores.configured_score_audience``: an
-    unset or malformed audience raises rather than defaulting to finney/39, so a
+    unset or malformed audience raises rather than defaulting to finney/94, so a
     misconfigured deployment cannot silently ingest for the wrong subnet.
     """
     network = os.environ.get(NETWORK_ENV)

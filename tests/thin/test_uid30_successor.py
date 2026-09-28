@@ -17,7 +17,7 @@ from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
     MAX_WEIGHT_LIMIT,
     MIN_ALLOWED_WEIGHTS,
-    SN39_MORTAL_PERIOD_BLOCKS,
+    SN94_MORTAL_PERIOD_BLOCKS,
     VERSION_KEY,
     W,
 )
@@ -235,7 +235,7 @@ def test_successor_state_resolves_both_hotkeys_dynamically_at_one_head(
             {"combined": "safe"}
             if preflight is base.preflight
             and mapping == expected_mapping
-            and mortal_period_blocks == SN39_MORTAL_PERIOD_BLOCKS
+            and mortal_period_blocks == SN94_MORTAL_PERIOD_BLOCKS
             else pytest.fail((preflight, mapping, mortal_period_blocks))
         ),
     )
@@ -713,7 +713,7 @@ def test_pristine_successor_recovery_refuses_without_chain_read_or_mutation(
     )
     monkeypatch.setattr(
         canonical,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: pytest.fail("recovery must never submit"),
     )
 
@@ -818,7 +818,7 @@ def test_successor_submit_uses_only_fixed_canonical_write_and_proof_seams(
         assert preflight is state.preflight
         return receipt
 
-    monkeypatch.setattr(canonical, "_submit_exact_sn39_extrinsic", submit)
+    monkeypatch.setattr(canonical, "_submit_exact_sn94_extrinsic", submit)
     monkeypatch.setattr(
         canonical,
         "_record_pending_submission_receipt",
@@ -872,7 +872,7 @@ def test_successor_submit_uses_only_fixed_canonical_write_and_proof_seams(
     ]
     assert observed_submit["wire_uids"] == [8, 124]
     assert observed_submit["wire_weights"] == [W, W]
-    assert observed_submit["netuid"] == 39
+    assert observed_submit["netuid"] == 94
     assert observed_submit["version_key"] == VERSION_KEY
     assert observed_submit["allow_reviewed_uid30_finalized_descendant"] is True
     assert result.wire_uids == (8, 124)
@@ -915,7 +915,7 @@ def test_successor_signed_failure_stays_ambiguous_and_never_retries(
         return False
 
     monkeypatch.setattr(canonical, "_reserve_common_submission", reserve)
-    monkeypatch.setattr(canonical, "_submit_exact_sn39_extrinsic", submit)
+    monkeypatch.setattr(canonical, "_submit_exact_sn94_extrinsic", submit)
     monkeypatch.setattr(canonical, "_abort_unsigned_common_submission", abort)
 
     with pytest.raises(launch.UID30LaunchAmbiguous, match="do not retry"):
@@ -950,7 +950,7 @@ def test_finalized_successor_recovery_is_read_only_and_returns_exact_two_rows(
         "extrinsic_hash": "0x" + "8" * 64,
         "nonce": 11,
         "era_reference_block": BLOCK,
-        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": VERSION_KEY,
         "wire_uids": [8, 124],
         "wire_weights": [W, W],
@@ -1004,7 +1004,7 @@ def test_finalized_successor_recovery_is_read_only_and_returns_exact_two_rows(
     )
     monkeypatch.setattr(
         canonical,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: pytest.fail("recovery must never submit"),
     )
     monkeypatch.setattr(
@@ -1062,7 +1062,7 @@ def test_uid_churn_flows_through_preview_and_fixed_recovery(
         "extrinsic_hash": "0x" + "8" * 64,
         "nonce": 11,
         "era_reference_block": BLOCK,
-        "mortal_period_blocks": SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": SN94_MORTAL_PERIOD_BLOCKS,
         "version_key": VERSION_KEY,
         "wire_uids": [second_uid, primary_uid],
         "wire_weights": [W, W],
@@ -1121,7 +1121,7 @@ def test_uid_churn_flows_through_preview_and_fixed_recovery(
     )
     monkeypatch.setattr(
         canonical,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: pytest.fail("recovery must never submit"),
     )
     monkeypatch.setattr(

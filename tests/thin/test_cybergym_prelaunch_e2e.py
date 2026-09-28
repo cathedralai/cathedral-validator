@@ -57,7 +57,7 @@ from scaffold.publisher import cybergym_ingest as ingest  # noqa: E402
 from scaffold.publisher.store import Store  # noqa: E402
 
 NETWORK = "finney"
-NETUID = 39
+NETUID = 94
 SOURCE_EPOCH = 11
 PRODUCER = "5Producer"
 TOKEN = "local-e2e-token"

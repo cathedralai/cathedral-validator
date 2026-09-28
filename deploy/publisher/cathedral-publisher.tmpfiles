@@ -2,7 +2,7 @@
 #
 # Creation-only (':'-prefixed) mode/ownership so a re-run never chowns an inode
 # that already exists — the same discipline as
-# deploy/sn39/cathedral-sn39-validator.tmpfiles. These trees back the
+# deploy/sn94/cathedral-sn94-validator.tmpfiles. These trees back the
 # StateDirectory=/LogsDirectory= the publisher units declare; declaring them
 # here converges a fresh host and is a no-op on an established one.
 #

@@ -1,12 +1,12 @@
 """Rotation must bound the journal without ever hiding the newest record.
 
 `/var/log/cathedral-validator` had no cap at all: 888 KB of append-only JSONL
-in nine days on the live SN39 box, and nothing to stop it filling the disk the
+in nine days on the live SN94 box, and nothing to stop it filling the disk the
 validator needs in order to write weights.
 
 Adding rotation is the easy half. The hard half is that rotation is exactly the
 operation that can turn the liveness alert red on a healthy validator, or blind
-it outright, because both monitors — `deploy/sn39/cathedral-mismatch-check` and
+it outright, because both monitors — `deploy/sn94/cathedral-mismatch-check` and
 `scaffold.health` behind `cathedral-validator status` — decide from the newest
 record they can see, and rotation empties the file that holds it.
 
@@ -40,8 +40,8 @@ from scaffold import events as events_module
 from scaffold import health
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ALERT_SCRIPT = REPO_ROOT / "deploy" / "sn39" / "cathedral-mismatch-check"
-FRAGMENT = REPO_ROOT / "deploy" / "sn39" / "cathedral-validator.logrotate"
+ALERT_SCRIPT = REPO_ROOT / "deploy" / "sn94" / "cathedral-mismatch-check"
+FRAGMENT = REPO_ROOT / "deploy" / "sn94" / "cathedral-validator.logrotate"
 TICK = 1500.0
 
 

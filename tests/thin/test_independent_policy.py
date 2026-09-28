@@ -215,7 +215,7 @@ def test_a_foreign_burn_hotkey_is_refused():
 
 
 def test_a_foreign_netuid_is_refused():
-    with pytest.raises(PolicyBundleError, match="economics.netuid must be 39"):
+    with pytest.raises(PolicyBundleError, match="economics.netuid must be 94"):
         parse_economics_set(economics_document(netuid=1))
 
 
@@ -392,10 +392,10 @@ def test_the_commitment_is_fifty_bytes_of_magic_netuid_epoch_and_digest():
     raw = commitment_for(bundle)
     assert len(raw) == 50 == COMMITMENT_LENGTH
     assert raw[:8] == COMMITMENT_MAGIC == b"CATHPOL1"
-    assert raw[8:10] == (39).to_bytes(2, "big")
+    assert raw[8:10] == (94).to_bytes(2, "big")
     assert raw[10:18] == EPOCH_OPEN.to_bytes(8, "big")
     assert raw[18:] == bundle.digest() == bundle_digest(bundle.document)
-    assert decode_commitment(raw) == (39, EPOCH_OPEN, bundle.digest())
+    assert decode_commitment(raw) == (94, EPOCH_OPEN, bundle.digest())
 
 
 def test_the_commitment_digest_is_sha256_of_the_canonical_bundle():
@@ -423,17 +423,17 @@ def test_require_commitment_refuses_a_digest_for_another_document():
     )
     raw = commitment_for(other)
     with pytest.raises(CommitmentError, match="does not match the fetched"):
-        require_commitment(raw, netuid=39, epoch=EPOCH_OPEN, document=bundle.document)
+        require_commitment(raw, netuid=94, epoch=EPOCH_OPEN, document=bundle.document)
 
 
 def test_require_commitment_refuses_another_epoch():
     bundle, _registry = signed_bundle()
     raw = commitment_for(bundle, epoch=EPOCH_OPEN - 360)
     with pytest.raises(CommitmentError, match="names epoch"):
-        require_commitment(raw, netuid=39, epoch=EPOCH_OPEN, document=bundle.document)
+        require_commitment(raw, netuid=94, epoch=EPOCH_OPEN, document=bundle.document)
 
 
 def test_encode_commitment_refuses_a_bool_epoch():
     bundle, _registry = signed_bundle()
     with pytest.raises(CommitmentError, match="epoch must be an integer"):
-        encode_commitment(39, True, bundle.digest())
+        encode_commitment(94, True, bundle.digest())

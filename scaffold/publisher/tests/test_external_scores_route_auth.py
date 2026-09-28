@@ -40,7 +40,7 @@ def _sample_report(source: str = "cathedral_sat_fast") -> dict:
         "complete": True,
         "epoch": 1,
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
     }
 
 
@@ -85,7 +85,7 @@ def client(monkeypatch):
     """Build the app with external scores enabled but no weights blending yet."""
     monkeypatch.setenv("CATHEDRAL_EXTERNAL_SCORES_INGEST_ENABLED", "1")
     monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETWORK", "finney")
-    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "39")
+    monkeypatch.setenv("CATHEDRAL_WEIGHT_POLICY_NETUID", "94")
     # Weights blending OFF by default in these tests (we test it separately).
     monkeypatch.delenv("CATHEDRAL_EXTERNAL_SCORES_ENABLED", raising=False)
     return TestClient(app_mod.build_app())
@@ -253,7 +253,7 @@ def test_confidential_route_persists_exact_body_digest_and_signs_it(
     rows = store.query(
         "SELECT report_json FROM external_score_reports "
         "WHERE source=? AND network=? AND netuid=? AND epoch=?",
-        ("cathedral_confidential_tdx", "finney", 39, report["epoch"]),
+        ("cathedral_confidential_tdx", "finney", 94, report["epoch"]),
     )
     assert json.loads(rows[0]["report_json"])["body_sha256"] == expected
     status = external_scores.status(
@@ -308,7 +308,7 @@ def test_confidential_idempotent_reencoding_keeps_original_body_digest(
     stored = client.app.state.store.query(
         "SELECT report_json FROM external_score_reports "
         "WHERE source=? AND network=? AND netuid=? AND epoch=?",
-        ("cathedral_confidential_tdx", "finney", 39, 1),
+        ("cathedral_confidential_tdx", "finney", 94, 1),
     )
     assert json.loads(stored[0]["report_json"])["body_sha256"] == original_digest
 
@@ -1045,7 +1045,7 @@ def test_route_preserves_exact_bytes_for_json_and_hmac(client, monkeypatch):
     body = (
         b'{\n  "scores": [{"score": 0.5, "miner_hotkey": "5Alice"}],\n'
         b'  "epoch": 1,\n  "source": "cathedral_confidential_tdx",\n'
-        b'  "network": "finney",\n  "netuid": 39,\n  "complete": true,\n'
+        b'  "network": "finney",\n  "netuid": 94,\n  "complete": true,\n'
         b'  "generated_at": "'
         + generated_at.encode("utf-8")
         + b'"\n}'

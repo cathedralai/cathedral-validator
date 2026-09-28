@@ -3,7 +3,7 @@
 The shipped profiles pin their trusted key bundles as
 ``config/provenance/*.json``, and `scaffold.provenance_audit._load_pubkeys`
 reads them with ``Path(pin).read_bytes()`` — against the process CWD. That
-resolves only because the SN39 release launcher chdirs into the release before
+resolves only because the SN94 release launcher chdirs into the release before
 exec. Every other invocation shape (a copied config run from ``$HOME``, a unit
 with a different WorkingDirectory, a packaged install) loses the shadow audit
 to a ``FileNotFoundError``. The audit never blocks the write path, so nothing
@@ -38,7 +38,7 @@ def _write_config(directory: Path, pin: str) -> Path:
     config.write_text(
         "[network]\n"
         'name = "finney"\n'
-        "netuid = 39\n"
+        "netuid = 94\n"
         "[provenance]\n"
         'mode = "shadow"\n'
         f'index_keys = "{pin}"\n'
@@ -74,7 +74,7 @@ def test_a_relative_pin_resolves_beside_its_config(tmp_path, monkeypatch):
 def test_the_working_directory_still_wins_when_it_resolves(tmp_path, monkeypatch):
     """The live shape: the launcher chdirs into the release tree.
 
-    The installed SN39 config lives in /etc/cathedral-validator while its key
+    The installed SN94 config lives in /etc/cathedral-validator while its key
     bundle lives in the release checkout, so anchoring unconditionally would
     point a live mainnet writer at a directory that does not hold its pins.
     """
@@ -125,14 +125,14 @@ def test_a_pin_that_resolves_nowhere_is_left_alone(tmp_path, monkeypatch):
 def test_the_shipped_profile_resolves_in_place_from_a_foreign_directory(
     tmp_path, monkeypatch
 ):
-    """`--config config/validator-thin-sn39-relay.toml` run from anywhere.
+    """`--config config/validator-thin-sn94-relay.toml` run from anywhere.
 
     The profile is still inside ``config/``, so its pins are written relative
     to the root that ``config/`` hangs off — one directory above the config
     file, not beside it.
     """
     monkeypatch.chdir(tmp_path)
-    cfg = cli._load_config_file(str(ROOT / "config" / "validator-thin-sn39-relay.toml"))
+    cfg = cli._load_config_file(str(ROOT / "config" / "validator-thin-sn94-relay.toml"))
 
     for pin in _KEY_PINS:
         resolved = Path(cfg[pin])
@@ -154,7 +154,7 @@ def test_a_relay_profile_copy_resolves_from_a_foreign_directory(tmp_path, monkey
         (checkout / "config" / "provenance" / name).write_bytes(source.read_bytes())
     copied = checkout / "my-validator.toml"
     copied.write_bytes(
-        (ROOT / "config" / "validator-thin-sn39-relay.toml").read_bytes()
+        (ROOT / "config" / "validator-thin-sn94-relay.toml").read_bytes()
     )
 
     monkeypatch.chdir(tmp_path)

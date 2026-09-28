@@ -53,7 +53,7 @@ def endpoint_proof(**overrides) -> axon.EndpointProof:
         "hotkey": axon.SECOND_MINER_HOTKEY,
         "validator_hotkey": axon.VALIDATOR_HOTKEY,
         "ip": SECOND_IP,
-        "port": axon.SN39_HTTPS_PORT,
+        "port": axon.SN94_HTTPS_PORT,
         "qvl": QuoteVerdict.PASS.value,
         "qvl_digest": LAUNCH_QVL_DIGEST,
         "sat_units": 20,
@@ -399,7 +399,7 @@ def test_one_attempt_uses_exact_bittensor_10_5_contract_and_finalized_readback(
     assert len(calls) == 1
     call = calls[0]
     assert {key: value for key, value in call.items() if key != "axon"} == {
-        "netuid": 39,
+        "netuid": 94,
         "mev_protection": False,
         "period": 128,
         "raise_error": True,

@@ -30,7 +30,7 @@ def _document(*, targets: list[dict[str, object]] | None = None) -> dict[str, ob
         "schema": preview.CONFIG_SCHEMA,
         "environment": "development",
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": VALIDATOR,
         "validator_wallet": {"name": "cathedral", "hotkey": "default", "path": None},
         "scoring_window": WINDOW,
@@ -183,7 +183,7 @@ def test_tls_ca_reads_opened_inode_when_path_is_replaced(monkeypatch, tmp_path):
     ("field", "value", "message"),
     (
         ("environment", "production", "environment must be development"),
-        ("netuid", 39.0, "pinned to finney SN39"),
+        ("netuid", 94.0, "pinned to finney SN94"),
         ("processor_generation", "rome", "one of milan, genoa, or turin"),
         ("processor_generation", ["milan"], "one of milan, genoa, or turin"),
         ("minimum_reported_tcb", "0x0000000000000000", "must be nonzero"),
@@ -335,7 +335,7 @@ def test_fake_compute_client_wires_hotkey_signer_and_scores_same_channel(monkeyp
     assert captured["hotkey"] == MINER
     assert captured["validator_hotkey"] == VALIDATOR
     assert captured["validator_network"] == "finney"
-    assert captured["validator_netuid"] == 39
+    assert captured["validator_netuid"] == 94
     assert captured["ssl_context"] == "verified-context"
     assert (
         captured["validator_signer"](b"signed-body")

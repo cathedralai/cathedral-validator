@@ -1,4 +1,4 @@
-"""Small direct SN39 validator built from the independent fleet primitives.
+"""Small direct SN94 validator built from the independent fleet primitives.
 
 One cycle reads one finalized metagraph, sends a signed validator request to
 every serving miner for its fleet, verifies every machine, runs the existing
@@ -284,9 +284,9 @@ def finalized_serving_miners_snapshot(
     try:
         metagraph = subtensor.metagraph(netuid, block=block_number)
     except Exception as exc:
-        raise DirectValidatorError("finalized SN39 metagraph is unavailable") from exc
+        raise DirectValidatorError("finalized SN94 metagraph is unavailable") from exc
     if _metagraph_block(metagraph) != block_number:
-        raise DirectValidatorError("SN39 metagraph is not at the finalized head")
+        raise DirectValidatorError("SN94 metagraph is not at the finalized head")
 
     view = metagraph_view(metagraph)
     validator_hotkey = str(getattr(keypair, "ss58_address", ""))
@@ -884,7 +884,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm-direct-write",
         action="store_true",
-        help="required acknowledgement that this process signs SN39 weights",
+        help="required acknowledgement that this process signs SN94 weights",
     )
     return parser
 

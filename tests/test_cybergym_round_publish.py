@@ -1,6 +1,6 @@
 """Carrying a round's scores to the publisher -- the step that turns them into weights.
 
-The producer does NOT set weights: SN39 composes ONE vector (compute 0.70 + cybergym 0.30) at the
+The producer does NOT set weights: SN94 composes ONE vector (compute 0.70 + cybergym 0.30) at the
 publisher, so a producer broadcasting its own would be a second writer for the same subnet.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from cathedral_thin.cybergym_round_publish import (
 
 CONFIG = PublisherConfig(url="https://publisher.example/v1/cybergym/scores",
                          bearer_token="tok", hmac_secret="sec",
-                         producer_hotkey="5Validator", network="finney", netuid=39)
+                         producer_hotkey="5Validator", network="finney", netuid=94)
 
 
 def _report(**kw):
@@ -39,7 +39,7 @@ class TestTheDocument:
                             "complete", "score_units", "scores", "evidence_sha256",
                             "nonce", "dispatched_units"}
         assert doc["complete"] is True and doc["score_units"] == SCORE_UNITS
-        assert doc["network"] == "finney" and doc["netuid"] == 39
+        assert doc["network"] == "finney" and doc["netuid"] == 94
 
     def test_a_report_is_the_full_truth_at_its_round(self):
         """`complete: true` means an omitted miner scores zero rather than keeping a previous
@@ -143,7 +143,7 @@ def test_config_reads_the_environment(monkeypatch):
     monkeypatch.setenv("CYBERGYM_PUBLISH_HMAC_SECRET", "h")
     monkeypatch.setenv("CYBERGYM_VALIDATOR_HOTKEY", "5Validator")
     config = PublisherConfig.from_environment()
-    assert config.enabled and config.producer_hotkey == "5Validator" and config.netuid == 39
+    assert config.enabled and config.producer_hotkey == "5Validator" and config.netuid == 94
 
 
 class TestTheDenominatorDoesNotRescaleTheField:

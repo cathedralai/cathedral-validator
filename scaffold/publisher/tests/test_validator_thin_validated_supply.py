@@ -194,7 +194,7 @@ def test_chain_preflight_resolves_validator_and_requires_permit(monkeypatch) -> 
     )
 
     result = validator_thin.chain_preflight(
-        network="finney", netuid=39, wallet_name="cathedral", wallet_hotkey="default"
+        network="finney", netuid=94, wallet_name="cathedral", wallet_hotkey="default"
     )
     assert result.validator_uid == 30
     assert result.hotkey_to_uid["tdx-miner"] == 163
@@ -235,7 +235,7 @@ def test_locked_sdk_epoch_countdown_has_no_inclusive_plus_one() -> None:
             else (_ for _ in ()).throw(AssertionError("wrong reference block"))
         ),
     )
-    assert Subtensor.blocks_until_next_epoch(probe, 39, block=900) == 200
+    assert Subtensor.blocks_until_next_epoch(probe, 94, block=900) == 200
 
 
 def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
@@ -313,7 +313,7 @@ def test_full_subnet_uses_runtime_immunity_buffer_for_uid_stability(
     def preflight_now() -> validator_thin.ChainPreflight:
         return validator_thin.chain_preflight(
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
         )
@@ -430,7 +430,7 @@ def test_offline_chain_submission_skips_preflight(monkeypatch) -> None:
     result = validator_thin.set_weights_on_chain(
         {0: 0.1, 163: 0.9},
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="unused",
         wallet_hotkey="unused",
         broadcast=False,
@@ -552,7 +552,7 @@ def test_chain_submission_uses_preflight_snapshot_and_waits_for_finality() -> No
     ]
 
 
-def test_direct_sn39_chain_submission_requires_state_machine_authorization(
+def test_direct_sn94_chain_submission_requires_state_machine_authorization(
     monkeypatch,
 ) -> None:
     called = []
@@ -582,7 +582,7 @@ def test_direct_sn39_chain_submission_requires_state_machine_authorization(
         validator_thin.set_weights_on_chain(
             {163: 0.9, 204: 0.1},
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
             broadcast=True,
@@ -600,7 +600,7 @@ def test_finalized_receipt_rejects_inclusion_block_uid_reassignment() -> None:
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "call_args": [
-            {"name": "netuid", "value": 39},
+            {"name": "netuid", "value": 94},
             {"name": "mecid", "value": 0},
             {"name": "version_key", "value": validator_thin._weight_version_key()},
             {"name": "dests", "value": [163, 204]},
@@ -666,7 +666,7 @@ def test_archive_rpc_fault_is_not_a_positive_receipt_mismatch() -> None:
             block_hash="0x" + "b" * 64,
             block_number=901,
             validator_hotkey="validator",
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
@@ -685,7 +685,7 @@ def test_receipt_is_not_proven_when_finalized_head_fails_reverse_check() -> None
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "call_args": [
-            {"name": "netuid", "value": 39},
+            {"name": "netuid", "value": 94},
             {"name": "mecid", "value": 0},
             {
                 "name": "version_key",
@@ -733,7 +733,7 @@ def test_receipt_is_not_proven_when_finalized_head_fails_reverse_check() -> None
             block_hash=block_hash,
             block_number=901,
             validator_hotkey="validator",
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
@@ -764,7 +764,7 @@ def test_incomplete_archive_block_is_not_a_positive_receipt_mismatch() -> None:
             block_hash=block_hash,
             block_number=901,
             validator_hotkey="validator",
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
@@ -803,7 +803,7 @@ def test_receipt_proves_independent_historical_execution_result(
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "call_args": [
-            {"name": "netuid", "value": 39},
+            {"name": "netuid", "value": 94},
             {"name": "mecid", "value": 0},
             {
                 "name": "version_key",
@@ -846,7 +846,7 @@ def test_receipt_proves_independent_historical_execution_result(
             block_hash=block_hash,
             block_number=901,
             validator_hotkey="validator",
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
@@ -866,7 +866,7 @@ def test_restart_locates_one_exact_noncontiguous_uid_call_without_writing() -> N
         "call_module": "SubtensorModule",
         "call_function": "set_mechanism_weights",
         "call_args": [
-            {"name": "netuid", "value": 39},
+            {"name": "netuid", "value": 94},
             {"name": "mecid", "value": 0},
             {
                 "name": "version_key",
@@ -916,9 +916,9 @@ def test_restart_locates_one_exact_noncontiguous_uid_call_without_writing() -> N
         SimpleNamespace(substrate=substrate),
         extrinsic_hash=extrinsic_hash,
         era_reference_block=900,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         validator_hotkey="validator",
-        netuid=39,
+        netuid=94,
         version_key=validator_thin._weight_version_key(),
         wire_uids=[7, 241],
         wire_weights=[65535, 7282],
@@ -955,9 +955,9 @@ def test_absent_signed_hash_is_terminal_only_after_complete_mortal_era() -> None
     kwargs = {
         "extrinsic_hash": extrinsic_hash,
         "era_reference_block": 900,
-        "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        "mortal_period_blocks": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         "validator_hotkey": "validator",
-        "netuid": 39,
+        "netuid": 94,
         "version_key": validator_thin._weight_version_key(),
         "wire_uids": [7, 241],
         "wire_weights": [65535, 7282],
@@ -1021,7 +1021,7 @@ def test_finalized_receipt_binds_policy_to_actual_inclusion_block(
                             "call_module": "SubtensorModule",
                             "call_function": "set_mechanism_weights",
                             "call_args": [
-                                {"name": "netuid", "value": 39},
+                                {"name": "netuid", "value": 94},
                                 {"name": "mecid", "value": 0},
                                 {
                                     "name": "version_key",
@@ -1068,7 +1068,7 @@ def test_finalized_receipt_binds_policy_to_actual_inclusion_block(
             block_hash=block_hash,
             block_number=block_number,
             validator_hotkey="validator-hotkey",
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[163, 204],
             wire_weights=[65535, 7282],
@@ -1088,7 +1088,7 @@ def test_vector_inclusion_policy_refuses_near_expiry_before_reservation() -> Non
         now
         + timedelta(
             seconds=validator_thin.CHAIN_OPERATION_DEADLINE_SECS
-            + validator_thin.SN39_MIN_VALIDITY_MARGIN_SECS
+            + validator_thin.SN94_MIN_VALIDITY_MARGIN_SECS
             - 1
         )
     )
@@ -1123,8 +1123,8 @@ def test_inclusion_policy_refuses_without_epoch_finality_room() -> None:
     """
     now = datetime.now(UTC)
     required_room = (
-        validator_thin.SN39_MORTAL_PERIOD_BLOCKS
-        + validator_thin.SN39_EPOCH_FINALITY_MARGIN_BLOCKS
+        validator_thin.SN94_MORTAL_PERIOD_BLOCKS
+        + validator_thin.SN94_EPOCH_FINALITY_MARGIN_BLOCKS
     )
     remaining = required_room - 1
     next_epoch_start = 900 + remaining
@@ -1289,7 +1289,7 @@ def test_uid_capacity_guard_requires_stability_for_complete_mortal_era(
     unprovable_worker = validator_thin._require_uid_mapping_stability(
         _uid_capacity_preflight(frozenset({"burn"})),
         {7: "worker", 241: "burn"},
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
     )
     assert unprovable_worker["excluded_hotkeys"] == ["worker"]
     kept = validator_thin._drop_unprovable_targets(
@@ -1314,19 +1314,19 @@ def test_uid_capacity_guard_requires_stability_for_complete_mortal_era(
         validator_thin._require_uid_mapping_stability(
             _uid_capacity_preflight(frozenset({"validator"})),
             {7: "worker", 241: "burn"},
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         )
 
     # Every target provable: nothing is excluded and the vector is untouched.
     fully_provable = validator_thin._require_uid_mapping_stability(
         _uid_capacity_preflight(frozenset({"worker", "burn"})),
         {7: "worker", 241: "burn"},
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
     )
     assert fully_provable["excluded_hotkeys"] == []
 
 
-def test_exact_sn39_signer_pins_era_and_journals_hash_before_submit(
+def test_exact_sn94_signer_pins_era_and_journals_hash_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     finalized_hash = "0x" + "f" * 64
@@ -1395,24 +1395,24 @@ def test_exact_sn39_signer_pins_era_and_journals_hash_before_submit(
     )
 
     assert (
-        validator_thin._submit_exact_sn39_extrinsic(
+        validator_thin._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=SimpleNamespace(
                 require_full_provenance_for_broadcast=True
             ),
             attempt_id="sha256:" + "1" * 64,
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         )
         is receipt
     )
     assert sequence == ["sign", "intent", "submit"]
     assert composed_calls == [
         {
-            "netuid": 39,
+            "netuid": 94,
             "mecid": 0,
             "dests": [7, 241],
             "weights": [65535, 7282],
@@ -1425,7 +1425,7 @@ def test_exact_sn39_signer_pins_era_and_journals_hash_before_submit(
             "keypair": wallet.hotkey,
             "nonce": 17,
             "era": {
-                "period": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+                "period": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
                 "current": 900,
             },
         }
@@ -1441,7 +1441,7 @@ def _reviewed_uid30_descendant_identity(
     preview_digest = "sha256:" + "1" * 64
     return {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "mapping_block": block,
         "validator_hotkey": validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY,
         "validator_uid": validator_thin.SN39_UID30_LAUNCH_VALIDATOR_UID,
@@ -1464,9 +1464,9 @@ def _reviewed_uid30_descendant_identity(
                 "status": validator_thin.PASS,
                 "mapping_block": block,
                 "mapping_block_hash": block_hash,
-                "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+                "mortal_period_blocks": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
                 "era_last_block": (
-                    block + validator_thin.SN39_MORTAL_PERIOD_BLOCKS - 1
+                    block + validator_thin.SN94_MORTAL_PERIOD_BLOCKS - 1
                 ),
                 "targets": [
                     {
@@ -1487,7 +1487,7 @@ def _reviewed_uid30_descendant_identity(
             "valid_from_time": "2020-01-01T00:00:00.000Z",
             "valid_until_time": "2100-01-01T00:00:00.000Z",
             "require_commit_reveal_disabled": True,
-            "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             "expected_next_epoch_start_block": block + 200,
         },
         "uid30_launch_schema": validator_thin.SN39_UID30_LAUNCH_SCHEMA,
@@ -1609,7 +1609,7 @@ def test_reviewed_uid30_signer_accepts_only_bounded_canonical_descendants(
     )
     journal = {
         "submission_genesis_hash": validator_thin.FINNEY_GENESIS_HASH,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
         "submission_validator_hotkey": (
             validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         ),
@@ -1655,15 +1655,15 @@ def test_reviewed_uid30_signer_accepts_only_bounded_canonical_descendants(
         _uid30_reviewed_preview_sha256="1" * 64,
     )
     assert (
-        validator_thin._submit_exact_sn39_extrinsic(
+        validator_thin._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime_contract,
             attempt_id=attempt_id,
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[target_uid],
             wire_weights=[65535],
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
         is receipt
@@ -1675,7 +1675,7 @@ def test_reviewed_uid30_signer_accepts_only_bounded_canonical_descendants(
             "keypair": preflight.wallet.hotkey,
             "nonce": 17,
             "era": {
-                "period": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+                "period": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
                 "current": block,
             },
         }
@@ -1699,7 +1699,7 @@ def test_reviewed_uid30_signer_accepts_only_bounded_canonical_descendants(
             [39, validator_thin.SN39_UID30_LAUNCH_MINER_HOTKEY],
             latest_hash,
         ),
-        ("Keys", [39, target_uid], latest_hash),
+        ("Keys", [94, target_uid], latest_hash),
     ]
 
 
@@ -1736,7 +1736,7 @@ def test_reviewed_uid30_descendant_refuses_before_composing_or_signing(
         identity["uid_safety"] = {}
     journal = {
         "submission_genesis_hash": validator_thin.FINNEY_GENESIS_HASH,
-        "provenance_netuid": 39,
+        "provenance_netuid": 94,
         "submission_validator_hotkey": (
             validator_thin.SN39_UID30_LAUNCH_VALIDATOR_HOTKEY
         ),
@@ -1844,20 +1844,20 @@ def test_reviewed_uid30_descendant_refuses_before_composing_or_signing(
     )
 
     with pytest.raises(validator_thin.wire.VectorError, match=expected):
-        validator_thin._submit_exact_sn39_extrinsic(
+        validator_thin._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=runtime_contract,
             attempt_id=attempt_id,
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[target_uid],
             wire_weights=[65535],
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             allow_reviewed_uid30_finalized_descendant=True,
         )
 
 
-def test_exact_sn39_signer_refuses_head_drift_before_signing(
+def test_exact_sn94_signer_refuses_head_drift_before_signing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     finalized_hash = "0x" + "f" * 64
@@ -1897,15 +1897,15 @@ def test_exact_sn39_signer_refuses_head_drift_before_signing(
         validator_thin.wire.VectorError,
         match="head advanced after preflight",
     ):
-        validator_thin._submit_exact_sn39_extrinsic(
+        validator_thin._submit_exact_sn94_extrinsic(
             preflight,
             runtime_contract=object(),
             attempt_id="sha256:" + "1" * 64,
-            netuid=39,
+            netuid=94,
             version_key=validator_thin._weight_version_key(),
             wire_uids=[7, 241],
             wire_weights=[65535, 7282],
-            mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         )
 
 
@@ -1957,12 +1957,12 @@ def test_transient_archive_fault_records_receipt_without_second_write(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_authorize_sn39_chain_submission",
+        "_authorize_sn94_chain_submission",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **kwargs: (
             sequence.append("signed") or sdk_calls.append(kwargs) or receipt
         ),
@@ -2000,7 +2000,7 @@ def test_transient_archive_fault_records_receipt_without_second_write(
         validator_thin.set_weights_on_chain(
             {7: 0.9, 241: 0.1},
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
             broadcast=True,
@@ -2065,7 +2065,7 @@ def test_post_signed_uncertainty_is_not_proven_not_fail(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_authorize_sn39_chain_submission",
+        "_authorize_sn94_chain_submission",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -2089,7 +2089,7 @@ def test_post_signed_uncertainty_is_not_proven_not_fail(
     if failure_stage == "submit_response":
         monkeypatch.setattr(
             validator_thin,
-            "_submit_exact_sn39_extrinsic",
+            "_submit_exact_sn94_extrinsic",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 TimeoutError("response lost after submit")
             ),
@@ -2097,7 +2097,7 @@ def test_post_signed_uncertainty_is_not_proven_not_fail(
     else:
         monkeypatch.setattr(
             validator_thin,
-            "_submit_exact_sn39_extrinsic",
+            "_submit_exact_sn94_extrinsic",
             lambda *_args, **_kwargs: receipt,
         )
         monkeypatch.setattr(
@@ -2115,7 +2115,7 @@ def test_post_signed_uncertainty_is_not_proven_not_fail(
         validator_thin.set_weights_on_chain(
             {7: 0.9, 241: 0.1},
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
             broadcast=True,
@@ -2147,7 +2147,7 @@ def test_restart_reproves_noncontiguous_uid_receipt_without_chain_write(
     )
     identity = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": "validator",
         "mapping_block": 900,
         "policy_version": 7,
@@ -2180,7 +2180,7 @@ def test_restart_reproves_noncontiguous_uid_receipt_without_chain_write(
             "extrinsic_hash": "0x" + "a" * 64,
             "nonce": 17,
             "era_reference_block": 900,
-            "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator_thin._weight_version_key(),
             "wire_uids": wire_uids,
             "wire_weights": wire_weights,
@@ -2250,7 +2250,7 @@ def test_restart_reproves_noncontiguous_uid_receipt_without_chain_write(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("recovery must never write")
         ),
@@ -2281,7 +2281,7 @@ def test_continuous_restart_recovers_crash_before_receipt_without_chain_write(
     wire_uids, wire_weights = validator_thin._wire_weights([7, 241], [0.9, 0.1])
     identity = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": "validator",
         "mapping_block": 900,
         "policy_version": 8,
@@ -2306,7 +2306,7 @@ def test_continuous_restart_recovers_crash_before_receipt_without_chain_write(
             "extrinsic_hash": "0x" + "a" * 64,
             "nonce": 18,
             "era_reference_block": 900,
-            "mortal_period_blocks": validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+            "mortal_period_blocks": validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
             "version_key": validator_thin._weight_version_key(),
             "wire_uids": wire_uids,
             "wire_weights": wire_weights,
@@ -2388,7 +2388,7 @@ def test_continuous_restart_recovers_crash_before_receipt_without_chain_write(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("recovery must never write")
         ),
@@ -2417,7 +2417,7 @@ def test_full_authority_restart_finalizes_exact_signed_attempt_without_resubmit(
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         require_full_provenance_for_broadcast=False,
@@ -2429,7 +2429,7 @@ def test_full_authority_restart_finalizes_exact_signed_attempt_without_resubmit(
     )
     identity = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": "validator",
         "mapping_block": 900,
         "source_epoch": 12,
@@ -2455,7 +2455,7 @@ def test_full_authority_restart_finalizes_exact_signed_attempt_without_resubmit(
         extrinsic_hash="0x" + "a" * 64,
         nonce=18,
         era_reference_block=900,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=wire_uids,
         wire_weights=wire_weights,
@@ -2503,7 +2503,7 @@ def test_full_authority_restart_finalizes_exact_signed_attempt_without_resubmit(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("authority recovery must never write")
         ),
@@ -2536,7 +2536,7 @@ def _finalize_common_without_lane_mirror(
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         require_full_provenance_for_broadcast=False,
@@ -2548,7 +2548,7 @@ def _finalize_common_without_lane_mirror(
     )
     identity: dict[str, object] = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": "validator",
         "mapping_block": 900,
         "burn_hotkey": validator_thin.SN39_BURN_HOTKEY,
@@ -2585,7 +2585,7 @@ def _finalize_common_without_lane_mirror(
         extrinsic_hash="0x" + "a" * 64,
         nonce=20,
         era_reference_block=900,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=wire_uids,
         wire_weights=wire_weights,
@@ -2634,7 +2634,7 @@ def test_common_finalization_crash_repairs_lane_once_without_resubmit(
     monkeypatch.setattr(validator_thin, "_thin_tick_lock", lambda _args: nullcontext())
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("finalized crash recovery must never write")
         ),
@@ -2685,7 +2685,7 @@ def test_common_finalization_tamper_fails_before_lane_repair(
     monkeypatch.setattr(validator_thin, "_thin_tick_lock", lambda _args: nullcontext())
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("contradictory finalized state must never write")
         ),
@@ -2727,7 +2727,7 @@ def test_common_finalization_lane_repair_classifies_local_failure(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("failed lane repair must never submit")
         ),
@@ -2753,7 +2753,7 @@ def test_continuous_profile_persistently_finalizes_journaled_launch_recovery(
     wire_uids, wire_weights = validator_thin._wire_weights([7, 241], [0.9, 0.1])
     identity = {
         "network": "finney",
-        "netuid": 39,
+        "netuid": 94,
         "validator_hotkey": "validator",
         "mapping_block": 900,
         "policy_version": 9,
@@ -2777,7 +2777,7 @@ def test_continuous_profile_persistently_finalizes_journaled_launch_recovery(
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         max_submissions=1,
@@ -2799,7 +2799,7 @@ def test_continuous_profile_persistently_finalizes_journaled_launch_recovery(
         extrinsic_hash="0x" + "a" * 64,
         nonce=19,
         era_reference_block=900,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=wire_uids,
         wire_weights=wire_weights,
@@ -2850,7 +2850,7 @@ def test_continuous_profile_persistently_finalizes_journaled_launch_recovery(
     )
     monkeypatch.setattr(
         validator_thin,
-        "_submit_exact_sn39_extrinsic",
+        "_submit_exact_sn94_extrinsic",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("cross-profile recovery must never write")
         ),
@@ -2969,7 +2969,7 @@ def test_same_version_different_vector_is_not_reclassified_as_idle(
         public_key_hex="fixture",
         key_id="cathedral-weight-policy",
         network="finney",
-        netuid=39,
+        netuid=94,
     )
     accepted: list[dict[str, object]] = []
     monkeypatch.setattr(validator_thin, "fetch_vector", lambda _url: changed_vector)
@@ -3143,7 +3143,7 @@ def test_chain_submission_has_a_validator_controlled_wall_clock_deadline(
 # every lock assertion below means the moment the constant is resized.
 _UID_SAFETY_MAPPING_BLOCK = 100
 _UID_SAFETY_ERA_LAST_BLOCK = (
-    _UID_SAFETY_MAPPING_BLOCK + validator_thin.SN39_MORTAL_PERIOD_BLOCKS - 1
+    _UID_SAFETY_MAPPING_BLOCK + validator_thin.SN94_MORTAL_PERIOD_BLOCKS - 1
 )
 
 
@@ -3157,18 +3157,18 @@ def _finney_uid_safety_fixture(
         ("ColdkeySwapAnnouncementDelay", ()): 36000,
         ("Owner", ("worker",)): "worker-coldkey",
         ("Owner", ("burn",)): "burn-coldkey",
-        ("LastHotkeySwapOnNetuid", (39, "worker-coldkey")): 98,
-        ("LastHotkeySwapOnNetuid", (39, "burn-coldkey")): 99,
+        ("LastHotkeySwapOnNetuid", (94, "worker-coldkey")): 98,
+        ("LastHotkeySwapOnNetuid", (94, "burn-coldkey")): 99,
         ("ColdkeySwapAnnouncements", ("worker-coldkey",)): None,
         ("ColdkeySwapAnnouncements", ("burn-coldkey",)): None,
-        ("HotkeySuccessor", (39, "worker")): None,
-        ("HotkeySuccessor", (39, "burn")): None,
-        ("HotkeySuccessor", (39, "old-worker")): "worker",
-        ("HotkeySuccessor", (39, "old-burn")): "burn",
-        ("HotkeyRoot", (39, "worker")): "old-worker",
-        ("HotkeyRoot", (39, "burn")): "old-burn",
-        ("HotkeyRoot", (39, "old-worker")): None,
-        ("HotkeyRoot", (39, "old-burn")): None,
+        ("HotkeySuccessor", (94, "worker")): None,
+        ("HotkeySuccessor", (94, "burn")): None,
+        ("HotkeySuccessor", (94, "old-worker")): "worker",
+        ("HotkeySuccessor", (94, "old-burn")): "burn",
+        ("HotkeyRoot", (94, "worker")): "old-worker",
+        ("HotkeyRoot", (94, "burn")): "old-burn",
+        ("HotkeyRoot", (94, "old-worker")): None,
+        ("HotkeyRoot", (94, "old-burn")): None,
     }
     rotations = {
         98: {
@@ -3217,7 +3217,7 @@ def _finney_uid_safety_fixture(
                                     "name": "new_hotkey",
                                     "value": row["new_hotkey"],
                                 },
-                                {"name": "netuid", "value": 39},
+                                {"name": "netuid", "value": 94},
                                 {"name": "keep_stake", "value": False},
                             ],
                         },
@@ -3245,7 +3245,7 @@ def _finney_uid_safety_fixture(
                             "coldkey": row["coldkey"],
                             "old_hotkey": row["old_hotkey"],
                             "new_hotkey": row["new_hotkey"],
-                            "netuid": 39,
+                            "netuid": 94,
                         },
                     }
                 }
@@ -3311,7 +3311,7 @@ def _uid_safety(fixture: SimpleNamespace) -> dict[str, object]:
     return validator_thin._require_uid_mapping_stability(
         fixture.preflight,
         {7: "worker", 241: "burn"},
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
     )
 
 
@@ -3333,7 +3333,7 @@ def test_finney_uid_safety_proves_an_active_rotation_lock() -> None:
 
 def test_finney_uid_safety_accepts_a_target_that_never_rotated() -> None:
     fixture = _finney_uid_safety_fixture()
-    fixture.values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 0
+    fixture.values[("LastHotkeySwapOnNetuid", (94, "worker-coldkey"))] = 0
     proof = _uid_safety(fixture)
     never = proof["rotation"]["targets"][0]
     assert never["uid"] == 7
@@ -3352,7 +3352,7 @@ def test_finney_uid_safety_accepts_an_expired_rotation_cooldown() -> None:
     # worker rotated one block earlier, so its cooldown ends one block short of
     # the era's last block.
     fixture = _finney_uid_safety_fixture(
-        hotkey_swap_interval=validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+        hotkey_swap_interval=validator_thin.SN94_MORTAL_PERIOD_BLOCKS
     )
     proof = _uid_safety(fixture)
     targets = proof["rotation"]["targets"]
@@ -3370,9 +3370,9 @@ def test_finney_uid_safety_accepts_an_expired_rotation_cooldown() -> None:
 
 def test_finney_uid_safety_accepts_every_cooldown_expired() -> None:
     fixture = _finney_uid_safety_fixture(
-        hotkey_swap_interval=validator_thin.SN39_MORTAL_PERIOD_BLOCKS
+        hotkey_swap_interval=validator_thin.SN94_MORTAL_PERIOD_BLOCKS
     )
-    fixture.values[("LastHotkeySwapOnNetuid", (39, "burn-coldkey"))] = 98
+    fixture.values[("LastHotkeySwapOnNetuid", (94, "burn-coldkey"))] = 98
     proof = _uid_safety(fixture)
     targets = proof["rotation"]["targets"]
     assert [row["swap_lock"] for row in targets] == ["expired", "expired"]
@@ -3402,7 +3402,7 @@ def test_finney_uid_safety_still_refuses_a_pending_coldkey_swap() -> None:
     ):
         _uid_safety(fixture)
     # A never-rotated target with a scheduled coldkey transfer still refuses.
-    fixture.values[("LastHotkeySwapOnNetuid", (39, "worker-coldkey"))] = 0
+    fixture.values[("LastHotkeySwapOnNetuid", (94, "worker-coldkey"))] = 0
     with pytest.raises(
         validator_thin.wire.VectorError,
         match="pending coldkey swap",
@@ -3414,7 +3414,7 @@ def test_unsigned_reservation_does_not_consume_budget_until_signed_intent(
     tmp_path: Path,
 ) -> None:
     args = SimpleNamespace(
-        netuid=39,
+        netuid=94,
         offline=False,
         max_submissions=1,
         require_full_provenance_for_broadcast=True,
@@ -3462,7 +3462,7 @@ def test_unsigned_reservation_does_not_consume_budget_until_signed_intent(
         extrinsic_hash="0x" + "a" * 64,
         nonce=17,
         era_reference_block=100,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=[7, 241],
         wire_weights=[65535, 7282],
@@ -3540,7 +3540,7 @@ def test_restart_retires_exhaustively_absent_attempt_but_preserves_budget(
         broadcast=True,
         offline=False,
         network="finney",
-        netuid=39,
+        netuid=94,
         wallet_name="validator",
         wallet_hotkey="default",
         max_submissions=2,
@@ -3557,7 +3557,7 @@ def test_restart_retires_exhaustively_absent_attempt_but_preserves_budget(
     def identity(policy_version: int) -> dict[str, object]:
         return {
             "network": "finney",
-            "netuid": 39,
+            "netuid": 94,
             "validator_hotkey": "validator",
             "mapping_block": 900,
             "policy_version": policy_version,
@@ -3589,7 +3589,7 @@ def test_restart_retires_exhaustively_absent_attempt_but_preserves_budget(
         extrinsic_hash="0x" + "a" * 64,
         nonce=17,
         era_reference_block=900,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=wire_uids,
         wire_weights=wire_weights,
