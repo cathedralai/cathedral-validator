@@ -151,7 +151,7 @@ def test_a_signed_inventory_verifies_and_any_edit_breaks_it():
     edited = json.loads(json.dumps(signed))
     edited["machines"][1]["state"] = "healthy"
     edited["totals"]["healthy"] = 2
-    with pytest.raises(inventory.PoolInventoryError, match="identity"):
+    with pytest.raises(inventory.PoolInventoryError, match="receipt root"):
         inventory.verify_pool_inventory(edited)
 
     lying = json.loads(json.dumps(signed))
@@ -300,3 +300,160 @@ def test_an_inventory_failure_never_changes_the_cycle(monkeypatch, tmp_path: Pat
     assert event["status"] == "CONFIRMED"
     assert event["pool_inventory"] == {"status": "FAILED"}
     assert event["wire_uids"] == [19]
+
+
+def _hashes(count: int) -> list[bytes]:
+    return [inventory._leaf_hash(bytes([index])) for index in range(count)]
+
+
+def test_merkle_root_matches_rfc6962_shape():
+    import hashlib
+
+    assert inventory.merkle_root([]) == hashlib.sha256(b"").digest()
+    one = _hashes(1)
+    assert inventory.merkle_root(one) == one[0] == hashlib.sha256(b"\x00\x00").digest()
+    three = _hashes(3)
+    left = inventory._node_hash(three[0], three[1])
+    assert inventory.merkle_root(three) == inventory._node_hash(left, three[2])
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 4, 5, 7, 8, 9, 16, 33])
+def test_every_inclusion_proof_reaches_the_root_and_only_there(size):
+    hashes = _hashes(size)
+    root = inventory.merkle_root(hashes)
+    for index in range(size):
+        proof = inventory.inclusion_proof(index, hashes)
+        assert inventory.root_from_proof(hashes[index], index, size, proof) == root
+        if size > 1:
+            wrong = (index + 1) % size
+            assert inventory.root_from_proof(hashes[wrong], index, size, proof) != root
+            with pytest.raises(inventory.PoolInventoryError):
+                inventory.root_from_proof(hashes[index], index, size, proof[:-1])
+            with pytest.raises(inventory.PoolInventoryError):
+                inventory.root_from_proof(hashes[index], index, size, proof + [root])
+
+
+def _signed() -> dict[str, object]:
+    return inventory.sign_pool_inventory(_document(), keypair=VALIDATOR_KEY)
+
+
+def test_each_machine_gets_a_receipt_that_verifies_alone():
+    signed = _signed()
+    for machine in signed["machines"]:
+        receipt = inventory.machine_receipt(
+            signed, uid=machine["uid"], endpoint=machine["endpoint"]
+        )
+        standalone = json.loads(json.dumps(receipt))
+        assert inventory.verify_machine_receipt(standalone)["leaf"] == machine
+        assert "machines" not in standalone["header"]
+    with pytest.raises(inventory.PoolInventoryError, match="no machine"):
+        inventory.machine_receipt(signed, uid=19, endpoint="https://9.9.9.9:8081")
+
+
+def _receipt() -> dict[str, object]:
+    signed = _signed()
+    machine = signed["machines"][1]
+    return json.loads(
+        json.dumps(
+            inventory.machine_receipt(
+                signed, uid=machine["uid"], endpoint=machine["endpoint"]
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "match"),
+    [
+        (lambda r: r["leaf"].__setitem__("state", "healthy"), "signed root"),
+        (lambda r: r["leaf"].__setitem__("reason", None), "signed root"),
+        (lambda r: r.__setitem__("index", 0), "signed root"),
+        (lambda r: r["proof"].__setitem__(0, "00" * 32), "signed root"),
+        (lambda r: r["header"]["totals"].__setitem__("healthy", 3), "signed identity"),
+        (
+            lambda r: r["header"]["receipts"].__setitem__("merkle_root", "11" * 32),
+            "signed identity",
+        ),
+        (
+            lambda r: r.__setitem__("inventory_id", "sha256:" + "0" * 64),
+            "signed identity",
+        ),
+        (lambda r: r["header"]["receipts"].__setitem__("leaves", 0), "tree"),
+        (lambda r: r.__setitem__("schema", "other"), "schema"),
+        (lambda r: r.pop("proof"), "fields"),
+    ],
+)
+def test_a_tampered_receipt_is_refused(tamper, match):
+    receipt = _receipt()
+    tamper(receipt)
+    with pytest.raises(inventory.PoolInventoryError, match=match):
+        inventory.verify_machine_receipt(receipt)
+
+
+def test_a_receipt_signed_by_another_key_is_refused():
+    receipt = _receipt()
+    other = inventory.sign_pool_inventory(
+        {
+            **_document(),
+            "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address},
+            "inventory_id": inventory._inventory_id(
+                {
+                    **_document(),
+                    "validator": {"uid": 7, "hotkey": OTHER_KEY.ss58_address},
+                }
+            ),
+        },
+        keypair=OTHER_KEY,
+    )
+    receipt["signature"] = other["signature"]
+    with pytest.raises(inventory.PoolInventoryError, match="verification failed"):
+        inventory.verify_machine_receipt(receipt)
+
+
+def test_the_server_returns_a_machine_receipt(tmp_path: Path):
+    target = tmp_path / "pool-inventory.json"
+    inventory.write_pool_inventory(target, _signed())
+    server = inventory.make_inventory_server(target, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}{inventory.RECEIPT_ROUTE}"
+    try:
+        from urllib.parse import urlencode
+
+        query = urlencode({"uid": 19, "endpoint": "https://1.1.19.b:8081"})
+        with urllib.request.urlopen(f"{base}?{query}", timeout=5) as response:
+            verified = inventory.verify_machine_receipt(json.loads(response.read()))
+        assert verified["leaf"]["state"] == "unverified"
+        for bad in ("uid=19", "uid=x&endpoint=e", "uid=19&endpoint=https://9.9.9.9:1"):
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(f"{base}?{bad}", timeout=5)
+            assert refused.value.code in {400, 404}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_receipt_commands_print_and_verify(tmp_path: Path, capsys):
+    target = tmp_path / "pool-inventory.json"
+    inventory.write_pool_inventory(target, _signed())
+    argv = ["pool-inventory", "receipt", "--inventory", str(target), "--uid", "19"]
+    assert runtime.main([*argv, "--endpoint", "https://1.1.19.a:8081"]) == 0
+    receipt_file = tmp_path / "receipt.json"
+    receipt_file.write_text(capsys.readouterr().out)
+    assert (
+        runtime.main(
+            ["pool-inventory", "verify-receipt", "--receipt", str(receipt_file)]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "MACHINE_RECEIPT_VALID"
+    receipt_file.write_text(
+        receipt_file.read_text().replace('"healthy"', '"unverified"', 1)
+    )
+    assert (
+        runtime.main(
+            ["pool-inventory", "verify-receipt", "--receipt", str(receipt_file)]
+        )
+        == 1
+    )
+    assert capsys.readouterr().out.startswith("MACHINE_RECEIPT_INVALID")
+    assert runtime.main([*argv, "--endpoint", "https://9.9.9.9:8081"]) == 1

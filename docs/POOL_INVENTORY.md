@@ -19,8 +19,9 @@ changes a round, its weights, or its receipt.
 | `generated_at` | UTC time the document was built. |
 | `totals` | `miners` scored, `machines` probed, `available`, `healthy`, `assigned`. |
 | `assignment_source` | Always `null`: no customer work reaches miner machines yet, so `assigned` is 0. |
+| `receipts` | `algorithm` (`rfc6962-sha256`), `leaves`, and the `merkle_root` over one leaf per machine. |
 | `machines` | One entry per probed machine, sorted by UID and endpoint. |
-| `inventory_id` | `sha256:` of the canonical document without `inventory_id` and `signature`. |
+| `inventory_id` | `sha256:` of the canonical header: every field except `machines`, `inventory_id` and `signature`. The header commits to the machines through `receipts.merkle_root`. |
 | `signature` | sr25519 by the validator hotkey over `cathedral-pool-inventory-v1\0` plus `inventory_id`. |
 
 Each machine carries its `uid`, `miner_hotkey`, `endpoint`, `tee_kind`,
@@ -33,6 +34,19 @@ Each machine carries its `uid`, `miner_hotkey`, `endpoint`, `tee_kind`,
 
 `available` counts `healthy` plus `unverified`. A reader can recompute every
 total from `machines`, and the verifier refuses a document whose totals differ.
+
+## Machine receipts
+
+Each machine in the document also has a signed receipt,
+`cathedral_machine_receipt_v1`, that verifies on its own. It carries the signed
+header, the machine's entry (its leaf), the leaf's index, and an inclusion
+proof. A reader recomputes the leaf hash (`SHA-256(0x00 || leaf)` over the
+canonical JSON), follows the proof to the root (RFC 9162 section 2.1.3.2, node
+hash `SHA-256(0x01 || left || right)`), compares it with
+`receipts.merkle_root`, checks the header against `inventory_id`, and checks
+the validator's sr25519 signature over `inventory_id`. The receipt proves what
+this validator recorded for this machine in this round, paid or not and why,
+without the rest of the document.
 
 ## Publishing it
 
@@ -54,9 +68,22 @@ cathedral-validator pool-inventory serve --inventory /absolute/path/pool-invento
 cathedral-validator pool-inventory verify --inventory /absolute/path/pool-inventory.json
 ```
 
-The server answers only `GET /v1/pool/inventory` with the signed file, `404`
-for any other path, and `503` while no file is published. It loads no key and
+The server answers `GET /v1/pool/inventory` with the signed file and
+`GET /v1/pool/receipt` (below), `404` for any other path, and `503` while no file is published. It loads no key and
 reads nothing else. Put it behind your own HTTPS front end to expose it.
+
+`GET /v1/pool/receipt?uid=N&endpoint=URL` returns one machine's receipt, built
+from the published file after verifying it: `400` for a malformed query, `404`
+when no machine matches.
+
+```bash
+cathedral-validator pool-inventory receipt --inventory /absolute/path/pool-inventory.json --uid 19 --endpoint https://203.0.113.5:8081
+cathedral-validator pool-inventory verify-receipt --receipt receipt.json
+```
+
+`verify-receipt` needs only the receipt file and prints
+`MACHINE_RECEIPT_VALID` with the machine's entry, or `MACHINE_RECEIPT_INVALID`
+and exits 1.
 
 `verify` checks the shape, the totals, the identity, and the validator's
 signature, and prints `POOL_INVENTORY_VALID` with the totals, or
