@@ -24,7 +24,8 @@ The file must be a regular file (not a symlink) and not world-writable:
   "prober_keys": {"sn94-prober-1": "<64 hex: raw Ed25519 public key>"},
   "price_keys": {"sn94-owner-1": "<64 hex: raw Ed25519 public key>"},
   "price_table": {"...": "the SN94 owner's signed price table, as published"},
-  "recheck_max_mib": 0
+  "recheck_max_mib": 0,
+  "inventory_path": "/var/lib/cathedral-validator/capacity-inventory.json"
 }
 ```
 
@@ -65,6 +66,36 @@ The result is logged as its own line after the cycle's line, `{"anchor_block": .
 per-reason refusal counts, `units` (`[uid, value]`), and the first 32 receipt rows
 (`rows_omitted` counts the rest), so the line stays small. Recovery cycles get no record. An
 error becomes `"status": "FAILED"`, never a failed cycle.
+
+## The inventory
+
+With `inventory_path` (optional; an absolute `.json` path the validator can write, normally in
+its state directory `/var/lib/cathedral-validator`), each cycle also updates a local inventory
+of every box this validator has seen:
+
+- `healthy`: its receipt this cycle verified and was accepted. `streak` counts consecutive
+  healthy cycles;
+- `unhealthy`: its receipt verified but was refused, with the `reason`;
+- `missing`: seen before but absent this cycle. It is dropped after 24 quiet cycles.
+
+Each box records its hotkey, UID, kind, hardware id, capacity, value, and first and last seen.
+A receipt that does not verify names no box anyone can trust, so it never appears. The file is
+replaced atomically (mode 600). A file that can't be read, or that is for another netuid, starts
+a new inventory. A write failure shows as `"inventory": {"status": "FAILED"}` in the shadow
+record and changes nothing else.
+
+The shadow record carries the inventory's `aggregate`: box counts by status, and healthy boxes,
+vCPUs, memory and value by kind. It names no box, hotkey or hardware, so it can be published. To
+read the file:
+
+```
+sudo python -m cathedral_thin.independent_runtime.capacity_inventory \
+  /var/lib/cathedral-validator/capacity-inventory.json [--aggregate]
+```
+
+(or with the release's interpreter). Which sandboxes are assigned to a box is known only to the
+control plane that routes them, so the inventory has no such field. The control plane's
+`GET /v1/pool` combines this kind of health view with its own assignments.
 
 ## Not yet
 

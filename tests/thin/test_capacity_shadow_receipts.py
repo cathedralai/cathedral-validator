@@ -151,6 +151,10 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
         ({"recheck_max_mib": -1}, "recheck_max_mib"),
         ({"recheck_max_mib": True}, "recheck_max_mib"),
         ({"recheck_max_mib": 65}, "recheck_max_mib"),
+        ({"inventory_path": "relative.json"}, "inventory_path"),
+        ({"inventory_path": "/var/lib/x/inventory.txt"}, "inventory_path"),
+        ({"inventory_path": "/var/lib/../etc/inventory.json"}, "inventory_path"),
+        ({"inventory_path": 7}, "inventory_path"),
         ({"schema": "other"}, "schema"),
         ({"extra": 1}, "exactly"),
     ],
@@ -380,3 +384,36 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
 def test_a_hostile_policy_file_is_a_policy_error(raw) -> None:
     with pytest.raises(cs.CapacityPolicyError):
         cs.parse_capacity_policy(raw, now=NOW)
+
+
+def test_each_record_updates_the_inventory_file(tmp_path) -> None:
+    path = tmp_path / "capacity-inventory.json"
+    policy = _policy(inventory_path=str(path))
+    count = cs.MAX_EVENT_ROWS + 3
+    fetch = _feed(
+        [],
+        lambda nonce: [
+            _receipt(box_id=f"box-{i}", hardware=f"{i:064x}", nonce=nonce)
+            for i in range(count)
+        ],
+    )
+    shadow = cs.CapacityShadow(
+        policy, fetch=fetch, now=lambda: NOW + timedelta(minutes=1)
+    )
+    record = shadow.record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
+    assert record["inventory"]["status"] == "WRITTEN"
+    assert record["inventory"]["aggregate"]["boxes"]["healthy"] == count
+    stored = json.loads(path.read_text())
+    assert len(stored["boxes"]) == count  # every box, not only the logged rows
+    assert stored["netuid"] == 94 and stored["round"] == 7
+
+
+def test_an_inventory_write_failure_is_recorded_not_raised(tmp_path) -> None:
+    policy = _policy(inventory_path=str(tmp_path / "absent-dir" / "inventory.json"))
+    fetch = _feed([], lambda nonce: [_receipt(nonce=nonce)])
+    shadow = cs.CapacityShadow(
+        policy, fetch=fetch, now=lambda: NOW + timedelta(minutes=1)
+    )
+    record = shadow.record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
+    assert record["status"] == "RECORDED" and record["accepted"] == 1
+    assert record["inventory"]["status"] == "FAILED"
