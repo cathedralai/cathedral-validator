@@ -135,10 +135,19 @@ validator:
    micro-units of the table's currency per hour, and sums the values per UID.
 
 The result is logged as its own line after the cycle's line, `{"anchor_block": ...,
-"capacity_shadow": {...}}`. It holds the status, the policy digest, the table's sequence, the
-per-reason refusal counts, `units` (`[uid, value]`), and the first 32 receipt rows
-(`rows_omitted` counts the rest), so the line stays small: with evidence in every row it stays
-under 40 KB, below journald's default 48 KiB line limit. Each verified row carries `kind` and
+"capacity_shadow": {...}}`. It holds the status, the policy digest, the table's sequence, and,
+each capped so the line stays one journal line:
+
+- `refused`: receipt counts for the 16 most common refusal reasons (`refused_omitted` counts the
+  receipts refused for any other reason). A reason is at most 200 characters of printable
+  ASCII;
+- `units` (`[uid, value]`): the 64 UIDs with the highest value (`units_omitted` counts the rest,
+  and `units_total` sums every UID);
+- `rows`: the first 24 receipt rows (`rows_omitted` counts the rest).
+
+The line therefore stays under 40,000 bytes in the worst case (the longest fields in every row,
+thousands of UIDs and reasons; a test builds it), with margin below journald's default 48 KiB
+line limit. The inventory file keeps every box. Each verified row carries `kind` and
 `tee_kind` (`tdx`, `sev_snp`, or `null` for bare metal), its `evidence` (the five fields above;
 `null` for bare metal), and `measurement_allowed` (`true` or `false` against the policy for its
 TEE kind, `null` when there is none). Recovery cycles get no record. An

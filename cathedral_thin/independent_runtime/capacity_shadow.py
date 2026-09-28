@@ -81,7 +81,13 @@ MAX_KEYS = 16
 # effect until a native checker exists. The machinery stays for that checker.
 MAX_RECHECK_MIB = 64
 RECHECK_BUDGET_SECONDS = 60.0
-MAX_EVENT_ROWS = 32
+# The record is one journal line, so every list and map in it is capped; the
+# inventory file keeps every box. MAX_EVENT_LINE_BYTES is the worst case the
+# tests build, with margin under journald's default 48 KiB LineMax.
+MAX_EVENT_ROWS = 24
+MAX_EVENT_UNITS = 64
+MAX_EVENT_REASONS = 16
+MAX_EVENT_LINE_BYTES = 40_000
 FETCH_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_CHARS = 200
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -370,6 +376,16 @@ def _parse_feed(raw: bytes, *, netuid: int, nonce: str) -> tuple[int, list[Any]]
     return round_, receipts
 
 
+def _reason(text: str) -> str:
+    """A refusal reason that is at most MAX_ERROR_CHARS bytes on the journal
+    line: printable ASCII only, with nothing JSON has to escape."""
+
+    return "".join(
+        char if " " <= char <= "~" and char not in '"\\' else "?"
+        for char in text[:MAX_ERROR_CHARS]
+    )
+
+
 def _short(exc: BaseException) -> str:
     text = str(exc)
     name = type(exc).__name__
@@ -442,12 +458,12 @@ def score_receipts(
                     parsed.evidence.measurement
                 )
         except receipt_lib.ReceiptError as exc:
-            rows.append({"verdict": "REFUSED", "reason": str(exc)[:MAX_ERROR_CHARS]})
+            rows.append({"verdict": "REFUSED", "reason": _reason(str(exc))})
             continue
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
             # The message is kept (bounded), so a library bug that refuses every
             # receipt still reads as that bug in the record's refused counts.
-            rows.append({"verdict": "REFUSED", "reason": _short(exc)})
+            rows.append({"verdict": "REFUSED", "reason": _reason(_short(exc))})
             continue
         if parsed.kind == BARE_METAL and not policy.admit_bare_metal:
             row["verdict"] = "REFUSED"
@@ -515,7 +531,7 @@ def score_receipts(
             recomputed = challenge.lane_output(parsed.challenge, lane)
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
             row["recheck"] = "error"
-            refuse(row, _short(exc))
+            refuse(row, _reason(_short(exc)))
             continue
         if recomputed == parsed.sampled_outputs[lane]:
             row["recheck"] = "passed"
@@ -541,6 +557,29 @@ def score_receipts(
     }
 
 
+def _event_fields(scored: Mapping[str, Any]) -> dict[str, Any]:
+    """``score_receipts``'s result, capped for the one journal line: the first
+    MAX_EVENT_ROWS rows, the MAX_EVENT_UNITS most valuable UIDs (``units_total``
+    still sums every UID) and the MAX_EVENT_REASONS most common refusal reasons
+    (``refused_omitted`` counts the receipts refused for the rest)."""
+
+    rows = scored["rows"]
+    units = sorted(scored["units"], key=lambda item: (-item[1], item[0]))
+    refused = sorted(scored["refused"].items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "receipts": scored["receipts"],
+        "accepted": scored["accepted"],
+        "refused": dict(sorted(refused[:MAX_EVENT_REASONS])),
+        "refused_omitted": sum(count for _reason, count in refused[MAX_EVENT_REASONS:]),
+        "recheck_failures": scored["recheck_failures"],
+        "units": sorted(units[:MAX_EVENT_UNITS]),
+        "units_omitted": max(0, len(units) - MAX_EVENT_UNITS),
+        "units_total": sum(value for _uid, value in units),
+        "rows": rows[:MAX_EVENT_ROWS],
+        "rows_omitted": max(0, len(rows) - MAX_EVENT_ROWS),
+    }
+
+
 class CapacityShadow:
     """One validator's shadow capacity scoring, run once per cycle."""
 
@@ -562,10 +601,10 @@ class CapacityShadow:
     ) -> dict[str, Any]:
         """Score this round's receipts, or describe why not. Never raises.
 
-        ``hotkey_to_uid`` names this cycle's serving miners. The record keeps
-        the first MAX_EVENT_ROWS receipt rows so the cycle's one journal line
-        stays small; the counts and units cover every receipt, and so does the
-        inventory file when the policy names one.
+        ``hotkey_to_uid`` names this cycle's serving miners. The record is
+        capped (``_event_fields``) so the cycle's one journal line stays under
+        MAX_EVENT_LINE_BYTES; the inventory file, when the policy names one,
+        covers every receipt's box.
         """
 
         head = {
@@ -599,14 +638,12 @@ class CapacityShadow:
             )
         except Exception as exc:  # noqa: BLE001 - a shadow record never fails the cycle
             return {**head, "status": "FAILED", "error": _short(exc)}
-        rows = scored.pop("rows")
+        rows = scored["rows"]
         record = {
             **head,
             "status": "RECORDED",
             "round": round_,
-            **scored,
-            "rows": rows[:MAX_EVENT_ROWS],
-            "rows_omitted": max(0, len(rows) - MAX_EVENT_ROWS),
+            **_event_fields(scored),
         }
         if self.policy.inventory_path is not None:
             try:

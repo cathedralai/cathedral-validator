@@ -688,7 +688,7 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     # One journal line, well under journald's default 48 KiB LineMax, even with
     # every row carrying its evidence.
     line = json.dumps({"anchor_block": 1, "capacity_shadow": record}, sort_keys=True)
-    assert len(line) < 40_000
+    assert len(line) < cs.MAX_EVENT_LINE_BYTES
 
 
 @pytest.mark.parametrize("raw", [b"[" * 100_000, b'{"schema": ' + b"9" * 5000 + b"}"])
