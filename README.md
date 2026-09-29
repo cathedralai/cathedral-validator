@@ -19,6 +19,34 @@ in a published signed release. The customer lifecycle producer is an unmet
 activation gate. The ordinary-key probe CLI measures create/exec/loss separately.
 The instructions below describe the existing SAT mechanism.
 
+The source now also includes a guided delivery setup mode. **Use it only after
+a signed SN94 bootstrap/runtime containing this change is published and the
+customer receipt producer is qualified.** The ordinary install command below
+still fetches the dated SN39 release; it cannot enable this mode today.
+
+Once those gates pass, supply the reviewed write policy and an existing,
+authenticated closed-window receipt bundle:
+
+```bash
+sudo cathedral-validator-setup \
+  --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
+  --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
+  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
+  --mechanism sn94_delivery_v1 \
+  --delivery-policy /absolute/reviewed/delivery-policy.json \
+  --delivery-bundle /absolute/reviewed/delivery-bundle.json \
+  --confirm-direct-write
+```
+
+Setup pins the mechanism and policy bytes, stages the initial feed, and selects
+`/var/lib/cathedral-validator/delivery.sqlite3` as the accounting ledger. The
+candidate runtime checks the configuration before the writer starts. Missing
+feed or a policy mismatch refuses startup; setup cannot silently switch an
+existing SAT installation into delivery or the reverse. The signed updater's
+readiness failure path deactivates a failed first release or restores the prior
+release. See the [delivery setup contract](docs/sn94/DELIVERY_V1.md#guided-setup)
+for feed ownership and remaining activation gates.
+
 ## What it does
 
 Each cycle, the validator:
@@ -124,8 +152,9 @@ sudo cathedral-validator-status
 Setup installs the current signed `stable` release for its declared subnet,
 starts the validator, and enables the stable update timer. This is not yet an
 SN94 installation. `SETUP_COMPLETE` on the last line means the
-host is running. `SETUP_REFUSED` names the exact check that failed and changes
-nothing.
+host is running. `SETUP_REFUSED` names the check that failed. Public inputs
+may already be staged after a first-install failure; the completion marker is
+written only after readiness is confirmed.
 
 ## Operate
 

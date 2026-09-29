@@ -131,6 +131,44 @@ cannot be combined with delivery mode. This change does not add commit/reveal
 support to the writer; a chain that requires it remains a separate release gate.
 Do not enable a service from this branch or bypass signed setup.
 
+## Guided setup
+
+This branch extends the signed-bootstrap setup source. It is not a published
+bootstrap. After publication and the other activation gates above,
+`cathedral-validator-setup --mechanism sn94_delivery_v1` requires both
+`--delivery-policy` and `--delivery-bundle`, alongside the normal identity and
+SNP-policy arguments. The default remains SAT.
+
+Setup writes root-owned, service-group-readable files under
+`/etc/cathedral-validator`: `service-config.json`, `delivery-policy.json` and
+`delivery-bundle.json`. The config pins the exact policy bytes and the fixed
+ledger `/var/lib/cathedral-validator/delivery.sqlite3`. The completion marker
+binds the config digest. Existing destinations are compared before mutation;
+a changed mechanism or policy needs a separately reviewed migration, not a
+setup rerun. Rerunning the same setup must supply the current feed bytes.
+
+The systemd unit runs `cathedral-validator service-config-check --config=...`
+before copying the wallet credential or starting the writer. The runtime uses
+the same canonical policy parser, enforces SN94 write mode and the release QVL
+pin, checks an explicit closed-window feed exists, and refuses unsafe files.
+This is a configuration check: it does not verify quotes, open the ledger or
+submit weights. The actual consumer still verifies every receipt. An explicit
+empty closed window is allowed and means sink-only accounting; a missing feed
+is never replaced by an empty one.
+
+The runtime checks the same config again before wallet access. Direct delivery
+flags cannot override service config. Readiness refusal follows the existing
+updater rollback path; setup does not enable the service or write its completion
+marker after that failure. An older runtime missing the check command refuses
+startup, so a matching signed runtime and bootstrap must be published together.
+
+An authenticated operator-owned publisher must atomically replace the bundle
+at its fixed path as root, keeping mode0440 and the validator service group.
+That publisher, allocation admission/countersigning and metadata cleanup are
+not implemented here. The runtime verifies the feed again on each cycle and
+keeps its private ledger across releases. Do not delete configuration or
+accounting state to switch mechanisms or clear an unresolved write.
+
 ## Recovery
 
 Receipt reservation and plan construction commit atomically in SQLite. Before

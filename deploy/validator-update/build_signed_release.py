@@ -860,7 +860,12 @@ def _validator_pex(path: Path) -> ValidatedPex:
     validator_module = "cathedral_thin/independent_runtime/direct_validator.py"
     if not project_module_present(validator_module):
         raise UpdateRefused("validator PEX omits the direct validator module")
-    for module in ("delivery_plan.py", "delivery_runtime.py", "delivery_probe.py"):
+    for module in (
+        "delivery_plan.py",
+        "delivery_runtime.py",
+        "delivery_probe.py",
+        "service_config.py",
+    ):
         if not project_module_present(f"cathedral_thin/independent_runtime/{module}"):
             raise UpdateRefused("validator PEX omits the delivery runtime")
     delivery_distributions = [

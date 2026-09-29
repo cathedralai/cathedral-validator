@@ -120,6 +120,7 @@ def _validator_pex(path: Path) -> None:
             "cathedral_thin/independent_runtime/delivery_plan.py": b"",
             "cathedral_thin/independent_runtime/delivery_runtime.py": b"",
             "cathedral_thin/independent_runtime/delivery_probe.py": b"",
+            "cathedral_thin/independent_runtime/service_config.py": b"",
             "cathedral_delivery/__init__.py": b"",
             "cathedral_thin/independent_runtime/telemetry.py": b"",
             "cathedral_thin/independent_runtime/telemetry_exporter.py": b"",
@@ -962,6 +963,7 @@ def test_expired_channel_renews_without_rebuild_within_updater_limits(
     [
         "cathedral_delivery/__init__.py",
         "cathedral_thin/independent_runtime/delivery_runtime.py",
+        "cathedral_thin/independent_runtime/service_config.py",
     ],
 )
 def test_release_cannot_omit_delivery_contract_or_writer(tmp_path, missing):

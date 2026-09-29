@@ -946,6 +946,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="explicit SN94 delivered-resource policy; absent keeps SAT mode",
     )
+    parser.add_argument(
+        "--service-config",
+        type=Path,
+        help="root-owned signed-service mechanism configuration",
+    )
     parser.add_argument("--delivery-bundle", type=Path, help="local receipt feed file")
     parser.add_argument(
         "--delivery-ledger",
@@ -1058,6 +1063,10 @@ def _capacity_shadow_event(
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["service-config-check"]:
+        from .service_config import main as service_check_main
+
+        return service_check_main(arguments[1:])
     if arguments and arguments[0] == "delivery-probe":
         from .delivery_probe import main as probe_main
 
@@ -1085,6 +1094,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         or options.interval_seconds <= 0
     ):
         raise SystemExit("interval must be positive")
+
+    if options.service_config is not None:
+        from .service_config import check as check_service_config
+        from .delivery_plan import DeliveryPlanError
+
+        if any(
+            (options.delivery_policy, options.delivery_bundle, options.delivery_ledger)
+        ):
+            raise SystemExit(
+                "service configuration cannot be overridden by delivery flags"
+            )
+        try:
+            service_config = check_service_config(options.service_config)
+        except (OSError, ValueError, TypeError, KeyError, DeliveryPlanError) as exc:
+            raise SystemExit(
+                "service configuration refused before wallet access"
+            ) from exc
+        if service_config["mechanism"] == "sn94_delivery_v1":
+            options.delivery_policy = Path(service_config["policy_path"])
+            options.delivery_bundle = Path(service_config["bundle_path"])
+            options.delivery_ledger = Path(service_config["ledger_path"])
 
     delivery_context = None
     delivery_options = (

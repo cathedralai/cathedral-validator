@@ -47,6 +47,8 @@ REFUSED_UNITS = (
     "cathedral-confidential-validator.service",
     "cathedral-validator.service",
 )
+DELIVERY_LEDGER = Path("/var/lib/cathedral-validator/delivery.sqlite3")
+MAX_DELIVERY_BUNDLE_BYTES = 8 * 1024 * 1024
 MAX_HOTKEY_BYTES = 1024 * 1024
 MAX_POLICY_BYTES = 128 * 1024
 MAX_UPDATER_STATE_BYTES = 1024 * 1024
@@ -640,12 +642,23 @@ def _requires_first_install() -> bool:
     return False
 
 
-def _setup_completion_body(expected_hotkey: str) -> bytes:
+def _setup_completion_body(
+    expected_hotkey: str, service_digest: str | None = None
+) -> bytes:
     return (
         json.dumps(
             {
-                "schema": "cathedral_validator_setup_complete_v1",
+                "schema": (
+                    "cathedral_validator_setup_complete_v2"
+                    if service_digest is not None
+                    else "cathedral_validator_setup_complete_v1"
+                ),
                 "expected_hotkey": expected_hotkey,
+                **(
+                    {"service_config_sha256": service_digest}
+                    if service_digest is not None
+                    else {}
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -659,6 +672,9 @@ def configure(
     hotkey_file: Path,
     expected_hotkey: str,
     snp_policy: Path,
+    mechanism: str = "sat",
+    delivery_policy: Path | None = None,
+    delivery_bundle: Path | None = None,
     runner: Runner = _default_runner,
 ) -> None:
     if not _is_bittensor_ss58(expected_hotkey):
@@ -667,7 +683,50 @@ def configure(
         raise SetupRefused(
             "--hotkey-file must be the named file inside a Bittensor hotkeys directory"
         )
+    if mechanism not in {"sat", "sn94_delivery_v1"}:
+        raise SetupRefused("unknown validator mechanism")
+    if (mechanism == "sn94_delivery_v1") != bool(
+        delivery_policy and delivery_bundle
+    ) or (
+        mechanism == "sat"
+        and (delivery_policy is not None or delivery_bundle is not None)
+    ):
+        raise SetupRefused(
+            "delivery mode requires both an explicit policy and an existing receipt bundle"
+        )
     owners = _operator_uids()
+    service_config = {
+        "schema": "cathedral_validator_service_config_v1",
+        "mechanism": mechanism,
+    }
+    delivery_inputs = []
+    if mechanism == "sn94_delivery_v1":
+        delivery_policy_body = _read_regular(
+            delivery_policy, maximum=65536, owners=owners, label="delivery policy"
+        )
+        delivery_bundle_body = _read_regular(
+            delivery_bundle,
+            maximum=MAX_DELIVERY_BUNDLE_BYTES,
+            owners=owners,
+            label="delivery bundle",
+        )
+        # Only immutable byte binding here. The signed candidate runtime uses its
+        # canonical policy parser before ExecStart, never a bootstrap copy.
+        service_config.update(
+            {
+                "policy_path": str(ETC / "delivery-policy.json"),
+                "policy_sha256": hashlib.sha256(delivery_policy_body).hexdigest(),
+                "bundle_path": str(ETC / "delivery-bundle.json"),
+                "ledger_path": str(DELIVERY_LEDGER),
+            }
+        )
+        delivery_inputs = [
+            (ETC / "delivery-policy.json", delivery_policy_body),
+            (ETC / "delivery-bundle.json", delivery_bundle_body),
+        ]
+    service_body = (
+        json.dumps(service_config, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
     hotkey = _read_regular(
         hotkey_file,
         maximum=MAX_HOTKEY_BYTES,
@@ -722,7 +781,12 @@ def configure(
                 "a conflicting validator or canary unit is active or enabled"
             )
     requires_first_install = _requires_first_install()
-    completion = _setup_completion_body(expected_hotkey)
+    completion = _setup_completion_body(
+        expected_hotkey,
+        hashlib.sha256(service_body).hexdigest()
+        if mechanism == "sn94_delivery_v1"
+        else None,
+    )
     setup_complete = _existing_matches(
         ETC / "setup-complete.json",
         completion,
@@ -753,6 +817,8 @@ def configure(
     destinations = (
         (ETC / "validator-hotkey", hotkey, 0o600, ROOT_GID),
         (ETC / "snp-policy.json", policy, 0o440, service_gid),
+        (ETC / "service-config.json", service_body, 0o440, service_gid),
+        *((path, body, 0o440, service_gid) for path, body in delivery_inputs),
         (ETC / "identity.env", identity, 0o600, ROOT_GID),
         (ETC / "direct.env", direct_example, 0o600, ROOT_GID),
         (ETC / "update.env", update, 0o600, ROOT_GID),
@@ -814,6 +880,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--hotkey-file", type=Path, required=True)
     parser.add_argument("--expected-hotkey", required=True)
     parser.add_argument("--snp-policy", type=Path, required=True)
+    parser.add_argument(
+        "--mechanism", choices=("sat", "sn94_delivery_v1"), default="sat"
+    )
+    parser.add_argument("--delivery-policy", type=Path)
+    parser.add_argument("--delivery-bundle", type=Path)
     parser.add_argument("--confirm-direct-write", action="store_true")
     options = parser.parse_args(argv)
     if os.geteuid() != 0:
@@ -825,6 +896,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             hotkey_file=options.hotkey_file,
             expected_hotkey=options.expected_hotkey,
             snp_policy=options.snp_policy,
+            mechanism=options.mechanism,
+            delivery_policy=options.delivery_policy,
+            delivery_bundle=options.delivery_bundle,
         )
     except SetupRefused as exc:
         print(f"SETUP_REFUSED: {exc}", file=sys.stderr)
