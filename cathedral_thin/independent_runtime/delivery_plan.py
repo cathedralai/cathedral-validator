@@ -1,8 +1,9 @@
-"""SN94 delivered-resource accounting. Plan-only: no chain writer or SAT fallback.
+"""SN94 delivered-resource accounting, with no SAT or unattested fallback.
 
 The durable plan reserves every receipt and interval atomically. A retry loads
 that same plan; it never rebuilds a window using a changed policy or new feed.
-Activation of chain submission requires a separately reviewed journal adapter.
+The delivery-plan CLI never writes chain state. delivery_runtime connects an
+explicit write policy to the existing journaled writer.
 """
 
 from __future__ import annotations

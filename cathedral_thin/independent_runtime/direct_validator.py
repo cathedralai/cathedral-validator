@@ -953,6 +953,10 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "delivery-probe":
+        from .delivery_probe import main as probe_main
+
+        return probe_main(arguments[1:])
     if arguments[:1] == ["delivery-plan"]:
         # Isolated plan-only accounting. Never opens a wallet or submits weights.
         from .delivery_plan import main as delivery_main

@@ -4,6 +4,15 @@ Cathedral Validator scores compute on Bittensor SN94 and writes weights directly
 with your validator hotkey. It does not download a weight vector, use a relay,
 or send your key to Cathedral.
 
+## SN94 delivered-resource V1
+
+The opt-in [delivery mechanism and operator procedure](docs/sn94/DELIVERY_V1.md)
+adds signed delivery receipts, strict TDX admission, durable resource accounting,
+and the existing writer/recovery path. It is disabled by default and is not yet
+in a published signed release. The customer lifecycle producer is an unmet
+activation gate. The ordinary-key probe CLI measures create/exec/loss separately.
+The instructions below describe the existing SAT mechanism.
+
 ## What it does
 
 Each cycle, the validator:
@@ -112,8 +121,8 @@ nothing.
 
 ## Operate
 
-The validator is one recurring process. There is no alternate scoring mode and
-no non-writing mode. A successful cycle prints `CONFIRMED` or
+The default validator is one recurring SAT process. The explicit delivery mode
+and its non-writing plan CLI are documented above. A successful writer cycle prints `CONFIRMED` or
 `RECOVERED_CONFIRMED` after the exact row is confirmed at inclusion and two
 later finalized heads.
 
