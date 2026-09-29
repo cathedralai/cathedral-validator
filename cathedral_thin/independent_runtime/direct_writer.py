@@ -1972,7 +1972,7 @@ class DirectWeightWriter:
         """Prove the exact commit is stored where the chain will reveal it.
 
         At the finalized inclusion block, under the epoch key the chain gave
-        it (``weights.rs:365-400``), the hotkey holds exactly one entry and it
+        it (``weights.rs:365-401``), the hotkey holds exactly one entry and it
         is ``(hotkey, inclusion block, ciphertext, reveal round)``; the commit
         also moved this UID's ``LastUpdate`` to that block. Two later heads
         must be finalized, as for a plain write.
@@ -2189,7 +2189,7 @@ class DirectWeightWriter:
     ) -> tuple[tuple[tuple[int, str], ...], list[list[Any]]]:
         """Prove the stored row the reveal wrote, and name any remapped UID.
 
-        The chain stores the max-upscaled vector (``weights.rs:840-850``),
+        The chain stores the max-upscaled vector (``weights.rs:835-851``),
         read here at the reveal block and two later finalized blocks. The
         commit was signed about an epoch earlier, so a weighted UID may have
         been re-registered to another hotkey by the reveal block; that is the

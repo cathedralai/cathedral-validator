@@ -13,7 +13,7 @@ the runtime Finney runs (spec 470, subtensor tag ``v470`` = 923fd1fa):
   ``CommitRevealWeightsVersion`` (4), a registered hotkey and the ordinary
   weight rate limit, then appends ``(hotkey, commit_block, ciphertext,
   reveal_round)`` under the epoch it lands in and sets ``LastUpdate``.
-* The automatic reveal: ``coinbase/block_step.rs:15-17, 88-106`` and
+* The automatic reveal: ``coinbase/block_step.rs:17-20, 88-106`` and
   ``coinbase/reveal_commits.rs:39-211``. Every block, before the epoch runs,
   commits keyed ``current_epoch - reveal_period`` are taken; one whose drand
   pulse is on chain is decrypted, its ``WeightsTlockPayload`` decoded, its
