@@ -67,9 +67,13 @@ from .preview_io import canonical_document_bytes
 from .localnet import (
     LOCALNET_ENV,
     LOCALNET_REQUEST_NETWORK,
+    TESTNET_ENV,
+    TESTNET_REQUEST_NETWORK,
     expected_genesis_hash,
     localnet_active,
     require_localnet_network,
+    require_testnet_network,
+    testnet_active,
 )
 from .qvl import expected_direct_validator_qvl_digest, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
@@ -994,11 +998,15 @@ def _pinned_network(value: object) -> str:
     """Refuse any network the direct validator is not pinned to.
 
     Development localnet mode (``CATHEDRAL_LOCALNET=1``) pins a ws:// endpoint
-    on this host instead, and refuses ``finney``.
+    on this host instead, and refuses ``finney``. Testnet mode
+    (``CATHEDRAL_TESTNET=1``) pins Bittensor's public testnet and refuses
+    ``finney`` the same way.
     """
 
     if localnet_active():
         return require_localnet_network(value)
+    if testnet_active():
+        return require_testnet_network(value)
     if value != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
     return value
@@ -1088,6 +1096,11 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     """
 
     if values is None:
+        if testnet_active():
+            raise SystemExit(
+                "testnet mode needs an explicit --netuid: netuid 94 on testnet "
+                "is another team's subnet"
+            )
         return NETUID
     if len(values) != 1:
         # argparse would silently keep the last one, and the unit still expands
@@ -1102,6 +1115,13 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     ):
         raise SystemExit("--netuid must be a canonical decimal u16 integer")
     netuid = int(value)
+    if testnet_active():
+        # A testnet journal and lock live under the testnet scope, which the
+        # updater and status tool never read, so the concern above does not
+        # apply. The testnet genesis pin keeps this process off Finney.
+        if netuid == 0:
+            raise SystemExit("--netuid 0 is the root subnet")
+        return netuid
     if netuid != NETUID:
         raise SystemExit(
             f"--netuid {netuid} is not the netuid this release was built for "
@@ -1258,6 +1278,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     _pinned_network(options.network)
     netuid = _configured_netuid(options.netuid)
+    if options.telemetry_spool is not None and (localnet_active() or testnet_active()):
+        raise SystemExit(
+            "telemetry publishes Finney events only; unset --telemetry-spool "
+            "in localnet or testnet mode"
+        )
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -1304,6 +1329,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "genesis": localnet_genesis,
                     "qvl_digest": verifier.digest,
                     "request_network": LOCALNET_REQUEST_NETWORK,
+                    "snp_policy_digest": snp_policy.digest,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    if testnet_active():
+        print(
+            json.dumps(
+                {
+                    "status": "TESTNET_DEVELOPMENT_MODE",
+                    "warning": (
+                        f"{TESTNET_ENV}=1: Bittensor public testnet, release "
+                        "verifiers, public miner addresses only. Never Finney."
+                    ),
+                    "network": options.network,
+                    "genesis": expected_genesis_hash(),
+                    "netuid": netuid,
+                    "qvl_digest": verifier.digest,
+                    "request_network": TESTNET_REQUEST_NETWORK,
                     "snp_policy_digest": snp_policy.digest,
                 },
                 sort_keys=True,

@@ -150,7 +150,7 @@ def observed_genesis_hash(subtensor: Any) -> str:
                 f"observed genesis {text} is not the pinned Finney genesis"
             )
         raise ChainClientError(
-            f"observed genesis {text} is not the pinned localnet genesis {expected}"
+            f"observed genesis {text} is not the pinned development genesis {expected}"
         )
     return text
 
