@@ -1864,3 +1864,22 @@ def test_delivery_candidate_prestart_refusal_never_completes_or_enables(
         json.loads((setup.ETC / "service-config.json").read_bytes())["mechanism"]
         == "sn94_delivery_v1"
     )
+
+
+def test_delivery_setup_cannot_adopt_existing_unbound_writer(monkeypatch, tmp_path):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    _committed_install()
+    calls = []
+    with pytest.raises(setup.SetupRefused, match="migration"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            mechanism="sn94_delivery_v1",
+            delivery_policy=delivery_policy,
+            delivery_bundle=bundle,
+            runner=_setup_runner(calls, direct_active=True),
+        )
+    assert not (setup.ETC / "service-config.json").exists()
+    assert _enable_calls(calls) == []

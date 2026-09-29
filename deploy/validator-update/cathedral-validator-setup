@@ -781,6 +781,14 @@ def configure(
                 "a conflicting validator or canary unit is active or enabled"
             )
     requires_first_install = _requires_first_install()
+    service_gid = _service_gid()
+    if mechanism == "sn94_delivery_v1" and not requires_first_install:
+        if not _existing_matches(
+            ETC / "service-config.json", service_body, mode=0o440, gid=service_gid
+        ):
+            raise SetupRefused(
+                "existing validator has no bound delivery configuration; migration needs review"
+            )
     completion = _setup_completion_body(
         expected_hotkey,
         hashlib.sha256(service_body).hexdigest()
@@ -805,7 +813,6 @@ def configure(
         # RestartPreventExitStatus= keeps stopped.
         raise SetupRefused("existing direct validator is stopped and needs review")
 
-    service_gid = _service_gid()
     identity = f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={expected_hotkey}\n".encode(
         "ascii"
     )

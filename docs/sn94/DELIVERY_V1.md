@@ -146,6 +146,9 @@ ledger `/var/lib/cathedral-validator/delivery.sqlite3`. The completion marker
 binds the config digest. Existing destinations are compared before mutation;
 a changed mechanism or policy needs a separately reviewed migration, not a
 setup rerun. Rerunning the same setup must supply the current feed bytes.
+Delivery mode also refuses an already-running installation with no prior bound
+delivery config, even if its old completion marker is absent. This is a clean
+first-install path, not an automatic migration of an existing SAT writer.
 
 The systemd unit runs `cathedral-validator service-config-check --config=...`
 before copying the wallet credential or starting the writer. The runtime uses

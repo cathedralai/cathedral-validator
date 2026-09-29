@@ -42,9 +42,11 @@ Setup pins the mechanism and policy bytes, stages the initial feed, and selects
 `/var/lib/cathedral-validator/delivery.sqlite3` as the accounting ledger. The
 candidate runtime checks the configuration before the writer starts. Missing
 feed or a policy mismatch refuses startup; setup cannot silently switch an
-existing SAT installation into delivery or the reverse. The signed updater's
-readiness failure path deactivates a failed first release or restores the prior
-release. See the [delivery setup contract](docs/sn94/DELIVERY_V1.md#guided-setup)
+existing SAT installation into delivery or the reverse. Delivery setup is for
+a clean first install or recovery of the same already-bound configuration; an
+existing unbound writer needs a reviewed migration. The signed updater's
+readiness failure path deactivates a failed first release. Later rollback
+requires a prior release supporting the same signed service contract. See the [delivery setup contract](docs/sn94/DELIVERY_V1.md#guided-setup)
 for feed ownership and remaining activation gates.
 
 ## What it does
