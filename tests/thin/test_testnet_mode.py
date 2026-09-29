@@ -92,7 +92,9 @@ def test_testnet_network_refuses_everything_but_testnet(testnet, network) -> Non
 
 def test_network_pins(testnet, monkeypatch) -> None:
     assert runtime._pinned_network("test") == "test"
-    assert runtime._pinned_network(localnet.TESTNET_ENDPOINT) == localnet.TESTNET_ENDPOINT
+    assert (
+        runtime._pinned_network(localnet.TESTNET_ENDPOINT) == localnet.TESTNET_ENDPOINT
+    )
     monkeypatch.delenv(localnet.TESTNET_ENV)
     assert runtime._pinned_network("finney") == "finney"
     with pytest.raises(SystemExit):
@@ -181,7 +183,9 @@ def test_testnet_keeps_the_release_qvl_pin(testnet) -> None:
         qvl_runtime.load_direct_validator_verifier(str(STUB))
 
 
-@pytest.mark.parametrize("ip", ["10.10.20.17", "192.168.1.5", "100.103.39.86", "127.0.0.2"])
+@pytest.mark.parametrize(
+    "ip", ["10.10.20.17", "192.168.1.5", "100.103.39.86", "127.0.0.2"]
+)
 def test_testnet_never_dials_private_miner_addresses(testnet, ip) -> None:
     assert not localnet.allows_private_miner_address(ipaddress.ip_address(ip))
 
@@ -209,7 +213,9 @@ def test_validator_requests_name_test_and_the_testnet_netuid(testnet) -> None:
     assert document["netuid"] == 421
 
 
-def test_journal_scope_never_says_finney_in_testnet_mode(monkeypatch, production) -> None:
+def test_journal_scope_never_says_finney_in_testnet_mode(
+    monkeypatch, production
+) -> None:
     assert direct_state_scope(94) == "finney-sn94-mechanism-0"
     monkeypatch.setenv(localnet.TESTNET_ENV, "1")
     assert direct_state_scope(421) == "testnet-sn421-mechanism-0"
