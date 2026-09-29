@@ -11,7 +11,9 @@
 set -uo pipefail
 . "$(dirname "$0")/env.sh"
 export DOCKER_CONTEXT="colima-$LOCALNET_COLIMA_PROFILE"
-LIMIT_MB=${LOCALNET_CHAIN_MEMORY_LIMIT_MB:-7000}
+# Default sized for the 6 GiB VM up.sh creates: restart well before the VM's
+# OOM killer takes nodes. Raise both together for a bigger VM.
+LIMIT_MB=${LOCALNET_CHAIN_MEMORY_LIMIT_MB:-3500}
 
 log() { echo "$(date -u +%FT%TZ) $*"; }
 # Keep running after the launching terminal closes.

@@ -21,10 +21,14 @@ fi
 #    direct writer's 16-block era and freshness window still hold on this Mac
 #    because every chain RPC is local. The image holds both runtimes; the
 #    argument True selects the fast one.
-# Three fast-block nodes grow by roughly 15 to 20 MB a minute each; 12 GiB and
-# chain_watchdog.sh keep them up overnight.
+# Three fast-block nodes grow by roughly 15 to 20 MB a minute each;
+# chain_watchdog.sh restarts the container (state kept) before they fill the VM.
+# Keep the VM small relative to the host: on a 24 GiB Mac a 12 GiB VM pushed
+# macOS into about 11 GB of swap overnight, which filled the disk and gave the
+# VM's docker storage I/O errors. LOCALNET_VM_MEMORY_GIB (default 6) and the
+# watchdog limit (env.sh) are sized together.
 if ! colima status -p "$LOCALNET_COLIMA_PROFILE" >/dev/null 2>&1; then
-  colima start -p "$LOCALNET_COLIMA_PROFILE" --cpu 4 --memory 12 --disk 30
+  colima start -p "$LOCALNET_COLIMA_PROFILE" --cpu 4 --memory "${LOCALNET_VM_MEMORY_GIB:-6}" --disk 30
 fi
 export DOCKER_CONTEXT="colima-$LOCALNET_COLIMA_PROFILE"
 fresh_chain=0

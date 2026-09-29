@@ -92,15 +92,15 @@ Sandbox (`CATHEDRAL_LOCALNET_STUB_EVIDENCE=1`, code in
 
 ## Operating notes
 
-- The three fast-block nodes grow by roughly 15 to 20 MB a minute each. In a
-  6 GiB colima VM the OOM killer took two of them after about 40 minutes and the
-  chain stopped finalizing. `up.sh` starts the VM with 12 GiB and the container
-  with `--no-purge`; `chain_watchdog.sh` (started by `up.sh`) restarts the
-  container when a node is gone or node memory passes
-  `LOCALNET_CHAIN_MEMORY_LIMIT_MB` (default 7000). A restart keeps the chain: a
-  test restart went from block 325 to 429 with netuid 94 intact, and the
-  validator's next cycle confirmed. An older container created without
-  `--no-purge` resets on restart, so the watchdog leaves it alone.
+- The three fast-block nodes grow by roughly 15 to 20 MB a minute each.
+  - `up.sh` starts the colima VM with `LOCALNET_VM_MEMORY_GIB` (default 6) and the container with `--no-purge`.
+  - `chain_watchdog.sh` (started by `up.sh`) restarts the container when a node is gone or node memory passes `LOCALNET_CHAIN_MEMORY_LIMIT_MB` (default 3500).
+  - A restart keeps the chain: a test restart went from block 325 to 429 with netuid 94 intact, and the validator's next cycle confirmed.
+  - An older container created without `--no-purge` resets on restart, so the watchdog leaves it alone.
+- Keep the VM small relative to the host.
+  - In a 6 GiB VM with no watchdog, the OOM killer took two nodes after about 40 minutes and the chain stopped finalizing.
+  - A 12 GiB VM on a 24 GiB Mac failed differently. Overnight it pushed macOS into about 11 GB of swap, the disk filled, and the VM's docker storage returned I/O errors until the chain container could not restart.
+  - Size the VM and the watchdog limit together, and watch `df -h` and `sysctl vm.swapusage` on the host.
 - Never start a second localnet container in the same colima VM. Both chains
   share the genesis and `--discover-local`, so the new nodes join the running
   chain with the same authority keys and finality stalls.
