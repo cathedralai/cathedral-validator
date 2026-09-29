@@ -19,15 +19,23 @@ import socket
 import sys
 import time
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
-from cathedral_thin.independent.compute import ComputeAdapter
+from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
+from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
+from .capacity_shadow import (
+    CAPACITY_POLICY_ENV,
+    CapacityPolicyError,
+    CapacityShadow,
+    load_capacity_policy,
+)
 from .axon import (
     AXON_SKIP_REASONS,
     ServingAxon,
@@ -348,17 +356,60 @@ def finalized_serving_miners_snapshot(
     )
 
 
+INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
+INFRA_HALT_SCOPED = "scoped"
+
+
+def _verifier_outage(result: MultiComputeRound) -> bool:
+    """True when an INFRA verdict may mean this validator's verifier is down.
+
+    INFRA means the verifier could not reach a verdict (collateral fetch, a
+    timeout, unreadable verifier output), which says nothing about the machine,
+    so a round with INFRA verdicts is not written: it would zero machines for
+    this validator's own outage. But one machine's evidence is miner-supplied,
+    and a miner whose evidence alone ends in INFRA must not stop every other
+    miner's weights. A verifier that returned PASS for another machine of the
+    same TEE kind in this same round was at least partly working, so an INFRA
+    row of that kind can earn zero (it is never paid) and the round can be
+    written. It is not proof: collateral is per platform (Intel) or per chip
+    (AMD), so a partial outage looks the same, and then honest machines lose
+    the round. With no PASS of that kind the INFRA cannot be told apart from
+    an outage at all, and the round halts as before.
+
+    This decides who is paid, so it ships opt-in: only with
+    ``CATHEDRAL_INFRA_HALT=scoped`` does a round with proven-up verifiers get
+    written. Otherwise any INFRA verdict halts, as it always has, and the halt
+    says when the scoped rule would have written the round.
+    """
+
+    for kind, infra in (
+        (EVIDENCE_KIND_TDX, result.qvl_infra_count),
+        (EVIDENCE_KIND_SEV_SNP, result.snp_infra_count),
+    ):
+        if infra and not any(
+            row.get("tee_kind") == kind
+            and row.get("verdict") == QuoteVerdict.PASS.value
+            for row in result.rows
+        ):
+            return True
+    return False
+
+
 def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if (
-        result.feature_blocked
-        or result.blockers
-        or result.qvl_infra_count
-        or result.snp_infra_count
-    ):
+    if result.feature_blocked or result.blockers:
         raise DirectValidatorError("machine verification round is not fully proven")
+    if result.qvl_infra_count or result.snp_infra_count:
+        if _verifier_outage(result):
+            raise DirectValidatorError("machine verification round is not fully proven")
+        if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
+            raise DirectValidatorError(
+                "machine verification round is not fully proven (the verifiers "
+                "passed other machines of each INFRA kind this round, so "
+                f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would write it)"
+            )
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
     for uid, hotkey in identities.items():
@@ -951,6 +1002,60 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     return netuid
 
 
+def _capacity_shadow_from_environment() -> CapacityShadow | None:
+    """Load the optional capacity receipt policy (shadow scoring only).
+
+    Named by an environment variable for the same rollback reason as the other
+    optional policies. A policy that does not load is reported and skipped,
+    never fatal: shadow scoring must not stop a validator that pays today.
+    """
+
+    path = os.environ.get(CAPACITY_POLICY_ENV, "").strip()
+    if not path:
+        return None
+    try:
+        policy = load_capacity_policy(path, now=datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - never fatal, see above
+        error = str(exc) if isinstance(exc, CapacityPolicyError) else type(exc).__name__
+        _print_event({"capacity_shadow": {"status": "DISABLED", "error": error[:200]}})
+        return None
+    return CapacityShadow(policy)
+
+
+def _capacity_shadow_event(
+    event: dict[str, Any], capacity_shadow: CapacityShadow | None, netuid: int
+) -> dict[str, Any] | None:
+    """This cycle's shadow capacity record, as its own event line.
+
+    It runs after the cycle has returned and its event is printed: after the
+    weight write and its telemetry, and outside the cycle lock, so neither a
+    slow feed nor a recheck can delay a write, lose its telemetry or its log
+    line, or hold off an update. Recovery events get no record.
+    """
+
+    anchor = event.get("anchor")
+    if (
+        capacity_shadow is None
+        or "wire_uids" not in event
+        or not isinstance(anchor, dict)
+    ):
+        return None
+    shadow_event: dict[str, Any] = {"anchor_block": anchor.get("block_number")}
+    try:
+        hotkey_to_uid = {
+            str(miner["hotkey"]): int(miner["uid"]) for miner in anchor["miners"]
+        }
+        shadow_event["capacity_shadow"] = capacity_shadow.record(
+            netuid=netuid, hotkey_to_uid=hotkey_to_uid
+        )
+    except Exception as exc:  # noqa: BLE001 - a shadow record never fails the cycle
+        shadow_event["capacity_shadow"] = {
+            "status": "FAILED",
+            "error": type(exc).__name__,
+        }
+    return shadow_event
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "delivery-probe":
@@ -1019,6 +1124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
+    capacity_shadow = _capacity_shadow_from_environment()
     wallet = make_wallet(
         bt,
         name=options.wallet_name,
@@ -1180,6 +1286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
+                shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)
+                if shadow_event is not None:
+                    _print_event(shadow_event)
             except DirectSubmissionFinalizedFailure as exc:
                 return _stop_on_finalized_failure(exc)
             except DirectSubmissionContradiction as exc:
