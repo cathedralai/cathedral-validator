@@ -777,6 +777,7 @@ class WriterSubtensor:
         self.validator_stake = 10_000
         self.stake_threshold = 1_000
         self.min_allowed = 1
+        self.commit_reveal = False
         # What the SDK's `max_weight_limit()` would return: the chain's
         # `MaxWeightsLimit` storage, which the chain itself never consults.
         self.stored_max_weight_limit = 1.0
@@ -853,7 +854,7 @@ class WriterSubtensor:
 
     def commit_reveal_enabled(self, *, netuid: int, block: int) -> bool:
         assert (netuid, block) == (NETUID, self.substrate.sign_head)
-        return False
+        return self.commit_reveal
 
     def get_mechanism_count(self, netuid: int, *, block: int) -> int:
         assert (netuid, block) == (NETUID, self.substrate.sign_head)
@@ -1041,6 +1042,29 @@ def test_stake_threshold_refuses_before_signing_or_journaling(
     with pytest.raises(DirectValidatorError, match="below.*stake threshold"):
         submit_before_deadline(instance, planned)
 
+    assert subtensor.substrate.sign_calls == 0
+    assert subtensor.substrate.submit_calls == 0
+    assert not instance.state_path.exists()
+
+
+def test_commit_reveal_refusal_names_the_owner_command_before_signing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    subtensor.commit_reveal = True
+
+    with pytest.raises(DirectValidatorError) as refused:
+        submit_before_deadline(instance, planned)
+
+    message = str(refused.value)
+    # The operator cannot fix this locally; the message says so and names the
+    # exact owner command for the subnet this writer signs for.
+    assert f"subnet {NETUID} has commit_reveal_weights_enabled set" in message
+    assert "No change on this host fixes it" in message
+    assert (
+        f"`btcli sudo set --netuid {NETUID} "
+        "--name commit_reveal_weights_enabled --value false`"
+    ) in message
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
     assert not instance.state_path.exists()
