@@ -23,6 +23,7 @@ Environment=PEX_ROOT=/run/cathedral-validator-pex
 Environment=CATHEDRAL_VALIDATOR_TELEMETRY_ARGS=
 EnvironmentFile=/etc/cathedral-validator/direct.env
 EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env
+EnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env
 EnvironmentFile=/etc/cathedral-validator/identity.env
 LoadCredential=validator-hotkey:/etc/cathedral-validator/validator-hotkey
 RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex

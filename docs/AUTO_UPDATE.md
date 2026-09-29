@@ -384,6 +384,43 @@ OnFailure=YOUR-ALERT.service
 
 systemd starts that unit when the service enters the failed state. Exit codes
 2 and 3 always do, because systemd never restarts them.
+Any other failure, including a validator that exits at start because an
+optional policy doesn't load, is restarted every 15 seconds. That is slower
+than systemd's default start limit (5 starts in 10 seconds), so the service
+keeps restarting and never enters the failed state, and `OnFailure=` does not
+fire for it. Watch the service log for those.
+
+## Optional unit settings
+
+Units come only from the signed bootstrap; a signed release never rewrites
+them. When a release adds an optional unit setting, a host keeps its current
+unit until it installs a bootstrap that carries the setting. Until then, add
+it with a drop-in.
+
+The TDX measurement allowlist (README, "Optional: TDX measurement allowlist")
+reads `/etc/cathedral-validator/direct-tdx-measurement.env`. The unit from
+bootstrap sequence 3 has no line for it, so on such a host a release with the
+allowlist still runs with no policy, even with the env file installed. The
+validator says so at start with `"tdx_measurement_policy": {"status":
+"NOT_LOADED"}`. Add the line with a drop-in, then reload and restart:
+
+```bash
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/cathedral-validator-direct.service.d
+printf '[Service]\nEnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env\n' |
+  sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/tdx-measurement.conf \
+  >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart cathedral-validator-direct
+```
+
+The `-` makes the file optional, and the unit's `ExecStart` is unchanged, so a
+rollback to a release from before the allowlist ignores the variable instead
+of refusing to start. Such a release applies no policy, and prints no
+`tdx_measurement_policy` line and no `evidence_summary.tdx_measurement`; the
+updater can roll back to it when a new release fails to become ready. Once
+the host installs a bootstrap whose unit carries the line, the drop-in is
+redundant and harmless (the same file is read twice); remove it at leisure.
 
 ## Commit-reveal subnets
 

@@ -10,6 +10,7 @@ from raw machine counts.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import grp
 import hashlib
 import json
@@ -19,15 +20,23 @@ import socket
 import sys
 import time
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
-from cathedral_thin.independent.compute import ComputeAdapter
+from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
+from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
+from .capacity_shadow import (
+    CAPACITY_POLICY_ENV,
+    CapacityPolicyError,
+    CapacityShadow,
+    load_capacity_policy,
+)
 from .axon import (
     AXON_SKIP_REASONS,
     ServingAxon,
@@ -58,6 +67,14 @@ from .fleet_score import (
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
+from . import tdx_measurement
+from .tdx_measurement import (
+    TDX_MEASUREMENT_POLICY_ENV,
+    TdxMeasurementPolicy,
+    TdxMeasurementPolicyError,
+    load_tdx_measurement_policy,
+    read_policy_source,
+)
 from .telemetry import (
     PendingTelemetryStore,
     TelemetryError,
@@ -83,6 +100,10 @@ EXIT_FINALIZED_FAILED_STOPPED = 3
 FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
 STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
 RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
+POOL_INVENTORY_COMMAND = "pool-inventory"
+# The operator event names at most this many distinct TDX measurements per
+# cycle (the most common first); the rest are counted in observed_omitted.
+MAX_REPORTED_TDX_MEASUREMENTS = 32
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -349,17 +370,60 @@ def finalized_serving_miners_snapshot(
     )
 
 
+INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
+INFRA_HALT_SCOPED = "scoped"
+
+
+def _verifier_outage(result: MultiComputeRound) -> bool:
+    """True when an INFRA verdict may mean this validator's verifier is down.
+
+    INFRA means the verifier could not reach a verdict (collateral fetch, a
+    timeout, unreadable verifier output), which says nothing about the machine,
+    so a round with INFRA verdicts is not written: it would zero machines for
+    this validator's own outage. But one machine's evidence is miner-supplied,
+    and a miner whose evidence alone ends in INFRA must not stop every other
+    miner's weights. A verifier that returned PASS for another machine of the
+    same TEE kind in this same round was at least partly working, so an INFRA
+    row of that kind can earn zero (it is never paid) and the round can be
+    written. It is not proof: collateral is per platform (Intel) or per chip
+    (AMD), so a partial outage looks the same, and then honest machines lose
+    the round. With no PASS of that kind the INFRA cannot be told apart from
+    an outage at all, and the round halts as before.
+
+    This decides who is paid, so it ships opt-in: only with
+    ``CATHEDRAL_INFRA_HALT=scoped`` does a round with proven-up verifiers get
+    written. Otherwise any INFRA verdict halts, as it always has, and the halt
+    says when the scoped rule would have written the round.
+    """
+
+    for kind, infra in (
+        (EVIDENCE_KIND_TDX, result.qvl_infra_count),
+        (EVIDENCE_KIND_SEV_SNP, result.snp_infra_count),
+    ):
+        if infra and not any(
+            row.get("tee_kind") == kind
+            and row.get("verdict") == QuoteVerdict.PASS.value
+            for row in result.rows
+        ):
+            return True
+    return False
+
+
 def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if (
-        result.feature_blocked
-        or result.blockers
-        or result.qvl_infra_count
-        or result.snp_infra_count
-    ):
+    if result.feature_blocked or result.blockers:
         raise DirectValidatorError("machine verification round is not fully proven")
+    if result.qvl_infra_count or result.snp_infra_count:
+        if _verifier_outage(result):
+            raise DirectValidatorError("machine verification round is not fully proven")
+        if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
+            raise DirectValidatorError(
+                "machine verification round is not fully proven (the verifiers "
+                "passed other machines of each INFRA kind this round, so "
+                f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would write it)"
+            )
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
     for uid, hotkey in identities.items():
@@ -431,8 +495,15 @@ def build_direct_plan(
     result: MultiComputeRound,
     *,
     scored_miners: Sequence[ServingAxon] | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> DirectWeightPlan:
-    """Count unique verified machines per UID and normalize with zero burn."""
+    """Count unique verified machines per UID and normalize with zero burn.
+
+    With a TDX measurement policy the evidence document names its mode and
+    digest, so the evidence digest binds which policy produced the vector
+    (enforce drops refused machines from ``machines``). Without one the
+    document is exactly as before.
+    """
 
     miners = tuple(snapshot.miners if scored_miners is None else scored_miners)
     if not miners:
@@ -465,6 +536,11 @@ def build_direct_plan(
         "max_concurrent_miners": MAX_CONCURRENT_MINERS,
         "scheduling_order": "finalized_anchor_hash_rotation",
     }
+    if tdx_policy is not None:
+        evidence["tdx_measurement_policy"] = {
+            "mode": tdx_policy.mode,
+            "digest": tdx_policy.digest,
+        }
     evidence_digest = (
         "sha256:" + hashlib.sha256(canonical_document_bytes(evidence)).hexdigest()
     )
@@ -498,15 +574,66 @@ def _reported_exclusion_category(value: object) -> str:
     return "other"
 
 
+def _tdx_measurement_summary(
+    result: MultiComputeRound, tdx_policy: TdxMeasurementPolicy
+) -> dict[str, object]:
+    """What the TDX measurement policy saw this cycle, for the operator.
+
+    Built from every TDX row the policy judged (each QVL PASS), paid or not,
+    so shadow mode shows the measurements to review before enforcing, and
+    enforce shows what it refused. Bounded: at most
+    MAX_REPORTED_TDX_MEASUREMENTS distinct measurements, the most common first.
+    ``registry_release`` appears only when the policy file's source record
+    names this exact file; this summary never enters the evidence digest.
+    """
+
+    judged = [
+        row
+        for row in result.rows
+        if row.get("measurement_policy_digest") == tdx_policy.digest
+    ]
+    counts: dict[str, int] = {}
+    for row in judged:
+        measurement = row.get("measurement")
+        if isinstance(measurement, str):
+            counts[measurement] = counts.get(measurement, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    reported = ranked[:MAX_REPORTED_TDX_MEASUREMENTS]
+    summary: dict[str, object] = {
+        "mode": tdx_policy.mode,
+        "policy_digest": tdx_policy.digest,
+        "machines": len(judged),
+        "allowed_machines": sum(
+            row.get("measurement_allowed") is True for row in judged
+        ),
+        "missing_measurement": sum(
+            not isinstance(row.get("measurement"), str) for row in judged
+        ),
+        "observed": {
+            measurement: {
+                "allowed": tdx_policy.admits(measurement),
+                "machines": machines,
+            }
+            for measurement, machines in sorted(reported)
+        },
+        "observed_omitted": len(ranked) - len(reported),
+    }
+    if tdx_policy.registry_release is not None:
+        summary["registry_release"] = tdx_policy.registry_release
+    return summary
+
+
 def _evidence_cycle_summary(
     snapshot: FinalizedMetagraphSnapshot,
     result: MultiComputeRound,
     plan: DirectWeightPlan,
+    tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> dict[str, object]:
     """Return fixed-shape telemetry which never enters scoring.
 
     ``sample_sum`` is cumulative task time across concurrent miners. The event's
     ``evidence_cycle_elapsed_ms`` remains the sole end-to-end wall duration.
+    With a TDX measurement policy it also carries ``tdx_measurement``.
     """
 
     phase_summary: dict[str, dict[str, int | None]] = {}
@@ -539,7 +666,7 @@ def _evidence_cycle_summary(
             else 0
         )
     admitted_machine_rows = sum(count for _uid, count in plan.raw_scores)
-    return {
+    summary: dict[str, object] = {
         "phase_timings_ms": phase_summary,
         "exclusions": {
             "skipped_axons": skipped_axons,
@@ -549,6 +676,9 @@ def _evidence_cycle_summary(
             "reported_categories": reported_categories,
         },
     }
+    if tdx_policy is not None:
+        summary["tdx_measurement"] = _tdx_measurement_summary(result, tdx_policy)
+    return summary
 
 
 def _run_direct_cycle_unlocked(
@@ -560,7 +690,9 @@ def _run_direct_cycle_unlocked(
     report_recovery: Callable[[dict[str, Any]], None],
     netuid: int,
     snp_verifier: SnpProductionVerifier | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
+    pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
@@ -623,11 +755,14 @@ def _run_direct_cycle_unlocked(
         anchor_hash=snapshot.block_hash,
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
+        tdx_policy=tdx_policy,
         cycle_deadline_monotonic=cycle_deadline,
         netuid=snapshot.netuid,
     )
-    plan = build_direct_plan(snapshot, result)
-    evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
+    plan = build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
+    evidence_summary = _evidence_cycle_summary(
+        snapshot, result, plan, tdx_policy=tdx_policy
+    )
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -680,6 +815,27 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if pool_inventory is not None:
+        try:
+            from .pool_inventory import publish_cycle_inventory
+
+            inventory_path, inventory_network = pool_inventory
+            inventory_id = publish_cycle_inventory(
+                inventory_path,
+                snapshot=snapshot,
+                result=result,
+                healthy_rows=_positive_machine_rows(result, snapshot.miners),
+                network=inventory_network,
+                keypair=keypair,
+            )
+            event["pool_inventory"] = {
+                "status": "PUBLISHED",
+                "inventory_id": inventory_id,
+            }
+        except Exception:
+            # The inventory is a public projection of this round. Failing to
+            # write it never changes the round, its weights, or its receipt.
+            event["pool_inventory"] = {"status": "FAILED"}
     if getattr(receipt, "status", None) in {STATUS_EXPIRED, STATUS_COMMITTED}:
         # The writer proved these bytes can never land and nothing was
         # written, so there is no finalized receipt for telemetry; a prior
@@ -789,8 +945,10 @@ def run_direct_cycle(
     writer: Any,
     report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
+    pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -824,7 +982,9 @@ def run_direct_cycle(
             report_recovery=report_recovery,
             netuid=netuid,
             snp_verifier=snp_verifier,
+            tdx_policy=tdx_policy,
             telemetry_sink=telemetry_sink,
+            pool_inventory=pool_inventory,
         )
 
 
@@ -882,6 +1042,11 @@ def _parser() -> argparse.ArgumentParser:
         "--snpguest",
         required=True,
         help="pinned AMD snpguest verifier",
+    )
+    parser.add_argument(
+        "--pool-inventory",
+        type=Path,
+        help="publish a signed inventory of the scored pool to this path each cycle",
     )
     parser.add_argument(
         "--telemetry-spool",
@@ -945,8 +1110,141 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     return netuid
 
 
+def _capacity_shadow_from_environment() -> CapacityShadow | None:
+    """Load the optional capacity receipt policy (shadow scoring only).
+
+    Named by an environment variable for the same rollback reason as the other
+    optional policies. A policy that does not load is reported and skipped,
+    never fatal: shadow scoring must not stop a validator that pays today.
+    """
+
+    path = os.environ.get(CAPACITY_POLICY_ENV, "").strip()
+    if not path:
+        return None
+    try:
+        policy = load_capacity_policy(path, now=datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - never fatal, see above
+        error = str(exc) if isinstance(exc, CapacityPolicyError) else type(exc).__name__
+        _print_event({"capacity_shadow": {"status": "DISABLED", "error": error[:200]}})
+        return None
+    if policy.price_table_digest is None:
+        # Said once, at start: without a pinned digest the rollback floor is
+        # only minimum_price_table_sequence (docs/CAPACITY_RECEIPTS.md).
+        _print_event(
+            {
+                "capacity_shadow": {
+                    "status": "LOADED",
+                    "warning": "price_table_digest is not pinned: any validly signed"
+                    " price table at or above sequence"
+                    f" {policy.minimum_price_table_sequence} is accepted",
+                }
+            }
+        )
+    return CapacityShadow(policy)
+
+
+def _capacity_shadow_event(
+    event: dict[str, Any], capacity_shadow: CapacityShadow | None, netuid: int
+) -> dict[str, Any] | None:
+    """This cycle's shadow capacity record, as its own event line.
+
+    It runs after the cycle has returned and its event is printed: after the
+    weight write and its telemetry, and outside the cycle lock, so neither a
+    slow feed nor a recheck can delay a write, lose its telemetry or its log
+    line, or hold off an update. Recovery events get no record.
+    """
+
+    anchor = event.get("anchor")
+    if (
+        capacity_shadow is None
+        or "wire_uids" not in event
+        or not isinstance(anchor, dict)
+    ):
+        return None
+    shadow_event: dict[str, Any] = {"anchor_block": anchor.get("block_number")}
+    try:
+        hotkey_to_uid = {
+            str(miner["hotkey"]): int(miner["uid"]) for miner in anchor["miners"]
+        }
+        shadow_event["capacity_shadow"] = capacity_shadow.record(
+            netuid=netuid, hotkey_to_uid=hotkey_to_uid
+        )
+    except Exception as exc:  # noqa: BLE001 - a shadow record never fails the cycle
+        shadow_event["capacity_shadow"] = {
+            "status": "FAILED",
+            "error": type(exc).__name__,
+        }
+    return shadow_event
+
+
+def _tdx_measurement_policy_from_environment() -> TdxMeasurementPolicy | None:
+    """Load the optional owner TDX measurement allowlist.
+
+    It is named by an environment variable, not a flag: the unit reads it from
+    an optional file, and a runtime from before this setting ignores an unknown
+    variable, where it would exit with status 2 on an unknown flag and never be
+    restarted after an update rollback. Unset or empty means no policy.
+
+    It prints one startup line: ``LOADED`` with the mode and digest and which
+    signed list release the file was exported from (``source``: ``recorded``,
+    ``unrecorded`` or ``unreadable``, from ``<path>.source.json``; advisory,
+    with a ``warning`` when it names another file or an expired release), or
+    ``NOT_LOADED`` when the env file exists but the variable is absent from
+    this process (most likely a unit from an older bootstrap that does not read
+    the file). A variable set to empty is a deliberate "no policy" and prints
+    nothing, as does having neither.
+    """
+
+    path = os.environ.get(TDX_MEASUREMENT_POLICY_ENV, "").strip()
+    if not path:
+        env_file = tdx_measurement.TDX_MEASUREMENT_ENV_FILE
+        if TDX_MEASUREMENT_POLICY_ENV not in os.environ and os.path.lexists(env_file):
+            # The operator installed the env file, but the variable never
+            # reached us: units come only from the bootstrap, and one from
+            # before this policy has no EnvironmentFile line for it
+            # (docs/AUTO_UPDATE.md). A file with the line commented out looks
+            # the same from here, so the warning names both.
+            _print_event(
+                {
+                    "tdx_measurement_policy": {
+                        "status": "NOT_LOADED",
+                        "warning": f"{env_file} exists but"
+                        f" {TDX_MEASUREMENT_POLICY_ENV} is not set, so no TDX"
+                        " measurement policy applies; if the file sets it, the"
+                        " unit does not load it: add the EnvironmentFile"
+                        " drop-in from docs/AUTO_UPDATE.md",
+                    }
+                }
+            )
+        return None
+    try:
+        policy = load_tdx_measurement_policy(path)
+    except TdxMeasurementPolicyError as exc:
+        raise SystemExit(f"TDX measurement policy refused: {exc}") from exc
+    source = read_policy_source(path, policy)
+    if source.matches:
+        policy = dataclasses.replace(policy, registry_release=source.registry_release)
+    _print_event(
+        {
+            "tdx_measurement_policy": {
+                "status": "LOADED",
+                "mode": policy.mode,
+                "digest": policy.digest,
+                "allowed_measurements": len(policy.allowed_measurements),
+                **source.event_fields(),
+            }
+        }
+    )
+    return policy
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [POOL_INVENTORY_COMMAND]:
+        # Read-only: serves or verifies the published file; loads no key.
+        from .pool_inventory import main as pool_inventory_main
+
+        return pool_inventory_main(arguments[1:])
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
         # The operator's recovery command ships in the same signed release
         # entrypoint. It loads no key and never signs or broadcasts.
@@ -985,6 +1283,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
+    capacity_shadow = _capacity_shadow_from_environment()
+    tdx_policy = _tdx_measurement_policy_from_environment()
     wallet = make_wallet(
         bt,
         name=options.wallet_name,
@@ -1031,6 +1331,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Passed only when opted in, so the default construction is unchanged.
         **({} if commit_reveal is None else {"commit_reveal": commit_reveal}),
     )
+    pool_inventory: tuple[Path, str] | None = None
+    if options.pool_inventory is not None:
+        if (
+            not options.pool_inventory.is_absolute()
+            or ".." in options.pool_inventory.parts
+            or not options.pool_inventory.parent.is_dir()
+        ):
+            raise SystemExit(
+                "--pool-inventory must be an absolute path in an existing directory"
+            )
+        pool_inventory = (options.pool_inventory, options.network)
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
             "--telemetry-spool and --telemetry-reader-group must be supplied together"
@@ -1137,11 +1448,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     verifier_adapter=adapter,
                     writer=writer,
                     snp_verifier=snp_verifier,
+                    tdx_policy=tdx_policy,
                     telemetry_sink=telemetry_sink,
                     report_recovery=_print_event,
                     netuid=netuid,
+                    pool_inventory=pool_inventory,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
+                shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)
+                if shadow_event is not None:
+                    _print_event(shadow_event)
             except DirectSubmissionFinalizedFailure as exc:
                 return _stop_on_finalized_failure(exc)
             except DirectSubmissionContradiction as exc:
