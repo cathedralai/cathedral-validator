@@ -168,6 +168,19 @@ def test_readme_pins_the_install_script_by_digest() -> None:
     subprocess.run(["bash", "-n", str(INSTALL_SCRIPT)], check=True)
 
 
+def test_readme_separates_sn94_source_from_published_sn39_installation() -> None:
+    guide = _readme()
+    words = " ".join(guide.split())
+    assert "This source checkout targets SN94" in words
+    assert "signed `stable` release still targets SN39" in words
+    assert "rejects `--netuid 94`" in words
+    assert "SN94 requires a new signed release and bootstrap" in words
+    assert guide.index("signed `stable` release still targets SN39") < guide.index(
+        "curl -fsSL"
+    )
+    assert "The install and setup commands below are for that SN39 release" in words
+
+
 def test_install_script_uses_unpredictable_root_controlled_staging() -> None:
     install = _install_script()
 

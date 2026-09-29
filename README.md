@@ -1,8 +1,14 @@
 # Cathedral Validator
 
-Cathedral Validator scores compute on Bittensor SN94 and writes weights directly
+Cathedral Validator verifies compute on Bittensor and writes weights directly
 with your validator hotkey. It does not download a weight vector, use a relay,
 or send your key to Cathedral.
+
+This source checkout targets SN94. As checked on 2026-09-29, the published
+signed `stable` release still targets SN39 and rejects `--netuid 94`.
+The install and setup commands below are for that SN39 release. SN94 requires
+a new signed release and bootstrap, followed by chain and hardware qualification.
+Changing a command-line subnet number does not perform that cutover.
 
 **SN94 delivered-resource V1.**
 
@@ -17,7 +23,7 @@ The instructions below describe the existing SAT mechanism.
 
 Each cycle, the validator:
 
-1. Reads a finalized SN94 metagraph and finds serving miners.
+1. Reads the released subnet's finalized metagraph and finds serving miners.
 2. Authenticates to each miner and requests its machine fleet.
 3. Verifies Intel TDX or AMD SEV-SNP evidence and the same SAT workload.
 4. Removes duplicate endpoints, TLS identities, and physical machines.
@@ -34,7 +40,8 @@ pinned TDX and SNP verifier programs.
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
   Ubuntu 24.04 LTS is what Cathedral tests on.
-- A hotkey registered on SN94 that holds a validator permit. The validator
+- A hotkey registered on the released subnet (SN39 for the signed release above)
+  that holds a validator permit. The validator
   writes no weights without one. It keeps running, checks again every cycle,
   and reports `NOT_REGISTERED` or `NO_PERMIT` until the chain grants the permit
   at an epoch. A permit depends on your stake relative to other validators.
@@ -69,7 +76,7 @@ public address.
   submissions.
 - `raw.githubusercontent.com` and `github.com`, for the signed release channel
   and the release archives it downloads.
-- Each serving SN94 miner, on the address and port it advertises on chain.
+- Each serving miner on that subnet, at the address and port it advertises on chain.
   These are arbitrary hosts and ports that change as miners come and go, so
   outbound traffic to them cannot be pinned to a fixed allowlist.
 
@@ -114,8 +121,9 @@ sudo cathedral-validator-setup \
 sudo cathedral-validator-status
 ```
 
-Setup installs the current signed `stable` release, starts the validator, and
-enables the stable update timer. `SETUP_COMPLETE` on the last line means the
+Setup installs the current signed `stable` release for its declared subnet,
+starts the validator, and enables the stable update timer. This is not yet an
+SN94 installation. `SETUP_COMPLETE` on the last line means the
 host is running. `SETUP_REFUSED` names the exact check that failed and changes
 nothing.
 
