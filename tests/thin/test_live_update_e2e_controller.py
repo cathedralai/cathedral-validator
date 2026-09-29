@@ -1,5 +1,6 @@
 import importlib.abc
 import importlib.util
+import hashlib
 import json
 import re
 import runpy
@@ -98,6 +99,13 @@ def test_live_controller_uses_one_forced_iap_transport():
     assert "os.killpg(process.pid, signal.SIGKILL)" in before_preflight
     assert "Google API total deadline expired" in before_preflight
     assert "transient Google API failure" in before_preflight
+    assert "gh attestation verify --help" in before_preflight
+    for option in (
+        "--source-digest",
+        "--signer-workflow",
+        "--deny-self-hosted-runners",
+    ):
+        assert option in before_preflight
     assert script.index("ENABLED_CONTROLLER_APIS=") < script.index(
         'if [[ "$MODE" == "--preflight" ]]'
     )
@@ -414,6 +422,102 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex" in configure_host
 
 
+def test_live_controller_uses_private_random_bootstrap_staging():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    configure_host = script.split("configure_host() {", 1)[1].split(
+        'record_step "first install A', 1
+    )[0]
+    bootstrap = configure_host.split(
+        'remote "$host" "test \\"\\$(sha256sum /tmp/cathedral_no_chain_readiness.py',
+        1,
+    )[0]
+
+    create = "/usr/bin/mktemp -d /var/tmp/cathedral-live.XXXXXXXXXX"
+    guard = "/var/tmp/cathedral-live." + "[[:alnum:]]" * 10
+    assert create in bootstrap
+    assert "readonly bootstrap_dir" in bootstrap
+    assert guard in bootstrap
+    assert "unsafe bootstrap staging path" in bootstrap
+    assert "trap 'sudo /usr/bin/rm -rf -- \\\"\\$bootstrap_dir\\\"' EXIT" in bootstrap
+    assert "/var/tmp/cathedral-live-${RUN_ID}" not in bootstrap
+    for name in (
+        "bundle.tar.gz",
+        "manifest.json",
+        "manifest.sig",
+        "bootstrap-public.pem",
+        "signed-installer.py",
+    ):
+        assert f'\\"\\$bootstrap_dir/{name}\\"' in bootstrap
+    assert "; assert " not in bootstrap
+    assert bootstrap.index(create) < bootstrap.index(
+        "ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle"
+    )
+    assert bootstrap.index("openssl pkeyutl -verify") < bootstrap.index(
+        "signed bootstrap claims do not match"
+    )
+    assert bootstrap.index("signed bootstrap claims do not match") < bootstrap.index(
+        "tar -xOf"
+    )
+
+
+def test_live_controller_emits_valid_remote_bootstrap_shell(tmp_path: Path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    configure_host = (
+        "configure_host() {"
+        + script.split("configure_host() {", 1)[1].split(
+            'record_step "first install A', 1
+        )[0]
+    )
+    marker = tmp_path / "bootstrap-command-parsed"
+    shell = (
+        "set -Eeo pipefail\n"
+        f'EVIDENCE_DIR="{tmp_path}"\n'
+        f'MARKER="{marker}"\n'
+        "RUN_ID=syntax-test\n"
+        "BOOTSTRAP_BUNDLE_URL=https://example.invalid/bundle\n"
+        "BOOTSTRAP_MANIFEST_URL=https://example.invalid/manifest\n"
+        "BOOTSTRAP_SIGNATURE_URL=https://example.invalid/signature\n"
+        "BOOTSTRAP_PUBLIC_KEY_URL=https://example.invalid/key\n"
+        f"BOOTSTRAP_BUNDLE_SHA={'a' * 64}\n"
+        f"BOOTSTRAP_MANIFEST_SHA={'b' * 64}\n"
+        f"BOOTSTRAP_SIGNATURE_SHA={'c' * 64}\n"
+        f"BOOTSTRAP_PUBLIC_KEY_SHA={'d' * 64}\n"
+        "BOOTSTRAP_FINGERPRINT=sha256:test\n"
+        "BOOTSTRAP_SEQUENCE=1\n"
+        "HARNESS_SHA=harness\n"
+        "FAULT_ORIGIN_SHA=fault\n"
+        "STATE_WAITER_SHA=waiter\n"
+        "TEST_HOTKEY=test-hotkey\n"
+        "SNP_POLICY_JSON={}\n"
+        "CANARY_URL=https://example.invalid/canary\n"
+        "CANARY_A1_SHA=canary-digest\n"
+        "ARCHIVE_A_SHA=archive-digest\n"
+        "DIRECT_START_TIMEOUT_SECONDS=300\n"
+        "UPDATE_TIMER_INTERVAL_SECONDS=60\n"
+        "remote() {\n"
+        "  local host=$1\n"
+        "  shift\n"
+        "  if [[ $* == *'/usr/bin/mktemp -d /var/tmp/cathedral-live.XXXXXXXXXX'* ]]; then\n"
+        '    /bin/bash -n -c "$*"\n'
+        "    printf 'parsed\\n' >\"$MARKER\"\n"
+        "  fi\n"
+        "}\n"
+        + configure_host
+        + "\nconfigure_host test-host canary selected.timer other.timer\n"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "parsed\n"
+
+
 def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     root = Path(__file__).resolve().parents[2]
     script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
@@ -456,9 +560,15 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
         in refusal
     )
     assert "DIRECT_WRITER_STILL_STOPPED" in refusal
-    assert "NEEDS_REVIEW false any" in refusal
+    assert "NEEDS_REVIEW false false" in refusal
     assert 'record_step "guided setup rerun refuses the stopped writer' in script
     assert "guided-status-after-timer-b" in script
+    assert "guided-setup-idempotence-proof.json" in helper
+    assert "cathedral_validator_guided_setup_idempotence_proof_v1" in helper
+    assert "guided-setup-stopped-writer-proof.json" in refusal
+    assert "cathedral_validator_guided_setup_stopped_writer_proof_v1" in refusal
+    assert "guided_installed_asset_identity" in helper
+    assert "write_guided_transition_proof" in helper
 
     # Disposable operator inputs and mirror-bound signed assets.
     assert "import bittensor_wallet" in script
@@ -470,12 +580,219 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     # The hotkey never enters evidence: only digests of the inputs are recorded.
     assert 'cp "$OPERATOR_HOTKEY" "$EVIDENCE_DIR' not in script
     assert "OPERATOR_HOTKEY_SHA" in script
+    assert '"raw_key_material_recorded": False' in script
+    assert '"terminal_expectation": "stopped_writer_needs_review"' in script
+    assert '"installed_path": "/usr/local/sbin/cathedral-validator-setup"' in script
+    assert '"installed_path": "/usr/local/sbin/cathedral-validator-status"' in script
     # The harness root travels through the drop-in, so direct.env stays the
     # signed example and an idempotent setup rerun can match it.
     assert "sudo tee -a /etc/cathedral-validator/direct.env" not in script
     assert (
         "'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex'"
         in configure_host
+    )
+
+
+def test_live_controller_guided_proofs_are_canonical_and_secret_safe():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    proof = script.split("write_guided_transition_proof() {", 1)[1].split(
+        "configure_stable_host_through_operator_cli() {", 1
+    )[0]
+
+    assert 'json.dumps(document, sort_keys=True, separators=(",", ":"))' in proof
+    assert '"hotkey_keyfile_sha256": hotkey_digest' in proof
+    assert '"snp_policy_sha256": policy_digest' in proof
+    assert '"raw_key_material_recorded": False' in proof
+    assert "lines = raw.splitlines()" in proof
+    assert "if len(lines) != 2" in proof
+    assert '"main_pid": int(service[0])' in proof
+    assert '"invocation_id": service[1]' in proof
+    for name in (
+        "updater_state_sha256",
+        "setup_complete_sha256",
+        "installed_hotkey_sha256",
+        "update_env_sha256",
+        "installed_snp_policy_sha256",
+    ):
+        assert name in proof
+    for field in (
+        '"uid": 0',
+        '"gid": 0',
+        '"mode": "0755"',
+        '"regular_file": True',
+        '"symlink": False',
+    ):
+        assert field in proof
+    installed = script.split("guided_installed_asset_identity() {", 1)[1].split(
+        "write_guided_transition_proof() {", 1
+    )[0]
+    assert 'sudo test -f \\"\\$path\\"' in installed
+    assert '! sudo test -L \\"\\$path\\"' in installed
+    assert "sudo stat -c '%u'" in installed
+    assert "sudo stat -c '%g'" in installed
+    assert "sudo stat -c '%a'" in installed
+    assert "printf '%s\\t%s\\t%s\\t%s\\t%s\\ttrue\\tfalse\\n'" in installed
+    stopped = script.split("prove_guided_setup_refuses_stopped_writer() {", 1)[1].split(
+        "configure_host() {", 1
+    )[0]
+    assert "before_durable=\"${before#*$'\\n'}\"" in stopped
+    assert "after_durable=\"${after#*$'\\n'}\"" in stopped
+    assert '[[ "$before_durable" != "$after_durable" ]]' in stopped
+    assert '"initial_setup_exit": int(first_exit)' in proof
+    assert '"idempotent_rerun_exit": int(second_exit)' in proof
+    assert '"refused_setup_exit": int(second_exit)' in proof
+    assert '"writer_remained_stopped": True' in proof
+    assert "hashlib.sha256(status_bytes).hexdigest()" in proof
+    assert "TEST_HOTKEY" not in proof
+
+
+def test_live_controller_scans_all_evidence_before_destroying_operator_key():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    cleanup = script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    scan_at = cleanup.index("operator-secret-scan.json")
+    delete_at = cleanup.index('rm -rf -- "$RUN_ROOT"')
+
+    assert scan_at < delete_at
+    assert "cathedral_validator_operator_secret_scan_v2" in cleanup
+    assert 'evidence_dir.rglob("*")' in cleanup
+    assert "stream.read(1024 * 1024)" in cleanup
+    assert 'getattr(os, "O_NOFOLLOW", 0)' in cleanup
+    assert "evidence changed during secret scan" in cleanup
+    assert "evidence changed before secret scan" in cleanup
+    assert "before.st_ctime_ns" in cleanup
+    assert "discovered.st_ino" in cleanup
+    assert "content = path.read_bytes()" not in cleanup
+    assert '"ss58Address", "publicKey", "accountId"' in cleanup
+    assert '"privateKey", "secretPhrase", "secretSeed"' in cleanup
+    assert '"operator_input_file_sha256"' in cleanup
+    assert '"checked_field_names"' in cleanup
+    assert '"exact_match_count": 0' in cleanup
+    assert '"scanned_evidence_tree"' in cleanup
+    assert "cathedral-validator-live-update-evidence-v1\\x00" in cleanup
+    assert "operator key material occurred in evidence" in cleanup
+    # The artifact does not contain the values, per-field hashes, or paths of
+    # matching files (a successful artifact can only describe zero matches).
+    report_block = cleanup.split("report = {", 1)[1].split("output.write_text", 1)[0]
+    assert '"matches"' not in report_block
+    assert "hashlib.sha256(value" not in cleanup
+
+
+def test_live_controller_secret_scan_detects_a_chunk_boundary_match(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    cleanup = script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    scanner = cleanup.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    keyfile = tmp_path / "operator-hotkey"
+    keyfile.write_text(
+        json.dumps(
+            {
+                "ss58Address": "public-marker",
+                "privateKey": "private-marker",
+            }
+        ),
+        encoding="ascii",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    candidate = evidence / "large-artifact.bin"
+    candidate.write_bytes(b"x" * (1024 * 1024 - 4) + b"private-marker")
+    output = evidence / "operator-secret-scan.json"
+
+    rejected = subprocess.run(
+        [sys.executable, "-", str(keyfile), str(evidence), str(output)],
+        input=scanner,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert rejected.returncode != 0
+    assert "operator key material occurred in evidence" in rejected.stderr
+    assert "private-marker" not in rejected.stderr
+    assert not output.exists()
+
+    candidate.write_bytes(b"clean evidence\n")
+    accepted = subprocess.run(
+        [sys.executable, "-", str(keyfile), str(evidence), str(output)],
+        input=scanner,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    body = candidate.read_bytes()
+    rows = [
+        {
+            "path": candidate.name,
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+        }
+    ]
+    index = {
+        "schema": "cathedral_validator_live_update_evidence_index_v1",
+        "files": rows,
+    }
+    index_bytes = (
+        json.dumps(
+            index,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        + b"\n"
+    )
+    assert json.loads(output.read_text(encoding="ascii")) == {
+        "schema": "cathedral_validator_operator_secret_scan_v2",
+        "operator_input_file_sha256": hashlib.sha256(keyfile.read_bytes()).hexdigest(),
+        "checked_field_names": ["privateKey", "ss58Address"],
+        "scanned_evidence_tree": {
+            "algorithm": "sha256-domain-separated-canonical-json-file-list-v1",
+            "root_sha256": hashlib.sha256(
+                b"cathedral-validator-live-update-evidence-v1\x00" + index_bytes
+            ).hexdigest(),
+            "file_count": 1,
+        },
+        "exact_match_count": 0,
+    }
+
+
+def test_live_controller_retains_the_exact_bootstrap_bundle_for_review():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    build = script.split('bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER"', 1)[
+        1
+    ].split('BOOTSTRAP_FINGERPRINT="', 1)[0]
+
+    assert (
+        'install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" '
+        '\\\n  "$EVIDENCE_DIR/updater-bootstrap.tar.gz"' in build
+    )
+    assert build.index('"$EVIDENCE_DIR/bootstrap-build.json"') < build.index(
+        '"$EVIDENCE_DIR/updater-bootstrap.tar.gz"'
+    )
+    candidate_retention = script.index('install -m 0444 "$CANDIDATE_B_DIR/INPUTS.json"')
+    candidate_verification = script.index(
+        'gh attestation verify "$candidate_root/INPUTS.json"'
+    )
+    bootstrap_build = script.index(
+        'bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER"'
+    )
+    assert candidate_verification < candidate_retention < bootstrap_build
+    attestation_block = script.split(
+        "printf 'GitHub artifact attestation verification", 1
+    )[1].split('bootstrap_build_json="', 1)[0]
+    assert '--source-digest "$candidate_revision"' in attestation_block
+    assert (
+        '"${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml"'
+        in attestation_block
+    )
+    assert "--deny-self-hosted-runners" in attestation_block
+    assert build.index('"$EVIDENCE_DIR/updater-bootstrap.tar.gz"') < build.index(
+        '"$EVIDENCE_DIR/updater-bootstrap.manifest.json"'
     )
 
 
@@ -539,6 +856,9 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
         'cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt"'
         in retry_capture
     )
+    assert "verify-capture" in retry_capture
+    assert '"$EVIDENCE_DIR/${label}-sections.json"' in retry_capture
+    assert '"$EVIDENCE_DIR/${label}.d"' in retry_capture
     assert '>>"$EVIDENCE_DIR/${label}-capture-retries.log"' in retry_capture
     assert "attempt < CAPTURE_RETRY_ATTEMPTS" in retry_capture
     assert 'sleep "$CAPTURE_RETRY_INTERVAL_SECONDS"' in retry_capture
@@ -553,10 +873,16 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "CAPTURE_RETRY_ATTEMPTS=6\n"
             "CAPTURE_RETRY_INTERVAL_SECONDS=5\n"
             f"EVIDENCE_DIR={evidence!s}\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
             "capture_attempts=0\n"
             "capture_host() { capture_attempts=$((capture_attempts + 1)); "
             "printf 'attempt-%s\\n' \"$capture_attempts\" "
-            '>"$EVIDENCE_DIR/$1.txt"; (( capture_attempts >= 3 )); }\n'
+            '>"$EVIDENCE_DIR/$1.txt"; '
+            "printf '{}\\n' >\"$EVIDENCE_DIR/$1-sections.json\"; "
+            "mkdir \"$EVIDENCE_DIR/$1.d\"; printf 'section\\n' "
+            '>"$EVIDENCE_DIR/$1.d/section.txt"; '
+            "(( capture_attempts >= 3 )); }\n"
+            "python3() { return 0; }\n"
             "sleep() { :; }\n"
             "capture_host_with_retries() {" + retry_capture + "\n"
             "capture_host_with_retries transient-host vm-a\n"
@@ -570,7 +896,9 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "grep -Fx 'attempt-2' "
             '"$EVIDENCE_DIR/transient-host-capture-attempt-2.txt"\n'
             "grep -Fx 'attempt-3' "
-            '"$EVIDENCE_DIR/transient-host.txt"',
+            '"$EVIDENCE_DIR/transient-host.txt"\n'
+            'test -f "$EVIDENCE_DIR/transient-host-sections.json"\n'
+            'test -f "$EVIDENCE_DIR/transient-host.d/section.txt"',
         ],
         check=False,
         capture_output=True,
@@ -587,6 +915,7 @@ def test_live_controller_retries_failure_capture_before_teardown(tmp_path):
             "CAPTURE_RETRY_ATTEMPTS=6\n"
             "CAPTURE_RETRY_INTERVAL_SECONDS=5\n"
             f"EVIDENCE_DIR={exhausted!s}\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
             "capture_attempts=0\n"
             "capture_host() { capture_attempts=$((capture_attempts + 1)); "
             "if (( capture_attempts == 1 )); then printf 'useful-partial\\n' "
@@ -714,7 +1043,15 @@ def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     assert "systemctl cat cathedral-validator-canary-update.timer" in capture_host
     assert "cathedral-validator-update.timer" in capture_host
     assert "-b -n 250 --no-pager" in capture_host
-    assert '>"$EVIDENCE_DIR/${label}.txt" 2>&1' in capture_host
+    assert '>"$EVIDENCE_DIR/${label}-sections.tsv"' in capture_host
+    assert '2>"$EVIDENCE_DIR/${label}-ssh.stderr"' in capture_host
+    assert "decode-capture" in capture_host
+    assert "command_exit_status" not in capture_host
+    assert "capture_section current_release required" in capture_host
+    assert "capture_section updater_state required" in capture_host
+    assert "capture_section direct_unit_status optional" in capture_host
+    assert "-p MainPID -p InvocationID -p FragmentPath" in capture_host
+    assert "capture_section updater_runtime_journal optional" in capture_host
     assert "unsafe transient systemd unit for evidence capture" in capture_host
     assert "systemctl show '${transient_unit}.service'" in capture_host
     assert (
@@ -723,7 +1060,8 @@ def test_live_controller_failure_evidence_includes_runtime_gate_and_timers():
     assert (
         "journalctl -u '${transient_unit}.service' -b -n 250 --no-pager" in capture_host
     )
-    assert '>>"$EVIDENCE_DIR/${label}.txt" 2>&1' in capture_host
+    assert '>>"$EVIDENCE_DIR/${label}-sections.tsv"' in capture_host
+    assert '2>>"$EVIDENCE_DIR/${label}-ssh.stderr"' in capture_host
     assert script.count('capture_host "$attempt_label" "$host" "$transient_unit"') == 1
     assert script.count("\ncapture_host ") == 0
 
@@ -746,6 +1084,8 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
             "-c",
             "set -Eeuo pipefail\n"
             'EVIDENCE_DIR="$1"\n'
+            "RESULT_TOOL=/reviewed/result-tool\n"
+            "python3() { return 0; }\n"
             "remote_calls=0\n"
             "generic_result=0\n"
             "transient_result=0\n"
@@ -756,8 +1096,8 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
             '  return "$transient_result"\n'
             "}\n" + capture_host + "\n"
             "capture_host both-ok vm-a transient-a\n"
-            "grep -Fx 'remote-1' \"$EVIDENCE_DIR/both-ok.txt\"\n"
-            "grep -Fx 'remote-2' \"$EVIDENCE_DIR/both-ok.txt\"\n"
+            "grep -Fx 'remote-1' \"$EVIDENCE_DIR/both-ok-sections.tsv\"\n"
+            "grep -Fx 'remote-2' \"$EVIDENCE_DIR/both-ok-sections.tsv\"\n"
             "remote_calls=0\n"
             "generic_result=255\n"
             "transient_result=0\n"
@@ -783,6 +1123,112 @@ def test_live_controller_capture_preserves_both_ssh_failure_statuses(tmp_path):
         text=True,
     )
     assert dynamic_check.returncode == 0, dynamic_check.stderr
+
+
+def test_live_controller_refuses_when_git_cleanliness_is_unverifiable(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    source_check = (
+        "verify_controller_source_identity() {"
+        + script.split("verify_controller_source_identity() {", 1)[1].split(
+            "if ! verify_controller_source_identity; then", 1
+        )[0]
+    )
+    marker = tmp_path / "execution-started"
+    checked = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "REPOSITORY_ROOT=/reviewed/repository\n"
+            "SOURCE_REVISION_B=" + "b" * 40 + "\n"
+            'MARKER="$1"\n'
+            "git() {\n"
+            '  if [[ "$*" == *"rev-parse HEAD"* ]]; then '
+            'printf "%s\\n" "$SOURCE_REVISION_B"; return 0; fi\n'
+            '  if [[ "$*" == *"status --short"* ]]; then return 42; fi\n'
+            "  return 99\n"
+            "}\n"
+            'begin_execution() { : >"$MARKER"; }\n' + source_check + "\n"
+            "if verify_controller_source_identity; then begin_execution; "
+            "else status=$?; fi\n"
+            'test "$status" -eq 1\n'
+            'test ! -e "$MARKER"',
+            "git-cleanliness-preflight-test",
+            str(marker),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert "checkout cleanliness could not be verified" in checked.stderr
+    assert script.index("if ! verify_controller_source_identity; then") < script.index(
+        "gh auth status"
+    )
+
+
+def test_live_controller_git_status_failure_blocks_result_finalization(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    source_check = (
+        "verify_controller_source_identity() {"
+        + script.split("verify_controller_source_identity() {", 1)[1].split(
+            "if ! verify_controller_source_identity; then", 1
+        )[0]
+    )
+    cleanup = (
+        "cleanup() {"
+        + script.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            'EVIDENCE_DIR="$1"\n'
+            "RUN_ID=status-failure\n"
+            "CANARY_VM=canary\nSTABLE_VM=stable\nZONE=zone\nREGION=region\n"
+            "FIREWALL=firewall\nSUBNET=subnet\nNETWORK=network\n"
+            "CREATED_CANARY_VM=0\nCREATED_STABLE_VM=0\nCREATED_FIREWALL=0\n"
+            "CREATED_SUBNET=0\nCREATED_NETWORK=0\n"
+            "RUN_ROOT=/tmp/cathedral-validator-live-status-failure.does-not-exist\n"
+            "REPOSITORY_ROOT=/reviewed/repository\nSOURCE_REVISION_B=" + "b" * 40 + "\n"
+            "RESULT_TOOL=/reviewed/result-tool\n"
+            "E2E_RESULT_SIGNING_PRIVATE_KEY=/secure/private.pem\n"
+            "E2E_RESULT_SIGNING_PUBLIC_KEY=/secure/public.pem\n"
+            "E2E_RESULT_SIGNER_KEY_ID=test-result-key\n"
+            "TEST_GITHUB_REPOSITORY=owner/test\nESTIMATED_COST_USD=0.1\n"
+            "PLANNING_TOTAL_USD=0.3\nBOOTSTRAP_TAG=test-tag\n"
+            "gc() { printf '[]\\n'; }\n"
+            "git() {\n"
+            '  if [[ "$*" == *"rev-parse HEAD"* ]]; then '
+            'printf "%s\\n" "$SOURCE_REVISION_B"; return 0; fi\n'
+            '  if [[ "$*" == *"status --short"* ]]; then return 42; fi\n'
+            "  return 99\n"
+            "}\n"
+            'python3() { : >"$EVIDENCE_DIR/finalizer-called"; return 0; }\n'
+            + source_check
+            + "\n"
+            + cleanup
+            + "\ntrue\ncleanup",
+            "git-cleanliness-finalization-test",
+            str(evidence),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 1
+    assert "TEARDOWN_COMPLETE" in completed.stdout
+    assert "LIVE_UPDATE_E2E_RESULT_NOT_PROVEN" in completed.stderr
+    assert "LIVE_UPDATE_E2E_PASS" not in completed.stdout
+    assert not (evidence / "finalizer-called").exists()
+    assert "checkout cleanliness could not be verified" in (
+        evidence / "controller-source-finalization.stderr"
+    ).read_text(encoding="utf-8")
 
 
 def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
@@ -833,6 +1279,12 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     )
     assert "TriggeredServiceActiveState=" in start_timer
     assert "enabled timer has no scheduled trigger" in start_timer
+    assert (
+        'keys == ["channel", "current", "pending", "record", "sequence"]'
+        in wait_sequence
+    )
+    assert ".channel == $channel" in wait_sequence
+    assert '.current == ("releases/" + $expected.archive_sha256)' in wait_sequence
     assert ".record == $expected" in wait_sequence
     assert ".sequence == $expected.sequence" in wait_sequence
     assert ".pending == null" in wait_sequence
@@ -842,6 +1294,7 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
         'capture_host_with_retries "${label}-sequence-wait-failure" '
         '"$host" || true' in wait_sequence
     )
+    assert '>"$EVIDENCE_DIR/${label}-sequence-state.json"' in wait_sequence
     assert "sleep 5" in wait_sequence
     assert "systemctl show '$timer'" in rearm_timer
     assert "-p ActiveState -p SubState -p NextElapseUSecMonotonic" in rearm_timer
@@ -994,8 +1447,14 @@ def test_live_controller_observes_update_then_proves_timer_rearmed(tmp_path):
     )
     assert "InvocationIDObserved=" in start_reactivation
     assert "LastTriggerObserved=" in start_reactivation
+    assert start_reactivation.count("InvocationIDObserved=") == 2
+    assert start_reactivation.count("LastTriggerObserved=") == 2
     assert "systemctl enable --now '$timer'" in start_reactivation
     assert 'timer_state_is_rearmed "$active" "$substate" "$next"' in start_reactivation
+    assert "CATHEDRAL_TIMER_REACTIVATION_PROOF_V1" in observe_reactivation
+    assert "BeforeServiceInvocationID=$before_invocation" in observe_reactivation
+    assert "BeforeLastTriggerUSec=$before_trigger" in observe_reactivation
+    assert "ExpectedRelease=$expected_digest" in observe_reactivation
     assert "start_reactivation_proof_timer" in observe_reactivation
     assert "timer-reactivation-start-failure" in observe_reactivation
     assert "wait_timer_reactivation" in observe_reactivation

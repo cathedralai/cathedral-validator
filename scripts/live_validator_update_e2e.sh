@@ -114,6 +114,7 @@ readonly SIGNER="$REPOSITORY_ROOT/deploy/validator-update/build_signed_release.p
 readonly PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_channel.py"
 readonly BOOTSTRAP_BUILDER="$REPOSITORY_ROOT/deploy/validator-update/build_updater_bundle.py"
 readonly BOOTSTRAP_PUBLISHER="$REPOSITORY_ROOT/deploy/validator-update/publish_github_bootstrap.py"
+readonly RESULT_TOOL="$REPOSITORY_ROOT/scripts/live_update_e2e_result.py"
 
 if (( FIXED_CHANNEL_WAIT_SECONDS < FIXED_CHANNEL_CACHE_MAX_SECONDS + UPDATE_TIMER_INTERVAL_SECONDS + TIMER_OPERATION_TIMEOUT_SECONDS + TIMER_SYSTEMD_MARGIN_SECONDS + FIXED_CHANNEL_WAIT_MARGIN_SECONDS )); then
   printf 'REFUSED: fixed-channel wait must cover cache, timer, updater, systemd, and margin bounds\n' >&2
@@ -165,7 +166,9 @@ required_env() {
 
 for variable in \
   RUN_ID CANDIDATE_A_DIR CANDIDATE_B_DIR \
-  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY; do
+  SOURCE_REVISION_A SOURCE_REVISION_B EVIDENCE_DIR TEST_GITHUB_REPOSITORY \
+  E2E_RESULT_SIGNING_PRIVATE_KEY E2E_RESULT_SIGNING_PUBLIC_KEY \
+  E2E_RESULT_SIGNER_KEY_ID; do
   required_env "$variable"
 done
 
@@ -217,8 +220,9 @@ if [[ "$SOURCE_REVISION_A" == "$SOURCE_REVISION_B" ]]; then
   printf 'REFUSED: A and B must be distinct reviewed source revisions\n' >&2
   exit 2
 fi
-if [[ "$EVIDENCE_DIR" != /* || "$CANDIDATE_A_DIR" != /* || "$CANDIDATE_B_DIR" != /* ]]; then
-  printf 'REFUSED: evidence and candidate directories must be absolute paths\n' >&2
+if [[ "$EVIDENCE_DIR" != /* || "$CANDIDATE_A_DIR" != /* || "$CANDIDATE_B_DIR" != /* || \
+  "$E2E_RESULT_SIGNING_PRIVATE_KEY" != /* || "$E2E_RESULT_SIGNING_PUBLIC_KEY" != /* ]]; then
+  printf 'REFUSED: evidence, candidate, and result signing key paths must be absolute\n' >&2
   exit 2
 fi
 
@@ -285,12 +289,23 @@ if total > requested:
     raise SystemExit(f"REFUSED: planning total ${total} exceeds requested budget ${requested}")
 PY
 
-for command in awk basename cmp curl cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
+for command in awk basename cmp cp curl cut find gcloud gh git grep jq openssl python3 sed seq shasum ssh-keygen tee; do
   command -v "$command" >/dev/null || {
     printf 'REFUSED: required command is missing: %s\n' "$command" >&2
     exit 2
   }
 done
+if ! GH_ATTESTATION_HELP="$(gh attestation verify --help 2>&1)"; then
+  printf 'REFUSED: GitHub CLI lacks artifact-attestation verification\n' >&2
+  exit 2
+fi
+for option in --source-digest --signer-workflow --deny-self-hosted-runners; do
+  if [[ "$GH_ATTESTATION_HELP" != *"$option"* ]]; then
+    printf 'REFUSED: GitHub CLI attestation verifier lacks %s\n' "$option" >&2
+    exit 2
+  fi
+done
+readonly GH_ATTESTATION_HELP
 if ! python3 -c 'import cryptography' >/dev/null 2>&1; then
   printf 'REFUSED: controller Python cannot import cryptography\n' >&2
   exit 2
@@ -301,12 +316,46 @@ if ! python3 -c 'import bittensor_wallet' >/dev/null 2>&1; then
 fi
 for file in \
   "$HARNESS_SOURCE" "$FAULT_ORIGIN_SOURCE" "$STATE_WAITER_SOURCE" \
-  "$SIGNER" "$PUBLISHER" "$BOOTSTRAP_BUILDER" "$BOOTSTRAP_PUBLISHER"; do
+  "$SIGNER" "$PUBLISHER" "$BOOTSTRAP_BUILDER" "$BOOTSTRAP_PUBLISHER" \
+  "$RESULT_TOOL"; do
   [[ -f "$file" && ! -L "$file" ]] || {
     printf 'REFUSED: required reviewed file is unavailable: %s\n' "$file" >&2
     exit 2
   }
 done
+
+RESULT_SIGNER_FINGERPRINT="$(python3 "$RESULT_TOOL" validate-key-pair \
+  --private-key "$E2E_RESULT_SIGNING_PRIVATE_KEY" \
+  --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+  --key-id "$E2E_RESULT_SIGNER_KEY_ID")"
+readonly RESULT_SIGNER_FINGERPRINT
+python3 - \
+  "$E2E_RESULT_SIGNING_PRIVATE_KEY" "$EVIDENCE_DIR" \
+  "$CANDIDATE_A_DIR" "$CANDIDATE_B_DIR" "$REPOSITORY_ROOT" <<'PY'
+import pathlib
+import sys
+
+private_key = pathlib.Path(sys.argv[1]).resolve(strict=True)
+evidence = pathlib.Path(sys.argv[2]).resolve(strict=False)
+evidence_input = pathlib.Path(sys.argv[2])
+if evidence_input.is_symlink() or (
+    evidence_input.exists() and not evidence_input.is_dir()
+):
+    raise SystemExit("REFUSED: EVIDENCE_DIR must be a directory and not a symlink")
+candidate_roots = [pathlib.Path(value).resolve(strict=True) for value in sys.argv[3:5]]
+repository = pathlib.Path(sys.argv[5]).resolve(strict=True)
+for forbidden_root in [evidence, *candidate_roots, repository]:
+    resolved = forbidden_root
+    if private_key == resolved or resolved in private_key.parents:
+        raise SystemExit(
+            f"REFUSED: result signing private key must remain outside {resolved}"
+        )
+for forbidden_root in [*candidate_roots, repository]:
+    if evidence == forbidden_root or forbidden_root in evidence.parents:
+        raise SystemExit(
+            f"REFUSED: EVIDENCE_DIR must remain outside {forbidden_root}"
+        )
+PY
 
 gc() {
   gcloud --quiet --project="$GCP_PROJECT" "$@"
@@ -557,12 +606,29 @@ PY
 verify_candidate "$CANDIDATE_A_DIR" "$SOURCE_REVISION_A"
 verify_candidate "$CANDIDATE_B_DIR" "$SOURCE_REVISION_B"
 
-if [[ "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)" != "$SOURCE_REVISION_B" ]]; then
-  printf 'REFUSED: controller checkout HEAD must equal SOURCE_REVISION_B\n' >&2
-  exit 2
-fi
-if [[ -n "$(git -C "$REPOSITORY_ROOT" status --short)" ]]; then
-  printf 'REFUSED: controller checkout must be clean\n' >&2
+verify_controller_source_identity() {
+  local head=""
+  local worktree_status=""
+  if ! head="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"; then
+    printf 'REFUSED: controller checkout HEAD could not be verified\n' >&2
+    return 1
+  fi
+  if [[ "$head" != "$SOURCE_REVISION_B" ]]; then
+    printf 'REFUSED: controller checkout HEAD must equal SOURCE_REVISION_B\n' >&2
+    return 1
+  fi
+  if ! worktree_status="$(git -C "$REPOSITORY_ROOT" status --short)"; then
+    printf 'REFUSED: controller checkout cleanliness could not be verified\n' >&2
+    return 1
+  fi
+  if [[ -n "$worktree_status" ]]; then
+    printf 'REFUSED: controller checkout must be clean\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! verify_controller_source_identity; then
   exit 2
 fi
 
@@ -713,6 +779,8 @@ if [[ -n "$(find "$EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   exit 2
 fi
 chmod 0700 "$EVIDENCE_DIR"
+install -m 0444 "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+  "$EVIDENCE_DIR/live-update-e2e-result-public-key.pem"
 jq -n \
   --arg cloud_resource_manager "$CLOUD_RESOURCE_MANAGER_API" \
   --arg iap "$IAP_API" \
@@ -829,6 +897,10 @@ if seen != set(urls):
 example.write_text("".join(rewritten), encoding="ascii")
 PY
 
+GUIDED_SETUP_SOURCE_SHA="$(shasum -a 256 "$ASSETS_DIR/cathedral-validator-setup" | cut -d' ' -f1)"
+GUIDED_STATUS_SOURCE_SHA="$(shasum -a 256 "$ASSETS_DIR/cathedral-validator-status" | cut -d' ' -f1)"
+readonly GUIDED_SETUP_SOURCE_SHA GUIDED_STATUS_SOURCE_SHA
+
 CREATED_CANARY_VM=0
 CREATED_STABLE_VM=0
 CREATED_FIREWALL=0
@@ -934,6 +1006,10 @@ cleanup_resource_until_absent() {
 
 cleanup() {
   local status=$?
+  local source_identity_ok=0
+  local observed_result_digest=""
+  local result_digest=""
+  local result_ok=0
   local teardown_ok=1
   local final_status
   trap - EXIT INT TERM
@@ -1010,6 +1086,134 @@ cleanup() {
   fi
 
   if [[ -n "${RUN_ROOT:-}" && "$RUN_ROOT" == "${TMPDIR:-/tmp}/cathedral-validator-live-${RUN_ID}."* && -d "$RUN_ROOT" ]]; then
+    # On a successful run, independently scan every evidence file that exists
+    # before destroying the disposable wallet. The report records field names,
+    # the input-file digest and a domain-separated root over the exact scanned
+    # evidence bytes; it never records secret values or hashes of individual
+    # secret values. Files created below this point are fixed teardown/result
+    # metadata and never interpolate operator material.
+    if [[ "$status" == 0 && "$teardown_ok" == 1 ]]; then
+      if ! python3 - "$OPERATOR_HOTKEY" "$EVIDENCE_DIR" \
+        "$EVIDENCE_DIR/operator-secret-scan.json" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+
+keyfile_path = pathlib.Path(sys.argv[1])
+evidence_dir = pathlib.Path(sys.argv[2])
+output = pathlib.Path(sys.argv[3])
+keyfile_bytes = keyfile_path.read_bytes()
+document = json.loads(keyfile_bytes)
+public_fields = ("ss58Address", "publicKey", "accountId")
+private_fields = ("privateKey", "secretPhrase", "secretSeed")
+checked = []
+needles = []
+for name in public_fields + private_fields:
+    value = document.get(name)
+    if isinstance(value, str) and value:
+        checked.append(name)
+        needles.append(value.encode("utf-8"))
+if not any(name in checked for name in public_fields):
+    raise SystemExit("REFUSED: operator keyfile has no public identity field")
+if not any(name in checked for name in private_fields):
+    raise SystemExit("REFUSED: operator keyfile has no private field to scan")
+files = []
+for path in sorted(evidence_dir.rglob("*")):
+    metadata = path.lstat()
+    if stat.S_ISDIR(metadata.st_mode):
+        continue
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit("REFUSED: evidence contains a non-regular file")
+    files.append((path, path.relative_to(evidence_dir).as_posix(), metadata))
+
+maximum_overlap = max(len(needle) for needle in needles) - 1
+rows = []
+for path, relative, discovered in files:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_dev != discovered.st_dev
+            or before.st_ino != discovered.st_ino
+        ):
+            raise SystemExit("REFUSED: evidence changed before secret scan")
+        overlap = b""
+        digest = hashlib.sha256()
+        total = 0
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                observed = overlap + chunk
+                if any(needle in observed for needle in needles):
+                    raise SystemExit(
+                        "REFUSED: operator key material occurred in evidence"
+                    )
+                overlap = observed[-maximum_overlap:] if maximum_overlap else b""
+                digest.update(chunk)
+                total += len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise SystemExit("REFUSED: evidence changed during secret scan")
+        if total != before.st_size:
+            raise SystemExit("REFUSED: evidence changed during secret scan")
+        rows.append({"path": relative, "bytes": total, "sha256": digest.hexdigest()})
+    except OSError as exc:
+        raise SystemExit("REFUSED: evidence could not be scanned safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+index = {
+    "schema": "cathedral_validator_live_update_evidence_index_v1",
+    "files": rows,
+}
+index_bytes = (
+    json.dumps(index, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+               allow_nan=False).encode("ascii")
+    + b"\n"
+)
+tree_root = hashlib.sha256(
+    b"cathedral-validator-live-update-evidence-v1\x00" + index_bytes
+).hexdigest()
+report = {
+    "schema": "cathedral_validator_operator_secret_scan_v2",
+    "operator_input_file_sha256": hashlib.sha256(keyfile_bytes).hexdigest(),
+    "checked_field_names": sorted(checked),
+    "scanned_evidence_tree": {
+        "algorithm": "sha256-domain-separated-canonical-json-file-list-v1",
+        "root_sha256": tree_root,
+        "file_count": len(rows),
+    },
+    "exact_match_count": 0,
+}
+output.write_text(
+    json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+PY
+      then
+        teardown_ok=0
+      fi
+    fi
     rm -f -- "$SSH_PRIVATE_KEY"
     if [[ -e "$SSH_PRIVATE_KEY" ]]; then
       teardown_ok=0
@@ -1027,10 +1231,37 @@ cleanup() {
   printf 'original_status=%s\nteardown_verified=%s\n' \
     "$status" "$teardown_ok" >"$EVIDENCE_DIR/teardown-status.txt"
   if [[ $status -eq 0 && "$teardown_ok" == 1 ]]; then
+    if verify_controller_source_identity \
+      2>>"$EVIDENCE_DIR/controller-source-finalization.stderr"; then
+      source_identity_ok=1
+    fi
+    if [[ "$source_identity_ok" != 1 ]]; then
+      printf 'REFUSED: controller source identity changed during the live test\n' >&2
+    elif result_digest="$(python3 "$RESULT_TOOL" finalize \
+      --evidence-dir "$EVIDENCE_DIR" \
+      --private-key "$E2E_RESULT_SIGNING_PRIVATE_KEY" \
+      --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY" \
+      --key-id "$E2E_RESULT_SIGNER_KEY_ID" \
+      --controller-script "$REPOSITORY_ROOT/scripts/live_validator_update_e2e.sh")" && \
+      observed_result_digest="$(python3 "$RESULT_TOOL" verify-result \
+        --evidence-dir "$EVIDENCE_DIR" \
+        --public-key "$E2E_RESULT_SIGNING_PUBLIC_KEY")" && \
+      [[ "$observed_result_digest" == "$result_digest" ]]; then
+      result_ok=1
+    fi
     printf 'TEARDOWN_COMPLETE run=%s\n' "$RUN_ID"
-    printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s test_repository=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s\n' \
-      "$RUN_ID" "$EVIDENCE_DIR" "$TEST_GITHUB_REPOSITORY" \
-      "$ESTIMATED_COST_USD" "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG"
+    if [[ "$result_ok" == 1 ]]; then
+      printf 'LIVE_UPDATE_E2E_RESULT run=%s schema=cathedral_validator_live_update_e2e_result_v1 sha256=%s signature=%s\n' \
+        "$RUN_ID" "$result_digest" \
+        "$EVIDENCE_DIR/live_update_e2e_result_v1.json.sig"
+      printf 'LIVE_UPDATE_E2E_PASS run=%s evidence=%s test_repository=%s vm_disk_estimate_usd=%s planning_total_usd=%s bootstrap_tag=%s result_sha256=%s\n' \
+        "$RUN_ID" "$EVIDENCE_DIR" "$TEST_GITHUB_REPOSITORY" \
+        "$ESTIMATED_COST_USD" "$PLANNING_TOTAL_USD" "$BOOTSTRAP_TAG" \
+        "$result_digest"
+    else
+      final_status=1
+      printf 'LIVE_UPDATE_E2E_RESULT_NOT_PROVEN run=%s\n' "$RUN_ID" >&2
+    fi
   elif [[ "$teardown_ok" != 1 ]]; then
     printf 'TEARDOWN_NOT_PROVEN run=%s original_status=%s\n' "$RUN_ID" "$status" >&2
   else
@@ -1229,17 +1460,33 @@ fi
 
 printf 'GitHub artifact attestation verification\n' >"$EVIDENCE_DIR/candidate-attestations.log"
 for candidate_root in "$CANDIDATE_A_DIR" "$CANDIDATE_B_DIR"; do
+  candidate_revision="$SOURCE_REVISION_B"
+  if [[ "$candidate_root" == "$CANDIDATE_A_DIR" ]]; then
+    candidate_revision="$SOURCE_REVISION_A"
+  fi
   while IFS= read -r relative; do
     {
       printf '\nVERIFY %s\n' "$candidate_root/$relative"
-      gh attestation verify "$candidate_root/$relative" --repo "$SOURCE_GITHUB_REPOSITORY"
+      gh attestation verify "$candidate_root/$relative" \
+        --repo "$SOURCE_GITHUB_REPOSITORY" \
+        --source-digest "$candidate_revision" \
+        --signer-workflow \
+          "${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml" \
+        --deny-self-hosted-runners
     } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
   done < <(jq -r '.files | keys[]' "$candidate_root/INPUTS.json")
   {
     printf '\nVERIFY %s\n' "$candidate_root/INPUTS.json"
-    gh attestation verify "$candidate_root/INPUTS.json" --repo "$SOURCE_GITHUB_REPOSITORY"
+    gh attestation verify "$candidate_root/INPUTS.json" \
+      --repo "$SOURCE_GITHUB_REPOSITORY" \
+      --source-digest "$candidate_revision" \
+      --signer-workflow \
+        "${SOURCE_GITHUB_REPOSITORY}/.github/workflows/release-candidate.yml" \
+      --deny-self-hosted-runners
   } >>"$EVIDENCE_DIR/candidate-attestations.log" 2>&1
 done
+install -m 0444 "$CANDIDATE_B_DIR/INPUTS.json" \
+  "$EVIDENCE_DIR/candidate-b-inputs.json"
 
 bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --wheelhouse "$CANDIDATE_B_DIR/updater-wheelhouse" \
@@ -1255,6 +1502,8 @@ bootstrap_build_json="$(python3 "$BOOTSTRAP_BUILDER" \
   --sequence 1 \
   --lifetime-seconds 43200)"
 printf '%s\n' "$bootstrap_build_json" >"$EVIDENCE_DIR/bootstrap-build.json"
+install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  "$EVIDENCE_DIR/updater-bootstrap.tar.gz"
 install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
   "$EVIDENCE_DIR/updater-bootstrap.manifest.json"
 install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
@@ -1262,6 +1511,11 @@ install -m 0444 "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
 BOOTSTRAP_FINGERPRINT="$(printf '%s' "$bootstrap_build_json" | jq -er '.bootstrap_signing_key_fingerprint')"
 RUNTIME_FINGERPRINT="$(printf '%s' "$bootstrap_build_json" | jq -er '.runtime_release_key_fingerprint')"
 readonly BOOTSTRAP_FINGERPRINT RUNTIME_FINGERPRINT
+if [[ "$RESULT_SIGNER_FINGERPRINT" == "$BOOTSTRAP_FINGERPRINT" || \
+  "$RESULT_SIGNER_FINGERPRINT" == "$RUNTIME_FINGERPRINT" ]]; then
+  printf 'REFUSED: result evidence key must be distinct from release signing keys\n' >&2
+  exit 2
+fi
 BOOTSTRAP_SEQUENCE="$(printf '%s' "$bootstrap_build_json" | jq -er '.bootstrap_sequence')"
 BOOTSTRAP_MANIFEST_SHA="$(printf '%s' "$bootstrap_build_json" | jq -er '.manifest_sha256')"
 BOOTSTRAP_BUNDLE_SHA="$(printf '%s' "$bootstrap_build_json" | jq -er '.bundle_sha256')"
@@ -1382,7 +1636,10 @@ python3 - \
   "$STABLE_BRANCH" "$FAULT_BRANCH" "$BOOTSTRAP_TAG" \
   "$FIXED_CHANNEL_CACHE_MAX_SECONDS" "$UPDATE_TIMER_INTERVAL_SECONDS" \
   "$FIXED_CHANNEL_WAIT_SECONDS" \
-  "$HARNESS_SHA" "$FAULT_ORIGIN_SHA" "$STATE_WAITER_SHA" <<'PY'
+  "$HARNESS_SHA" "$FAULT_ORIGIN_SHA" "$STATE_WAITER_SHA" \
+  "$E2E_RESULT_SIGNER_KEY_ID" "$RESULT_SIGNER_FINGERPRINT" \
+  "$GUIDED_SETUP_SOURCE_SHA" "$GUIDED_STATUS_SOURCE_SHA" \
+  "$OPERATOR_HOTKEY_SHA" "$OPERATOR_POLICY_SHA" <<'PY'
 import json
 import pathlib
 import sys
@@ -1419,6 +1676,12 @@ import sys
     harness_sha256,
     fault_origin_sha256,
     state_waiter_sha256,
+    result_signer_key_id,
+    result_signer_fingerprint,
+    guided_setup_source_sha256,
+    guided_status_source_sha256,
+    operator_hotkey_sha256,
+    operator_policy_sha256,
 ) = sys.argv[1:]
 path = pathlib.Path(output)
 document = {
@@ -1456,6 +1719,12 @@ document = {
     "no_chain_harness_sha256": harness_sha256,
     "fault_origin_sha256": fault_origin_sha256,
     "state_waiter_sha256": state_waiter_sha256,
+    "result_signer": {
+        "purpose": "live_e2e_test_evidence_only",
+        "key_id": result_signer_key_id,
+        "algorithm": "ed25519",
+        "public_key_fingerprint": result_signer_fingerprint,
+    },
     "bootstrap_track": "test",
     "bootstrap_tag": bootstrap_tag,
     "bootstrap_transport": "anonymous_immutable_github_release",
@@ -1464,7 +1733,23 @@ document = {
     "stable_host_status_command": "cathedral-validator-status --json",
     "canary_host_configuration": "internal direct updater first install; not a public operating mode",
     "operator_hotkey_shape": "disposable bittensor-wallet keyfile, unregistered, never recorded",
-    "bootstrap_assets": "reviewed deploy assets with both channel URLs rewritten to the isolated mirror branches",
+    "bootstrap_assets": "reviewed deploy assets with isolated mirror channel URLs and the authenticated stable floor",
+    "guided_operator": {
+        "setup": {
+            "source_sha256": guided_setup_source_sha256,
+            "installed_path": "/usr/local/sbin/cathedral-validator-setup",
+        },
+        "status": {
+            "source_sha256": guided_status_source_sha256,
+            "installed_path": "/usr/local/sbin/cathedral-validator-status",
+        },
+        "operator_inputs": {
+            "hotkey_keyfile_sha256": operator_hotkey_sha256,
+            "snp_policy_sha256": operator_policy_sha256,
+            "raw_key_material_recorded": False,
+        },
+        "terminal_expectation": "stopped_writer_needs_review",
+    },
     "fixed_channel_cache_max_seconds": int(fixed_channel_cache_max_seconds),
     "update_timer_interval_seconds": int(update_timer_interval_seconds),
     "fixed_channel_wait_seconds": int(fixed_channel_wait_seconds),
@@ -2010,29 +2295,58 @@ capture_host() {
   local label="$1"
   local host="$2"
   local transient_unit="${3:-}"
+  local capture_prelude
+  local decode_status=0
   local generic_status=0
   local transient_status=0
+  local -a decode_args
+  if [[ ! "$label" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+    printf 'REFUSED: unsafe evidence capture label: %s\n' "$label" >&2
+    return 2
+  fi
   if [[ -n "$transient_unit" && ! "$transient_unit" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
     printf 'REFUSED: unsafe transient systemd unit for evidence capture: %s\n' \
       "$transient_unit" >&2
     return 2
   fi
-  if remote "$host" "printf '%s\n' '--- current ---'; sudo readlink /opt/cathedral-validator/current || true; printf '%s\n' '--- updater state ---'; sudo cat /var/lib/cathedral-validator-update/state.json || true; printf '%s\n' '--- direct unit state ---'; sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny || true; sudo systemctl status cathedral-validator-direct.service --full --no-pager || true; printf '%s\n' '--- direct unit definition ---'; sudo systemctl cat cathedral-validator-direct.service || true; printf '%s\n' '--- boot reconcile state ---'; sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager || true; printf '%s\n' '--- boot reconcile definition ---'; sudo systemctl cat cathedral-validator-boot-reconcile.service || true; printf '%s\n' '--- updater service state ---'; sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths || true; sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager || true; printf '%s\n' '--- updater service definitions ---'; sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service || true; printf '%s\n' '--- timers ---'; sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths || true; sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer || true; sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer' || true; printf '%s\n' '--- updater and runtime logs ---'; sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager || true" >"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+  capture_prelude='capture_failed=0; capture_section() { section="$1"; requirement="$2"; shift 2; output="$(mktemp)" || exit 70; "$@" >"$output" 2>&1; command_status=$?; byte_count="$(wc -c <"$output")"; digest="$(sha256sum "$output" | cut -d" " -f1)"; encoded="$(base64 -w 0 "$output")"; printf "CATHEDRAL_EVIDENCE_SECTION_V1\t%s\t%s\t%s\t%s\t%s\t%s\n" "$section" "$requirement" "$command_status" "$byte_count" "$digest" "$encoded"; rm -f -- "$output"; if [ "$requirement" = required ] && { [ "$command_status" -ne 0 ] || [ "$byte_count" -eq 0 ]; }; then capture_failed=1; fi; }'
+  if remote "$host" "$capture_prelude; capture_section current_release required sudo readlink /opt/cathedral-validator/current; capture_section updater_state required sudo cat /var/lib/cathedral-validator-update/state.json; capture_section direct_unit_show required sudo systemctl show cathedral-validator-direct.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID -p FragmentPath -p DropInPaths -p RestrictAddressFamilies -p IPAddressDeny; capture_section direct_unit_status optional sudo systemctl status cathedral-validator-direct.service --full --no-pager; capture_section direct_unit_definition required sudo systemctl cat cathedral-validator-direct.service; capture_section boot_reconcile_show required sudo systemctl show cathedral-validator-boot-reconcile.service -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section boot_reconcile_status optional sudo systemctl status cathedral-validator-boot-reconcile.service --full --no-pager; capture_section boot_reconcile_definition required sudo systemctl cat cathedral-validator-boot-reconcile.service; capture_section updater_services_show required sudo systemctl show cathedral-validator-canary-update.service cathedral-validator-update.service -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p FragmentPath -p DropInPaths; capture_section updater_services_status optional sudo systemctl status cathedral-validator-canary-update.service cathedral-validator-update.service --full --no-pager; capture_section updater_services_definitions required sudo systemctl cat cathedral-validator-canary-update.service cathedral-validator-update.service; capture_section timers_show required sudo systemctl show cathedral-validator-canary-update.timer cathedral-validator-update.timer -p Id -p UnitFileState -p ActiveState -p SubState -p ConditionResult -p NextElapseUSecMonotonic -p LastTriggerUSec -p LastTriggerUSecMonotonic -p DropInPaths; capture_section timer_definitions required sudo systemctl cat cathedral-validator-canary-update.timer cathedral-validator-update.timer; capture_section timer_list required sudo systemctl list-timers --all --no-pager 'cathedral-validator*update.timer'; capture_section updater_runtime_journal optional sudo journalctl -u cathedral-validator-boot-reconcile.service -u cathedral-validator-direct.service -u cathedral-validator-update.service -u cathedral-validator-canary-update.service -b -n 250 --no-pager; exit \"\$capture_failed\"" >"$EVIDENCE_DIR/${label}-sections.tsv" 2>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
     :
   else
     generic_status=$?
   fi
   if [[ -n "$transient_unit" ]]; then
-    if remote "$host" "printf '%s\n' '--- transient updater unit ---'; sudo systemctl show '${transient_unit}.service' -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID || true; sudo systemctl status '${transient_unit}.service' --full --no-pager || true; printf '%s\n' '--- transient updater journal ---'; sudo journalctl -u '${transient_unit}.service' -b -n 250 --no-pager || true" >>"$EVIDENCE_DIR/${label}.txt" 2>&1; then
+    if remote "$host" "$capture_prelude; capture_section transient_unit_show optional sudo systemctl show '${transient_unit}.service' -p Id -p Result -p ExecMainCode -p ExecMainStatus -p ActiveState -p SubState -p MainPID -p InvocationID; capture_section transient_unit_status optional sudo systemctl status '${transient_unit}.service' --full --no-pager; capture_section transient_unit_journal optional sudo journalctl -u '${transient_unit}.service' -b -n 250 --no-pager; exit \"\$capture_failed\"" >>"$EVIDENCE_DIR/${label}-sections.tsv" 2>>"$EVIDENCE_DIR/${label}-ssh.stderr"; then
       :
     else
       transient_status=$?
     fi
   fi
+  decode_args=(
+    decode-capture
+    --input "$EVIDENCE_DIR/${label}-sections.tsv"
+    --ssh-stderr "$EVIDENCE_DIR/${label}-ssh.stderr"
+    --text-output "$EVIDENCE_DIR/${label}.txt"
+    --manifest-output "$EVIDENCE_DIR/${label}-sections.json"
+    --artifacts-dir "$EVIDENCE_DIR/${label}.d"
+    --label "$label"
+    --host "$host"
+  )
+  if [[ -n "$transient_unit" ]]; then
+    decode_args+=(--transient-unit "$transient_unit")
+  fi
+  if python3 "$RESULT_TOOL" "${decode_args[@]}"; then
+    :
+  else
+    decode_status=$?
+  fi
   if (( generic_status != 0 )); then
     return "$generic_status"
   fi
-  return "$transient_status"
+  if (( transient_status != 0 )); then
+    return "$transient_status"
+  fi
+  return "$decode_status"
 }
 
 capture_host_with_retries() {
@@ -2045,7 +2359,15 @@ capture_host_with_retries() {
   for attempt in $(seq 1 "$CAPTURE_RETRY_ATTEMPTS"); do
     attempt_label="${label}-capture-attempt-${attempt}"
     if capture_host "$attempt_label" "$host" "$transient_unit"; then
-      if cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt"; then
+      rm -f -- "$EVIDENCE_DIR/${label}.txt" "$EVIDENCE_DIR/${label}-sections.json"
+      rm -rf -- "$EVIDENCE_DIR/${label}.d"
+      if cp "$EVIDENCE_DIR/${attempt_label}.txt" "$EVIDENCE_DIR/${label}.txt" && \
+        cp "$EVIDENCE_DIR/${attempt_label}-sections.json" \
+          "$EVIDENCE_DIR/${label}-sections.json" && \
+        cp -R "$EVIDENCE_DIR/${attempt_label}.d" "$EVIDENCE_DIR/${label}.d" && \
+        python3 "$RESULT_TOOL" verify-capture \
+          --manifest "$EVIDENCE_DIR/${label}-sections.json" \
+          --artifacts-dir "$EVIDENCE_DIR/${label}.d"; then
         printf 'attempt=%s status=0\n' "$attempt" \
           >>"$EVIDENCE_DIR/${label}-capture-retries.log"
         return 0
@@ -2054,6 +2376,8 @@ capture_host_with_retries() {
         printf 'attempt=%s status=%s promotion=failed\n' \
           "$attempt" "$capture_status" \
           >>"$EVIDENCE_DIR/${label}-capture-retries.log"
+        rm -f -- "$EVIDENCE_DIR/${label}.txt" "$EVIDENCE_DIR/${label}-sections.json"
+        rm -rf -- "$EVIDENCE_DIR/${label}.d"
       fi
     else
       capture_status=$?
@@ -2167,7 +2491,151 @@ assert_guided_status() {
 
 direct_writer_identity() {
   local host="$1"
-  remote "$host" "set -eu; sudo systemctl show cathedral-validator-direct.service -p MainPID -p InvocationID --value | paste -sd: -; sudo sha256sum /var/lib/cathedral-validator-update/state.json /etc/cathedral-validator/setup-complete.json /etc/cathedral-validator/validator-hotkey /etc/cathedral-validator/update.env | cut -d' ' -f1 | paste -sd: -" | tr -d '\r'
+  remote "$host" "set -eu; sudo systemctl show cathedral-validator-direct.service -p MainPID -p InvocationID --value | paste -sd: -; sudo sha256sum /var/lib/cathedral-validator-update/state.json /etc/cathedral-validator/setup-complete.json /etc/cathedral-validator/validator-hotkey /etc/cathedral-validator/update.env /etc/cathedral-validator/snp-policy.json | cut -d' ' -f1 | paste -sd: -" | tr -d '\r'
+}
+
+guided_installed_asset_identity() {
+  local host="$1"
+  remote "$host" "set -eu
+for path in '$GUIDED_SETUP' '$GUIDED_STATUS'; do
+  sudo test -f \"\$path\"
+  ! sudo test -L \"\$path\"
+  digest=\$(sudo sha256sum \"\$path\" | cut -d' ' -f1)
+  uid=\$(sudo stat -c '%u' \"\$path\")
+  gid=\$(sudo stat -c '%g' \"\$path\")
+  mode=\$(sudo stat -c '%a' \"\$path\")
+  printf '%s\t%s\t%s\t%s\t%s\ttrue\tfalse\n' \
+    \"\$path\" \"\$digest\" \"\$uid\" \"\$gid\" \"\$mode\"
+done" | tr -d '\r'
+}
+
+write_guided_transition_proof() {
+  local output="$1"
+  local schema="$2"
+  local host="$3"
+  local before="$4"
+  local after="$5"
+  local installed="$6"
+  local status_file="$7"
+  local first_exit="$8"
+  local second_exit="$9"
+  python3 - "$output" "$schema" "$host" "$before" "$after" "$installed" \
+    "$status_file" "$first_exit" "$second_exit" \
+    "$GUIDED_SETUP_SOURCE_SHA" "$GUIDED_STATUS_SOURCE_SHA" \
+    "$OPERATOR_HOTKEY_SHA" "$OPERATOR_POLICY_SHA" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+(
+    output, schema, host, before_raw, after_raw, installed_raw, status_name,
+    first_exit, second_exit, setup_source, status_source, hotkey_digest,
+    policy_digest,
+) = sys.argv[1:]
+
+durable_names = (
+    "updater_state_sha256",
+    "setup_complete_sha256",
+    "installed_hotkey_sha256",
+    "update_env_sha256",
+    "installed_snp_policy_sha256",
+)
+
+def identity(raw):
+    lines = raw.splitlines()
+    if len(lines) != 2:
+        raise SystemExit("REFUSED: malformed direct writer identity")
+    service = lines[0].split(":")
+    durable_values = lines[1].split(":")
+    if len(service) != 2 or not service[0].isdigit():
+        raise SystemExit("REFUSED: malformed direct writer service identity")
+    if len(durable_values) != len(durable_names) or any(
+        len(value) != 64 for value in durable_values
+    ):
+        raise SystemExit("REFUSED: malformed durable-state digest")
+    return {
+        "main_pid": int(service[0]),
+        "invocation_id": service[1],
+        "durable_sha256": dict(zip(durable_names, durable_values, strict=True)),
+    }
+
+installed = {}
+for line in installed_raw.splitlines():
+    parts = line.split("\t")
+    if len(parts) != 7 or parts[0] in installed:
+        raise SystemExit("REFUSED: malformed installed guided operator identity")
+    path, digest, uid, gid, mode, regular_file, symlink = parts
+    if len(mode) != 3 or any(character not in "01234567" for character in mode):
+        raise SystemExit("REFUSED: malformed installed guided operator mode")
+    installed[path] = {
+        "installed_path": path,
+        "sha256": digest,
+        "uid": int(uid),
+        "gid": int(gid),
+        "mode": f"0{mode}",
+        "regular_file": regular_file == "true",
+        "symlink": symlink == "true",
+    }
+expected_installed = {
+    "/usr/local/sbin/cathedral-validator-setup": setup_source,
+    "/usr/local/sbin/cathedral-validator-status": status_source,
+}
+if set(installed) != set(expected_installed):
+    raise SystemExit("REFUSED: installed guided operator asset set differs")
+for path, digest in expected_installed.items():
+    value = installed[path]
+    if value != {
+        "installed_path": path,
+        "sha256": digest,
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+        "regular_file": True,
+        "symlink": False,
+    }:
+        raise SystemExit("REFUSED: installed guided operator asset metadata differs")
+status_path = pathlib.Path(output).parent / status_name
+status_bytes = status_path.read_bytes()
+document = {
+    "schema": schema,
+    "host": host,
+    "guided_assets": {
+        "setup": installed["/usr/local/sbin/cathedral-validator-setup"],
+        "status": installed["/usr/local/sbin/cathedral-validator-status"],
+    },
+    "operator_inputs": {
+        "hotkey_keyfile_sha256": hotkey_digest,
+        "snp_policy_sha256": policy_digest,
+        "raw_key_material_recorded": False,
+    },
+    "before": identity(before_raw),
+    "after": identity(after_raw),
+    "status": {
+        "file": status_name,
+        "sha256": hashlib.sha256(status_bytes).hexdigest(),
+    },
+}
+if schema == "cathedral_validator_guided_setup_idempotence_proof_v1":
+    document["outcomes"] = {
+        "initial_setup_exit": int(first_exit),
+        "idempotent_rerun_exit": int(second_exit),
+        "setup_complete_marker": "SETUP_COMPLETE: stable direct validator configured",
+    }
+elif schema == "cathedral_validator_guided_setup_stopped_writer_proof_v1":
+    document["outcomes"] = {
+        "stop_writer_exit": int(first_exit),
+        "refused_setup_exit": int(second_exit),
+        "refusal_marker": "SETUP_REFUSED: existing direct validator is stopped and needs review",
+        "writer_remained_stopped": True,
+    }
+else:
+    raise SystemExit("REFUSED: unsupported guided transition proof schema")
+pathlib.Path(output).write_text(
+    json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+PY
 }
 
 configure_stable_host_through_operator_cli() {
@@ -2181,6 +2649,7 @@ configure_stable_host_through_operator_cli() {
   local rerun_output
   local identity_before
   local identity_after
+  local installed_assets
   local status
   remote "$host" "set -eu; test \"\$(sha256sum /tmp/validator | cut -d' ' -f1)\" = '$OPERATOR_HOTKEY_SHA'; test \"\$(sha256sum /tmp/amd-sev-snp-policy.json | cut -d' ' -f1)\" = '$OPERATOR_POLICY_SHA'; install -d -m 0700 /home/${SSH_USER}/.bittensor /home/${SSH_USER}/.bittensor/wallets /home/${SSH_USER}/.bittensor/wallets/live /home/${SSH_USER}/.bittensor/wallets/live/hotkeys; install -m 0600 /tmp/validator '$OPERATOR_HOTKEY_PATH'; install -m 0600 /tmp/amd-sev-snp-policy.json '$OPERATOR_POLICY_PATH'; rm -f /tmp/validator /tmp/amd-sev-snp-policy.json; test \"\$(stat -c '%a' '$OPERATOR_HOTKEY_PATH')\" = 600; printf 'OPERATOR_INPUTS_STAGED hotkey_sha256=%s policy_sha256=%s\n' '$OPERATOR_HOTKEY_SHA' '$OPERATOR_POLICY_SHA'" || return $?
   if setup_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
@@ -2213,6 +2682,7 @@ sudo systemctl is-active --quiet cathedral-validator-update.timer
 printf 'GUIDED_SETUP_CONFIG_PROOF host=%s\n' '$host'" || return $?
   assert_guided_status guided-status-after-setup "$host" "$ARCHIVE_A_SHA" 1 NOT_PROVEN true true || return $?
   identity_before="$(direct_writer_identity "$host")" || return $?
+  installed_assets="$(guided_installed_asset_identity "$host")" || return $?
   if rerun_output="$(remote "$host" "$(guided_setup_command)" 2>&1)"; then
     :
   else
@@ -2229,6 +2699,11 @@ printf 'GUIDED_SETUP_CONFIG_PROOF host=%s\n' '$host'" || return $?
       "$host" "$identity_before" "$identity_after" >&2
     return 1
   fi
+  write_guided_transition_proof \
+    "$EVIDENCE_DIR/guided-setup-idempotence-proof.json" \
+    cathedral_validator_guided_setup_idempotence_proof_v1 "$host" \
+    "$identity_before" "$identity_after" "$installed_assets" \
+    guided-status-after-setup.json 0 0 || return $?
   printf 'GUIDED_SETUP_IDEMPOTENT_RERUN host=%s identity=%s\n' "$host" "$identity_after"
 }
 
@@ -2240,6 +2715,9 @@ prove_guided_setup_refuses_stopped_writer() {
   local after
   local refusal
   local status
+  local installed_assets
+  local before_durable
+  local after_durable
   before="$(direct_writer_identity "$host")" || return $?
   remote "$host" "set -eu; sudo systemctl stop cathedral-validator-direct.service; ! sudo systemctl is-active --quiet cathedral-validator-direct.service; printf 'DIRECT_WRITER_STOPPED_FOR_PROOF\n'" || return $?
   if refusal="$(remote "$host" "set +e; output=\$($(guided_setup_command) 2>&1); status=\$?; printf '%s\n' \"\$output\"; printf 'SETUP_EXIT=%s\n' \"\$status\"; test \"\$status\" -eq 2 && ! sudo systemctl is-active --quiet cathedral-validator-direct.service && printf 'DIRECT_WRITER_STILL_STOPPED\n'" 2>&1)"; then
@@ -2254,12 +2732,20 @@ prove_guided_setup_refuses_stopped_writer() {
   printf '%s\n' "$refusal" | grep -Fx 'DIRECT_WRITER_STILL_STOPPED' >/dev/null || return 1
   assert_no_operator_secret_in "$refusal" || return $?
   after="$(direct_writer_identity "$host")" || return $?
-  if [[ "${before#*:*:}" != "${after#*:*:}" ]]; then
+  before_durable="${before#*$'\n'}"
+  after_durable="${after#*$'\n'}"
+  if [[ "$before_durable" != "$after_durable" ]]; then
     printf 'REFUSED: refused guided setup rerun changed durable state host=%s before=%s after=%s\n' \
       "$host" "$before" "$after" >&2
     return 1
   fi
-  assert_guided_status guided-status-stopped-writer "$host" "$ARCHIVE_A_SHA" 5 NEEDS_REVIEW false any || return $?
+  assert_guided_status guided-status-stopped-writer "$host" "$ARCHIVE_A_SHA" 5 NEEDS_REVIEW false false || return $?
+  installed_assets="$(guided_installed_asset_identity "$host")" || return $?
+  write_guided_transition_proof \
+    "$EVIDENCE_DIR/guided-setup-stopped-writer-proof.json" \
+    cathedral_validator_guided_setup_stopped_writer_proof_v1 "$host" \
+    "$before" "$after" "$installed_assets" \
+    guided-status-stopped-writer.json 0 2 || return $?
   printf 'GUIDED_SETUP_STOPPED_WRITER_REFUSED host=%s\n' "$host"
 }
 
@@ -2270,7 +2756,33 @@ configure_host() {
   local other_timer="$4"
   local failure_status
   remote "$host" "sudo env DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq openssl python3.12 python3.12-venv python3-cryptography >/dev/null"
-  remote "$host" "sudo install -d -o root -g root -m 0700 /var/tmp/cathedral-live-${RUN_ID} && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz '$BOOTSTRAP_BUNDLE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.json '$BOOTSTRAP_MANIFEST_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:manifest && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/manifest.sig '$BOOTSTRAP_SIGNATURE_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:signature && sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem '$BOOTSTRAP_PUBLIC_KEY_URL' && printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:public_key && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz /var/tmp/cathedral-live-${RUN_ID}/manifest.json /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && sudo chmod 0444 /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem && sudo /usr/bin/python3 -c 'import hashlib,pathlib; expected={\"bundle.tar.gz\":\"$BOOTSTRAP_BUNDLE_SHA\",\"manifest.json\":\"$BOOTSTRAP_MANIFEST_SHA\",\"manifest.sig\":\"$BOOTSTRAP_SIGNATURE_SHA\",\"bootstrap-public.pem\":\"$BOOTSTRAP_PUBLIC_KEY_SHA\"}; root=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}\"); assert all(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest for name,digest in expected.items())' && printf '%s\n' ANONYMOUS_BOOTSTRAP_EXACT_BYTES_VERIFIED && sudo openssl pkeyutl -verify -pubin -inkey /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -rawin -in /var/tmp/cathedral-live-${RUN_ID}/manifest.json -sigfile /var/tmp/cathedral-live-${RUN_ID}/manifest.sig && test \"sha256:\$(sudo openssl pkey -pubin -in /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)\" = '$BOOTSTRAP_FINGERPRINT' && sudo /usr/bin/python3 -c 'import hashlib,json,pathlib; b=pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz\").read_bytes(); m=json.loads(pathlib.Path(\"/var/tmp/cathedral-live-${RUN_ID}/manifest.json\").read_text(encoding=\"ascii\")); assert len(b)==m[\"bundle\"][\"size\"] and hashlib.sha256(b).hexdigest()==m[\"bundle\"][\"sha256\"]; assert m[\"bootstrap_signing_key\"][\"fingerprint\"]==\"$BOOTSTRAP_FINGERPRINT\"; assert m[\"bootstrap_metadata\"][\"sequence\"]>=1' && sudo sh -c 'tar -xOf /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz payload/installer/install_updater_bundle.py > /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py' && sudo chmod 0400 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py && sudo /usr/bin/python3.12 /var/tmp/cathedral-live-${RUN_ID}/signed-installer.py --bundle /var/tmp/cathedral-live-${RUN_ID}/bundle.tar.gz --manifest /var/tmp/cathedral-live-${RUN_ID}/manifest.json --signature /var/tmp/cathedral-live-${RUN_ID}/manifest.sig --bootstrap-public-key /var/tmp/cathedral-live-${RUN_ID}/bootstrap-public.pem --expected-bootstrap-key-fingerprint '$BOOTSTRAP_FINGERPRINT' --minimum-bootstrap-sequence '$BOOTSTRAP_SEQUENCE'" | tee "$EVIDENCE_DIR/bootstrap-install-${host}.log"
+  remote "$host" \
+    "bootstrap_dir=\"\$(sudo /usr/bin/mktemp -d /var/tmp/cathedral-live.XXXXXXXXXX)\" || exit 1; \
+readonly bootstrap_dir; \
+case \"\$bootstrap_dir\" in \
+  /var/tmp/cathedral-live.[[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]][[:alnum:]]) ;; \
+  *) printf '%s\n' 'REFUSED: unsafe bootstrap staging path' >&2; exit 1 ;; \
+esac; \
+trap 'sudo /usr/bin/rm -rf -- \"\$bootstrap_dir\"' EXIT; \
+sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output \"\$bootstrap_dir/bundle.tar.gz\" '$BOOTSTRAP_BUNDLE_URL' && \
+printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:bundle && \
+sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output \"\$bootstrap_dir/manifest.json\" '$BOOTSTRAP_MANIFEST_URL' && \
+printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:manifest && \
+sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output \"\$bootstrap_dir/manifest.sig\" '$BOOTSTRAP_SIGNATURE_URL' && \
+printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:signature && \
+sudo env -i PATH=/usr/bin:/bin HOME=/var/empty /usr/bin/curl --disable --fail --show-error --silent --location --proto '=https' --tlsv1.2 --header 'Authorization:' --output \"\$bootstrap_dir/bootstrap-public.pem\" '$BOOTSTRAP_PUBLIC_KEY_URL' && \
+printf '%s\n' ANONYMOUS_BOOTSTRAP_DOWNLOADED:public_key && \
+sudo chmod 0400 \"\$bootstrap_dir/bundle.tar.gz\" \"\$bootstrap_dir/manifest.json\" \"\$bootstrap_dir/manifest.sig\" && \
+sudo chmod 0444 \"\$bootstrap_dir/bootstrap-public.pem\" && \
+sudo /usr/bin/python3 -c 'import hashlib,pathlib,sys; expected={\"bundle.tar.gz\":\"$BOOTSTRAP_BUNDLE_SHA\",\"manifest.json\":\"$BOOTSTRAP_MANIFEST_SHA\",\"manifest.sig\":\"$BOOTSTRAP_SIGNATURE_SHA\",\"bootstrap-public.pem\":\"$BOOTSTRAP_PUBLIC_KEY_SHA\"}; root=pathlib.Path(sys.argv[1]); actual={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in expected}; actual==expected or sys.exit(\"REFUSED: bootstrap artifact digest mismatch\")' \"\$bootstrap_dir\" && \
+printf '%s\n' ANONYMOUS_BOOTSTRAP_EXACT_BYTES_VERIFIED && \
+sudo openssl pkeyutl -verify -pubin -inkey \"\$bootstrap_dir/bootstrap-public.pem\" -rawin -in \"\$bootstrap_dir/manifest.json\" -sigfile \"\$bootstrap_dir/manifest.sig\" && \
+test \"sha256:\$(sudo openssl pkey -pubin -in \"\$bootstrap_dir/bootstrap-public.pem\" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)\" = '$BOOTSTRAP_FINGERPRINT' && \
+sudo /usr/bin/python3 -c 'import hashlib,json,pathlib,sys; root=pathlib.Path(sys.argv[1]); b=(root/\"bundle.tar.gz\").read_bytes(); m=json.loads((root/\"manifest.json\").read_text(encoding=\"ascii\")); bundle=m.get(\"bundle\"); key=m.get(\"bootstrap_signing_key\"); metadata=m.get(\"bootstrap_metadata\"); valid=isinstance(bundle,dict) and type(bundle.get(\"size\")) is int and bundle.get(\"size\")>=0 and isinstance(bundle.get(\"sha256\"),str) and len(b)==bundle.get(\"size\") and hashlib.sha256(b).hexdigest()==bundle.get(\"sha256\") and isinstance(key,dict) and key.get(\"fingerprint\")==\"$BOOTSTRAP_FINGERPRINT\" and isinstance(metadata,dict) and type(metadata.get(\"sequence\")) is int and metadata.get(\"sequence\")>=1; valid or sys.exit(\"REFUSED: signed bootstrap claims do not match the downloaded bundle or trust anchor\")' \"\$bootstrap_dir\" && \
+sudo /bin/sh -c 'tar -xOf \"\$1\" payload/installer/install_updater_bundle.py >\"\$2\"' sh \"\$bootstrap_dir/bundle.tar.gz\" \"\$bootstrap_dir/signed-installer.py\" && \
+sudo chmod 0400 \"\$bootstrap_dir/signed-installer.py\" && \
+sudo /usr/bin/python3.12 \"\$bootstrap_dir/signed-installer.py\" --bundle \"\$bootstrap_dir/bundle.tar.gz\" --manifest \"\$bootstrap_dir/manifest.json\" --signature \"\$bootstrap_dir/manifest.sig\" --bootstrap-public-key \"\$bootstrap_dir/bootstrap-public.pem\" --expected-bootstrap-key-fingerprint '$BOOTSTRAP_FINGERPRINT' --minimum-bootstrap-sequence '$BOOTSTRAP_SEQUENCE'" \
+    | tee "$EVIDENCE_DIR/bootstrap-install-${host}.log"
   remote "$host" "test \"\$(sha256sum /tmp/cathedral_no_chain_readiness.py | cut -d' ' -f1)\" = '$HARNESS_SHA' && test \"\$(sha256sum /tmp/tampered_https_origin.py | cut -d' ' -f1)\" = '$FAULT_ORIGIN_SHA' && test \"\$(sha256sum /tmp/wait_updater_state.py | cut -d' ' -f1)\" = '$STATE_WAITER_SHA' && sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/cathedral-validator-live-test /etc/systemd/system/cathedral-validator-direct.service.d /etc/systemd/system/${timer}.d /etc/systemd/system/${other_timer}.d && sudo install -o root -g root -m 0555 /tmp/cathedral_no_chain_readiness.py /usr/local/libexec/cathedral-no-chain-readiness.py && sudo install -o root -g root -m 0555 /tmp/tampered_https_origin.py /usr/local/libexec/cathedral-tampered-https-origin.py && sudo install -o root -g root -m 0555 /tmp/wait_updater_state.py /usr/local/libexec/cathedral-wait-updater-state.py"
   if [[ "$channel" == "canary" ]]; then
     # Cathedral's internal canary host is not a public operating mode, so it
@@ -2374,8 +2886,17 @@ wait_sequence() {
   while (( SECONDS < deadline )); do
     if snapshot="$(snapshot_state "$host" "$channel" 2>>"$EVIDENCE_DIR/${label}-sequence-snapshot-ssh.stderr")"; then
       printf '%s\n' "$snapshot"
-      if printf '%s\n' "$snapshot" | jq -e --argjson expected "$expected_record" \
-        '.record == $expected and .sequence == $expected.sequence and .pending == null' >/dev/null; then
+      if printf '%s\n' "$snapshot" | jq -e \
+        --arg channel "$channel" --argjson expected "$expected_record" \
+        'type == "object" and
+         keys == ["channel", "current", "pending", "record", "sequence"] and
+         .channel == $channel and
+         .current == ("releases/" + $expected.archive_sha256) and
+         .record == $expected and
+         .sequence == $expected.sequence and
+         .pending == null' >/dev/null; then
+        printf '%s\n' "$snapshot" \
+          >"$EVIDENCE_DIR/${label}-sequence-state.json"
         return 0
       fi
     fi
@@ -2552,14 +3073,25 @@ observe_timer_reactivation() {
   local failure_status
   before_invocation="$(remote "$host" "sudo systemctl show '$service' -p InvocationID --value" | tr -d '\r')"
   before_trigger="$(remote "$host" "sudo systemctl show '$timer' -p LastTriggerUSec --value" | tr -d '\r')"
-  if [[ -z "$before_invocation" || -z "$before_trigger" ]]; then
+  if [[ ! "$before_invocation" =~ ^[0-9A-Fa-f]{32}$ || \
+    -z "$before_trigger" || "$before_trigger" == *$'\n'* ]]; then
     printf 'REFUSED: timer reactivation requires prior timer and service evidence host=%s timer=%s\n' \
       "$host" "$timer" >&2
     return 1
   fi
-  if start_reactivation_proof_timer "$host" "$timer" \
-    "$before_invocation" "$before_trigger" 2>&1 | \
-    tee "$EVIDENCE_DIR/${label}-timer-reactivation-start.log"; then
+  if {
+    printf '%s\n' \
+      'CATHEDRAL_TIMER_REACTIVATION_PROOF_V1' \
+      "ProofHost=$host" \
+      "ProofTimer=$timer" \
+      "ProofService=$service" \
+      "ProofChannel=$channel" \
+      "ExpectedRelease=$expected_digest" \
+      "BeforeServiceInvocationID=$before_invocation" \
+      "BeforeLastTriggerUSec=$before_trigger"
+    start_reactivation_proof_timer "$host" "$timer" \
+      "$before_invocation" "$before_trigger"
+  } 2>&1 | tee "$EVIDENCE_DIR/${label}-timer-reactivation-start.log"; then
     :
   else
     failure_status=$?
