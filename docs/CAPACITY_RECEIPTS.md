@@ -49,6 +49,9 @@ optional; the rest are required.
   table at exactly the minimum sequence must be the table with that digest (a newer sequence is
   accepted). When you move to a new table, raise the minimum to its sequence and pin its digest
   (`cathedral.capacity.pricing.table_digest`). A refused table means the policy does not load.
+  With the defaults (1, no digest) any validly signed table is accepted, so the validator logs
+  `{"capacity_shadow": {"status": "LOADED", "warning": "price_table_digest is not pinned: ..."}}`
+  once at start until you pin one.
 - `admit_bare_metal` (`true` or `false`; default `false`): whether bare-metal boxes earn. When
   off, a bare-metal receipt that verifies is refused with the reason `bare-metal boxes are not
   admitted (admit_bare_metal is off)`; it still appears in the rows, and in the inventory as
@@ -80,9 +83,10 @@ validator:
    each receipt for that nonce, so a validator can't reuse another validator's receipts;
 2. verifies every receipt: the prober key, the netuid, the nonce, the round, freshness, and that
    the challenge proves the capacity it pays for. Each receipt is handled on its own: if
-   verifying or valuing one raises anything at all, that receipt is refused (the reason is the
-   error's type name, or the library's message for a receipt it rejects) and the rest of the
-   round is scored as usual. One malformed receipt never fails the round;
+   verifying or valuing one raises any `Exception`, that receipt is refused (the reason is the
+   error's type name and message, cut to 200 characters, or the library's message for a receipt
+   it rejects) and the rest of the round is scored as usual. One malformed receipt never fails
+   the round; `KeyboardInterrupt` and `SystemExit` still stop the validator;
 3. refuses bare-metal boxes unless `admit_bare_metal` is on;
 4. refuses a box that appears twice and hardware claimed under two hotkeys (both earn nothing),
    and counts one box per hardware id for a single hotkey (the more valuable one). The hardware
@@ -114,6 +118,9 @@ of every box this validator has seen:
 - `missing`: seen before but absent this cycle. It is dropped after 24 quiet cycles.
 
 Each box records its hotkey, UID, kind, TEE kind, hardware id, capacity, value, and first and last seen.
+When the feed carries one box id in several rows, the inventory keeps an accepted row, else a
+row refused for any reason but bare metal not being admitted, else the first row; so a
+bare-metal receipt reusing a TEE box's id never hides the TEE box or its reason.
 A receipt that does not verify names no box anyone can trust, so it never appears. The file is
 replaced atomically (mode 600). A file that can't be read, or that is for another netuid, starts
 a new inventory. A write failure shows as `"inventory": {"status": "FAILED"}` in the shadow

@@ -1082,6 +1082,19 @@ def _capacity_shadow_from_environment() -> CapacityShadow | None:
         error = str(exc) if isinstance(exc, CapacityPolicyError) else type(exc).__name__
         _print_event({"capacity_shadow": {"status": "DISABLED", "error": error[:200]}})
         return None
+    if policy.price_table_digest is None:
+        # Said once, at start: without a pinned digest the rollback floor is
+        # only minimum_price_table_sequence (docs/CAPACITY_RECEIPTS.md).
+        _print_event(
+            {
+                "capacity_shadow": {
+                    "status": "LOADED",
+                    "warning": "price_table_digest is not pinned: any validly signed"
+                    " price table at or above sequence"
+                    f" {policy.minimum_price_table_sequence} is accepted",
+                }
+            }
+        )
     return CapacityShadow(policy)
 
 

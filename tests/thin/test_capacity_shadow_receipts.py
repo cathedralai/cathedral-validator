@@ -338,6 +338,25 @@ def test_a_refused_bare_metal_receipt_cannot_knock_out_a_tee_box_with_its_id() -
     assert doc["boxes"]["victim"]["kind"] == "tee"
 
 
+def test_a_refused_tee_box_keeps_its_own_reason_over_a_bare_metal_one() -> None:
+    # Review of #265: the not-admitted bare-metal row came first, the TEE row
+    # with the same id was refused for another reason, and the inventory kept
+    # the bare-metal row, hiding the TEE box's real reason.
+    scored = _score(
+        [
+            _receipt(box_id="x", kind="bare_metal", hardware="b0" * 32),
+            _receipt(box_id="x", hotkey=HOTKEY_B, hardware="aa" * 32),
+        ],
+        uids={HOTKEY_A: 3},
+    )
+    assert scored["accepted"] == 0
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    box = doc["boxes"]["x"]
+    assert box["kind"] == "tee" and box["miner_hotkey"] == HOTKEY_B
+    assert box["status"] == inv.UNHEALTHY
+    assert box["reason"] == "the hotkey is not a serving miner on this netuid"
+
+
 def test_one_receipt_that_breaks_verification_or_valuation_is_contained(
     monkeypatch,
 ) -> None:
@@ -356,7 +375,9 @@ def test_one_receipt_that_breaks_verification_or_valuation_is_contained(
             _receipt(box_id="b3", hardware="f2" * 32),
         ]
     )
-    assert scored["accepted"] == 2 and scored["refused"] == {"RuntimeError": 1}
+    assert scored["accepted"] == 2 and scored["refused"] == {
+        "RuntimeError: library bug": 1
+    }
     assert scored["units"] == [[3, 2 * TEE_6_24]]
     monkeypatch.setattr(receipt, "verify_receipt", real_verify)
 
@@ -373,8 +394,27 @@ def test_one_receipt_that_breaks_verification_or_valuation_is_contained(
         [_receipt(), _receipt(box_id="b2", hardware="f1" * 32, vcpus=8, memory_gib=32)],
         policy=policy,
     )
-    assert scored["accepted"] == 1 and scored["refused"] == {"PriceTableError": 1}
+    assert scored["accepted"] == 1 and scored["refused"] == {
+        "PriceTableError: vcpus must be a positive integer": 1
+    }
     assert scored["units"] == [[3, 1]]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interpreter_stop_while_verifying_is_never_contained(
+    monkeypatch, stop
+) -> None:
+    # Only Exception is contained per receipt: a stop request must still stop.
+    real_verify = receipt.verify_receipt
+
+    def verify(item, **kwargs):
+        if item.get("box", {}).get("box_id") == "stop":
+            raise stop
+        return real_verify(item, **kwargs)
+
+    monkeypatch.setattr(receipt, "verify_receipt", verify)
+    with pytest.raises(stop):
+        _score([_receipt(), _receipt(box_id="stop", hardware="f1" * 32)])
 
 
 def test_receipts_for_another_validator_round_or_key_are_refused() -> None:
@@ -508,6 +548,22 @@ def test_a_recheck_that_raises_refuses_only_that_receipt(
     assert rows["box-1"]["reason"] == "MemoryError"
     assert rows["small"]["recheck"] == "skipped"
     assert scored["units"] == [[3, TEE_6_24]]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interpreter_stop_during_the_recheck_is_never_contained(
+    small_lanes, monkeypatch, stop
+) -> None:
+    calls: list[int] = []
+
+    def lane_output(spec, lane):
+        calls.append(lane)
+        raise stop
+
+    monkeypatch.setattr(ch, "lane_output", lane_output)
+    with pytest.raises(stop):
+        _score([_receipt(vcpus=512, memory_gib=1)], policy=_policy(recheck_max_mib=2))
+    assert len(calls) == 1
 
 
 def test_the_recheck_stops_at_its_time_budget(small_lanes) -> None:

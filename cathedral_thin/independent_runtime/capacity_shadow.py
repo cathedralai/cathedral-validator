@@ -44,7 +44,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from cathedral_thin.independent.canonical import PolicyBundleError, parse_strict_json
-from cathedral_thin.independent_runtime.capacity_inventory import record_cycle
+from cathedral_thin.independent_runtime.capacity_inventory import (
+    BARE_METAL_REFUSED,
+    record_cycle,
+)
 from cathedral_thin.independent.fetch_policy import (
     PolicyFetchError,
     fetch_policy_bytes,
@@ -94,7 +97,6 @@ _OPTIONAL_POLICY_KEYS = frozenset(
 )
 MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
 BARE_METAL = "bare_metal"
-BARE_METAL_REFUSED = "bare-metal boxes are not admitted (admit_bare_metal is off)"
 
 ACCEPTED = "ACCEPTED"
 
@@ -302,7 +304,9 @@ def _parse_feed(raw: bytes, *, netuid: int, nonce: str) -> tuple[int, list[Any]]
 
 
 def _short(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+    text = str(exc)
+    name = type(exc).__name__
+    return (f"{name}: {text}" if text else name)[:MAX_ERROR_CHARS]
 
 
 def score_receipts(
@@ -355,7 +359,9 @@ def score_receipts(
             rows.append({"verdict": "REFUSED", "reason": str(exc)[:MAX_ERROR_CHARS]})
             continue
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
-            rows.append({"verdict": "REFUSED", "reason": type(exc).__name__})
+            # The message is kept (bounded), so a library bug that refuses every
+            # receipt still reads as that bug in the record's refused counts.
+            rows.append({"verdict": "REFUSED", "reason": _short(exc)})
             continue
         if parsed.kind == BARE_METAL and not policy.admit_bare_metal:
             row["verdict"] = "REFUSED"
@@ -417,7 +423,7 @@ def score_receipts(
             recomputed = challenge.lane_output(parsed.challenge, lane)
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
             row["recheck"] = "error"
-            refuse(row, type(exc).__name__)
+            refuse(row, _short(exc))
             continue
         if recomputed == parsed.sampled_outputs[lane]:
             row["recheck"] = "passed"
