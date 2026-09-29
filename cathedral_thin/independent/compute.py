@@ -137,6 +137,9 @@ class QuoteIdentityVerdict:
     verdict: QuoteVerdict
     stable_platform_id: str | None
     platform_identity_verified: bool
+    # The verifier's TD measurement (``tdx-measurement-sha256:<64 hex>``) on a
+    # PASS, for an owner allowlist to judge. None when absent or malformed.
+    measurement: str | None = None
 
 
 @runtime_checkable
@@ -148,6 +151,18 @@ class QuoteIdentityVerifier(Protocol):
         expected_report_data: bytes,
         deadline_monotonic: float | None = None,
     ) -> QuoteIdentityVerdict: ...
+
+
+def tdx_measurement_or_none(value: object) -> str | None:
+    prefix = "tdx-measurement-sha256:"
+    if (
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and len(value) == len(prefix) + 64
+        and all(character in _HEX for character in value[len(prefix) :])
+    ):
+        return value
+    return None
 
 
 def require_stable_platform_id(value: object) -> str:
@@ -487,13 +502,14 @@ class ComputeAdapter:
             return QuoteIdentityVerdict(QuoteVerdict.INFRA, None, False)
         if result.verdict is not QuoteVerdict.PASS:
             return QuoteIdentityVerdict(result.verdict, None, False)
+        measurement = tdx_measurement_or_none(result.measurement)
         if not result.platform_identity_verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
         try:
             identity = require_stable_platform_id(result.stable_platform_id)
         except ComputeEvidenceError:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
-        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True, measurement)
 
     @staticmethod
     def _validate_quote_inputs(quote: bytes, *, expected_report_data: bytes) -> None:

@@ -65,6 +65,7 @@ SYSTEMD_ASSETS = frozenset(
 )
 EXAMPLE_ASSETS = frozenset(
     {
+        "direct-tdx-measurement.env.example",
         "direct-telemetry.env.example",
         "direct.env.example",
         "identity.env.example",

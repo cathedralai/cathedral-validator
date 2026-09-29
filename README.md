@@ -117,6 +117,91 @@ no non-writing mode. A successful cycle prints `CONFIRMED` or
 `RECOVERED_CONFIRMED` after the exact row is confirmed at inclusion and two
 later finalized heads.
 
+### Optional: TDX measurement allowlist
+
+A TDX machine passes when its quote is genuine and current; by default any
+guest image passes. To pay only guest images you have reviewed, install a
+policy:
+
+```json
+{"schema": "cathedral_tdx_measurement_policy_v1",
+ "mode": "shadow",
+ "allowed_measurements": ["tdx-measurement-sha256:<64 hex>"]}
+```
+
+Generate it from the owner's signed measurement list with cathedral-sandbox's
+`cathedral policy-registry export-measurement-policy` (`--registry`,
+`--trusted-keys`, `--trusted-keys-digest`, `--state`, `--mode`, `--scope`,
+`--out tdx-measurement-policy.json`; see its `--help` and the sandbox's
+docs/MRTD.md). It verifies the signed release and writes the policy plus
+`tdx-measurement-policy.json.source.json`, which records the release, its
+digest, the policy file's digest and when the release expires. The policy
+file takes no other keys; `allowed_measurements` is sorted and unique, and
+`shadow` may list none. Install both files, and the env file that names the
+policy, so the validator's service user can read them but not change them:
+
+```bash
+sudo install -o root -g cathedral-validator -m 0440 \
+  tdx-measurement-policy.json /etc/cathedral-validator/tdx-measurement-policy.json
+sudo install -o root -g cathedral-validator -m 0440 \
+  tdx-measurement-policy.json.source.json \
+  /etc/cathedral-validator/tdx-measurement-policy.json.source.json
+sudo install -o root -g root -m 0600 \
+  deploy/validator-update/direct-tdx-measurement.env.example \
+  /etc/cathedral-validator/direct-tdx-measurement.env
+```
+
+Signed releases never change the systemd unit, and the unit from bootstrap
+sequence 3 does not read that env file. Unless
+`systemctl cat cathedral-validator-direct` shows
+`EnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env`, add the
+drop-in from
+[Optional unit settings](docs/AUTO_UPDATE.md#optional-unit-settings) first.
+The policy is read once, at start, so restart after installing or editing
+either file, including the switch from shadow to enforce:
+
+```bash
+sudo systemctl restart cathedral-validator-direct
+```
+
+At start the service log shows
+`{"tdx_measurement_policy": {"status": "LOADED", "mode": ..., "digest": ...,
+"source": "recorded", "registry_release": ..., "registry_digest": ...,
+"registry_valid_until": ...}}`: the
+signed list release the policy was exported from, read from the
+`.source.json` beside it. The record is advisory and never stops the
+validator. `"source": "unrecorded"` means there is none (a hand-written
+policy); `"unreadable"` means it is malformed, too large or unsafe and is
+ignored, with a `warning`. A `warning` also appears when the record's
+`policy_digest` is not the loaded policy's `digest` (the two files come from
+different exports) or when the release's `registry_valid_until` has passed;
+regenerate both files and restart. The check runs once, at start.
+`"status": "NOT_LOADED"` means the env file exists but the unit does not read
+it, so no policy applies. A policy that doesn't load (missing, unreadable,
+malformed, or enforce with an empty list) stops the validator at start with
+`TDX measurement policy refused:` and the unit retries every 15 seconds until
+it is fixed.
+
+In `"mode": "shadow"` the machines are paid as before, and each cycle's line
+carries `evidence_summary.tdx_measurement`: every measurement the policy
+judged this cycle, paid or not, with whether it is listed and how many
+machines reported it (the 32 most common; `observed_omitted` counts the rest).
+Once you have reviewed and listed them, switch to `"enforce"`: a machine whose
+measurement is not listed fails with `tdx_measurement_not_allowed` and earns
+zero; if it is a miner's primary, that miner's whole fleet is excluded. A
+policy that admits no machine at all leaves the cycle with nothing to pay, so
+it writes no weights. With a policy set, the evidence digest also binds its
+mode and digest. When the source record names the loaded policy,
+`evidence_summary.tdx_measurement` also carries `registry_release`; the
+evidence digest does not, so it is unchanged with or without a record.
+
+Expect more entries than images. RTMR0 follows the VM shape (vCPUs and
+memory), RTMR1 the guest kernel and initrd, and RTMR3 what the guest extends
+at runtime. A guest package upgrade that rebuilds the initramfs changes the
+measurement while MRTD stays fixed, so under enforce a miner who patches their
+guest earns zero until the new value is listed. Without the env file nothing
+changes.
+
 `sudo cathedral-validator-status` is the one local summary: service health,
 signed release, update timer, and the latest recorded weight result. It does
 not replace finalized chain verification. The service log is

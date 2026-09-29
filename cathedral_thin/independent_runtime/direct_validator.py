@@ -10,6 +10,7 @@ from raw machine counts.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import grp
 import hashlib
 import json
@@ -65,6 +66,14 @@ from .fleet_score import (
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
+from . import tdx_measurement
+from .tdx_measurement import (
+    TDX_MEASUREMENT_POLICY_ENV,
+    TdxMeasurementPolicy,
+    TdxMeasurementPolicyError,
+    load_tdx_measurement_policy,
+    read_policy_source,
+)
 from .telemetry import (
     PendingTelemetryStore,
     TelemetryError,
@@ -90,6 +99,9 @@ EXIT_FINALIZED_FAILED_STOPPED = 3
 FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
 STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
 RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
+# The operator event names at most this many distinct TDX measurements per
+# cycle (the most common first); the rest are counted in observed_omitted.
+MAX_REPORTED_TDX_MEASUREMENTS = 32
 _REPORTED_EXCLUSION_CATEGORIES = (
     "fleet",
     "duplicate_endpoint",
@@ -481,8 +493,15 @@ def build_direct_plan(
     result: MultiComputeRound,
     *,
     scored_miners: Sequence[ServingAxon] | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> DirectWeightPlan:
-    """Count unique verified machines per UID and normalize with zero burn."""
+    """Count unique verified machines per UID and normalize with zero burn.
+
+    With a TDX measurement policy the evidence document names its mode and
+    digest, so the evidence digest binds which policy produced the vector
+    (enforce drops refused machines from ``machines``). Without one the
+    document is exactly as before.
+    """
 
     miners = tuple(snapshot.miners if scored_miners is None else scored_miners)
     if not miners:
@@ -515,6 +534,11 @@ def build_direct_plan(
         "max_concurrent_miners": MAX_CONCURRENT_MINERS,
         "scheduling_order": "finalized_anchor_hash_rotation",
     }
+    if tdx_policy is not None:
+        evidence["tdx_measurement_policy"] = {
+            "mode": tdx_policy.mode,
+            "digest": tdx_policy.digest,
+        }
     evidence_digest = (
         "sha256:" + hashlib.sha256(canonical_document_bytes(evidence)).hexdigest()
     )
@@ -548,15 +572,66 @@ def _reported_exclusion_category(value: object) -> str:
     return "other"
 
 
+def _tdx_measurement_summary(
+    result: MultiComputeRound, tdx_policy: TdxMeasurementPolicy
+) -> dict[str, object]:
+    """What the TDX measurement policy saw this cycle, for the operator.
+
+    Built from every TDX row the policy judged (each QVL PASS), paid or not,
+    so shadow mode shows the measurements to review before enforcing, and
+    enforce shows what it refused. Bounded: at most
+    MAX_REPORTED_TDX_MEASUREMENTS distinct measurements, the most common first.
+    ``registry_release`` appears only when the policy file's source record
+    names this exact file; this summary never enters the evidence digest.
+    """
+
+    judged = [
+        row
+        for row in result.rows
+        if row.get("measurement_policy_digest") == tdx_policy.digest
+    ]
+    counts: dict[str, int] = {}
+    for row in judged:
+        measurement = row.get("measurement")
+        if isinstance(measurement, str):
+            counts[measurement] = counts.get(measurement, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    reported = ranked[:MAX_REPORTED_TDX_MEASUREMENTS]
+    summary: dict[str, object] = {
+        "mode": tdx_policy.mode,
+        "policy_digest": tdx_policy.digest,
+        "machines": len(judged),
+        "allowed_machines": sum(
+            row.get("measurement_allowed") is True for row in judged
+        ),
+        "missing_measurement": sum(
+            not isinstance(row.get("measurement"), str) for row in judged
+        ),
+        "observed": {
+            measurement: {
+                "allowed": tdx_policy.admits(measurement),
+                "machines": machines,
+            }
+            for measurement, machines in sorted(reported)
+        },
+        "observed_omitted": len(ranked) - len(reported),
+    }
+    if tdx_policy.registry_release is not None:
+        summary["registry_release"] = tdx_policy.registry_release
+    return summary
+
+
 def _evidence_cycle_summary(
     snapshot: FinalizedMetagraphSnapshot,
     result: MultiComputeRound,
     plan: DirectWeightPlan,
+    tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> dict[str, object]:
     """Return fixed-shape telemetry which never enters scoring.
 
     ``sample_sum`` is cumulative task time across concurrent miners. The event's
     ``evidence_cycle_elapsed_ms`` remains the sole end-to-end wall duration.
+    With a TDX measurement policy it also carries ``tdx_measurement``.
     """
 
     phase_summary: dict[str, dict[str, int | None]] = {}
@@ -589,7 +664,7 @@ def _evidence_cycle_summary(
             else 0
         )
     admitted_machine_rows = sum(count for _uid, count in plan.raw_scores)
-    return {
+    summary: dict[str, object] = {
         "phase_timings_ms": phase_summary,
         "exclusions": {
             "skipped_axons": skipped_axons,
@@ -599,6 +674,9 @@ def _evidence_cycle_summary(
             "reported_categories": reported_categories,
         },
     }
+    if tdx_policy is not None:
+        summary["tdx_measurement"] = _tdx_measurement_summary(result, tdx_policy)
+    return summary
 
 
 def _run_direct_cycle_unlocked(
@@ -610,6 +688,7 @@ def _run_direct_cycle_unlocked(
     report_recovery: Callable[[dict[str, Any]], None],
     netuid: int,
     snp_verifier: SnpProductionVerifier | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
@@ -660,11 +739,14 @@ def _run_direct_cycle_unlocked(
         anchor_hash=snapshot.block_hash,
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
+        tdx_policy=tdx_policy,
         cycle_deadline_monotonic=cycle_deadline,
         netuid=snapshot.netuid,
     )
-    plan = build_direct_plan(snapshot, result)
-    evidence_summary = _evidence_cycle_summary(snapshot, result, plan)
+    plan = build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
+    evidence_summary = _evidence_cycle_summary(
+        snapshot, result, plan, tdx_policy=tdx_policy
+    )
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -825,6 +907,7 @@ def run_direct_cycle(
     writer: Any,
     report_recovery: Callable[[dict[str, Any]], None],
     snp_verifier: SnpProductionVerifier | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
 ) -> dict[str, Any]:
@@ -860,6 +943,7 @@ def run_direct_cycle(
             report_recovery=report_recovery,
             netuid=netuid,
             snp_verifier=snp_verifier,
+            tdx_policy=tdx_policy,
             telemetry_sink=telemetry_sink,
         )
 
@@ -1035,6 +1119,67 @@ def _capacity_shadow_event(
     return shadow_event
 
 
+def _tdx_measurement_policy_from_environment() -> TdxMeasurementPolicy | None:
+    """Load the optional owner TDX measurement allowlist.
+
+    It is named by an environment variable, not a flag: the unit reads it from
+    an optional file, and a runtime from before this setting ignores an unknown
+    variable, where it would exit with status 2 on an unknown flag and never be
+    restarted after an update rollback. Unset or empty means no policy.
+
+    It prints one startup line: ``LOADED`` with the mode and digest and which
+    signed list release the file was exported from (``source``: ``recorded``,
+    ``unrecorded`` or ``unreadable``, from ``<path>.source.json``; advisory,
+    with a ``warning`` when it names another file or an expired release), or
+    ``NOT_LOADED`` when the env file exists but the variable is absent from
+    this process (most likely a unit from an older bootstrap that does not read
+    the file). A variable set to empty is a deliberate "no policy" and prints
+    nothing, as does having neither.
+    """
+
+    path = os.environ.get(TDX_MEASUREMENT_POLICY_ENV, "").strip()
+    if not path:
+        env_file = tdx_measurement.TDX_MEASUREMENT_ENV_FILE
+        if TDX_MEASUREMENT_POLICY_ENV not in os.environ and os.path.lexists(env_file):
+            # The operator installed the env file, but the variable never
+            # reached us: units come only from the bootstrap, and one from
+            # before this policy has no EnvironmentFile line for it
+            # (docs/AUTO_UPDATE.md). A file with the line commented out looks
+            # the same from here, so the warning names both.
+            _print_event(
+                {
+                    "tdx_measurement_policy": {
+                        "status": "NOT_LOADED",
+                        "warning": f"{env_file} exists but"
+                        f" {TDX_MEASUREMENT_POLICY_ENV} is not set, so no TDX"
+                        " measurement policy applies; if the file sets it, the"
+                        " unit does not load it: add the EnvironmentFile"
+                        " drop-in from docs/AUTO_UPDATE.md",
+                    }
+                }
+            )
+        return None
+    try:
+        policy = load_tdx_measurement_policy(path)
+    except TdxMeasurementPolicyError as exc:
+        raise SystemExit(f"TDX measurement policy refused: {exc}") from exc
+    source = read_policy_source(path, policy)
+    if source.matches:
+        policy = dataclasses.replace(policy, registry_release=source.registry_release)
+    _print_event(
+        {
+            "tdx_measurement_policy": {
+                "status": "LOADED",
+                "mode": policy.mode,
+                "digest": policy.digest,
+                "allowed_measurements": len(policy.allowed_measurements),
+                **source.event_fields(),
+            }
+        }
+    )
+    return policy
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
@@ -1070,6 +1215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
     capacity_shadow = _capacity_shadow_from_environment()
+    tdx_policy = _tdx_measurement_policy_from_environment()
     wallet = make_wallet(
         bt,
         name=options.wallet_name,
@@ -1212,6 +1358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     verifier_adapter=adapter,
                     writer=writer,
                     snp_verifier=snp_verifier,
+                    tdx_policy=tdx_policy,
                     telemetry_sink=telemetry_sink,
                     report_recovery=_print_event,
                     netuid=netuid,
