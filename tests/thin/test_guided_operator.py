@@ -14,6 +14,11 @@ from importlib.machinery import SourceFileLoader
 import pytest
 from bittensor_wallet import Keyfile, Keypair
 
+from cathedral_thin.independent_runtime.snp_production import (
+    SnpProductionError,
+    load_snp_policy,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -536,6 +541,83 @@ def test_setup_refuses_bad_hotkey_or_policy_before_config_mutation(
     with pytest.raises(setup.SetupRefused, match="production shape"):
         _configure(hotkey, policy, _runner([]))
     _assert_no_configuration_written()
+
+
+def _policy_with(**extra: object) -> bytes:
+    document = json.loads(_policy())
+    document.update(extra)
+    return json.dumps(document, separators=(",", ":")).encode("ascii")
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_setup_installs_a_policy_that_sets_require_single_socket(
+    monkeypatch, tmp_path: Path, required: bool
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    body = _policy_with(require_single_socket=required)
+    _write(policy, body)
+
+    _configure(hotkey, policy, _setup_runner([]))
+
+    installed = setup.ETC / "snp-policy.json"
+    assert installed.read_bytes() == body
+    assert load_snp_policy(installed).require_single_socket is required
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, []])
+def test_setup_refuses_a_non_boolean_require_single_socket_before_mutation(
+    monkeypatch, tmp_path: Path, value: object
+) -> None:
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    _write(policy, _policy_with(require_single_socket=value))
+
+    with pytest.raises(setup.SetupRefused, match="must be a boolean"):
+        _configure(hotkey, policy, _setup_runner([]))
+
+    _assert_no_configuration_written()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _policy(),
+        _policy_with(require_single_socket=True),
+        _policy_with(require_single_socket=False),
+        _policy_with(require_single_socket="false"),
+        _policy_with(require_single_socket=0),
+        _policy_with(single_socket=False),
+        _policy_with(generations={}),
+        _policy_with(schema="cathedral_amd_sev_snp_policy_v2"),
+    ],
+    ids=[
+        "plain",
+        "required",
+        "relaxed",
+        "string",
+        "zero",
+        "unknown-key",
+        "no-generation",
+        "other-schema",
+    ],
+)
+def test_setup_accepts_exactly_the_policies_the_runtime_loads(
+    tmp_path: Path, body: bytes
+) -> None:
+    path = _write(tmp_path / "policy.json", body, 0o600)
+    try:
+        load_snp_policy(path)
+    except SnpProductionError:
+        runtime_accepts = False
+    else:
+        runtime_accepts = True
+    try:
+        setup._validate_policy(body)
+    except setup.SetupRefused:
+        setup_accepts = False
+    else:
+        setup_accepts = True
+
+    assert setup_accepts is runtime_accepts
 
 
 def test_setup_refuses_group_or_world_readable_hotkey_before_mutation(

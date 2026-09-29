@@ -274,6 +274,13 @@ host requirements, or runtime release key must change. Use the candidate's exact
 wheelhouse and hash lock plus the reviewed deploy assets from the same source
 revision.
 
+Unit changes waiting for the next bootstrap (sequence 4 or later): the direct
+unit's `EnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env`
+and the `direct-tdx-measurement.env.example` asset. Until that bootstrap is
+published, hosts need the drop-in in
+[Optional unit settings](AUTO_UPDATE.md#optional-unit-settings); publish the
+bootstrap with, or soon after, the release that ships the allowlist.
+
 The privileged updater environment intentionally contains only the Cathedral
 project wheel, `cryptography`, `cffi`, and `pycparser`. It does not contain
 Bittensor or NumPy. Those validator dependencies stay in the signed runtime PEX.

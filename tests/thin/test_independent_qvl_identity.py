@@ -110,6 +110,53 @@ def test_qvl_identity_requires_stable_quote_bound_verified_claims(tmp_path, chan
     assert result.platform_identity_verified is False
 
 
+def exiting_script(tmp_path, status: int, stdout: str = ""):
+    path = tmp_path / "qvl-exit-fixture"
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"sys.stdout.write({stdout!r})\n"
+        "sys.stderr.write('cathedral TDX verification failed\\n')\n"
+        f"sys.exit({status})\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+    return path
+
+
+def test_qvl_collateral_unavailable_exit_is_infrastructure(tmp_path):
+    verifier = SubprocessQuoteVerifier(exiting_script(tmp_path, 3))
+
+    assert (
+        verifier.verify(b"quote", expected_report_data=b"r" * 64) is QuoteVerdict.INFRA
+    )
+    result = verifier.verify_with_identity(b"quote", expected_report_data=b"r" * 64)
+    assert result.verdict is QuoteVerdict.INFRA
+    assert result.stable_platform_id is None
+    assert result.platform_identity_verified is False
+
+
+@pytest.mark.parametrize("status", [1, 2, 4, 125])
+def test_qvl_other_nonzero_exits_fail_the_machine(tmp_path, status):
+    verifier = SubprocessQuoteVerifier(exiting_script(tmp_path, status))
+
+    assert (
+        verifier.verify(b"quote", expected_report_data=b"r" * 64) is QuoteVerdict.FAIL
+    )
+
+
+def test_qvl_unavailable_exit_with_claims_on_stdout_fails(tmp_path):
+    verifier = SubprocessQuoteVerifier(
+        exiting_script(
+            tmp_path, 3, '{"intel_verified": true, "report_data_match": true}\n'
+        )
+    )
+
+    assert (
+        verifier.verify(b"quote", expected_report_data=b"r" * 64) is QuoteVerdict.FAIL
+    )
+
+
 def test_qvl_replacement_after_load_is_infrastructure_failure(tmp_path):
     path = verifier_script(
         tmp_path, {"intel_verified": True, "report_data_match": True}
