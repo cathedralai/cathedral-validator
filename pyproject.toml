@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "cryptography>=42",
     # Standalone canonical receipt contract; preserves the existing SNP package pin.
-    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@bc757eebd0a20e9cfbc5ab1d9ac84dd4b42b07ef#subdirectory=packages/delivery-contract",
+    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract",
     "bittensor>=10.4,<11",
     "numpy>=1.24",
 ]

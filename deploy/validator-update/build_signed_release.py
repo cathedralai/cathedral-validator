@@ -358,7 +358,7 @@ TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 RUNTIME_DISTRIBUTIONS_SCHEMA = "cathedral_validator_pex_distributions_v1"
 EXPECTED_RUNTIME_LOCK_SHA256 = (
-    "9fa73c20f0f77684ebbe24cf8bb384f03d31b6bf3be205ae9fbd8a83f9899938"
+    "e03b31617c7a430436153998a879030e58991ee83a3d2fa7768ce4270d3daed7"
 )
 VALIDATOR_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 QVL_RELEASE_PATH = "bin/cathedral-tdx-verifier"
@@ -371,6 +371,7 @@ _REQUIRED_DISTRIBUTIONS = (
     "bittensor-",
     "cathedral-",
     "cathedral_scaffold-",
+    "cathedral_delivery-",
     "cryptography-",
     "numpy-",
 )
@@ -859,6 +860,20 @@ def _validator_pex(path: Path) -> ValidatedPex:
     validator_module = "cathedral_thin/independent_runtime/direct_validator.py"
     if not project_module_present(validator_module):
         raise UpdateRefused("validator PEX omits the direct validator module")
+    for module in ("delivery_plan.py", "delivery_runtime.py", "delivery_probe.py"):
+        if not project_module_present(f"cathedral_thin/independent_runtime/{module}"):
+            raise UpdateRefused("validator PEX omits the delivery runtime")
+    delivery_distributions = [
+        name for name in distributions if name.lower().startswith("cathedral_delivery-")
+    ]
+    if len(delivery_distributions) != 1 or not any(
+        name in names
+        for name in (
+            "cathedral_delivery/__init__.py",
+            f".deps/{delivery_distributions[0]}/cathedral_delivery/__init__.py",
+        )
+    ):
+        raise UpdateRefused("validator PEX omits the canonical delivery contract")
     snp_module = "cathedral_thin/independent_runtime/snp_production.py"
     if not project_module_present(snp_module):
         raise UpdateRefused("validator PEX omits the production SNP verifier")

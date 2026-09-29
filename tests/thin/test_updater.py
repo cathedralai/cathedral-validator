@@ -97,6 +97,7 @@ def main():
                 "bittensor-10.5.0-py3-none-any.whl": "1" * 64,
                 "cathedral-0.0.0-py3-none-any.whl": "5" * 64,
                 "cathedral_scaffold-1.2.3-py3-none-any.whl": "2" * 64,
+                "cathedral_delivery-0.1.0-py3-none-any.whl": "6" * 64,
                 "cryptography-48.0.0-py3-none-any.whl": "3" * 64,
                 "numpy-2.5.2-py3-none-any.whl": "4" * 64,
             },
@@ -127,6 +128,10 @@ def main():
             "cathedral_thin/independent_runtime/__init__.py": b"",
             "cathedral_thin/independent_runtime/direct_validator.py": runtime,
             "cathedral_thin/independent_runtime/snp_production.py": b"",
+            "cathedral_thin/independent_runtime/delivery_plan.py": b"",
+            "cathedral_thin/independent_runtime/delivery_runtime.py": b"",
+            "cathedral_thin/independent_runtime/delivery_probe.py": b"",
+            "cathedral_delivery/__init__.py": b"",
             "cathedral_thin/independent_runtime/telemetry.py": b"",
             "cathedral_thin/independent_runtime/telemetry_exporter.py": b"",
             ".deps/cathedral_scaffold-1.2.3-py3-none-any.whl/"

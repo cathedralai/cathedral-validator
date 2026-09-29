@@ -337,9 +337,9 @@
           "artifacts": [
             {
               "algorithm": "sha256",
-              "commit_id": "bc757eebd0a20e9cfbc5ab1d9ac84dd4b42b07ef",
-              "hash": "7d4c5f7daeb94784fb6d9774f8106ded4474d12f48465d85f93310eb0b8c2707",
-              "url": "git+https://github.com/cathedralai/cathedral-sandbox.git@bc757eebd0a20e9cfbc5ab1d9ac84dd4b42b07ef#subdirectory=packages/delivery-contract"
+              "commit_id": "29477bd2e8334a8d78e5f9168f001759ede60ad8",
+              "hash": "8ab1bd5c7fc06c523ab64be143e615373d3ef2812b16e213e0f34dce0555df8f",
+              "url": "git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract"
             }
           ],
           "project_name": "cathedral-delivery",
@@ -947,7 +947,7 @@
   "requirements": [
     "bittensor<11,>=10.4",
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
-    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@bc757eebd0a20e9cfbc5ab1d9ac84dd4b42b07ef#subdirectory=packages/delivery-contract",
+    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract",
     "cryptography>=42",
     "numpy>=1.24"
   ],
