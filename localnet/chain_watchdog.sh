@@ -14,6 +14,8 @@ export DOCKER_CONTEXT="colima-$LOCALNET_COLIMA_PROFILE"
 LIMIT_MB=${LOCALNET_CHAIN_MEMORY_LIMIT_MB:-7000}
 
 log() { echo "$(date -u +%FT%TZ) $*"; }
+# Keep running after the launching terminal closes.
+trap '' HUP
 
 while true; do
   running=$(docker inspect -f '{{.State.Running}}' "$LOCALNET_CONTAINER" 2>/dev/null || echo missing)

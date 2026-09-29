@@ -58,6 +58,7 @@ capture
 # production refresh timer. The worker re-verifies when the file changes.
 stop_pidfile "$LOCALNET_HOME/pids/snapshot-refresher.pid"
 (
+  trap '' HUP
   while true; do
     sleep 120
     capture || echo "$(date -u +%FT%TZ) capture failed"
@@ -85,6 +86,7 @@ PY
     --ip "$LOCALNET_HOST_IP" --port "$PORT"
 
   (
+    trap '' HUP
     cd "$CATHEDRAL_SANDBOX_DIR"
     exec env CATHEDRAL_LOCALNET_STUB_EVIDENCE=1 "$VENV_MINER/bin/python" -u -m cathedral.cli \
       worker serve \

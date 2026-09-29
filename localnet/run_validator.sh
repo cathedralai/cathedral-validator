@@ -46,6 +46,8 @@ ARGS=(
 )
 
 run() {
+  # Keep running after the launching terminal closes.
+  trap '' HUP
   cd "$VALIDATOR_REPO"
   exec env HOME="$VALIDATOR_HOME" \
     CATHEDRAL_LOCALNET=1 CATHEDRAL_LOCALNET_GENESIS_HASH="$GENESIS" \
