@@ -35,7 +35,29 @@ SAMPLE_NONCE = bytes([7]) * 32
 DIGEST = bytes([3]) * 32
 TEE_6_24 = 6 * 30_000 + 24 * 4_000
 BARE_6_24 = 6 * 18_000 + 24 * 2_500
+TDX_MEASUREMENT = "tdx-measurement-sha256:" + "a1" * 32
+TDX_OTHER = "tdx-measurement-sha256:" + "b2" * 32
+SNP_MEASUREMENT = "c3" * 48
+VERIFIER = "sha256:" + "5e" * 32
+ATTESTED_AT = "2026-09-28T11:50:00Z"  # the prober verified the quote before NOW
 _DEFAULT = object()
+
+
+def _evidence(tee_kind, measurement=None, **changes):
+    """A v2 receipt's evidence for a TEE box, as the prober records it."""
+
+    evidence = {
+        "evidence_kind": tee_kind,
+        "evidence_sha256": hashlib.sha256(tee_kind.encode()).hexdigest(),
+        "measurement": measurement
+        or (TDX_MEASUREMENT if tee_kind == "tdx" else SNP_MEASUREMENT),
+        "verifier_digest": VERIFIER,
+        "tls_spki_sha256": "7a" * 32,
+        "attestation_nonce": "9c" * 32,
+        "attested_at": ATTESTED_AT,
+    }
+    evidence.update(changes)
+    return evidence
 
 
 def _hex(key: Ed25519PrivateKey) -> str:
@@ -95,9 +117,16 @@ def _receipt(
     key_id="prober-1",
     sample_count=None,
     hardware_id_kind=None,
+    evidence=_DEFAULT,
+    measurement=None,
+    sign_by_hand=False,
 ):
     if tee_kind is _DEFAULT:
         tee_kind = "tdx" if kind == "tee" else None
+    if evidence is _DEFAULT:
+        # Receipt v2: evidence for a TEE box, null for bare metal.
+        evidence = _evidence(tee_kind, measurement) if tee_kind is not None else None
+    forged = sign_by_hand or hardware_id_kind is not None
     if tee_kind == "tdx":
         # A TDX box's hardware id comes from the digest in the strict
         # verifier's stable_platform_id, as the prober derives it.
@@ -134,14 +163,19 @@ def _receipt(
         issued_at=NOW,
         valid_for=timedelta(minutes=30),
         prober_key_id=key_id,
+        evidence=evidence,
     )
-    if hardware_id_kind is not None:
-        # sign_receipt refuses a body of the wrong kind, so a forged one is
-        # signed by hand: only the validator's verification may reject it.
-        body["box"]["hardware_id_kind"] = hardware_id_kind
+    if forged:
+        # sign_receipt refuses a body of the wrong kind, or a TEE body without
+        # evidence, so a forged one is signed by hand: only the validator's
+        # verification may reject it.
+        if hardware_id_kind is not None:
+            body["box"]["hardware_id_kind"] = hardware_id_kind
         signature = key.sign(receipt.canonical_bytes(body))
         return {**body, "signature": base64.b64encode(signature).decode()}
-    return receipt.sign_receipt(body, key)
+    # The prober signs bare metal only when told to; whether it earns is the
+    # validator's admit_bare_metal.
+    return receipt.sign_receipt(body, key, allow_bare_metal=kind == "bare_metal")
 
 
 def _score(receipts, policy=None, uids=None):
@@ -166,6 +200,7 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
     assert policy.admit_bare_metal is False
     assert policy.minimum_price_table_sequence == 1
     assert policy.price_table_digest is None
+    assert policy.max_evidence_age is None  # opt-in, as in verify_receipt
 
 
 @pytest.mark.parametrize(
@@ -196,6 +231,15 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
         ({"price_table_digest": "AB" * 32}, "price_table_digest"),
         ({"price_table_digest": "ab" * 31}, "price_table_digest"),
         ({"price_table_digest": 7}, "price_table_digest"),
+        ({"max_evidence_age_seconds": 0}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": -1}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": True}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": 60.0}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": None}, "max_evidence_age_seconds"),
+        (
+            {"max_evidence_age_seconds": cs.MAX_EVIDENCE_AGE_SECONDS + 1},
+            "max_evidence_age_seconds",
+        ),
         ({"schema": "other"}, "schema"),
         ({"extra": 1}, "exactly"),
     ],
@@ -640,7 +684,8 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     fetch = _feed(
         [],
         lambda nonce: [
-            _receipt(box_id=f"box-{i}", hardware=f"{i + 1:064x}", nonce=nonce)
+            # the longest box ids the library accepts, each with v2 evidence
+            _receipt(box_id=f"{i:0128d}", hardware=f"{i + 1:064x}", nonce=nonce)
             for i in range(count)
         ],
     )
@@ -650,7 +695,13 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     assert record["receipts"] == record["accepted"] == count
     assert len(record["rows"]) == cs.MAX_EVENT_ROWS and record["rows_omitted"] == 5
     assert record["units"] == [[3, count * TEE_6_24]]
-    assert len(json.dumps(record)) < 24_000
+    assert all(
+        row["evidence"]["measurement"] == TDX_MEASUREMENT for row in record["rows"]
+    )
+    # One journal line, well under journald's default 48 KiB LineMax, even with
+    # every row carrying its evidence.
+    line = json.dumps({"anchor_block": 1, "capacity_shadow": record}, sort_keys=True)
+    assert len(line) < cs.MAX_EVENT_LINE_BYTES
 
 
 @pytest.mark.parametrize("raw", [b"[" * 100_000, b'{"schema": ' + b"9" * 5000 + b"}"])
@@ -690,3 +741,281 @@ def test_an_inventory_write_failure_is_recorded_not_raised(tmp_path) -> None:
     record = shadow.record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
     assert record["status"] == "RECORDED" and record["accepted"] == 1
     assert record["inventory"]["status"] == "FAILED"
+
+
+# Receipt v2: TEE evidence, and the optional measurement allowlist.
+
+
+@pytest.mark.parametrize(
+    "evidence, reason",
+    [
+        (None, "a tee receipt's evidence must have exactly"),
+        (_evidence("sev_snp"), "evidence_kind must equal the box's tee_kind"),
+        (
+            _evidence("tdx", measurement="tdx-measurement-sha256:" + "00" * 32),
+            "all zeros",
+        ),
+    ],
+)
+def test_a_tee_receipt_with_missing_or_bad_evidence_is_refused_alone(
+    evidence, reason
+) -> None:
+    # The prober's sign_receipt refuses such a body, so only a forged or buggy
+    # prober could sign it: the validator's verification must still refuse it.
+    with pytest.raises(receipt.ReceiptError):
+        _receipt(box_id="bad", hardware="f1" * 32, evidence=evidence)
+    bad = _receipt(
+        box_id="bad", hardware="f1" * 32, evidence=evidence, sign_by_hand=True
+    )
+    scored = _score([_receipt(), bad])
+    assert scored["accepted"] == 1 and scored["units"] == [[3, TEE_6_24]]
+    [refused] = [row for row in scored["rows"] if row["verdict"] != cs.ACCEPTED]
+    assert reason in refused["reason"]
+    assert "box_id" not in refused  # an unverified receipt names no box
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert list(doc["boxes"]) == ["box-1"]
+
+
+def test_tee_evidence_is_recorded_in_rows_and_the_inventory() -> None:
+    scored = _score(_mixed_round(), policy=_policy(admit_bare_metal=True))
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert rows["box-3"]["evidence"] == _evidence("tdx")
+    assert rows["box-4"]["evidence"] == _evidence("sev_snp")
+    assert rows["box-1"]["evidence"] is None  # bare metal carries none
+    assert {row["measurement_allowed"] for row in scored["rows"]} == {None}
+    first = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert first["boxes"]["box-3"]["evidence"] == _evidence("tdx")
+    assert first["boxes"]["box-1"]["evidence"] is None
+    # The inventory keeps the evidence of the box's latest receipt.
+    later = _score(
+        [
+            _receipt(
+                box_id="box-3",
+                hotkey=HOTKEY_B,
+                hardware="aa" * 32,
+                measurement=TDX_OTHER,
+            )
+        ]
+    )
+    second = inv.update_inventory(
+        first, later["rows"], netuid=94, round_=8, now=NOW + timedelta(minutes=25)
+    )
+    assert second["boxes"]["box-3"]["evidence"]["measurement"] == TDX_OTHER
+    assert second["boxes"]["box-3"]["streak"] == 2
+    # A box gone quiet keeps its last-seen evidence.
+    assert second["boxes"]["box-4"]["status"] == inv.MISSING
+    assert second["boxes"]["box-4"]["evidence"] == _evidence("sev_snp")
+
+
+def test_without_a_bound_old_evidence_from_admission_still_verifies() -> None:
+    # An idle box keeps the evidence from its admission for as long as it is
+    # not relaunched: a year-old attestation is not refused for age.
+    old = _receipt(evidence=_evidence("tdx", attested_at="2025-09-28T12:00:00Z"))
+    scored = _score([old])
+    assert scored["accepted"] == 1 and scored["refused"] == {}
+    assert scored["rows"][0]["evidence"]["attested_at"] == "2025-09-28T12:00:00Z"
+
+
+def test_tee_evidence_older_than_the_policy_allows_is_refused_alone() -> None:
+    # _score checks at NOW + 1 minute, 11 minutes after ATTESTED_AT.
+    fresh = _receipt()
+    stale = _receipt(
+        box_id="stale",
+        hardware="f1" * 32,
+        evidence=_evidence("tdx", attested_at="2026-09-28T10:00:00Z"),
+    )
+    bare = _receipt(box_id="bare", hardware="f2" * 32, kind="bare_metal")
+    scored = _score(
+        [fresh, stale, bare],
+        policy=_policy(admit_bare_metal=True, max_evidence_age_seconds=3600),
+    )
+    rows = {row.get("box_id", "refused"): row for row in scored["rows"]}
+    # 121 minutes is past the hour the policy allows.
+    assert rows["refused"]["reason"] == (
+        "the receipt's evidence is older than max_evidence_age"
+    )
+    assert rows["box-1"]["verdict"] == rows["bare"]["verdict"] == cs.ACCEPTED
+    # The bound is the policy's: a tighter one refuses the fresh receipt too,
+    # and bare metal, which has no evidence, is never refused for age.
+    tight = _score(
+        [fresh, stale, bare],
+        policy=_policy(admit_bare_metal=True, max_evidence_age_seconds=600),
+    )
+    assert tight["accepted"] == 1
+    assert tight["refused"] == {
+        "the receipt's evidence is older than max_evidence_age": 2
+    }
+    loose = _score([stale], policy=_policy(max_evidence_age_seconds=3 * 3600))
+    assert loose["accepted"] == 1
+
+
+def _measurement_policy(tmp_path, name, *, schema, mode, allowed):
+    path = tmp_path / name
+    path.write_text(
+        json.dumps({"schema": schema, "mode": mode, "allowed_measurements": allowed})
+    )
+    os.chmod(path, 0o640)
+    return str(path)
+
+
+TDX_SCHEMA = "cathedral_tdx_measurement_policy_v1"
+SNP_SCHEMA = "cathedral_snp_measurement_policy_v1"
+
+
+def test_an_enforced_measurement_allowlist_refuses_unlisted_tee_images(
+    tmp_path,
+) -> None:
+    pytest.importorskip("cathedral.capacity.admission")
+    tdx = _measurement_policy(
+        tmp_path,
+        "tdx.json",
+        schema=TDX_SCHEMA,
+        mode="enforce",
+        allowed=[TDX_MEASUREMENT],
+    )
+    policy = _policy(measurement_policies=[tdx])
+    assert set(policy.measurement_policies) == {"tdx"}
+    scored = _score(
+        [
+            _receipt(box_id="listed"),
+            _receipt(
+                box_id="unlisted",
+                hotkey=HOTKEY_B,
+                hardware="aa" * 32,
+                measurement=TDX_OTHER,
+            ),
+            # no SEV-SNP policy: its measurement is recorded, never checked
+            _receipt(
+                box_id="snp", hotkey=HOTKEY_B, hardware="ab" * 32, tee_kind="sev_snp"
+            ),
+        ],
+        policy=policy,
+    )
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert rows["listed"]["verdict"] == cs.ACCEPTED
+    assert rows["listed"]["measurement_allowed"] is True
+    assert rows["unlisted"]["verdict"] == "REFUSED"
+    assert rows["unlisted"]["reason"] == cs.MEASUREMENT_REFUSED
+    assert rows["unlisted"]["measurement_allowed"] is False
+    assert rows["unlisted"]["evidence"]["measurement"] == TDX_OTHER
+    assert rows["snp"]["verdict"] == cs.ACCEPTED
+    assert rows["snp"]["measurement_allowed"] is None
+    assert scored["refused"] == {cs.MEASUREMENT_REFUSED: 1}
+    assert scored["units"] == [[3, TEE_6_24], [5, TEE_6_24]]
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert doc["boxes"]["unlisted"]["status"] == inv.UNHEALTHY
+    assert doc["boxes"]["unlisted"]["measurement_allowed"] is False
+
+
+def test_an_unlisted_image_cannot_knock_out_an_admitted_box(tmp_path) -> None:
+    pytest.importorskip("cathedral.capacity.admission")
+    tdx = _measurement_policy(
+        tmp_path,
+        "tdx.json",
+        schema=TDX_SCHEMA,
+        mode="enforce",
+        allowed=[TDX_MEASUREMENT],
+    )
+    scored = _score(
+        [
+            _receipt(box_id="victim"),
+            _receipt(box_id="victim", hotkey=HOTKEY_B, measurement=TDX_OTHER),
+        ],
+        policy=_policy(measurement_policies=[tdx]),
+    )
+    assert scored["units"] == [[3, TEE_6_24]]
+    assert scored["refused"] == {cs.MEASUREMENT_REFUSED: 1}
+
+
+def test_a_shadow_measurement_policy_only_records(tmp_path) -> None:
+    pytest.importorskip("cathedral.capacity.admission")
+    tdx = _measurement_policy(
+        tmp_path, "tdx.json", schema=TDX_SCHEMA, mode="shadow", allowed=[]
+    )
+    snp = _measurement_policy(
+        tmp_path,
+        "snp.json",
+        schema=SNP_SCHEMA,
+        mode="enforce",
+        allowed=[SNP_MEASUREMENT],
+    )
+    policy = _policy(measurement_policies=[tdx, snp])
+    scored = _score(
+        [
+            _receipt(),
+            _receipt(
+                box_id="snp", hotkey=HOTKEY_B, hardware="ab" * 32, tee_kind="sev_snp"
+            ),
+        ],
+        policy=policy,
+    )
+    assert scored["accepted"] == 2 and scored["refused"] == {}
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert rows["box-1"]["measurement_allowed"] is False
+    assert rows["snp"]["measurement_allowed"] is True
+    fetch = _feed([], lambda nonce: [_receipt(nonce=nonce)])
+    record = cs.CapacityShadow(
+        policy, fetch=fetch, now=lambda: NOW + timedelta(minutes=1)
+    ).record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
+    assert record["measurement_policies"] == {
+        "sev_snp": {
+            "mode": "enforce",
+            "digest": policy.measurement_policies["sev_snp"].digest,
+        },
+        "tdx": {"mode": "shadow", "digest": policy.measurement_policies["tdx"].digest},
+    }
+    assert "measurement_policies" not in cs.CapacityShadow(
+        _policy(), fetch=fetch, now=lambda: NOW + timedelta(minutes=1)
+    ).record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
+
+
+def test_bad_measurement_policies_are_refused(tmp_path) -> None:
+    pytest.importorskip("cathedral.capacity.admission")
+    tdx = _measurement_policy(
+        tmp_path,
+        "tdx.json",
+        schema=TDX_SCHEMA,
+        mode="enforce",
+        allowed=[TDX_MEASUREMENT],
+    )
+    again = _measurement_policy(
+        tmp_path, "tdx2.json", schema=TDX_SCHEMA, mode="shadow", allowed=[]
+    )
+    empty = _measurement_policy(
+        tmp_path, "empty.json", schema=TDX_SCHEMA, mode="enforce", allowed=[]
+    )
+    cases = [
+        ([], "one or two"),
+        ([tdx, again, tdx], "one or two"),
+        (tdx, "one or two"),
+        ([7], "one or two"),
+        ([tdx, again], "two tdx policies"),
+        ([empty], "at least one measurement"),
+        ([str(tmp_path / "absent.json")], "unreadable"),
+        (["relative.json"], "absolute"),
+    ]
+    for value, message in cases:
+        with pytest.raises(cs.CapacityPolicyError, match=message):
+            _policy(measurement_policies=value)
+    os.chmod(tdx, 0o646)
+    with pytest.raises(cs.CapacityPolicyError, match="world-writable"):
+        _policy(measurement_policies=[tdx])
+
+
+def test_measurement_policies_need_the_admission_module(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_admission(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cathedral.capacity" and "admission" in (fromlist or ()):
+            raise ImportError("no admission module")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", without_admission)
+    tdx = _measurement_policy(
+        tmp_path, "tdx.json", schema=TDX_SCHEMA, mode="shadow", allowed=[]
+    )
+    with pytest.raises(cs.CapacityPolicyError, match="cathedral.capacity.admission"):
+        _policy(measurement_policies=[tdx])
+    assert _policy().measurement_policies == {}  # without the key nothing is needed

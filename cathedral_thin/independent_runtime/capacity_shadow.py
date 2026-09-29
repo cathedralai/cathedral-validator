@@ -9,6 +9,17 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 * verify each receipt against the pinned prober keys (signature, netuid,
   nonce, round, freshness, and that the challenge proves the capacity paid
   for);
+* record each TEE receipt's evidence (receipt v2: the SHA-256 of the quote or
+  report the prober verified, its launch measurement, the verifier's digest,
+  the attested TLS key's SPKI hash, the nonce the quote's REPORT_DATA was made
+  over and when the prober verified it) in its row and in the inventory, and,
+  only when the policy sets ``max_evidence_age_seconds``, refuse a receipt
+  whose evidence is older than that;
+* optionally check that measurement against the owner's measurement policy
+  files (cathedral-validator #256's ``cathedral_tdx_measurement_policy_v1``,
+  and the SEV-SNP variant from the library's admission module): in
+  ``enforce`` an unlisted measurement is refused, in ``shadow`` it is only
+  recorded;
 * refuse bare-metal boxes unless the policy sets ``admit_bare_metal`` (TEE
   boxes come first; bare metal is deferred);
 * refuse a box id seen twice, and hardware claimed under two hotkeys; keep one
@@ -38,14 +49,16 @@ import re
 import secrets
 import stat
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from cathedral_thin.independent.canonical import PolicyBundleError, parse_strict_json
 from cathedral_thin.independent_runtime.capacity_inventory import (
     BARE_METAL_REFUSED,
+    MEASUREMENT_REFUSED,
+    NOT_ADMITTED,
     record_cycle,
 )
 from cathedral_thin.independent.fetch_policy import (
@@ -71,7 +84,13 @@ MAX_KEYS = 16
 # effect until a native checker exists. The machinery stays for that checker.
 MAX_RECHECK_MIB = 64
 RECHECK_BUDGET_SECONDS = 60.0
-MAX_EVENT_ROWS = 32
+# The record is one journal line, so every list and map in it is capped; the
+# inventory file keeps every box. MAX_EVENT_LINE_BYTES is the worst case the
+# tests build, with margin under journald's default 48 KiB LineMax.
+MAX_EVENT_ROWS = 24
+MAX_EVENT_UNITS = 64
+MAX_EVENT_REASONS = 16
+MAX_EVENT_LINE_BYTES = 40_000
 FETCH_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_CHARS = 200
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -93,10 +112,30 @@ _OPTIONAL_POLICY_KEYS = frozenset(
         "admit_bare_metal",
         "minimum_price_table_sequence",
         "price_table_digest",
+        "measurement_policies",
+        "max_evidence_age_seconds",
     }
 )
+# A TEE receipt's evidence is the attestation from the box's admission, or
+# from its last relaunch between customers, reused for every round's receipt
+# until the next one. An idle box is not relaunched, so its evidence can be
+# any age while the box is healthy. The age bound is therefore opt-in, like
+# the library's verify_receipt: without max_evidence_age_seconds nothing is
+# refused for age. An operator sets it only when their prober re-attests on a
+# known cadence.
+MAX_EVIDENCE_AGE_SECONDS = 7 * 24 * 3600
 MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
 BARE_METAL = "bare_metal"
+# What a v2 TEE receipt's evidence carries (cathedral.capacity.receipt.ReceiptEvidence).
+EVIDENCE_FIELDS = (
+    "evidence_kind",
+    "evidence_sha256",
+    "measurement",
+    "verifier_digest",
+    "tls_spki_sha256",
+    "attestation_nonce",
+    "attested_at",
+)
 
 ACCEPTED = "ACCEPTED"
 
@@ -115,6 +154,17 @@ def _library() -> tuple[Any, Any, Any]:
     return challenge, pricing, receipt
 
 
+def _admission() -> Any:
+    try:
+        from cathedral.capacity import admission  # noqa: PLC0415
+    except ImportError as exc:
+        raise CapacityPolicyError(
+            "measurement_policies needs a cathedral-sandbox with"
+            " cathedral.capacity.admission"
+        ) from exc
+    return admission
+
+
 @dataclass(frozen=True)
 class CapacityPolicy:
     mode: str
@@ -127,6 +177,11 @@ class CapacityPolicy:
     admit_bare_metal: bool = False
     minimum_price_table_sequence: int = 1
     price_table_digest: str | None = None
+    # tee_kind -> the library's MeasurementPolicy; empty means record only.
+    measurement_policies: Mapping[str, Any] = field(default_factory=dict)
+    # verify_receipt refuses a TEE receipt whose evidence is older than this;
+    # None (the default) sets no bound.
+    max_evidence_age: timedelta | None = None
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -175,6 +230,35 @@ def _ed25519_keys(value: object, label: str) -> dict[str, Any]:
             )
         keys[key_id] = Ed25519PublicKey.from_public_bytes(bytes.fromhex(raw))
     return keys
+
+
+def _measurement_policies(value: object) -> dict[str, Any]:
+    """One measurement policy file per TEE kind, in #256's format, read as
+    safely as the capacity policy itself and parsed by the library."""
+
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 2
+        or any(not isinstance(item, str) for item in value)
+    ):
+        raise CapacityPolicyError(
+            "measurement_policies must list one or two measurement policy paths"
+        )
+    admission = _admission()
+    policies: dict[str, Any] = {}
+    for path in value:
+        try:
+            parsed = admission.parse_policy(_safe_bytes(Path(path)))
+        except admission.AdmissionError as exc:
+            raise CapacityPolicyError(f"measurement policy {path}: {exc}") from exc
+        except CapacityPolicyError as exc:
+            raise CapacityPolicyError(f"measurement policy {path}: {exc}") from exc
+        if parsed.kind in policies:
+            raise CapacityPolicyError(
+                f"measurement_policies names two {parsed.kind} policies"
+            )
+        policies[parsed.kind] = parsed
+    return policies
 
 
 def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
@@ -257,6 +341,21 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError(
             "inventory_path must be an absolute path to a .json file"
         )
+    max_evidence_age = document.get("max_evidence_age_seconds")
+    if "max_evidence_age_seconds" in document and (
+        not isinstance(max_evidence_age, int)
+        or isinstance(max_evidence_age, bool)
+        or not 1 <= max_evidence_age <= MAX_EVIDENCE_AGE_SECONDS
+    ):
+        raise CapacityPolicyError(
+            "max_evidence_age_seconds must be an integer from 1 to"
+            f" {MAX_EVIDENCE_AGE_SECONDS}"
+        )
+    measurement_policies = (
+        _measurement_policies(document["measurement_policies"])
+        if "measurement_policies" in document
+        else {}
+    )
     return CapacityPolicy(
         mode=document["mode"],
         receipts_url=url,
@@ -268,6 +367,10 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         admit_bare_metal=admit_bare_metal,
         minimum_price_table_sequence=minimum_sequence,
         price_table_digest=pinned_digest,
+        measurement_policies=measurement_policies,
+        max_evidence_age=(
+            None if max_evidence_age is None else timedelta(seconds=max_evidence_age)
+        ),
     )
 
 
@@ -303,10 +406,26 @@ def _parse_feed(raw: bytes, *, netuid: int, nonce: str) -> tuple[int, list[Any]]
     return round_, receipts
 
 
+def _reason(text: str) -> str:
+    """A refusal reason that is at most MAX_ERROR_CHARS bytes on the journal
+    line: printable ASCII only, with nothing JSON has to escape."""
+
+    return "".join(
+        char if " " <= char <= "~" and char not in '"\\' else "?"
+        for char in text[:MAX_ERROR_CHARS]
+    )
+
+
 def _short(exc: BaseException) -> str:
     text = str(exc)
     name = type(exc).__name__
     return (f"{name}: {text}" if text else name)[:MAX_ERROR_CHARS]
+
+
+def _evidence_row(evidence: Any) -> dict[str, str] | None:
+    if evidence is None:
+        return None
+    return {name: getattr(evidence, name) for name in EVIDENCE_FIELDS}
 
 
 def score_receipts(
@@ -338,6 +457,7 @@ def score_receipts(
                 validator_nonce=nonce,
                 now=now,
                 expected_round=round_,
+                max_evidence_age=policy.max_evidence_age,
             )
             row = {
                 "box_id": parsed.box_id,
@@ -352,20 +472,38 @@ def score_receipts(
                 "value": policy.price_table.value(
                     kind=parsed.kind, vcpus=parsed.vcpus, memory_gib=parsed.memory_gib
                 ),
+                # A v2 receipt carries evidence exactly for a TEE box; the
+                # library refuses a TEE receipt without it.
+                "evidence": _evidence_row(parsed.evidence),
+                "measurement_allowed": None,
                 "recheck": "off",
                 "verdict": ACCEPTED,
             }
+            measurement_policy = (
+                policy.measurement_policies.get(parsed.evidence.evidence_kind)
+                if parsed.evidence is not None
+                else None
+            )
+            if measurement_policy is not None:
+                row["measurement_allowed"] = measurement_policy.allows(
+                    parsed.evidence.measurement
+                )
         except receipt_lib.ReceiptError as exc:
-            rows.append({"verdict": "REFUSED", "reason": str(exc)[:MAX_ERROR_CHARS]})
+            rows.append({"verdict": "REFUSED", "reason": _reason(str(exc))})
             continue
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
             # The message is kept (bounded), so a library bug that refuses every
             # receipt still reads as that bug in the record's refused counts.
-            rows.append({"verdict": "REFUSED", "reason": _short(exc)})
+            rows.append({"verdict": "REFUSED", "reason": _reason(_short(exc))})
             continue
         if parsed.kind == BARE_METAL and not policy.admit_bare_metal:
             row["verdict"] = "REFUSED"
             row["reason"] = BARE_METAL_REFUSED
+        elif (
+            row["measurement_allowed"] is False and measurement_policy.mode == "enforce"
+        ):
+            row["verdict"] = "REFUSED"
+            row["reason"] = MEASUREMENT_REFUSED
         rows.append(row)
         verified.append((row, parsed))
 
@@ -377,9 +515,10 @@ def score_receipts(
     by_box: dict[str, list[dict[str, Any]]] = {}
     by_hardware: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row, _parsed in verified:
-        if row.get("reason") == BARE_METAL_REFUSED:
+        if row.get("reason") in NOT_ADMITTED:
             # A box that is not admitted takes no part in dedup, so a cheap
-            # bare-metal receipt cannot knock out a TEE box sharing its box id.
+            # bare-metal receipt (or a TEE box running an unlisted image)
+            # cannot knock out an admitted box sharing its box id or hardware.
             continue
         by_box.setdefault(row["box_id"], []).append(row)
         by_hardware.setdefault(
@@ -423,7 +562,7 @@ def score_receipts(
             recomputed = challenge.lane_output(parsed.challenge, lane)
         except Exception as exc:  # noqa: BLE001 - one receipt never fails the round
             row["recheck"] = "error"
-            refuse(row, _short(exc))
+            refuse(row, _reason(_short(exc)))
             continue
         if recomputed == parsed.sampled_outputs[lane]:
             row["recheck"] = "passed"
@@ -449,6 +588,29 @@ def score_receipts(
     }
 
 
+def _event_fields(scored: Mapping[str, Any]) -> dict[str, Any]:
+    """``score_receipts``'s result, capped for the one journal line: the first
+    MAX_EVENT_ROWS rows, the MAX_EVENT_UNITS most valuable UIDs (``units_total``
+    still sums every UID) and the MAX_EVENT_REASONS most common refusal reasons
+    (``refused_omitted`` counts the receipts refused for the rest)."""
+
+    rows = scored["rows"]
+    units = sorted(scored["units"], key=lambda item: (-item[1], item[0]))
+    refused = sorted(scored["refused"].items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "receipts": scored["receipts"],
+        "accepted": scored["accepted"],
+        "refused": dict(sorted(refused[:MAX_EVENT_REASONS])),
+        "refused_omitted": sum(count for _reason, count in refused[MAX_EVENT_REASONS:]),
+        "recheck_failures": scored["recheck_failures"],
+        "units": sorted(units[:MAX_EVENT_UNITS]),
+        "units_omitted": max(0, len(units) - MAX_EVENT_UNITS),
+        "units_total": sum(value for _uid, value in units),
+        "rows": rows[:MAX_EVENT_ROWS],
+        "rows_omitted": max(0, len(rows) - MAX_EVENT_ROWS),
+    }
+
+
 class CapacityShadow:
     """One validator's shadow capacity scoring, run once per cycle."""
 
@@ -470,10 +632,10 @@ class CapacityShadow:
     ) -> dict[str, Any]:
         """Score this round's receipts, or describe why not. Never raises.
 
-        ``hotkey_to_uid`` names this cycle's serving miners. The record keeps
-        the first MAX_EVENT_ROWS receipt rows so the cycle's one journal line
-        stays small; the counts and units cover every receipt, and so does the
-        inventory file when the policy names one.
+        ``hotkey_to_uid`` names this cycle's serving miners. The record is
+        capped (``_event_fields``) so the cycle's one journal line stays under
+        MAX_EVENT_LINE_BYTES; the inventory file, when the policy names one,
+        covers every receipt's box.
         """
 
         head = {
@@ -483,6 +645,12 @@ class CapacityShadow:
             "currency": self.policy.price_table.currency,
             "unit": "micro-currency per hour",
         }
+        measurement_policies = getattr(self.policy, "measurement_policies", None)
+        if measurement_policies:
+            head["measurement_policies"] = {
+                kind: {"mode": item.mode, "digest": item.digest}
+                for kind, item in sorted(measurement_policies.items())
+            }
         try:
             nonce = secrets.token_hex(32)
             raw = self._fetch(f"{self.policy.receipts_url}/{netuid}/{nonce}")
@@ -501,14 +669,12 @@ class CapacityShadow:
             )
         except Exception as exc:  # noqa: BLE001 - a shadow record never fails the cycle
             return {**head, "status": "FAILED", "error": _short(exc)}
-        rows = scored.pop("rows")
+        rows = scored["rows"]
         record = {
             **head,
             "status": "RECORDED",
             "round": round_,
-            **scored,
-            "rows": rows[:MAX_EVENT_ROWS],
-            "rows_omitted": max(0, len(rows) - MAX_EVENT_ROWS),
+            **_event_fields(scored),
         }
         if self.policy.inventory_path is not None:
             try:
