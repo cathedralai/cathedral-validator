@@ -9389,6 +9389,25 @@ def set_weights_on_chain(
                 f"wire_weights={wire_values} vector={preview}",
             )
             return ChainSubmission(success=True)
+        if broadcast and netuid == 94 and runtime_contract is not None:
+            # The caller reserved this attempt before calling. Name it now,
+            # before anything below can refuse (preflight, authorization,
+            # chain constraints), so the handler releases the unsigned
+            # reservation instead of leaving every later tick fenced behind
+            # it. Advisory only: an unreadable journal leaves attempt_id unset
+            # exactly as before, and the strict read before signing still
+            # decides. The release itself refuses anything past unsigned.
+            try:
+                reserved = _read_state(_submission_state_path(runtime_contract)).get(
+                    "submission_pending_id"
+                )
+            except Exception:
+                reserved = None
+            if (
+                isinstance(reserved, str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", reserved) is not None
+            ):
+                attempt_id = reserved
         if preflight is None:
             preflight = chain_preflight(
                 network=network,
@@ -9429,15 +9448,20 @@ def set_weights_on_chain(
                     if runtime_contract is not None
                     else {}
                 )
-                attempt_id = state.get("submission_pending_id")
+                pending_id = state.get("submission_pending_id")
                 if (
                     runtime_contract is None
-                    or not isinstance(attempt_id, str)
-                    or re.fullmatch(r"sha256:[0-9a-f]{64}", attempt_id) is None
+                    or not isinstance(pending_id, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", pending_id) is None
                 ):
                     raise wire.VectorError(
                         "SN94 authorized call has no durable pending attempt"
                     )
+                if attempt_id is not None and pending_id != attempt_id:
+                    raise wire.VectorError(
+                        "SN94 pending attempt changed during authorization"
+                    )
+                attempt_id = pending_id
                 primary_call_started = True
                 _mark_tick_reached_chain_call(runtime_contract)
                 receipt = _submit_exact_sn94_extrinsic(

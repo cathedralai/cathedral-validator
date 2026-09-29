@@ -124,6 +124,8 @@ validator assigned weight, or subnet emissions exist.
 `cathedral_amd_sev_snp_policy_v1` accepts an optional top-level boolean
 `require_single_socket`. Absent means `true`, so a policy file written before
 this key existed keeps exactly its previous meaning and its previous digest.
+`cathedral-validator-setup` accepts the key, installs the policy byte for byte,
+and refuses any value that is not a JSON boolean, exactly as the runtime does.
 
 Set it to `false` only deliberately. It exists because a Linux KVM host cannot
 satisfy bit 20 on a machine with more than one socket populated: AMD 56860

@@ -4,6 +4,11 @@ The independent composer will not pay from an unpinned mock. This verifier
 hashes the on-disk binary and that digest is the ``qvl_digest`` pin. The child
 must print JSON with ``intel_verified`` and ``report_data_match`` both the
 boolean ``true``, matching the production TDX verifier contract.
+
+Exit status ``3`` with nothing on stdout is the verifier's report that Intel's
+collateral service did not answer. It says nothing about the miner, so it is
+INFRA, like an AMD key-server outage on the SNP path. Every other nonzero exit
+is FAIL. Verifier releases before that contract never exit ``3``.
 """
 
 from __future__ import annotations
@@ -17,7 +22,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from cathedral_thin.independent.compute import QuoteIdentityVerdict, QuoteVerdict
+from cathedral_thin.independent.compute import (
+    QuoteIdentityVerdict,
+    QuoteVerdict,
+    tdx_measurement_or_none,
+)
 
 from .errors import QuoteVerifyError
 
@@ -36,6 +45,7 @@ DIRECT_VALIDATOR_QVL_DIGEST = (
 MAX_OUTPUT = 1_048_576
 MAX_BINARY_BYTES = 64 * 1024 * 1024
 TIMEOUT_SECONDS = 30
+COLLATERAL_UNAVAILABLE_EXIT = 3
 
 
 def digest_file(path: Path) -> str:
@@ -195,6 +205,8 @@ class SubprocessQuoteVerifier:
             return QuoteVerdict.INFRA, None
         if len(completed.stdout) + len(completed.stderr) > MAX_OUTPUT:
             return QuoteVerdict.INFRA, None
+        if completed.returncode == COLLATERAL_UNAVAILABLE_EXIT and not completed.stdout:
+            return QuoteVerdict.INFRA, None
         if completed.returncode != 0:
             return QuoteVerdict.FAIL, None
         try:
@@ -247,6 +259,7 @@ class SubprocessQuoteVerifier:
         )
         if verdict is not QuoteVerdict.PASS or claims is None:
             return QuoteIdentityVerdict(verdict, None, False)
+        measurement = tdx_measurement_or_none(claims.get("measurement"))
         stable = claims.get("stable_platform_id")
         platform = claims.get("platform_id")
         verified = (
@@ -255,7 +268,7 @@ class SubprocessQuoteVerifier:
             and claims.get("claims_bound_to_quote") is True
         )
         if not isinstance(stable, str) or platform != stable or not verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
         prefix = "tdx-platform-sha256:"
         if (
             not stable.startswith(prefix)
@@ -265,8 +278,8 @@ class SubprocessQuoteVerifier:
                 for character in stable[len(prefix) :]
             )
         ):
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False)
-        return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True, measurement)
 
 
 def _load_pinned_verifier(
