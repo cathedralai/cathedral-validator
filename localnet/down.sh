@@ -10,6 +10,7 @@ for file in "$LOCALNET_HOME"/pids/miner*.pid; do
 done
 stop_pidfile "$LOCALNET_HOME/pids/snapshot-refresher.pid"
 if [ "${1:-}" = "--chain" ]; then
+  stop_pidfile "$LOCALNET_HOME/pids/chain-watchdog.pid"
   DOCKER_CONTEXT="colima-$LOCALNET_COLIMA_PROFILE" docker stop "$LOCALNET_CONTAINER" >/dev/null || true
 fi
 echo "down: stopped"
