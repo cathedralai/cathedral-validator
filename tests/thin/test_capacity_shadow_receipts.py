@@ -200,9 +200,7 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
     assert policy.admit_bare_metal is False
     assert policy.minimum_price_table_sequence == 1
     assert policy.price_table_digest is None
-    assert policy.max_evidence_age == timedelta(
-        seconds=cs.DEFAULT_MAX_EVIDENCE_AGE_SECONDS
-    )
+    assert policy.max_evidence_age is None  # opt-in, as in verify_receipt
 
 
 @pytest.mark.parametrize(
@@ -809,11 +807,13 @@ def test_tee_evidence_is_recorded_in_rows_and_the_inventory() -> None:
     assert second["boxes"]["box-4"]["evidence"] == _evidence("sev_snp")
 
 
-def test_the_default_evidence_age_follows_the_validator_round() -> None:
-    from cathedral_thin.independent_runtime import direct_validator as runtime
-
-    assert cs.ROUND_SECONDS == runtime.DEFAULT_INTERVAL_SECONDS
-    assert cs.DEFAULT_MAX_EVIDENCE_AGE_SECONDS == 4 * cs.ROUND_SECONDS
+def test_without_a_bound_old_evidence_from_admission_still_verifies() -> None:
+    # An idle box keeps the evidence from its admission for as long as it is
+    # not relaunched: a year-old attestation is not refused for age.
+    old = _receipt(evidence=_evidence("tdx", attested_at="2025-09-28T12:00:00Z"))
+    scored = _score([old])
+    assert scored["accepted"] == 1 and scored["refused"] == {}
+    assert scored["rows"][0]["evidence"]["attested_at"] == "2025-09-28T12:00:00Z"
 
 
 def test_tee_evidence_older_than_the_policy_allows_is_refused_alone() -> None:
@@ -825,9 +825,12 @@ def test_tee_evidence_older_than_the_policy_allows_is_refused_alone() -> None:
         evidence=_evidence("tdx", attested_at="2026-09-28T10:00:00Z"),
     )
     bare = _receipt(box_id="bare", hardware="f2" * 32, kind="bare_metal")
-    scored = _score([fresh, stale, bare], policy=_policy(admit_bare_metal=True))
+    scored = _score(
+        [fresh, stale, bare],
+        policy=_policy(admit_bare_metal=True, max_evidence_age_seconds=3600),
+    )
     rows = {row.get("box_id", "refused"): row for row in scored["rows"]}
-    # 121 minutes is past the default of four rounds (100 minutes).
+    # 121 minutes is past the hour the policy allows.
     assert rows["refused"]["reason"] == (
         "the receipt's evidence is older than max_evidence_age"
     )

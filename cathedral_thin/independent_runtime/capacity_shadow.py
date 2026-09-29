@@ -12,9 +12,9 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
 * record each TEE receipt's evidence (receipt v2: the SHA-256 of the quote or
   report the prober verified, its launch measurement, the verifier's digest,
   the attested TLS key's SPKI hash, the nonce the quote's REPORT_DATA was made
-  over and when the prober verified it) in its row and in the inventory, and
-  refuse a receipt whose evidence is older than the policy's
-  ``max_evidence_age_seconds``;
+  over and when the prober verified it) in its row and in the inventory, and,
+  only when the policy sets ``max_evidence_age_seconds``, refuse a receipt
+  whose evidence is older than that;
 * optionally check that measurement against the owner's measurement policy
   files (cathedral-validator #256's ``cathedral_tdx_measurement_policy_v1``,
   and the SEV-SNP variant from the library's admission module): in
@@ -116,16 +116,13 @@ _OPTIONAL_POLICY_KEYS = frozenset(
         "max_evidence_age_seconds",
     }
 )
-# A TEE receipt's evidence comes from the box's admission and is reused for
-# every round's receipt, so the validator bounds its age. Receipts are per
-# round and the direct validator's round is its DEFAULT_INTERVAL_SECONDS (25
-# minutes). A prober that re-attests every round gives evidence at most about
-# two rounds old when a validator checks it (one round until the next
-# receipt, one more until the validator's cycle reads it); four rounds allows
-# for two late or missed re-attestations, and still refuses evidence left
-# over from an admission hours ago.
-ROUND_SECONDS = 1500
-DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 4 * ROUND_SECONDS
+# A TEE receipt's evidence is the attestation from the box's admission, or
+# from its last relaunch between customers, reused for every round's receipt
+# until the next one. An idle box is not relaunched, so its evidence can be
+# any age while the box is healthy. The age bound is therefore opt-in, like
+# the library's verify_receipt: without max_evidence_age_seconds nothing is
+# refused for age. An operator sets it only when their prober re-attests on a
+# known cadence.
 MAX_EVIDENCE_AGE_SECONDS = 7 * 24 * 3600
 MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
 BARE_METAL = "bare_metal"
@@ -182,8 +179,9 @@ class CapacityPolicy:
     price_table_digest: str | None = None
     # tee_kind -> the library's MeasurementPolicy; empty means record only.
     measurement_policies: Mapping[str, Any] = field(default_factory=dict)
-    # verify_receipt refuses a TEE receipt whose evidence is older than this.
-    max_evidence_age: timedelta = timedelta(seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS)
+    # verify_receipt refuses a TEE receipt whose evidence is older than this;
+    # None (the default) sets no bound.
+    max_evidence_age: timedelta | None = None
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -343,10 +341,8 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError(
             "inventory_path must be an absolute path to a .json file"
         )
-    max_evidence_age = document.get(
-        "max_evidence_age_seconds", DEFAULT_MAX_EVIDENCE_AGE_SECONDS
-    )
-    if (
+    max_evidence_age = document.get("max_evidence_age_seconds")
+    if "max_evidence_age_seconds" in document and (
         not isinstance(max_evidence_age, int)
         or isinstance(max_evidence_age, bool)
         or not 1 <= max_evidence_age <= MAX_EVIDENCE_AGE_SECONDS
@@ -372,7 +368,9 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         minimum_price_table_sequence=minimum_sequence,
         price_table_digest=pinned_digest,
         measurement_policies=measurement_policies,
-        max_evidence_age=timedelta(seconds=max_evidence_age),
+        max_evidence_age=(
+            None if max_evidence_age is None else timedelta(seconds=max_evidence_age)
+        ),
     )
 
 

@@ -35,10 +35,13 @@ evidence. A validator cannot re-verify the quote from the receipt; `evidence_sha
 audit one later against the prober's archive, and the library's
 `receipt.expected_report_data` gives the REPORT_DATA that quote must carry.
 
-The evidence comes from admission and is reused for every round's receipt, so the validator
-refuses a TEE receipt whose `attested_at` is more than `max_evidence_age_seconds` before now
-(the library's `verify_receipt(..., max_evidence_age=)`), with the library's reason `the
-receipt's evidence is older than max_evidence_age`.
+The evidence is the attestation from the box's admission, or from its last relaunch between
+customers, and is reused for every round's receipt until the next one. An idle box is not
+relaunched, so its evidence can be of any age while the box stays healthy. By default the
+validator therefore sets no age bound, as the library's `verify_receipt` does not. With
+`max_evidence_age_seconds` set, it refuses a TEE receipt whose `attested_at` is more than that
+before now (`verify_receipt(..., max_evidence_age=)`), with the library's reason `the receipt's
+evidence is older than max_evidence_age`.
 
 ## Turn it on
 
@@ -64,8 +67,7 @@ The file must be a regular file (not a symlink) and not world-writable:
   "admit_bare_metal": false,
   "minimum_price_table_sequence": 1,
   "price_table_digest": "<64 hex: the table's digest, optional>",
-  "measurement_policies": ["/etc/cathedral-validator/tdx-measurement-policy.json"],
-  "max_evidence_age_seconds": 6000
+  "measurement_policies": ["/etc/cathedral-validator/tdx-measurement-policy.json"]
 }
 ```
 
@@ -101,13 +103,13 @@ The file must be a regular file (not a symlink) and not world-writable:
   and only recorded (`measurement_allowed: false`). A kind with no policy is recorded, never
   checked. Without the key nothing is checked. Each file's mode and digest appear in the record
   as `measurement_policies`, since this policy's own digest covers only the paths.
-- `max_evidence_age_seconds` (an integer from 1 to 604800, seven days; default 6000): the
-  oldest TEE evidence a receipt may rest on, measured from its `attested_at` to the validator's
-  clock. The default is four 25-minute rounds, the direct validator's default interval:
-  evidence re-attested every round is at most about two rounds old when a validator reads it,
-  so four allows two late or missed re-attestations. A prober that only attests at admission
-  has every TEE receipt refused once the evidence ages past this. Set it to match how often the
-  prober re-attests; a validator running a longer interval should raise it.
+- `max_evidence_age_seconds` (optional; an integer from 1 to 604800, seven days): the oldest
+  TEE evidence a receipt may rest on, measured from its `attested_at` to the validator's clock.
+  Without it there is no bound. The prober attests a box at admission and again after each
+  relaunch between customers, so an idle box's evidence can be arbitrarily old. Set this only
+  if your prober re-attests on a known cadence, and leave room for a late re-attestation plus
+  the time until your cycle reads the receipt; otherwise every TEE receipt is refused once its
+  evidence ages past the bound.
 - `recheck_max_mib` (0 to 64): `0` turns the recheck off. Otherwise the validator recomputes one
   sampled challenge lane per receipt whose lane needs at most this many MiB, and marks the rest
   `skipped`. It starts no new lane after a minute, so a cycle spends at most about a minute plus
@@ -134,7 +136,7 @@ validator:
    "validator_nonce", "receipts": [...]}` (at most 1 MiB and 1024 receipts). The prober signs
    each receipt for that nonce, so a validator can't reuse another validator's receipts;
 2. verifies every receipt: the prober key, the netuid, the nonce, the round, freshness, the age
-   of a TEE receipt's evidence (`max_evidence_age_seconds`), and that the challenge proves the
+   of a TEE receipt's evidence (only with `max_evidence_age_seconds`), and that the challenge proves the
    capacity it pays for. Each receipt is handled on its own: if
    verifying or valuing one raises any `Exception`, that receipt is refused (the reason is the
    error's type name and message, cut to 200 characters, or the library's message for a receipt
