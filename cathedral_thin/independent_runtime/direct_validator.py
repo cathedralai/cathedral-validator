@@ -25,7 +25,8 @@ from typing import Any, Callable, Sequence
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
-from cathedral_thin.independent.compute import ComputeAdapter
+from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
+from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .axon import (
@@ -348,17 +349,60 @@ def finalized_serving_miners_snapshot(
     )
 
 
+INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
+INFRA_HALT_SCOPED = "scoped"
+
+
+def _verifier_outage(result: MultiComputeRound) -> bool:
+    """True when an INFRA verdict may mean this validator's verifier is down.
+
+    INFRA means the verifier could not reach a verdict (collateral fetch, a
+    timeout, unreadable verifier output), which says nothing about the machine,
+    so a round with INFRA verdicts is not written: it would zero machines for
+    this validator's own outage. But one machine's evidence is miner-supplied,
+    and a miner whose evidence alone ends in INFRA must not stop every other
+    miner's weights. A verifier that returned PASS for another machine of the
+    same TEE kind in this same round was at least partly working, so an INFRA
+    row of that kind can earn zero (it is never paid) and the round can be
+    written. It is not proof: collateral is per platform (Intel) or per chip
+    (AMD), so a partial outage looks the same, and then honest machines lose
+    the round. With no PASS of that kind the INFRA cannot be told apart from
+    an outage at all, and the round halts as before.
+
+    This decides who is paid, so it ships opt-in: only with
+    ``CATHEDRAL_INFRA_HALT=scoped`` does a round with proven-up verifiers get
+    written. Otherwise any INFRA verdict halts, as it always has, and the halt
+    says when the scoped rule would have written the round.
+    """
+
+    for kind, infra in (
+        (EVIDENCE_KIND_TDX, result.qvl_infra_count),
+        (EVIDENCE_KIND_SEV_SNP, result.snp_infra_count),
+    ):
+        if infra and not any(
+            row.get("tee_kind") == kind
+            and row.get("verdict") == QuoteVerdict.PASS.value
+            for row in result.rows
+        ):
+            return True
+    return False
+
+
 def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if (
-        result.feature_blocked
-        or result.blockers
-        or result.qvl_infra_count
-        or result.snp_infra_count
-    ):
+    if result.feature_blocked or result.blockers:
         raise DirectValidatorError("machine verification round is not fully proven")
+    if result.qvl_infra_count or result.snp_infra_count:
+        if _verifier_outage(result):
+            raise DirectValidatorError("machine verification round is not fully proven")
+        if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
+            raise DirectValidatorError(
+                "machine verification round is not fully proven (the verifiers "
+                "passed other machines of each INFRA kind this round, so "
+                f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would write it)"
+            )
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
     for uid, hotkey in identities.items():

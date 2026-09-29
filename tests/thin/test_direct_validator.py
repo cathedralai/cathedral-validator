@@ -556,6 +556,104 @@ def test_qvl_infrastructure_failure_halts_instead_of_redistributing() -> None:
         build_direct_plan(snapshot(), result)
 
 
+def _infra_row(marker: str, *, uid: int, hotkey: str, kind: str) -> dict[str, object]:
+    row = machine_row(marker, uid=uid, hotkey=hotkey, paid=False)
+    row.update(
+        verdict="INFRA",
+        tee_kind=kind,
+        platform_identity_verified=False,
+        score_reasons=["quote_not_verified"],
+    )
+    return row
+
+
+def _tee_round(
+    *rows: dict[str, object], qvl: int = 0, snp: int = 0
+) -> MultiComputeRound:
+    return replace(
+        round_result(*rows, miners=(MINER_ONE_AXON, MINER_TWO_AXON)),
+        qvl_infra_count=qvl,
+        snp_infra_count=snp,
+    )
+
+
+@pytest.mark.parametrize("kind", ["tdx", "sev_snp"])
+def test_one_miners_infra_verdict_zeroes_only_that_machine_when_the_verifier_worked(
+    kind: str, monkeypatch
+) -> None:
+    monkeypatch.setenv(runtime.INFRA_HALT_ENV, "scoped")
+    passed = dict(machine_row("1"), tee_kind=kind)
+    infra = _infra_row("2", uid=20, hotkey=MINER_TWO, kind=kind)
+    result = _tee_round(
+        passed, infra, qvl=int(kind == "tdx"), snp=int(kind == "sev_snp")
+    )
+
+    planned = build_direct_plan(
+        snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result
+    )
+
+    assert planned.raw_scores == ((19, 1), (20, 0))
+    assert planned.wire_uids == (19,)
+
+
+@pytest.mark.parametrize("value", [None, "", "any", "SCOPED", "scoped-ish"])
+def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) -> None:
+    if value is None:
+        monkeypatch.delenv(runtime.INFRA_HALT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runtime.INFRA_HALT_ENV, value)
+    result = _tee_round(
+        dict(machine_row("1"), tee_kind="tdx"),
+        _infra_row("2", uid=20, hotkey=MINER_TWO, kind="tdx"),
+        qvl=1,
+    )
+
+    with pytest.raises(DirectValidatorError, match="=scoped would write it"):
+        build_direct_plan(snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result)
+
+
+@pytest.mark.parametrize(
+    "rows, qvl, snp",
+    [
+        # Only the other kind's verifier passed anyone: TDX may be down.
+        ((("1", 19, "sev_snp", "PASS"), ("2", 20, "tdx", "INFRA")), 1, 0),
+        # Only the other kind's verifier passed anyone: SNP may be down.
+        ((("1", 19, "tdx", "PASS"), ("2", 20, "sev_snp", "INFRA")), 0, 1),
+        # Every machine of the kind is INFRA.
+        ((("1", 19, "tdx", "INFRA"), ("2", 20, "tdx", "INFRA")), 2, 0),
+        # One kind proven up, the other not.
+        (
+            (
+                ("1", 19, "tdx", "PASS"),
+                ("2", 20, "tdx", "INFRA"),
+                ("3", 20, "sev_snp", "INFRA"),
+            ),
+            1,
+            1,
+        ),
+    ],
+)
+def test_infra_without_a_pass_of_the_same_kind_still_halts(
+    rows, qvl, snp, monkeypatch
+) -> None:
+    monkeypatch.setenv(runtime.INFRA_HALT_ENV, "scoped")
+    built = []
+    for marker, uid, kind, verdict in rows:
+        hotkey = MINER_ONE if uid == 19 else MINER_TWO
+        if verdict == "PASS":
+            built.append(
+                dict(machine_row(marker, uid=uid, hotkey=hotkey), tee_kind=kind)
+            )
+        else:
+            built.append(_infra_row(marker, uid=uid, hotkey=hotkey, kind=kind))
+
+    with pytest.raises(DirectValidatorError, match="not fully proven"):
+        build_direct_plan(
+            snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)),
+            _tee_round(*built, qvl=qvl, snp=snp),
+        )
+
+
 class Extrinsic:
     def __init__(
         self, value: dict[str, object], *, extrinsic_hash: str = EXTRINSIC_HASH
