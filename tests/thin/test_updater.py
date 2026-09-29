@@ -2336,6 +2336,29 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
     assert "Environment=CATHEDRAL_VALIDATOR_TELEMETRY_ARGS=\n" in direct
     assert "EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env" in direct
     assert direct.count("$CATHEDRAL_VALIDATOR_TELEMETRY_ARGS") == 1
+    # The TDX measurement policy arrives as an environment variable from an
+    # optional file, never as a flag an older runtime would reject.
+    assert (
+        "EnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env" in direct
+    )
+    assert "TDX_MEASUREMENT" not in direct.split("ExecStart=", 1)[1].split("\n", 1)[0]
+    tdx_env = (deploy / "direct-tdx-measurement.env.example").read_text()
+    assert (
+        "CATHEDRAL_TDX_MEASUREMENT_POLICY=/etc/cathedral-validator/"
+        "tdx-measurement-policy.json" in tdx_env
+    )
+    # Units change only with a bootstrap, so hosts on an older one add the
+    # same line with the documented drop-in; keep the two identical.
+    auto_update = (root / "docs" / "AUTO_UPDATE.md").read_text()
+    assert (
+        "[Service]\\nEnvironmentFile=-/etc/cathedral-validator/"
+        "direct-tdx-measurement.env\\n" in auto_update
+    )
+    from cathedral_thin.independent_runtime import tdx_measurement
+
+    assert str(tdx_measurement.TDX_MEASUREMENT_ENV_FILE) == (
+        "/etc/cathedral-validator/direct-tdx-measurement.env"
+    )
 
     direct_env = (deploy / "direct.env.example").read_text()
     assert "CATHEDRAL_SNP_POLICY=/etc/cathedral-validator/snp-policy.json" in direct_env
