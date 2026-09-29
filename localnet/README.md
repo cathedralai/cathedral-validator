@@ -64,7 +64,7 @@ Sandbox (`CATHEDRAL_LOCALNET_STUB_EVIDENCE=1`, code in
 
 | Stub | Why | Guard |
 |---|---|---|
-| Evidence collector returns `STUB_MAGIC or REPORT_DATA or platform` instead of a configfs-tsm quote | No TDX guest | Only with `worker serve`, complete signed validator access, and `--validator-network local`; `finney`, `test`, and every other network refuse to start. v2 channel-bound requests only |
+| Evidence collector returns magic + REPORT_DATA + platform bytes instead of a configfs-tsm quote | No TDX guest | Only with `worker serve`, complete signed validator access, and `--validator-network local`; `finney`, `test`, and every other network refuse to start. v2 channel-bound requests only |
 | Worker accepts a private IPv4 `--public-endpoint` | A laptop has no public IP | Enabled only after the stub gate passes for `local` |
 
 ## Chain settings `setup_chain.py` applies (local chain only, via //Alice sudo)
