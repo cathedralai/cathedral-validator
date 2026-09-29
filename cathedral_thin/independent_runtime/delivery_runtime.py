@@ -244,14 +244,20 @@ class DeliveryContext:
             snapshot = snapshot_reader(subtensor, keypair, 94)
             plan = weight_plan(snapshot, delivery)
             writer._validate_plan(plan)
-            # Persist before any call into the signer. Even a crash before its
-            # journal exists is NOT_PROVEN, never permission to sign again.
-            ledger.db.execute(
-                "INSERT INTO submissions VALUES(?,?,NULL)",
-                (delivery["plan_id"], "STARTED"),
-            )
+
+            def before_sign():
+                # The writer invokes this only after cooldown/eligibility checks,
+                # immediately before the signer. Once persisted, absence of a
+                # writer journal is ambiguous and never permission to sign again.
+                ledger.db.execute(
+                    "INSERT INTO submissions VALUES(?,?,NULL)",
+                    (delivery["plan_id"], "STARTED"),
+                )
+
             receipt = writer.submit(
-                plan, cycle_deadline_monotonic=time.monotonic() + 180
+                plan,
+                cycle_deadline_monotonic=time.monotonic() + 180,
+                before_sign=before_sign,
             )
             ledger.db.execute(
                 "UPDATE submissions SET state='SETTLED',receipt=? WHERE plan_id=?",

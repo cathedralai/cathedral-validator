@@ -2027,6 +2027,7 @@ class DirectWeightWriter:
         plan: DirectWeightPlan,
         *,
         cycle_deadline_monotonic: float,
+        before_sign: Callable[[], None] | None = None,
     ) -> DirectSubmissionReceipt:
         """Persist one signed intent, broadcast once, and prove stored finality.
 
@@ -2081,6 +2082,10 @@ class DirectWeightWriter:
                 _require_presign_time(
                     presign_deadline, stage="immediately before signing"
                 )
+                if before_sign is not None:
+                    # Delivery accounting commits STARTED at the real signer
+                    # boundary, after definite pre-sign eligibility refusals.
+                    before_sign()
                 signed = substrate.create_signed_extrinsic(
                     call=call,
                     keypair=self.keypair,

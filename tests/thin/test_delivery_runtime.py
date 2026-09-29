@@ -206,3 +206,80 @@ def test_reserved_delivery_window_recovers_then_cannot_submit_twice(
     )
     assert result["status"] == "WINDOW_ALREADY_CONSUMED"
     assert chain.substrate.sign_calls == chain.substrate.submit_calls == 1
+
+
+def test_bundle_consumer_to_real_writer_unattested_burn_only(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from tests.thin.test_delivery_plan import EX
+    from cathedral_thin.independent_runtime import delivery_runtime
+
+    planned = delivery_plan()
+    zero = build_plan(
+        policy=planned.delivery["policy"],
+        window_start=START,
+        uid_hotkeys={19: MINER_ONE, 20: MINER_TWO},
+        admitted=[],
+    )
+    burn_plan = weight_plan(planned.snapshot, zero)
+    instance, chain, _ = writer(tmp_path, monkeypatch, planned=burn_plan)
+    instance.delivery_policy_digest = burn_plan.delivery["policy_digest"]
+    ctx = context(tmp_path, burn_plan)
+    _, receipt = entry(miner_hotkey=MINER_ONE, execution_class="unattested")
+    ctx.bundle_path.write_text(
+        json.dumps(
+            {
+                "window_start": START,
+                "uid_hotkeys": [[999, "feed-cannot-choose-chain-owner"]],
+                "entries": [
+                    {
+                        "receipt": receipt,
+                        "executor_public_key": EX.public_key()
+                        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                        .hex(),
+                        "quote_hex": "",
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(delivery_runtime.time, "time", lambda: START + 3601)
+    result = ctx.run(
+        subtensor=chain,
+        keypair=instance.keypair,
+        writer=instance,
+        snapshot_reader=lambda *_: planned.snapshot,
+    )
+    assert result["status"] == STATUS_CONFIRMED
+    assert result["raw_scores"] == []
+    assert result["wire_uids"] == [20] and result["wire_weights"] == [65535]
+    assert chain.substrate.sign_calls == chain.substrate.submit_calls == 1
+
+
+def test_cooldown_before_signing_does_not_poison_delivery_window(tmp_path, monkeypatch):
+    instance, chain, planned = setup(tmp_path, monkeypatch)
+    ctx = context(tmp_path, planned)
+    ledger = DeliveryLedger(ctx.ledger_path)
+    ledger.prepare(planned.delivery)
+    ledger.close()
+    old = chain.blocks_since
+    chain.blocks_since = 5
+    with pytest.raises(DirectValidatorError):
+        ctx.run(
+            subtensor=chain,
+            keypair=instance.keypair,
+            writer=instance,
+            snapshot_reader=lambda *_: planned.snapshot,
+        )
+    ledger = DeliveryLedger(ctx.ledger_path)
+    assert ledger.db.execute("SELECT count(*) FROM submissions").fetchone() == (0,)
+    ledger.close()
+    assert chain.substrate.sign_calls == 0
+    chain.blocks_since = old
+    result = ctx.run(
+        subtensor=chain,
+        keypair=instance.keypair,
+        writer=instance,
+        snapshot_reader=lambda *_: planned.snapshot,
+    )
+    assert result["status"] == STATUS_CONFIRMED
+    assert chain.substrate.sign_calls == chain.substrate.submit_calls == 1
