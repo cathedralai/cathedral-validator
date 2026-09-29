@@ -11,10 +11,11 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -111,7 +112,7 @@ def build_plan(
     admitted: Sequence[Any],
     rejected: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    from cathedral.delivery import AdmittedDelivery
+    from cathedral_delivery import AdmittedDelivery
 
     checked = policy_check(dict(policy))
     seconds = checked["window_seconds"]
@@ -343,7 +344,7 @@ class DeliveryLedger:
 def consume_bundle(
     bundle: Mapping[str, Any], policy: Mapping[str, Any], *, now: int
 ) -> dict[str, Any]:
-    from cathedral.delivery import DeliveryError, admit_delivery, verify_receipt
+    from cathedral_delivery import DeliveryError, admit_delivery, verify_receipt
 
     checked = policy_check(dict(policy))
     if not isinstance(bundle, dict) or set(bundle) != {

@@ -776,6 +776,7 @@ def run_direct_cycle(
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
+    delivery_context: Any | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -801,6 +802,15 @@ def run_direct_cycle(
     lock = getattr(writer, "cycle_locked", None)
     context = lock() if callable(lock) else nullcontext()
     with context:
+        if delivery_context is not None:
+            if netuid != 94:
+                raise DirectValidatorError("delivery mechanism is SN94 only")
+            return delivery_context.run(
+                subtensor=subtensor,
+                keypair=keypair,
+                writer=writer,
+                snapshot_reader=finalized_serving_miners_snapshot,
+            )
         return _run_direct_cycle_unlocked(
             subtensor=subtensor,
             keypair=keypair,
@@ -880,6 +890,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
     )
+    parser.add_argument(
+        "--delivery-policy",
+        type=Path,
+        help="explicit SN94 delivered-resource policy; absent keeps SAT mode",
+    )
+    parser.add_argument("--delivery-bundle", type=Path, help="local receipt feed file")
+    parser.add_argument(
+        "--delivery-ledger",
+        type=Path,
+        help="private durable receipt accounting database",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
         "--confirm-direct-write",
@@ -935,6 +956,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments[:1] == ["delivery-plan"]:
         # Isolated plan-only accounting. Never opens a wallet or submits weights.
         from .delivery_plan import main as delivery_main
+
         return delivery_main(arguments[1:])
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
         # The operator's recovery command ships in the same signed release
@@ -954,6 +976,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         or options.interval_seconds <= 0
     ):
         raise SystemExit("interval must be positive")
+
+    delivery_context = None
+    delivery_options = (
+        options.delivery_policy,
+        options.delivery_bundle,
+        options.delivery_ledger,
+    )
+    if any(delivery_options):
+        if not all(delivery_options) or netuid != 94:
+            raise SystemExit(
+                "delivery policy, bundle and ledger are required together on SN94"
+            )
+        from .delivery_runtime import DeliveryContext
+        from .delivery_plan import DeliveryPlanError
+
+        try:
+            delivery_context = DeliveryContext(
+                policy_path=options.delivery_policy,
+                bundle_path=options.delivery_bundle,
+                ledger_path=options.delivery_ledger,
+            )
+        except (DeliveryPlanError, OSError, ValueError) as exc:
+            raise SystemExit(
+                "delivery configuration refused before wallet access"
+            ) from exc
 
     verifier = load_direct_validator_verifier(options.qvl)
     adapter = ComputeAdapter(
@@ -999,7 +1046,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
         netuid=netuid,
+        **(
+            {"delivery_policy_digest": delivery_context.policy_digest}
+            if delivery_context is not None
+            else {}
+        ),
     )
+    if delivery_context is not None and options.telemetry_spool is not None:
+        raise SystemExit(
+            "delivery receipts have their own accounting ledger; SAT telemetry is disabled"
+        )
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
             "--telemetry-spool and --telemetry-reader-group must be supplied together"
@@ -1113,6 +1169,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     telemetry_sink=telemetry_sink,
                     report_recovery=_print_event,
                     netuid=netuid,
+                    **(
+                        {"delivery_context": delivery_context}
+                        if delivery_context is not None
+                        else {}
+                    ),
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
             except DirectSubmissionFinalizedFailure as exc:

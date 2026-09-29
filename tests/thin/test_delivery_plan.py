@@ -3,14 +3,15 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from cathedral.delivery import (
+from cathedral_delivery import (
+    MIN_RETENTION_SECONDS,
     AdmittedDelivery,
     sign_receipt,
     verify_receipt,
-    MIN_RETENTION_SECONDS,
 )
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 from cathedral_thin.independent_runtime.delivery_plan import (
     DeliveryLedger,
     DeliveryPlanError,
@@ -27,54 +28,54 @@ CP = Ed25519PrivateKey.generate()
 
 
 def policy():
-    return dict(
-        schema="cathedral_sn94_delivery_policy_v1",
-        netuid=94,
-        mode="plan_only",
-        window_seconds=3600,
-        burn_bps=1000,
-        burn_uid=0,
-        burn_hotkey="burn",
-        allowed_measurements=[MEASUREMENT],
-        verifier_path="/nonexistent/pinned-verifier",
-        verifier_sha256="aa" * 32,
-        control_plane_keys={
+    return {
+        "schema": "cathedral_sn94_delivery_policy_v1",
+        "netuid": 94,
+        "mode": "plan_only",
+        "window_seconds": 3600,
+        "burn_bps": 1000,
+        "burn_uid": 0,
+        "burn_hotkey": "burn",
+        "allowed_measurements": [MEASUREMENT],
+        "verifier_path": "/nonexistent/pinned-verifier",
+        "verifier_sha256": "aa" * 32,
+        "control_plane_keys": {
             "central-1": CP.public_key()
             .public_bytes(Encoding.Raw, PublicFormat.Raw)
             .hex()
         },
-    )
+    }
 
 
 def entry(**changes):
-    body = dict(
-        schema="cathedral_delivery_receipt_v1",
-        netuid=94,
-        receipt_id="r-1",
-        attempt_id="a-1",
-        sandbox_id="s-1",
-        miner_hotkey="miner-1",
-        hardware_id="11" * 32,
-        executor_key_id="ex-1",
-        control_plane_key_id="central-1",
-        evidence_sha256="22" * 32,
-        measurement=MEASUREMENT,
-        admission_nonce="44" * 32,
-        admitted_at=START,
-        admission_expires_at=START + 7200,
-        window_start=START,
-        window_end=START + 3600,
-        started_at=START + 1,
-        ended_at=START + 61,
-        vcpu=1,
-        memory_gib=4,
-        vcpu_seconds=60,
-        gib_seconds=240,
-        issued_at=START + 62,
-        retention_until=START + 62 + MIN_RETENTION_SECONDS,
-        execution_class="attested",
-        outcome="completed",
-    )
+    body = {
+        "schema": "cathedral_delivery_receipt_v1",
+        "netuid": 94,
+        "receipt_id": "r-1",
+        "attempt_id": "a-1",
+        "sandbox_id": "s-1",
+        "miner_hotkey": "miner-1",
+        "hardware_id": "11" * 32,
+        "executor_key_id": "ex-1",
+        "control_plane_key_id": "central-1",
+        "evidence_sha256": "22" * 32,
+        "measurement": MEASUREMENT,
+        "admission_nonce": "44" * 32,
+        "admitted_at": START,
+        "admission_expires_at": START + 7200,
+        "window_start": START,
+        "window_end": START + 3600,
+        "started_at": START + 1,
+        "ended_at": START + 61,
+        "vcpu": 1,
+        "memory_gib": 4,
+        "vcpu_seconds": 60,
+        "gib_seconds": 240,
+        "issued_at": START + 62,
+        "retention_until": START + 62 + MIN_RETENTION_SECONDS,
+        "execution_class": "attested",
+        "outcome": "completed",
+    }
     body.update(changes)
     receipt = sign_receipt(body, executor_key=EX, control_plane_key=CP)
     verified = verify_receipt(
@@ -176,7 +177,7 @@ def test_restart_recovers_exact_reserved_plan_and_policy(tmp_path):
     path = tmp_path / "ledger.sqlite"
     expected = plan()
     ledger = DeliveryLedger(path)
-    value, recovered = ledger.prepare(expected)
+    _value, recovered = ledger.prepare(expected)
     ledger.close()
     assert not recovered
     ledger = DeliveryLedger(path)
