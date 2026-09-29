@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from cathedral_thin.independent.canonical import PolicyBundleError, parse_strict_json
+from cathedral_thin.independent_runtime.capacity_inventory import record_cycle
 from cathedral_thin.independent.fetch_policy import (
     PolicyFetchError,
     fetch_policy_bytes,
@@ -69,6 +70,7 @@ _POLICY_KEYS = frozenset(
         "recheck_max_mib",
     }
 )
+_OPTIONAL_POLICY_KEYS = frozenset({"inventory_path"})
 
 ACCEPTED = "ACCEPTED"
 
@@ -95,6 +97,7 @@ class CapacityPolicy:
     price_table: Any
     recheck_max_mib: int
     digest: str
+    inventory_path: Path | None = None
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -151,9 +154,12 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         document = parse_strict_json(raw, max_bytes=MAX_POLICY_BYTES)
     except (PolicyBundleError, ValueError, RecursionError) as exc:
         raise CapacityPolicyError(f"capacity policy: {exc}") from exc
-    if not isinstance(document, dict) or set(document) != _POLICY_KEYS:
+    if not isinstance(document, dict) or not (
+        _POLICY_KEYS <= set(document) <= _POLICY_KEYS | _OPTIONAL_POLICY_KEYS
+    ):
         raise CapacityPolicyError(
             f"capacity policy must have exactly {sorted(_POLICY_KEYS)}"
+            f" and optionally {sorted(_OPTIONAL_POLICY_KEYS)}"
         )
     if document["schema"] != POLICY_SCHEMA:
         raise CapacityPolicyError("capacity policy schema is unsupported")
@@ -185,6 +191,17 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError(
             f"recheck_max_mib must be an integer from 0 to {MAX_RECHECK_MIB}"
         )
+    inventory = document.get("inventory_path")
+    if inventory is not None and (
+        not isinstance(inventory, str)
+        or not inventory.startswith("/")
+        or not inventory.endswith(".json")
+        or "\x00" in inventory
+        or ".." in Path(inventory).parts
+    ):
+        raise CapacityPolicyError(
+            "inventory_path must be an absolute path to a .json file"
+        )
     return CapacityPolicy(
         mode=document["mode"],
         receipts_url=url,
@@ -192,6 +209,7 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         price_table=table,
         recheck_max_mib=recheck,
         digest="sha256:" + hashlib.sha256(bytes(raw)).hexdigest(),
+        inventory_path=Path(inventory) if inventory is not None else None,
     )
 
 
@@ -374,7 +392,8 @@ class CapacityShadow:
 
         ``hotkey_to_uid`` names this cycle's serving miners. The record keeps
         the first MAX_EVENT_ROWS receipt rows so the cycle's one journal line
-        stays small; the counts and units cover every receipt.
+        stays small; the counts and units cover every receipt, and so does the
+        inventory file when the policy names one.
         """
 
         head = {
@@ -390,6 +409,7 @@ class CapacityShadow:
             if len(raw) > MAX_FEED_BYTES:
                 raise CapacityPolicyError("receipt feed is too large")
             round_, receipts = _parse_feed(raw, netuid=netuid, nonce=nonce)
+            now = self._now()
             scored = score_receipts(
                 receipts,
                 policy=self.policy,
@@ -397,12 +417,12 @@ class CapacityShadow:
                 nonce=nonce,
                 round_=round_,
                 hotkey_to_uid=hotkey_to_uid,
-                now=self._now(),
+                now=now,
             )
         except Exception as exc:  # noqa: BLE001 - a shadow record never fails the cycle
             return {**head, "status": "FAILED", "error": _short(exc)}
         rows = scored.pop("rows")
-        return {
+        record = {
             **head,
             "status": "RECORDED",
             "round": round_,
@@ -410,6 +430,19 @@ class CapacityShadow:
             "rows": rows[:MAX_EVENT_ROWS],
             "rows_omitted": max(0, len(rows) - MAX_EVENT_ROWS),
         }
+        if self.policy.inventory_path is not None:
+            try:
+                aggregate = record_cycle(
+                    self.policy.inventory_path,
+                    rows,
+                    netuid=netuid,
+                    round_=round_,
+                    now=now,
+                )
+                record["inventory"] = {"status": "WRITTEN", "aggregate": aggregate}
+            except Exception as exc:  # noqa: BLE001 - the inventory never fails the record
+                record["inventory"] = {"status": "FAILED", "error": _short(exc)}
+        return record
 
 
 __all__ = [
