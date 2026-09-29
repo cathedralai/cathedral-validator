@@ -290,12 +290,16 @@ def _validate_policy(body: bytes) -> None:
         raise SetupRefused("SNP policy is not strict JSON") from exc
     if (
         not isinstance(document, dict)
-        or set(document) != {"schema", "generations"}
+        or not {"schema", "generations"}
+        <= set(document)
+        <= {"schema", "generations", "require_single_socket"}
         or document["schema"] != "cathedral_amd_sev_snp_policy_v1"
         or not isinstance(document["generations"], dict)
         or not document["generations"]
     ):
         raise SetupRefused("SNP policy has an unsupported production shape")
+    if not isinstance(document.get("require_single_socket", True), bool):
+        raise SetupRefused("SNP policy require_single_socket must be a boolean")
     for generation, policy in document["generations"].items():
         if (
             generation not in _GENERATIONS
