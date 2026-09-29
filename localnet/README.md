@@ -23,11 +23,12 @@ repository (or set `CATHEDRAL_SANDBOX_DIR`).
 ./localnet/down.sh          # stop miners, refresher, validator (--chain: container too)
 ```
 
-A first run from zero takes about five minutes, most of it the Python installs.
-`check.sh` usually passes within one tempo (40 blocks, about 12 s) of the first
-confirmed write. Logs and state live in `localnet/.run/` (git-ignored):
+From fresh clones with a warm uv cache the whole sequence took under two
+minutes on an M4 (up.sh 51 s, run_miner.sh 21 s, first `CONFIRMED` write 7 s
+after run_validator.sh, `check.sh` PASS at block 290). A cold uv cache adds the
+Python installs. Logs and state live in `localnet/.run/` (git-ignored):
 `logs/validator.log`, `logs/miner<i>.log`, `logs/snapshot-refresher.log`,
-`evidence/check-*.json`.
+`logs/chain-watchdog.log`, `evidence/check-*.json`.
 
 ## What runs, and what is real
 
@@ -90,6 +91,19 @@ Sandbox (`CATHEDRAL_LOCALNET_STUB_EVIDENCE=1`, code in
 - Blocks 6795 to 6893: each miner's stake grew by about 20 alpha (two epochs).
 
 ## Operating notes
+
+- The three fast-block nodes grow by roughly 15 to 20 MB a minute each. In a
+  6 GiB colima VM the OOM killer took two of them after about 40 minutes and the
+  chain stopped finalizing. `up.sh` starts the VM with 12 GiB and the container
+  with `--no-purge`; `chain_watchdog.sh` (started by `up.sh`) restarts the
+  container when a node is gone or node memory passes
+  `LOCALNET_CHAIN_MEMORY_LIMIT_MB` (default 7000). A restart keeps the chain: a
+  test restart went from block 325 to 429 with netuid 94 intact, and the
+  validator's next cycle confirmed. An older container created without
+  `--no-purge` resets on restart, so the watchdog leaves it alone.
+- Never start a second localnet container in the same colima VM. Both chains
+  share the genesis and `--discover-local`, so the new nodes join the running
+  chain with the same authority keys and finality stalls.
 
 - Fast blocks are about 0.3 s. The writer's 16-block mortal era and its anchor
   freshness window are therefore about 5 s of wall time. They hold here because
