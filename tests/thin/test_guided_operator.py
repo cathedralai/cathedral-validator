@@ -1723,7 +1723,7 @@ def _delivery_inputs(tmp_path):
                 "burn_uid": 0,
                 "burn_hotkey": "burn",
                 "allowed_measurements": ["tdx-measurement-sha256:" + "33" * 32],
-                "verifier_path": "/nonexistent/qvl",
+                "verifier_path": "/opt/cathedral-validator/current/bin/cathedral-tdx-verifier",
                 "verifier_sha256": DIRECT_VALIDATOR_QVL_DIGEST,
                 "control_plane_keys": {"authority": "11" * 32},
             }

@@ -26,6 +26,7 @@ from .qvl import DIRECT_VALIDATOR_QVL_DIGEST
 
 SCHEMA = "cathedral_validator_service_config_v1"
 OWNER_UID = 0
+VERIFIER_PATH = "/opt/cathedral-validator/current/bin/cathedral-tdx-verifier"
 
 
 def _public_json(path: Path, maximum: int) -> tuple[dict[str, Any], bytes]:
@@ -105,6 +106,7 @@ def check(path: Path) -> dict[str, Any]:
     policy = policy_check(policy)
     if (
         policy["mode"] != "write"
+        or policy["verifier_path"] != VERIFIER_PATH
         or policy["verifier_sha256"] != DIRECT_VALIDATOR_QVL_DIGEST
         or hashlib.sha256(raw).hexdigest() != config["policy_sha256"]
     ):

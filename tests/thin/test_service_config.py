@@ -34,7 +34,7 @@ def inputs(tmp_path, monkeypatch):
             "burn_uid": 0,
             "burn_hotkey": "burn",
             "allowed_measurements": ["tdx-measurement-sha256:" + "33" * 32],
-            "verifier_path": "/nonexistent/qvl",
+            "verifier_path": service_config.VERIFIER_PATH,
             "verifier_sha256": DIRECT_VALIDATOR_QVL_DIGEST,
             "control_plane_keys": {"authority": "11" * 32},
         },
@@ -147,3 +147,76 @@ def test_service_unit_checks_before_wallet_copy_and_passes_same_configuration():
     )
     assert "--config=/etc/cathedral-validator/service-config.json" in unit
     assert "--service-config=/etc/cathedral-validator/service-config.json" in unit
+
+
+def test_direct_entrypoint_rechecks_config_before_wallet(tmp_path, monkeypatch):
+    config, _policy, bundle, _ledger = inputs(tmp_path, monkeypatch)
+    bundle.unlink()
+    monkeypatch.setattr(direct_validator, "_expected_hotkey", lambda value: value)
+    monkeypatch.setattr(
+        direct_validator, "make_wallet", lambda *_a, **_k: pytest.fail("wallet opened")
+    )
+    with pytest.raises(SystemExit, match="configuration refused before wallet"):
+        direct_validator.main(
+            [
+                "--qvl",
+                service_config.VERIFIER_PATH,
+                "--snp-policy",
+                "/nonexistent/snp-policy",
+                "--snpguest",
+                "/nonexistent/snpguest",
+                "--confirm-direct-write",
+                "--netuid",
+                "94",
+                "--expected-hotkey",
+                "synthetic",
+                "--service-config",
+                str(config),
+            ]
+        )
+
+
+def test_direct_entrypoint_uses_exact_service_delivery_paths(tmp_path, monkeypatch):
+    from cathedral_thin.independent_runtime import delivery_runtime
+
+    config, policy, bundle, ledger = inputs(tmp_path, monkeypatch)
+    monkeypatch.setattr(direct_validator, "_expected_hotkey", lambda value: value)
+    monkeypatch.setattr(
+        direct_validator, "make_wallet", lambda *_a, **_k: pytest.fail("wallet opened")
+    )
+    original = delivery_runtime.DeliveryContext
+    observed = []
+
+    def context(**kwargs):
+        observed.append(kwargs)
+        return original(**kwargs)
+
+    def no_verifier_start(*_a, **_k):
+        raise RuntimeError("reached verifier startup before wallet")
+
+    monkeypatch.setattr(delivery_runtime, "DeliveryContext", context)
+    monkeypatch.setattr(
+        direct_validator, "load_direct_validator_verifier", no_verifier_start
+    )
+    with pytest.raises(RuntimeError, match="before wallet"):
+        direct_validator.main(
+            [
+                "--qvl",
+                service_config.VERIFIER_PATH,
+                "--snp-policy",
+                "/nonexistent/snp-policy",
+                "--snpguest",
+                "/nonexistent/snpguest",
+                "--confirm-direct-write",
+                "--netuid",
+                "94",
+                "--expected-hotkey",
+                "synthetic",
+                "--service-config",
+                str(config),
+            ]
+        )
+    assert observed == [
+        {"policy_path": policy, "bundle_path": bundle, "ledger_path": ledger}
+    ]
+    assert not ledger.exists()
