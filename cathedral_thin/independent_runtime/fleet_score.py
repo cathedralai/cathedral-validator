@@ -55,6 +55,7 @@ from .multicompute import (
     duplicate_hardware_indexes,
 )
 from .qvl import TIMEOUT_SECONDS as QVL_TIMEOUT_SECONDS
+from .tdx_measurement import TdxMeasurementPolicy
 from .snp_production import AMD_GUEST_POLICY_SINGLE_SOCKET, SnpProductionVerifier
 from .validator_request import (
     SignedValidatorTransport,
@@ -255,6 +256,7 @@ def _collect_candidate(
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     netuid: int,
     deadline_monotonic: float | None = None,
 ) -> tuple[dict[str, Any], MachineWorkObservation, CollectedEvidence | None, bool]:
@@ -311,6 +313,22 @@ def _collect_candidate(
                     timings["qvl"] = _phase_finished(started)
                 row["verdict"] = identity.verdict.value
                 verdict_pass = identity.verdict is QuoteVerdict.PASS
+                if tdx_policy is not None and verdict_pass:
+                    allowed = tdx_policy.admits(identity.measurement)
+                    row.update(
+                        {
+                            "measurement": identity.measurement,
+                            "measurement_allowed": allowed,
+                            "measurement_policy_mode": tdx_policy.mode,
+                            "measurement_policy_digest": tdx_policy.digest,
+                        }
+                    )
+                    if not allowed and tdx_policy.enforced:
+                        # A genuine TD running an image the owner has not
+                        # admitted: the quote is fine, the workload is not.
+                        row["verdict"] = QuoteVerdict.FAIL.value
+                        row["identity_error"] = "tdx_measurement_not_allowed"
+                        verdict_pass = False
                 if verdict_pass:
                     if (
                         not identity.platform_identity_verified
@@ -620,6 +638,7 @@ def _collect_miner_evidence(
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     deadline_monotonic: float | None,
     netuid: int,
     progress: _FleetProgress | None = None,
@@ -648,6 +667,7 @@ def _collect_miner_evidence(
         anchor_hash=anchor_hash,
         verifier_adapter=verifier_adapter,
         snp_verifier=snp_verifier,
+        tdx_policy=tdx_policy,
         netuid=netuid,
         deadline_monotonic=deadline_monotonic,
     )
@@ -767,6 +787,7 @@ def _collect_miner_evidence(
             anchor_hash=anchor_hash,
             verifier_adapter=verifier_adapter,
             snp_verifier=snp_verifier,
+            tdx_policy=tdx_policy,
             netuid=netuid,
             deadline_monotonic=deadline_monotonic,
         )
@@ -830,6 +851,7 @@ def score_multicompute_round(
     anchor_hash: str,
     verifier_adapter: ComputeAdapter,
     snp_verifier: SnpProductionVerifier | None = None,
+    tdx_policy: TdxMeasurementPolicy | None = None,
     cycle_deadline_monotonic: float | None = None,
     netuid: int = NETUID,
 ) -> MultiComputeRound:
@@ -954,6 +976,7 @@ def score_multicompute_round(
                     anchor_hash=anchor_hash,
                     verifier_adapter=verifier_adapter,
                     snp_verifier=snp_verifier,
+                    tdx_policy=tdx_policy,
                     deadline_monotonic=discovery_deadline,
                     netuid=netuid,
                     progress=progress,
@@ -1017,6 +1040,7 @@ def score_multicompute_round(
                 anchor_hash=anchor_hash,
                 verifier_adapter=verifier_adapter,
                 snp_verifier=snp_verifier,
+                tdx_policy=tdx_policy,
                 deadline_monotonic=None,
                 netuid=netuid,
             )

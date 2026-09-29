@@ -26,6 +26,7 @@ from .amd_snp_dev_preview import (
     AmdSnpDevPreviewError,
     load_compute_contract,
 )
+from .owner_policy_file import read_owner_policy_file
 
 # The exact reviewed AMD production contract merged by cathedral-sandbox#189.
 SANDBOX_CONTRACT_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
@@ -78,45 +79,16 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _safe_policy_bytes(path: Path) -> bytes:
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise SnpProductionError("safe SNP policy loading is unavailable")
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
-    except OSError as exc:
-        raise SnpProductionError("SNP policy is not a readable regular file") from exc
-    try:
-        before = os.fstat(fd)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid not in {0, os.geteuid()}
-            or stat.S_IMODE(before.st_mode) & 0o022
-            or not 1 <= before.st_size <= MAX_POLICY_BYTES
-        ):
-            raise SnpProductionError(
-                "SNP policy must be root or operator owned and not group writable"
-            )
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(65536, MAX_POLICY_BYTES + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_POLICY_BYTES:
-                raise SnpProductionError("SNP policy exceeds its size bound")
-            chunks.append(chunk)
-        raw = b"".join(chunks)
-        after = os.fstat(fd)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ) or len(raw) != before.st_size:
-            raise SnpProductionError("SNP policy changed while it was read")
-        return raw
-    finally:
-        os.close(fd)
+    return read_owner_policy_file(
+        path,
+        max_bytes=MAX_POLICY_BYTES,
+        error=SnpProductionError,
+        unavailable="safe SNP policy loading is unavailable",
+        unreadable="SNP policy is not a readable regular file",
+        unsafe="SNP policy must be root or operator owned and not group writable",
+        too_large="SNP policy exceeds its size bound",
+        changed="SNP policy changed while it was read",
+    )
 
 
 def load_snp_policy(path: str | Path) -> SnpPolicy:
