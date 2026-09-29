@@ -9389,7 +9389,7 @@ def set_weights_on_chain(
                 f"wire_weights={wire_values} vector={preview}",
             )
             return ChainSubmission(success=True)
-        if broadcast and netuid == 39 and runtime_contract is not None:
+        if broadcast and netuid == 94 and runtime_contract is not None:
             # The caller reserved this attempt before calling. Name it now,
             # before anything below can refuse (preflight, authorization,
             # chain constraints), so the handler releases the unsigned
@@ -9459,7 +9459,7 @@ def set_weights_on_chain(
                     )
                 if attempt_id is not None and pending_id != attempt_id:
                     raise wire.VectorError(
-                        "SN39 pending attempt changed during authorization"
+                        "SN94 pending attempt changed during authorization"
                     )
                 attempt_id = pending_id
                 primary_call_started = True
