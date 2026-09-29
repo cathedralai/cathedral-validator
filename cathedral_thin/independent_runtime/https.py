@@ -35,12 +35,14 @@ from cathedral_thin.independent.collect import (
 from cathedral_thin.independent.constants import POLICY_USER_AGENT
 from cathedral_thin.independent.fetch_policy import (
     getaddrinfo_bounded,
+    is_globally_routable_address,
     validate_policy_url,
     validated_peer_ips,
 )
 from cathedral_thin.independent.sat import MAX_SAT_RESPONSE_BYTES, SAT_WORK_PATH
 
 from .errors import IndependentLiveError
+from .localnet import allows_private_miner_address, localnet_active
 
 DEFAULT_TIMEOUT = 30.0
 VALIDATOR_REQUEST_HEADER = "X-Cathedral-Validator-Request"
@@ -214,8 +216,11 @@ class HttpsEvidenceTransport:
                 raise IndependentLiveError("evidence request exceeded its deadline")
             return left
 
-        peer_ips = validated_peer_ips(
-            getaddrinfo_bounded(endpoint.host, endpoint.port, remaining())
+        infos = getaddrinfo_bounded(endpoint.host, endpoint.port, remaining())
+        peer_ips = (
+            _localnet_peer_ips(infos)
+            if localnet_active()
+            else validated_peer_ips(infos)
         )
         last_error: Exception | None = None
         for peer_ip in peer_ips:
@@ -314,6 +319,32 @@ class HttpsEvidenceTransport:
             return int(response.status), b"".join(chunks)
         finally:
             connection.close()
+
+
+def _localnet_peer_ips(infos: Any) -> list[str]:
+    """Development localnet only: also admit private and loopback miner IPs.
+
+    Every answer must still be public or a localnet-allowed private address;
+    one disallowed answer refuses the whole resolution, as in production.
+    """
+
+    peer_ips: list[str] = []
+    for info in infos:
+        try:
+            raw = info[4][0]
+            address = ipaddress.ip_address(raw)
+        except (IndexError, TypeError, ValueError) as exc:
+            raise IndependentLiveError("miner address resolution is malformed") from exc
+        if not (
+            is_globally_routable_address(address)
+            or allows_private_miner_address(address)
+        ):
+            raise IndependentLiveError("miner resolves to a disallowed address")
+        if raw not in peer_ips:
+            peer_ips.append(raw)
+    if not peer_ips:
+        raise IndependentLiveError("miner address does not resolve")
+    return peer_ips
 
 
 def _axon_origin(ip: str, port: int) -> str:

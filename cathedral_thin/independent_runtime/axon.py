@@ -21,6 +21,7 @@ from cathedral_thin.independent.inclusion import MetagraphView
 
 from .errors import ChainClientError
 from .https import axon_evidence_url, axon_sat_work_url
+from .localnet import allows_private_miner_address, expected_genesis_hash
 
 # Probe and scoring paths both need to say why an axon row was excluded.
 # Counts only: never list a refused hotkey as dialable.
@@ -114,7 +115,9 @@ def scan_axons(metagraph: Any) -> AxonScan:
         except ChainClientError:
             skipped["unusable_ip"] += 1
             continue
-        if not is_globally_routable_address(address):
+        if not is_globally_routable_address(
+            address
+        ) and not allows_private_miner_address(address):
             skipped["unroutable"] += 1
             continue
         found.append(
@@ -140,9 +143,14 @@ def observed_genesis_hash(subtensor: Any) -> str:
     if not text.startswith("0x"):
         text = "0x" + text
     text = text.lower()
-    if text != FINNEY_GENESIS_HASH:
+    expected = expected_genesis_hash()
+    if text != expected:
+        if expected == FINNEY_GENESIS_HASH:
+            raise ChainClientError(
+                f"observed genesis {text} is not the pinned Finney genesis"
+            )
         raise ChainClientError(
-            f"observed genesis {text} is not the pinned Finney genesis"
+            f"observed genesis {text} is not the pinned localnet genesis {expected}"
         )
     return text
 

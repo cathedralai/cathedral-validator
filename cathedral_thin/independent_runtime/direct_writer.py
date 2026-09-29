@@ -32,7 +32,6 @@ from bittensor.utils import get_mechid_storage_index
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
-    FINNEY_GENESIS_HASH,
     MECID,
     MORTAL_PERIOD_BLOCKS,
     NETUID,
@@ -42,6 +41,7 @@ from cathedral_thin.independent.constants import (
 from cathedral_thin.independent.submit import build_mechanism_weights_kwargs
 
 from .axon import finalized_head, observed_genesis_hash
+from .localnet import expected_genesis_hash, state_scope_network
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DirectSubmissionReceipt,
@@ -52,7 +52,7 @@ from .direct_contract import (
     zero_burn_vector,
 )
 from .preview_io import canonical_document_bytes
-from .qvl import DIRECT_VALIDATOR_QVL_DIGEST
+from .qvl import expected_direct_validator_qvl_digest
 
 STATE_SCHEMA = "cathedral_direct_validator_state_v1"
 STATUS_CONFIRMED = "CONFIRMED"
@@ -554,7 +554,7 @@ def direct_state_scope(netuid: int) -> str:
     the updater and status tool, which still spell it out, look for it.
     """
 
-    return f"finney-sn{require_netuid(netuid)}-mechanism-{MECID}"
+    return f"{state_scope_network()}-sn{require_netuid(netuid)}-mechanism-{MECID}"
 
 
 def canonical_state_path(keypair: Any, *, netuid: int = NETUID) -> Path:
@@ -845,7 +845,7 @@ class DirectWeightWriter:
             or any(uid not in uid_hotkeys for uid in plan.wire_uids)
             or plan.snapshot.validator_uid in plan.wire_uids
             or sum(plan.wire_weights) != 0xFFFF
-            or plan.qvl_digest != DIRECT_VALIDATOR_QVL_DIGEST
+            or plan.qvl_digest != expected_direct_validator_qvl_digest()
             or not isinstance(plan.evidence_digest, str)
             or not plan.evidence_digest.startswith("sha256:")
             or len(plan.evidence_digest) != 71
@@ -1202,7 +1202,7 @@ class DirectWeightWriter:
         kwargs = intent.get("kwargs")
         if (
             identity.get("schema") != DIRECT_PLAN_SCHEMA
-            or identity.get("qvl_digest") != DIRECT_VALIDATOR_QVL_DIGEST
+            or identity.get("qvl_digest") != expected_direct_validator_qvl_digest()
             or identity.get("burn_uid") is not None
             or identity.get("burn_weight") != 0
             or identity.get("kwargs") != kwargs
@@ -1843,7 +1843,7 @@ class DirectWeightWriter:
         """
 
         substrate = self.subtensor.substrate
-        if self._history_block_hash(substrate, 0) != FINNEY_GENESIS_HASH:
+        if self._history_block_hash(substrate, 0) != expected_genesis_hash():
             raise FailedWriteRecordRefused(
                 "the node's chain is not the pinned Finney genesis"
             )

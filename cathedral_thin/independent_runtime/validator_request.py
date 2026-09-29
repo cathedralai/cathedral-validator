@@ -39,6 +39,12 @@ from cathedral_thin.independent.fetch_policy import is_globally_routable_address
 
 from .errors import IndependentLiveError
 from .https import HttpsEvidenceTransport, canonical_post_body
+from .localnet import (
+    LOCALNET_REQUEST_NETWORK,
+    allows_private_miner_address,
+    localnet_active,
+    request_network,
+)
 
 VALIDATOR_REQUEST_SCHEMA = "cathedral_validator_request_v1"
 WORKER_FLEET_SCHEMA = "cathedral_worker_fleet_v1"
@@ -81,6 +87,12 @@ _REQUEST_KEYS = frozenset(
     }
 )
 _FLEET_KEYS = frozenset({"schema", "worker_hotkey", "endpoints"})
+
+
+def _signable_networks() -> frozenset[str]:
+    if localnet_active():
+        return frozenset({"finney", "test", LOCALNET_REQUEST_NETWORK})
+    return frozenset({"finney", "test"})
 
 
 def _require_hotkey(value: Any, label: str) -> str:
@@ -126,13 +138,15 @@ def build_validator_request_header(
     nonce: bytes,
     issued_at: datetime,
     expires_at: datetime,
-    network: str = NETWORK,
+    network: str | None = None,
     netuid: int = NETUID,
 ) -> str:
     """Return standard-base64 canonical JSON signed by ``keypair.sign``."""
 
+    if network is None:
+        network = request_network()
     if (
-        network not in {"finney", "test"}
+        network not in _signable_networks()
         or type(netuid) is not int
         or not 0 <= netuid <= 65535
     ):
@@ -223,7 +237,9 @@ def validate_public_worker_endpoint(value: Any) -> str:
         address = ipaddress.ip_address(parsed.hostname or "")
     except ValueError as exc:
         raise IndependentLiveError("fleet endpoint must use an IP literal") from exc
-    if not is_globally_routable_address(address):
+    if not is_globally_routable_address(address) and not allows_private_miner_address(
+        address
+    ):
         raise IndependentLiveError("fleet endpoint must use a globally routable IP")
     host = f"[{address.compressed}]" if address.version == 6 else address.compressed
     canonical = f"https://{host}:{port}"
@@ -257,15 +273,17 @@ class SignedValidatorTransport:
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[int], bytes] | None = None,
         expected_spki: bytes | None = None,
-        network: str = NETWORK,
+        network: str | None = None,
         netuid: int = NETUID,
     ) -> None:
         if not isinstance(transport, HttpsEvidenceTransport):
             raise IndependentLiveError(
                 "signed validator access requires the hardened HTTPS transport"
             )
+        if network is None:
+            network = request_network()
         if (
-            network not in {"finney", "test"}
+            network not in _signable_networks()
             or type(netuid) is not int
             or not 0 <= netuid <= 65535
         ):
