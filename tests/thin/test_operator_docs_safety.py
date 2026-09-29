@@ -80,7 +80,9 @@ def test_readme_is_the_small_public_guide() -> None:
     )
     assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
     assert "service receives only the hotkey file" in words
-    assert "There is no alternate scoring mode and no non-writing mode" in words
+    assert "The default validator is one recurring SAT process" in words
+    assert "disabled by default" in words
+    assert "docs/sn94/DELIVERY_V1.md" in guide
     assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in words
     assert "`NOT_PROVEN` means success is unresolved" in guide
     assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide

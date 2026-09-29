@@ -4,7 +4,7 @@ Cathedral Validator scores compute on Bittensor SN94 and writes weights directly
 with your validator hotkey. It does not download a weight vector, use a relay,
 or send your key to Cathedral.
 
-## SN94 delivered-resource V1
+**SN94 delivered-resource V1.**
 
 The opt-in [delivery mechanism and operator procedure](docs/sn94/DELIVERY_V1.md)
 adds signed delivery receipts, strict TDX admission, durable resource accounting,
