@@ -253,6 +253,9 @@ Never delete or replace the journal to clear an error. The journal location,
 pause and resume, and the recovery rules are in
 [Validator auto-update](docs/AUTO_UPDATE.md).
 
+For the whole path in order, from a fresh host to a confirmed weight row, see
+the [Operator runbook](docs/OPERATOR_RUNBOOK.md).
+
 ## Updates
 
 Signed releases update the validator, pinned TDX verifier, and pinned SNP
