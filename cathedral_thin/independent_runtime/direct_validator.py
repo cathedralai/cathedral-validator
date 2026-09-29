@@ -827,6 +827,7 @@ def run_direct_cycle(
     snp_verifier: SnpProductionVerifier | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
+    delivery_context: Any | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -852,6 +853,15 @@ def run_direct_cycle(
     lock = getattr(writer, "cycle_locked", None)
     context = lock() if callable(lock) else nullcontext()
     with context:
+        if delivery_context is not None:
+            if netuid != 94:
+                raise DirectValidatorError("delivery mechanism is SN94 only")
+            return delivery_context.run(
+                subtensor=subtensor,
+                keypair=keypair,
+                writer=writer,
+                snapshot_reader=finalized_serving_miners_snapshot,
+            )
         return _run_direct_cycle_unlocked(
             subtensor=subtensor,
             keypair=keypair,
@@ -930,6 +940,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--interval-seconds", type=float, default=DEFAULT_INTERVAL_SECONDS
+    )
+    parser.add_argument(
+        "--delivery-policy",
+        type=Path,
+        help="explicit SN94 delivered-resource policy; absent keeps SAT mode",
+    )
+    parser.add_argument(
+        "--service-config",
+        type=Path,
+        help="root-owned signed-service mechanism configuration",
+    )
+    parser.add_argument("--delivery-bundle", type=Path, help="local receipt feed file")
+    parser.add_argument(
+        "--delivery-ledger",
+        type=Path,
+        help="private durable receipt accounting database",
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
@@ -1037,6 +1063,19 @@ def _capacity_shadow_event(
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["service-config-check"]:
+        from .service_config import main as service_check_main
+
+        return service_check_main(arguments[1:])
+    if arguments and arguments[0] == "delivery-probe":
+        from .delivery_probe import main as probe_main
+
+        return probe_main(arguments[1:])
+    if arguments[:1] == ["delivery-plan"]:
+        # Isolated plan-only accounting. Never opens a wallet or submits weights.
+        from .delivery_plan import main as delivery_main
+
+        return delivery_main(arguments[1:])
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
         # The operator's recovery command ships in the same signed release
         # entrypoint. It loads no key and never signs or broadcasts.
@@ -1055,6 +1094,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         or options.interval_seconds <= 0
     ):
         raise SystemExit("interval must be positive")
+
+    if options.service_config is not None:
+        from .service_config import check as check_service_config
+        from .delivery_plan import DeliveryPlanError
+
+        if any(
+            (options.delivery_policy, options.delivery_bundle, options.delivery_ledger)
+        ):
+            raise SystemExit(
+                "service configuration cannot be overridden by delivery flags"
+            )
+        try:
+            service_config = check_service_config(options.service_config)
+        except (OSError, ValueError, TypeError, KeyError, DeliveryPlanError) as exc:
+            raise SystemExit(
+                "service configuration refused before wallet access"
+            ) from exc
+        if service_config["mechanism"] == "sn94_delivery_v1":
+            options.delivery_policy = Path(service_config["policy_path"])
+            options.delivery_bundle = Path(service_config["bundle_path"])
+            options.delivery_ledger = Path(service_config["ledger_path"])
+
+    delivery_context = None
+    delivery_options = (
+        options.delivery_policy,
+        options.delivery_bundle,
+        options.delivery_ledger,
+    )
+    if any(delivery_options):
+        if not all(delivery_options) or netuid != 94:
+            raise SystemExit(
+                "delivery policy, bundle and ledger are required together on SN94"
+            )
+        from .delivery_runtime import DeliveryContext
+        from .delivery_plan import DeliveryPlanError
+
+        try:
+            delivery_context = DeliveryContext(
+                policy_path=options.delivery_policy,
+                bundle_path=options.delivery_bundle,
+                ledger_path=options.delivery_ledger,
+            )
+        except (DeliveryPlanError, OSError, ValueError) as exc:
+            raise SystemExit(
+                "delivery configuration refused before wallet access"
+            ) from exc
 
     verifier = load_direct_validator_verifier(options.qvl)
     adapter = ComputeAdapter(
@@ -1101,7 +1186,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
         netuid=netuid,
+        **(
+            {"delivery_policy_digest": delivery_context.policy_digest}
+            if delivery_context is not None
+            else {}
+        ),
     )
+    if delivery_context is not None and options.telemetry_spool is not None:
+        raise SystemExit(
+            "delivery receipts have their own accounting ledger; SAT telemetry is disabled"
+        )
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
             "--telemetry-spool and --telemetry-reader-group must be supplied together"
@@ -1215,6 +1309,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     telemetry_sink=telemetry_sink,
                     report_recovery=_print_event,
                     netuid=netuid,
+                    **(
+                        {"delivery_context": delivery_context}
+                        if delivery_context is not None
+                        else {}
+                    ),
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
                 shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)

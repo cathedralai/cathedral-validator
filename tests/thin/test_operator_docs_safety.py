@@ -80,7 +80,9 @@ def test_readme_is_the_small_public_guide() -> None:
     )
     assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
     assert "service receives only the hotkey file" in words
-    assert "There is no alternate scoring mode and no non-writing mode" in words
+    assert "The default validator is one recurring SAT process" in words
+    assert "disabled by default" in words
+    assert "docs/sn94/DELIVERY_V1.md" in guide
     assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in words
     assert "`NOT_PROVEN` means success is unresolved" in guide
     assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide
@@ -164,6 +166,19 @@ def test_readme_pins_the_install_script_by_digest() -> None:
     assert "REPLACE_WITH" not in script
     assert _published_bootstrap_sequence(script) >= 1
     subprocess.run(["bash", "-n", str(INSTALL_SCRIPT)], check=True)
+
+
+def test_readme_separates_sn94_source_from_published_sn39_installation() -> None:
+    guide = _readme()
+    words = " ".join(guide.split())
+    assert "This source checkout targets SN94" in words
+    assert "signed `stable` release still targets SN39" in words
+    assert "rejects `--netuid 94`" in words
+    assert "SN94 requires a new signed release and bootstrap" in words
+    assert guide.index("signed `stable` release still targets SN39") < guide.index(
+        "curl -fsSL"
+    )
+    assert "The install and setup commands below are for that SN39 release" in words
 
 
 def test_install_script_uses_unpredictable_root_controlled_staging() -> None:

@@ -97,6 +97,7 @@ def main():
                 "bittensor-10.5.0-py3-none-any.whl": "1" * 64,
                 "cathedral-0.0.0-py3-none-any.whl": "5" * 64,
                 "cathedral_scaffold-1.2.3-py3-none-any.whl": "2" * 64,
+                "cathedral_delivery-0.1.0-py3-none-any.whl": "6" * 64,
                 "cryptography-48.0.0-py3-none-any.whl": "3" * 64,
                 "numpy-2.5.2-py3-none-any.whl": "4" * 64,
             },
@@ -127,6 +128,11 @@ def main():
             "cathedral_thin/independent_runtime/__init__.py": b"",
             "cathedral_thin/independent_runtime/direct_validator.py": runtime,
             "cathedral_thin/independent_runtime/snp_production.py": b"",
+            "cathedral_thin/independent_runtime/delivery_plan.py": b"",
+            "cathedral_thin/independent_runtime/delivery_runtime.py": b"",
+            "cathedral_thin/independent_runtime/delivery_probe.py": b"",
+            "cathedral_thin/independent_runtime/service_config.py": b"",
+            "cathedral_delivery/__init__.py": b"",
             "cathedral_thin/independent_runtime/telemetry.py": b"",
             "cathedral_thin/independent_runtime/telemetry_exporter.py": b"",
             ".deps/cathedral_scaffold-1.2.3-py3-none-any.whl/"
@@ -587,6 +593,55 @@ def test_failed_first_release_readiness_is_stopped_and_deactivated(
         calls.append(tuple(command))
         if command[1] == "restart":
             raise OSError("first service never reached READY=1")
+
+    updater = _updater(
+        tmp_path,
+        journal=journal,
+        metadata=metadata,
+        archive=archive,
+        service_restarter=fail_start,
+        seed_current=False,
+    )
+
+    with pytest.raises(UpdateRefused, match="failed readiness and was deactivated"):
+        _bootstrap(updater, private, channel="canary", sequence=1)
+
+    assert calls == [
+        (SYSTEMCTL, "restart", VALIDATOR_SERVICE),
+        (SYSTEMCTL, "stop", VALIDATOR_SERVICE),
+    ]
+    assert not (tmp_path / "install" / "current").exists()
+    updater_state = json.loads((tmp_path / "state" / "state.json").read_text())
+    assert updater_state["pending"] is None
+    assert updater_state["channels"] == {}
+
+
+def test_service_config_prestart_refusal_deactivates_first_release(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from cathedral_thin.independent_runtime import service_config
+
+    monkeypatch.setattr(service_config, "OWNER_UID", os.getuid())
+    missing_config = tmp_path / "absent-service-config.json"
+    private = Ed25519PrivateKey.generate()
+    archive = _archive()
+    metadata = _canary_metadata(
+        private,
+        sequence=1,
+        archive=archive,
+        tree=_tree_digest(tmp_path, archive),
+    )
+    journal = tmp_path / "journal" / "state.json"
+    calls: list[tuple[str, ...]] = []
+
+    def fail_start(command) -> None:
+        calls.append(tuple(command))
+        if command[1] == "restart":
+            # Model the unit's actual ExecStartPre command, with no wallet,
+            # service or chain access. Its failure prevents ExecStart.
+            assert service_config.main(["--config", str(missing_config)]) == 2
+            raise OSError("ExecStartPre configuration refused")
 
     updater = _updater(
         tmp_path,

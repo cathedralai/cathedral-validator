@@ -1706,3 +1706,180 @@ def test_status_keeps_every_field_when_a_failed_write_meets_no_permit_and_expiry
     assert report["release_metadata"]["state"] == "EXPIRES_SOON"
     assert report["warning"].startswith("Signed stable release metadata")
     assert HOTKEY not in json.dumps(report)
+
+
+def _delivery_inputs(tmp_path):
+    from cathedral_thin.independent_runtime.qvl import DIRECT_VALIDATOR_QVL_DIGEST
+
+    policy = _write(
+        tmp_path / "operator" / "delivery-policy.json",
+        json.dumps(
+            {
+                "schema": "cathedral_sn94_delivery_policy_v1",
+                "netuid": 94,
+                "mode": "write",
+                "window_seconds": 3600,
+                "burn_bps": 1000,
+                "burn_uid": 0,
+                "burn_hotkey": "burn",
+                "allowed_measurements": ["tdx-measurement-sha256:" + "33" * 32],
+                "verifier_path": "/opt/cathedral-validator/current/bin/cathedral-tdx-verifier",
+                "verifier_sha256": DIRECT_VALIDATOR_QVL_DIGEST,
+                "control_plane_keys": {"authority": "11" * 32},
+            }
+        ),
+    )
+    bundle = _write(
+        tmp_path / "operator" / "delivery-bundle.json",
+        json.dumps(
+            {
+                "window_start": 0,
+                "uid_hotkeys": [[0, "burn"]],
+                "entries": [],
+            }
+        ),
+    )
+    return policy, bundle
+
+
+def test_delivery_setup_stages_bound_inputs_before_candidate_can_start(
+    monkeypatch, tmp_path
+):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    calls = []
+    base = _setup_runner(calls)
+
+    def runner(command, **kwargs):
+        if command[0] == str(setup.UPDATER):
+            config = json.loads((setup.ETC / "service-config.json").read_bytes())
+            assert config["mechanism"] == "sn94_delivery_v1"
+            assert (
+                config["policy_sha256"]
+                == hashlib.sha256(delivery_policy.read_bytes()).hexdigest()
+            )
+            assert Path(config["bundle_path"]).read_bytes() == bundle.read_bytes()
+            assert config["ledger_path"] == str(setup.DELIVERY_LEDGER)
+            from cathedral_thin.independent_runtime import service_config
+
+            monkeypatch.setattr(service_config, "OWNER_UID", os.getuid())
+            assert service_config.check(setup.ETC / "service-config.json") == config
+        return base(command, **kwargs)
+
+    setup.configure(
+        hotkey_file=hotkey,
+        expected_hotkey=HOTKEY,
+        snp_policy=policy,
+        mechanism="sn94_delivery_v1",
+        delivery_policy=delivery_policy,
+        delivery_bundle=bundle,
+        runner=runner,
+    )
+    complete = json.loads((setup.ETC / "setup-complete.json").read_bytes())
+    assert (
+        complete["service_config_sha256"]
+        == hashlib.sha256((setup.ETC / "service-config.json").read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("first_mode", ["sat", "sn94_delivery_v1"])
+def test_setup_rerun_cannot_change_mechanism(monkeypatch, tmp_path, first_mode):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    delivery = {
+        "mechanism": "sn94_delivery_v1",
+        "delivery_policy": delivery_policy,
+        "delivery_bundle": bundle,
+    }
+    setup.configure(
+        hotkey_file=hotkey,
+        expected_hotkey=HOTKEY,
+        snp_policy=policy,
+        runner=_setup_runner([]),
+        **(delivery if first_mode != "sat" else {}),
+    )
+    _committed_install()
+    before = (setup.ETC / "service-config.json").read_bytes()
+    with pytest.raises(setup.SetupRefused, match="differs|owner-controlled"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            runner=_setup_runner([], direct_active=True),
+            **(delivery if first_mode == "sat" else {}),
+        )
+    assert (setup.ETC / "service-config.json").read_bytes() == before
+
+
+def test_delivery_missing_feed_refuses_before_any_setup_mutation(monkeypatch, tmp_path):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    bundle.unlink()
+    calls = []
+    with pytest.raises(setup.SetupRefused):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            mechanism="sn94_delivery_v1",
+            delivery_policy=delivery_policy,
+            delivery_bundle=bundle,
+            runner=_setup_runner(calls),
+        )
+    assert calls == []
+    assert not (setup.ETC / "service-config.json").exists()
+
+
+def test_delivery_candidate_prestart_refusal_never_completes_or_enables(
+    monkeypatch, tmp_path
+):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    calls = []
+    base = _setup_runner(calls)
+
+    def runner(command, **kwargs):
+        if command[0] == str(setup.UPDATER):
+            calls.append(command)
+            raise subprocess.CalledProcessError(
+                2,
+                command,
+                stderr="CATHEDRAL_VALIDATOR_UPDATE_REFUSED: first release failed readiness and was deactivated",
+            )
+        return base(command, **kwargs)
+
+    with pytest.raises(setup.SetupRefused, match="failed readiness"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            mechanism="sn94_delivery_v1",
+            delivery_policy=delivery_policy,
+            delivery_bundle=bundle,
+            runner=runner,
+        )
+    assert _enable_calls(calls) == []
+    assert not (setup.ETC / "setup-complete.json").exists()
+    assert (
+        json.loads((setup.ETC / "service-config.json").read_bytes())["mechanism"]
+        == "sn94_delivery_v1"
+    )
+
+
+def test_delivery_setup_cannot_adopt_existing_unbound_writer(monkeypatch, tmp_path):
+    hotkey, policy = _setup_paths(monkeypatch, tmp_path)
+    delivery_policy, bundle = _delivery_inputs(tmp_path)
+    _committed_install()
+    calls = []
+    with pytest.raises(setup.SetupRefused, match="migration"):
+        setup.configure(
+            hotkey_file=hotkey,
+            expected_hotkey=HOTKEY,
+            snp_policy=policy,
+            mechanism="sn94_delivery_v1",
+            delivery_policy=delivery_policy,
+            delivery_bundle=bundle,
+            runner=_setup_runner(calls, direct_active=True),
+        )
+    assert not (setup.ETC / "service-config.json").exists()
+    assert _enable_calls(calls) == []

@@ -600,7 +600,17 @@ class DirectWeightWriter:
         snapshot_reader: Callable[[Any, Any], FinalizedMetagraphSnapshot] | None = None,
         call_builder: Callable[[Mapping[str, Any]], Any] | None = None,
         netuid: int = NETUID,
+        delivery_policy_digest: str | None = None,
     ) -> None:
+        self.delivery_policy_digest = delivery_policy_digest
+        if delivery_policy_digest is not None and (
+            netuid != 94
+            or not isinstance(delivery_policy_digest, str)
+            or len(delivery_policy_digest) != 64
+        ):
+            raise DirectValidatorError(
+                "delivery writer requires an explicit SN94 policy digest"
+            )
         self.subtensor = subtensor
         self.keypair = keypair
         self.netuid = require_netuid(netuid)
@@ -790,6 +800,14 @@ class DirectWeightWriter:
         )
 
     def _validate_plan(self, plan: DirectWeightPlan) -> dict[str, Any]:
+        from .delivery_runtime import DeliveryWeightPlan, validate_writer_plan
+
+        if isinstance(plan, DeliveryWeightPlan):
+            return validate_writer_plan(plan, writer=self)
+        if self.delivery_policy_digest is not None:
+            raise DirectValidatorError(
+                "delivery mode never falls back to machine-count scores"
+            )
         if not isinstance(plan, DirectWeightPlan):
             raise DirectValidatorError("direct writer requires a DirectWeightPlan")
         if (
@@ -1200,11 +1218,25 @@ class DirectWeightWriter:
         miners = anchor.get("miners") if isinstance(anchor, Mapping) else None
         uid_rows = identity.get("uid_hotkeys")
         kwargs = intent.get("kwargs")
+        from .delivery_runtime import DELIVERY_WEIGHT_SCHEMA, validate_delivery_identity
+
+        delivery_mode = identity.get("schema") == DELIVERY_WEIGHT_SCHEMA
+        if delivery_mode:
+            try:
+                validate_delivery_identity(
+                    identity,
+                    policy_digest=self.delivery_policy_digest,
+                    netuid=self.netuid,
+                )
+            except DirectValidatorError as exc:
+                raise DirectSubmissionContradiction(
+                    "delivery recovery policy or plan differs"
+                ) from exc
         if (
-            identity.get("schema") != DIRECT_PLAN_SCHEMA
+            (identity.get("schema") != DIRECT_PLAN_SCHEMA and not delivery_mode)
             or identity.get("qvl_digest") != DIRECT_VALIDATOR_QVL_DIGEST
-            or identity.get("burn_uid") is not None
-            or identity.get("burn_weight") != 0
+            or (not delivery_mode and identity.get("burn_uid") is not None)
+            or (not delivery_mode and identity.get("burn_weight") != 0)
             or identity.get("kwargs") != kwargs
             or not isinstance(validator, Mapping)
             or not isinstance(miners, list)
@@ -1629,6 +1661,31 @@ class DirectWeightWriter:
         self._write_state(state)
         return receipt
 
+    def delivery_record(self, plan_id: str) -> dict[str, Any] | None:
+        """Read an exact completed delivery plan for allocation-ledger recovery."""
+        from .delivery_runtime import DELIVERY_WEIGHT_SCHEMA
+
+        with self._locked():
+            state = self._read_state()
+            last = state.get("last_attempt")
+            if not isinstance(last, dict):
+                return None
+            identity = last.get("identity", {})
+            if (
+                identity.get("schema") != DELIVERY_WEIGHT_SCHEMA
+                or identity.get("delivery", {}).get("plan_id") != plan_id
+            ):
+                return None
+            self._confirmation_contract(last)
+            receipt = last.get("receipt")
+            if not isinstance(receipt, dict) or receipt.get("status") not in {
+                STATUS_CONFIRMED,
+                STATUS_RECOVERED,
+                STATUS_EXPIRED,
+            }:
+                return None
+            return dict(receipt)
+
     def recover(self) -> DirectSubmissionReceipt | None:
         """Confirm one signed hash and stored row without signing or resubmitting."""
 
@@ -1637,6 +1694,10 @@ class DirectWeightWriter:
             pending = self._pending(state)
             if pending is None:
                 return None
+            from .delivery_runtime import DELIVERY_WEIGHT_SCHEMA
+
+            if pending.get("identity", {}).get("schema") == DELIVERY_WEIGHT_SCHEMA:
+                self._confirmation_contract(pending)
             status, receipt = self._locate(pending)
             if status == "finalized" and receipt is not None:
                 try:
@@ -1966,6 +2027,7 @@ class DirectWeightWriter:
         plan: DirectWeightPlan,
         *,
         cycle_deadline_monotonic: float,
+        before_sign: Callable[[], None] | None = None,
     ) -> DirectSubmissionReceipt:
         """Persist one signed intent, broadcast once, and prove stored finality.
 
@@ -2020,6 +2082,10 @@ class DirectWeightWriter:
                 _require_presign_time(
                     presign_deadline, stage="immediately before signing"
                 )
+                if before_sign is not None:
+                    # Delivery accounting commits STARTED at the real signer
+                    # boundary, after definite pre-sign eligibility refusals.
+                    before_sign()
                 signed = substrate.create_signed_extrinsic(
                     call=call,
                     keypair=self.keypair,

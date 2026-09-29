@@ -3482,9 +3482,9 @@ def test_unsigned_reservation_does_not_consume_budget_until_signed_intent(
     )
 
 
-def _reserved_sn39_runtime():
+def _reserved_runtime(*, netuid=94):
     args = SimpleNamespace(
-        netuid=39,
+        netuid=netuid,
         offline=False,
         max_submissions=1,
         require_full_provenance_for_broadcast=True,
@@ -3509,7 +3509,7 @@ def _submit_refused(args, monkeypatch, error: Exception) -> list[str]:
     def refuse(*_args, **_kwargs):
         raise error
 
-    monkeypatch.setattr(validator_thin, "_authorize_sn39_chain_submission", refuse)
+    monkeypatch.setattr(validator_thin, "_authorize_sn94_chain_submission", refuse)
     monkeypatch.setattr(
         validator_thin,
         "_lifecycle",
@@ -3519,7 +3519,7 @@ def _submit_refused(args, monkeypatch, error: Exception) -> list[str]:
         validator_thin.set_weights_on_chain(
             {7: 0.9, 241: 0.1},
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
             broadcast=True,
@@ -3540,7 +3540,7 @@ def _submit_refused(args, monkeypatch, error: Exception) -> list[str]:
 def test_a_refusal_before_signing_releases_the_unsigned_reservation(
     monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    args, attempt_id, identity = _reserved_sn39_runtime()
+    args, attempt_id, identity = _reserved_runtime()
     journal_path = validator_thin._submission_state_path(args)
 
     events = _submit_refused(args, monkeypatch, error)
@@ -3561,7 +3561,7 @@ def test_a_refusal_before_signing_releases_the_unsigned_reservation(
 def test_an_attempt_swapped_during_authorization_is_refused_and_kept(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args, attempt_id, identity = _reserved_sn39_runtime()
+    args, attempt_id, identity = _reserved_runtime()
     other_id = "sha256:" + "2" * 64
 
     def swap(*_args, **_kwargs):
@@ -3573,7 +3573,7 @@ def test_an_attempt_swapped_during_authorization_is_refused_and_kept(
             args, lane="thin", attempt_id=other_id, identity=identity
         )
 
-    monkeypatch.setattr(validator_thin, "_authorize_sn39_chain_submission", swap)
+    monkeypatch.setattr(validator_thin, "_authorize_sn94_chain_submission", swap)
     monkeypatch.setattr(
         validator_thin, "_validate_chain_constraints", lambda *_args, **_kwargs: None
     )
@@ -3583,7 +3583,7 @@ def test_an_attempt_swapped_during_authorization_is_refused_and_kept(
         validator_thin.set_weights_on_chain(
             {7: 0.9, 241: 0.1},
             network="finney",
-            netuid=39,
+            netuid=94,
             wallet_name="validator",
             wallet_hotkey="default",
             broadcast=True,
@@ -3600,14 +3600,14 @@ def test_an_attempt_swapped_during_authorization_is_refused_and_kept(
 def test_a_refusal_never_releases_an_attempt_that_reached_signed_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args, attempt_id, _identity = _reserved_sn39_runtime()
+    args, attempt_id, _identity = _reserved_runtime()
     validator_thin._record_pending_broadcast_intent(
         args,
         attempt_id=attempt_id,
         extrinsic_hash="0x" + "a" * 64,
         nonce=17,
         era_reference_block=100,
-        mortal_period_blocks=validator_thin.SN39_MORTAL_PERIOD_BLOCKS,
+        mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
         version_key=validator_thin._weight_version_key(),
         wire_uids=[7, 241],
         wire_weights=[65535, 7282],
@@ -3618,6 +3618,80 @@ def test_a_refusal_never_releases_an_attempt_that_reached_signed_intent(
     kept = validator_thin._read_state(validator_thin._submission_state_path(args))
     assert kept["submission_pending_id"] == attempt_id
     assert kept["submission_pending_phase"] == "signed_intent"
+
+
+@pytest.mark.parametrize("netuid,keeps_legacy_reservation", [(39, True), (94, False)])
+def test_presign_constraint_refusal_preserves_other_netuid_behavior(
+    monkeypatch: pytest.MonkeyPatch, netuid: int, keeps_legacy_reservation: bool
+) -> None:
+    args, attempt_id, _identity = _reserved_runtime(netuid=netuid)
+    monkeypatch.setattr(
+        validator_thin, "_authorize_sn94_chain_submission", lambda *_a, **_k: None
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise validator_thin.wire.VectorError("constraint refused before signing")
+
+    monkeypatch.setattr(validator_thin, "_validate_chain_constraints", refuse)
+    with pytest.raises(validator_thin.wire.VectorError, match="constraint refused"):
+        validator_thin.set_weights_on_chain(
+            {7: 0.9, 241: 0.1},
+            network="finney",
+            netuid=netuid,
+            wallet_name="validator",
+            wallet_hotkey="default",
+            broadcast=True,
+            preflight=_uid_capacity_preflight(frozenset({"worker", "burn"})),
+            uid_hotkeys={7: "worker", 241: "burn"},
+            runtime_contract=args,
+        )
+    state = validator_thin._read_state(validator_thin._submission_state_path(args))
+    assert state["submission_pending_id"] == (
+        attempt_id if keeps_legacy_reservation else None
+    )
+
+
+def test_exception_after_signed_intent_remains_ambiguous_and_reserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args, attempt_id, _identity = _reserved_runtime()
+    for name in ("_authorize_sn94_chain_submission", "_validate_chain_constraints"):
+        monkeypatch.setattr(validator_thin, name, lambda *_a, **_k: None)
+
+    def signed_then_lost(*_args, **_kwargs):
+        validator_thin._record_pending_broadcast_intent(
+            args,
+            attempt_id=attempt_id,
+            extrinsic_hash="0x" + "a" * 64,
+            nonce=17,
+            era_reference_block=100,
+            mortal_period_blocks=validator_thin.SN94_MORTAL_PERIOD_BLOCKS,
+            version_key=validator_thin._weight_version_key(),
+            wire_uids=[7, 241],
+            wire_weights=[65535, 7282],
+        )
+        raise ConnectionResetError("response unavailable after intent")
+
+    monkeypatch.setattr(
+        validator_thin, "_submit_exact_sn94_extrinsic", signed_then_lost
+    )
+    with pytest.raises(
+        validator_thin._PendingReceiptNotProven, match="must not submit"
+    ):
+        validator_thin.set_weights_on_chain(
+            {7: 0.9, 241: 0.1},
+            network="finney",
+            netuid=94,
+            wallet_name="validator",
+            wallet_hotkey="default",
+            broadcast=True,
+            preflight=_uid_capacity_preflight(frozenset({"worker", "burn"})),
+            uid_hotkeys={7: "worker", 241: "burn"},
+            runtime_contract=args,
+        )
+    state = validator_thin._read_state(validator_thin._submission_state_path(args))
+    assert state["submission_pending_id"] == attempt_id
+    assert state["submission_pending_phase"] == "signed_intent"
 
 
 def test_receipt_block_number_requires_canonical_hash_height_round_trip() -> None:

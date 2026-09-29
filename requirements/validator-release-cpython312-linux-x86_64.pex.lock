@@ -337,6 +337,22 @@
           "artifacts": [
             {
               "algorithm": "sha256",
+              "commit_id": "29477bd2e8334a8d78e5f9168f001759ede60ad8",
+              "hash": "8ab1bd5c7fc06c523ab64be143e615373d3ef2812b16e213e0f34dce0555df8f",
+              "url": "git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract"
+            }
+          ],
+          "project_name": "cathedral-delivery",
+          "requires_dists": [
+            "cryptography>=42"
+          ],
+          "requires_python": ">=3.11",
+          "version": "0.1.0"
+        },
+        {
+          "artifacts": [
+            {
+              "algorithm": "sha256",
               "hash": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
               "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl"
             }
@@ -931,6 +947,7 @@
   "requirements": [
     "bittensor<11,>=10.4",
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract",
     "cryptography>=42",
     "numpy>=1.24"
   ],

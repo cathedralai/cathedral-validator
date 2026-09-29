@@ -11,6 +11,8 @@ requires-python = ">=3.11"
 # verifies their machines locally, and writes its own vector to Bittensor.
 dependencies = [
     "cryptography>=42",
+    # Standalone canonical receipt contract; preserves the existing SNP package pin.
+    "cathedral-delivery @ git+https://github.com/cathedralai/cathedral-sandbox.git@29477bd2e8334a8d78e5f9168f001759ede60ad8#subdirectory=packages/delivery-contract",
     "bittensor>=10.4,<11",
     "numpy>=1.24",
 ]

@@ -89,6 +89,7 @@ def _validator_pex(path: Path) -> None:
                 "bittensor-10.5.0-py3-none-any.whl": "1" * 64,
                 "cathedral-0.0.0-py3-none-any.whl": "5" * 64,
                 "cathedral_scaffold-1.2.3-py3-none-any.whl": "2" * 64,
+                "cathedral_delivery-0.1.0-py3-none-any.whl": "6" * 64,
                 "cryptography-48.0.0-py3-none-any.whl": "3" * 64,
                 "numpy-2.5.2-py3-none-any.whl": "4" * 64,
             },
@@ -116,6 +117,11 @@ def _validator_pex(path: Path) -> None:
             "cathedral_thin/independent_runtime/__init__.py": b"",
             "cathedral_thin/independent_runtime/direct_validator.py": b"",
             "cathedral_thin/independent_runtime/snp_production.py": b"",
+            "cathedral_thin/independent_runtime/delivery_plan.py": b"",
+            "cathedral_thin/independent_runtime/delivery_runtime.py": b"",
+            "cathedral_thin/independent_runtime/delivery_probe.py": b"",
+            "cathedral_thin/independent_runtime/service_config.py": b"",
+            "cathedral_delivery/__init__.py": b"",
             "cathedral_thin/independent_runtime/telemetry.py": b"",
             "cathedral_thin/independent_runtime/telemetry_exporter.py": b"",
         }
@@ -950,3 +956,27 @@ def test_expired_channel_renews_without_rebuild_within_updater_limits(
             },
             _release(same_sequence, private, channel="stable"),
         )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "cathedral_delivery/__init__.py",
+        "cathedral_thin/independent_runtime/delivery_runtime.py",
+        "cathedral_thin/independent_runtime/service_config.py",
+    ],
+)
+def test_release_cannot_omit_delivery_contract_or_writer(tmp_path, missing):
+    builder = _builder()
+    path = tmp_path / "delivery-missing.pex"
+    _validator_pex(path)
+    original = path.read_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as source:
+        with zipfile.ZipFile(output, "w") as target:
+            for member in source.infolist():
+                if member.filename != missing:
+                    target.writestr(member, source.read(member.filename))
+    path.write_bytes(b"#!/usr/bin/python3.12\n" + output.getvalue())
+    with pytest.raises(builder["UpdateRefused"], match="delivery"):
+        builder["_validator_pex"](path)

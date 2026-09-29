@@ -1,14 +1,59 @@
 # Cathedral Validator
 
-Cathedral Validator scores compute on Bittensor SN94 and writes weights directly
+Cathedral Validator verifies compute on Bittensor and writes weights directly
 with your validator hotkey. It does not download a weight vector, use a relay,
 or send your key to Cathedral.
+
+This source checkout targets SN94. As checked on 2026-09-29, the published
+signed `stable` release still targets SN39 and rejects `--netuid 94`.
+The install and setup commands below are for that SN39 release. SN94 requires
+a new signed release and bootstrap, followed by chain and hardware qualification.
+Changing a command-line subnet number does not perform that cutover.
+
+**SN94 delivered-resource V1.**
+
+The opt-in [delivery mechanism and operator procedure](docs/sn94/DELIVERY_V1.md)
+adds signed delivery receipts, strict TDX admission, durable resource accounting,
+and the existing writer/recovery path. It is disabled by default and is not yet
+in a published signed release. The customer lifecycle producer is an unmet
+activation gate. The ordinary-key probe CLI measures create/exec/loss separately.
+The instructions below describe the existing SAT mechanism.
+
+The source now also includes a guided delivery setup mode. **Use it only after
+a signed SN94 bootstrap/runtime containing this change is published and the
+customer receipt producer is qualified.** The ordinary install command below
+still fetches the dated SN39 release; it cannot enable this mode today.
+
+Once those gates pass, supply the reviewed write policy and an existing,
+authenticated closed-window receipt bundle:
+
+```bash
+sudo cathedral-validator-setup \
+  --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
+  --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
+  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
+  --mechanism sn94_delivery_v1 \
+  --delivery-policy /absolute/reviewed/delivery-policy.json \
+  --delivery-bundle /absolute/reviewed/delivery-bundle.json \
+  --confirm-direct-write
+```
+
+Setup pins the mechanism and policy bytes, stages the initial feed, and selects
+`/var/lib/cathedral-validator/delivery.sqlite3` as the accounting ledger. The
+candidate runtime checks the configuration before the writer starts. Missing
+feed or a policy mismatch refuses startup; setup cannot silently switch an
+existing SAT installation into delivery or the reverse. Delivery setup is for
+a clean first install or recovery of the same already-bound configuration; an
+existing unbound writer needs a reviewed migration. The signed updater's
+readiness failure path deactivates a failed first release. Later rollback
+requires a prior release supporting the same signed service contract. See the [delivery setup contract](docs/sn94/DELIVERY_V1.md#guided-setup)
+for feed ownership and remaining activation gates.
 
 ## What it does
 
 Each cycle, the validator:
 
-1. Reads a finalized SN94 metagraph and finds serving miners.
+1. Reads the released subnet's finalized metagraph and finds serving miners.
 2. Authenticates to each miner and requests its machine fleet.
 3. Verifies Intel TDX or AMD SEV-SNP evidence and the same SAT workload.
 4. Removes duplicate endpoints, TLS identities, and physical machines.
@@ -25,7 +70,8 @@ pinned TDX and SNP verifier programs.
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
   Ubuntu 24.04 LTS is what Cathedral tests on.
-- A hotkey registered on SN94 that holds a validator permit. The validator
+- A hotkey registered on the released subnet (SN39 for the signed release above)
+  that holds a validator permit. The validator
   writes no weights without one. It keeps running, checks again every cycle,
   and reports `NOT_REGISTERED` or `NO_PERMIT` until the chain grants the permit
   at an epoch. A permit depends on your stake relative to other validators.
@@ -60,7 +106,7 @@ public address.
   submissions.
 - `raw.githubusercontent.com` and `github.com`, for the signed release channel
   and the release archives it downloads.
-- Each serving SN94 miner, on the address and port it advertises on chain.
+- Each serving miner on that subnet, at the address and port it advertises on chain.
   These are arbitrary hosts and ports that change as miners come and go, so
   outbound traffic to them cannot be pinned to a fixed allowlist.
 
@@ -105,15 +151,17 @@ sudo cathedral-validator-setup \
 sudo cathedral-validator-status
 ```
 
-Setup installs the current signed `stable` release, starts the validator, and
-enables the stable update timer. `SETUP_COMPLETE` on the last line means the
-host is running. `SETUP_REFUSED` names the exact check that failed and changes
-nothing.
+Setup installs the current signed `stable` release for its declared subnet,
+starts the validator, and enables the stable update timer. This is not yet an
+SN94 installation. `SETUP_COMPLETE` on the last line means the
+host is running. `SETUP_REFUSED` names the check that failed. Public inputs
+may already be staged after a first-install failure; the completion marker is
+written only after readiness is confirmed.
 
 ## Operate
 
-The validator is one recurring process. There is no alternate scoring mode and
-no non-writing mode. A successful cycle prints `CONFIRMED` or
+The default validator is one recurring SAT process. The explicit delivery mode
+and its non-writing plan CLI are documented above. A successful writer cycle prints `CONFIRMED` or
 `RECOVERED_CONFIRMED` after the exact row is confirmed at inclusion and two
 later finalized heads.
 
