@@ -177,6 +177,8 @@ def test_the_worst_case_record_fits_one_journal_line(monkeypatch, capsys) -> Non
             "measurement": snp,
             "verifier_digest": "sha256:" + "5e" * 32,
             "tls_spki_sha256": "7" * 64,
+            "attestation_nonce": "9" * 64,
+            "attested_at": "9999-12-31T23:59:59Z",
         },
         "measurement_allowed": False,
         "recheck": "skipped",

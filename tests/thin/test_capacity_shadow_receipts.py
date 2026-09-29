@@ -39,6 +39,7 @@ TDX_MEASUREMENT = "tdx-measurement-sha256:" + "a1" * 32
 TDX_OTHER = "tdx-measurement-sha256:" + "b2" * 32
 SNP_MEASUREMENT = "c3" * 48
 VERIFIER = "sha256:" + "5e" * 32
+ATTESTED_AT = "2026-09-28T11:50:00Z"  # the prober verified the quote before NOW
 _DEFAULT = object()
 
 
@@ -52,6 +53,8 @@ def _evidence(tee_kind, measurement=None, **changes):
         or (TDX_MEASUREMENT if tee_kind == "tdx" else SNP_MEASUREMENT),
         "verifier_digest": VERIFIER,
         "tls_spki_sha256": "7a" * 32,
+        "attestation_nonce": "9c" * 32,
+        "attested_at": ATTESTED_AT,
     }
     evidence.update(changes)
     return evidence
@@ -197,6 +200,9 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
     assert policy.admit_bare_metal is False
     assert policy.minimum_price_table_sequence == 1
     assert policy.price_table_digest is None
+    assert policy.max_evidence_age == timedelta(
+        seconds=cs.DEFAULT_MAX_EVIDENCE_AGE_SECONDS
+    )
 
 
 @pytest.mark.parametrize(
@@ -227,6 +233,15 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
         ({"price_table_digest": "AB" * 32}, "price_table_digest"),
         ({"price_table_digest": "ab" * 31}, "price_table_digest"),
         ({"price_table_digest": 7}, "price_table_digest"),
+        ({"max_evidence_age_seconds": 0}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": -1}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": True}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": 60.0}, "max_evidence_age_seconds"),
+        ({"max_evidence_age_seconds": None}, "max_evidence_age_seconds"),
+        (
+            {"max_evidence_age_seconds": cs.MAX_EVIDENCE_AGE_SECONDS + 1},
+            "max_evidence_age_seconds",
+        ),
         ({"schema": "other"}, "schema"),
         ({"extra": 1}, "exactly"),
     ],
@@ -792,6 +807,43 @@ def test_tee_evidence_is_recorded_in_rows_and_the_inventory() -> None:
     # A box gone quiet keeps its last-seen evidence.
     assert second["boxes"]["box-4"]["status"] == inv.MISSING
     assert second["boxes"]["box-4"]["evidence"] == _evidence("sev_snp")
+
+
+def test_the_default_evidence_age_follows_the_validator_round() -> None:
+    from cathedral_thin.independent_runtime import direct_validator as runtime
+
+    assert cs.ROUND_SECONDS == runtime.DEFAULT_INTERVAL_SECONDS
+    assert cs.DEFAULT_MAX_EVIDENCE_AGE_SECONDS == 4 * cs.ROUND_SECONDS
+
+
+def test_tee_evidence_older_than_the_policy_allows_is_refused_alone() -> None:
+    # _score checks at NOW + 1 minute, 11 minutes after ATTESTED_AT.
+    fresh = _receipt()
+    stale = _receipt(
+        box_id="stale",
+        hardware="f1" * 32,
+        evidence=_evidence("tdx", attested_at="2026-09-28T10:00:00Z"),
+    )
+    bare = _receipt(box_id="bare", hardware="f2" * 32, kind="bare_metal")
+    scored = _score([fresh, stale, bare], policy=_policy(admit_bare_metal=True))
+    rows = {row.get("box_id", "refused"): row for row in scored["rows"]}
+    # 121 minutes is past the default of four rounds (100 minutes).
+    assert rows["refused"]["reason"] == (
+        "the receipt's evidence is older than max_evidence_age"
+    )
+    assert rows["box-1"]["verdict"] == rows["bare"]["verdict"] == cs.ACCEPTED
+    # The bound is the policy's: a tighter one refuses the fresh receipt too,
+    # and bare metal, which has no evidence, is never refused for age.
+    tight = _score(
+        [fresh, stale, bare],
+        policy=_policy(admit_bare_metal=True, max_evidence_age_seconds=600),
+    )
+    assert tight["accepted"] == 1
+    assert tight["refused"] == {
+        "the receipt's evidence is older than max_evidence_age": 2
+    }
+    loose = _score([stale], policy=_policy(max_evidence_age_seconds=3 * 3600))
+    assert loose["accepted"] == 1
 
 
 def _measurement_policy(tmp_path, name, *, schema, mode, allowed):

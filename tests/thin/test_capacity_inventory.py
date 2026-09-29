@@ -165,6 +165,8 @@ def test_a_box_keeps_the_evidence_of_its_latest_receipt() -> None:
         "measurement": "tdx-measurement-sha256:" + "a1" * 32,
         "verifier_digest": "sha256:" + "5e" * 32,
         "tls_spki_sha256": "7a" * 32,
+        "attestation_nonce": "9c" * 32,
+        "attested_at": "2026-09-28T11:50:00Z",
     }
     tee = {"kind": "tee", "tee_kind": "tdx", "hardware_id_kind": "tdx_platform"}
     first = _cycle(

@@ -22,13 +22,23 @@ evidence, does not verify and is refused on its own. The evidence is:
 | `measurement` | the launch measurement: `tdx-measurement-sha256:<64 hex>`, or SEV-SNP's 96 hex |
 | `verifier_digest` | `sha256:<64 hex>` of the verifier that checked it |
 | `tls_spki_sha256` | SHA-256 of the SPKI of the TLS key the quote's REPORT_DATA binds |
+| `attestation_nonce` | 64 hex: the prober's 32-byte nonce the quote's REPORT_DATA was made over |
+| `attested_at` | `YYYY-MM-DDTHH:MM:SSZ`, no later than the receipt's `issued_at`: when the prober verified the quote |
 
-The prober gets it from the library's admission (`cathedral.capacity.admission.admit`): the
-quote's REPORT_DATA must bind the prober's nonce, the miner hotkey and the TLS key it saw on the
+The prober gets it from the library's admission (`cathedral.capacity.admission.admit`), which
+takes the pinned verifier's own verdict and the raw quote, refuses a partial verification, and
+reads REPORT_DATA and the measurement from the quote itself. The quote's REPORT_DATA must bind the prober's nonce, the miner hotkey and the TLS key it saw on the
 sandbox API connection (`report_data_v2`), and a host already admitted as another box is
-refused, so no evidence exists for it and no receipt can be signed. A validator cannot
-re-verify the quote from the receipt; `evidence_sha256` lets it audit one later against the
-prober's archive.
+refused, so no evidence exists for it and no receipt can be signed. So is a box whose
+measurement a shadow-mode admission policy does not list: it is recorded but never gets
+evidence. A validator cannot re-verify the quote from the receipt; `evidence_sha256` lets it
+audit one later against the prober's archive, and the library's
+`receipt.expected_report_data` gives the REPORT_DATA that quote must carry.
+
+The evidence comes from admission and is reused for every round's receipt, so the validator
+refuses a TEE receipt whose `attested_at` is more than `max_evidence_age_seconds` before now
+(the library's `verify_receipt(..., max_evidence_age=)`), with the library's reason `the
+receipt's evidence is older than max_evidence_age`.
 
 ## Turn it on
 
@@ -54,12 +64,13 @@ The file must be a regular file (not a symlink) and not world-writable:
   "admit_bare_metal": false,
   "minimum_price_table_sequence": 1,
   "price_table_digest": "<64 hex: the table's digest, optional>",
-  "measurement_policies": ["/etc/cathedral-validator/tdx-measurement-policy.json"]
+  "measurement_policies": ["/etc/cathedral-validator/tdx-measurement-policy.json"],
+  "max_evidence_age_seconds": 6000
 }
 ```
 
-`inventory_path`, `admit_bare_metal`, `minimum_price_table_sequence`, `price_table_digest` and
-`measurement_policies` are optional; the rest are required.
+`inventory_path`, `admit_bare_metal`, `minimum_price_table_sequence`, `price_table_digest`,
+`measurement_policies` and `max_evidence_age_seconds` are optional; the rest are required.
 
 - `prober_keys`: take them only from the SN94 owner's published prober attestation.
 - `price_keys` and `price_table`: the owner's price-table key and the signed table. The table is
@@ -90,6 +101,13 @@ The file must be a regular file (not a symlink) and not world-writable:
   and only recorded (`measurement_allowed: false`). A kind with no policy is recorded, never
   checked. Without the key nothing is checked. Each file's mode and digest appear in the record
   as `measurement_policies`, since this policy's own digest covers only the paths.
+- `max_evidence_age_seconds` (an integer from 1 to 604800, seven days; default 6000): the
+  oldest TEE evidence a receipt may rest on, measured from its `attested_at` to the validator's
+  clock. The default is four 25-minute rounds, the direct validator's default interval:
+  evidence re-attested every round is at most about two rounds old when a validator reads it,
+  so four allows two late or missed re-attestations. A prober that only attests at admission
+  has every TEE receipt refused once the evidence ages past this. Set it to match how often the
+  prober re-attests; a validator running a longer interval should raise it.
 - `recheck_max_mib` (0 to 64): `0` turns the recheck off. Otherwise the validator recomputes one
   sampled challenge lane per receipt whose lane needs at most this many MiB, and marks the rest
   `skipped`. It starts no new lane after a minute, so a cycle spends at most about a minute plus
@@ -115,8 +133,9 @@ validator:
    answers `{"schema": "cathedral_capacity_receipt_feed_v1", "netuid", "round",
    "validator_nonce", "receipts": [...]}` (at most 1 MiB and 1024 receipts). The prober signs
    each receipt for that nonce, so a validator can't reuse another validator's receipts;
-2. verifies every receipt: the prober key, the netuid, the nonce, the round, freshness, and that
-   the challenge proves the capacity it pays for. Each receipt is handled on its own: if
+2. verifies every receipt: the prober key, the netuid, the nonce, the round, freshness, the age
+   of a TEE receipt's evidence (`max_evidence_age_seconds`), and that the challenge proves the
+   capacity it pays for. Each receipt is handled on its own: if
    verifying or valuing one raises any `Exception`, that receipt is refused (the reason is the
    error's type name and message, cut to 200 characters, or the library's message for a receipt
    it rejects) and the rest of the round is scored as usual. One malformed receipt never fails
@@ -148,7 +167,7 @@ each capped so the line stays one journal line:
 The line therefore stays under 40,000 bytes in the worst case (the longest fields in every row,
 thousands of UIDs and reasons; a test builds it), with margin below journald's default 48 KiB
 line limit. The inventory file keeps every box. Each verified row carries `kind` and
-`tee_kind` (`tdx`, `sev_snp`, or `null` for bare metal), its `evidence` (the five fields above;
+`tee_kind` (`tdx`, `sev_snp`, or `null` for bare metal), its `evidence` (the seven fields above;
 `null` for bare metal), and `measurement_allowed` (`true` or `false` against the policy for its
 TEE kind, `null` when there is none). Recovery cycles get no record. An
 error becomes `"status": "FAILED"`, never a failed cycle.

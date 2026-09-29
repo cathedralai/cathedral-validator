@@ -16,9 +16,9 @@ quiet, without trusting the control plane's own view:
   quiet cycles the box is dropped.
 
 Each box keeps the TEE evidence of its latest receipt (receipt v2: the quote
-or report digest, launch measurement, verifier digest and attested TLS key
-hash; None for bare metal), so an operator can audit which image a box ran
-when it was last seen.
+or report digest, launch measurement, verifier digest, attested TLS key hash,
+attestation nonce and time of verification; None for bare metal), so an
+operator can audit which image a box ran when it was last seen.
 
 A receipt that does not verify names no box anyone can trust, so it never
 enters the inventory. Which sandboxes are *assigned* to a box is known only to

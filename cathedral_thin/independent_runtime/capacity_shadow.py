@@ -10,8 +10,11 @@ round and signs a receipt of the capacity it verified (cathedral-sandbox
   nonce, round, freshness, and that the challenge proves the capacity paid
   for);
 * record each TEE receipt's evidence (receipt v2: the SHA-256 of the quote or
-  report the prober verified, its launch measurement, the verifier's digest
-  and the attested TLS key's SPKI hash) in its row and in the inventory;
+  report the prober verified, its launch measurement, the verifier's digest,
+  the attested TLS key's SPKI hash, the nonce the quote's REPORT_DATA was made
+  over and when the prober verified it) in its row and in the inventory, and
+  refuse a receipt whose evidence is older than the policy's
+  ``max_evidence_age_seconds``;
 * optionally check that measurement against the owner's measurement policy
   files (cathedral-validator #256's ``cathedral_tdx_measurement_policy_v1``,
   and the SEV-SNP variant from the library's admission module): in
@@ -47,7 +50,7 @@ import secrets
 import stat
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -110,8 +113,20 @@ _OPTIONAL_POLICY_KEYS = frozenset(
         "minimum_price_table_sequence",
         "price_table_digest",
         "measurement_policies",
+        "max_evidence_age_seconds",
     }
 )
+# A TEE receipt's evidence comes from the box's admission and is reused for
+# every round's receipt, so the validator bounds its age. Receipts are per
+# round and the direct validator's round is its DEFAULT_INTERVAL_SECONDS (25
+# minutes). A prober that re-attests every round gives evidence at most about
+# two rounds old when a validator checks it (one round until the next
+# receipt, one more until the validator's cycle reads it); four rounds allows
+# for two late or missed re-attestations, and still refuses evidence left
+# over from an admission hours ago.
+ROUND_SECONDS = 1500
+DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 4 * ROUND_SECONDS
+MAX_EVIDENCE_AGE_SECONDS = 7 * 24 * 3600
 MAX_PRICE_TABLE_SEQUENCE = 2**63 - 1
 BARE_METAL = "bare_metal"
 # What a v2 TEE receipt's evidence carries (cathedral.capacity.receipt.ReceiptEvidence).
@@ -121,6 +136,8 @@ EVIDENCE_FIELDS = (
     "measurement",
     "verifier_digest",
     "tls_spki_sha256",
+    "attestation_nonce",
+    "attested_at",
 )
 
 ACCEPTED = "ACCEPTED"
@@ -165,6 +182,8 @@ class CapacityPolicy:
     price_table_digest: str | None = None
     # tee_kind -> the library's MeasurementPolicy; empty means record only.
     measurement_policies: Mapping[str, Any] = field(default_factory=dict)
+    # verify_receipt refuses a TEE receipt whose evidence is older than this.
+    max_evidence_age: timedelta = timedelta(seconds=DEFAULT_MAX_EVIDENCE_AGE_SECONDS)
 
 
 def _safe_bytes(path: Path) -> bytes:
@@ -324,6 +343,18 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         raise CapacityPolicyError(
             "inventory_path must be an absolute path to a .json file"
         )
+    max_evidence_age = document.get(
+        "max_evidence_age_seconds", DEFAULT_MAX_EVIDENCE_AGE_SECONDS
+    )
+    if (
+        not isinstance(max_evidence_age, int)
+        or isinstance(max_evidence_age, bool)
+        or not 1 <= max_evidence_age <= MAX_EVIDENCE_AGE_SECONDS
+    ):
+        raise CapacityPolicyError(
+            "max_evidence_age_seconds must be an integer from 1 to"
+            f" {MAX_EVIDENCE_AGE_SECONDS}"
+        )
     measurement_policies = (
         _measurement_policies(document["measurement_policies"])
         if "measurement_policies" in document
@@ -341,6 +372,7 @@ def parse_capacity_policy(raw: bytes, *, now: datetime) -> CapacityPolicy:
         minimum_price_table_sequence=minimum_sequence,
         price_table_digest=pinned_digest,
         measurement_policies=measurement_policies,
+        max_evidence_age=timedelta(seconds=max_evidence_age),
     )
 
 
@@ -427,6 +459,7 @@ def score_receipts(
                 validator_nonce=nonce,
                 now=now,
                 expected_round=round_,
+                max_evidence_age=policy.max_evidence_age,
             )
             row = {
                 "box_id": parsed.box_id,

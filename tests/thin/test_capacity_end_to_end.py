@@ -2,16 +2,20 @@
 admission's evidence, and the validator's shadow scoring values the box.
 
 It runs the real cathedral-sandbox libraries (``cathedral.capacity.admission``,
-``receipt``, ``pricing`` and ``cathedral.common.report_data_v2``). Only the
-quote verification is faked: ``VerifiedAttestation`` holds what the pinned
-verifier would have established. Skipped where the installed sandbox has no
-admission module.
+``receipt``, ``pricing``, ``cathedral.common.report_data_v2`` and the TDX quote
+parser). Only the quote's signature check is skipped: the quote is laid out as
+a real TDX v4 quote, and ``Attested`` is the verdict the pinned strict verifier
+would return for it. Admission reads REPORT_DATA and the measurement from the
+quote bytes itself. Skipped where the installed sandbox has no admission module
+taking the verifier's verdict.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import hashlib
+import inspect
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -27,16 +31,22 @@ from cryptography.x509.oid import NameOID
 from cathedral_thin.independent_runtime import capacity_shadow as cs
 
 admission = pytest.importorskip("cathedral.capacity.admission")
+if "attested" not in inspect.signature(admission.admit).parameters:
+    pytest.skip(
+        "the installed cathedral-sandbox admission predates the verifier verdict API",
+        allow_module_level=True,
+    )
 from cathedral.capacity import challenge as ch  # noqa: E402
 from cathedral.capacity import pricing, receipt  # noqa: E402
 from cathedral.channel import tls_spki_binding  # noqa: E402
-from cathedral.common import report_data_v2  # noqa: E402
+from cathedral.common import Attested, Tier, report_data_v2  # noqa: E402
+from cathedral.verify.tdx_quote import parse_tdx_quote  # noqa: E402
 
 NOW = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+ATTESTED_AT = NOW - timedelta(minutes=5)  # admission, before the round's receipt
 URL = "https://receipts.example/v1/capacity/receipts"
 HOTKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 OTHER_HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-MEASUREMENT = "tdx-measurement-sha256:" + "a1" * 32
 VERIFIER = "sha256:" + "5e" * 32
 PPID = bytes.fromhex("0123456789abcdef0123456789abcdef")
 PROBER = Ed25519PrivateKey.generate()
@@ -73,17 +83,80 @@ def _stable_platform_id(ppid: bytes) -> str:
     return "tdx-platform-sha256:" + digest.hexdigest()
 
 
-def _attestation(*, nonce: bytes, hotkey: str, certificate: bytes, quote: bytes):
-    """What the prober's strict TDX verifier run established about one quote,
-    whose REPORT_DATA binds the prober's nonce, the hotkey and the TLS key."""
+def _tdx_quote(report_data: bytes, mr_td: bytes = b"M" * 48) -> bytes:
+    """A TDX v4 quote laid out as the pinned verifier's parser reads it
+    (cathedral-sandbox tests/tdx_quote_fixtures.py, synthetic_tdx_quote),
+    with a PCK chain placeholder in place of a real signature. Debug is off."""
 
-    return admission.VerifiedAttestation(
-        kind="tdx",
-        measurement=MEASUREMENT,
+    header = bytearray(48)
+    header[0:2] = (4).to_bytes(2, "little")  # version 4
+    header[2:4] = (2).to_bytes(2, "little")  # ECDSA-256 attestation key
+    header[4:8] = (0x81).to_bytes(4, "little")  # TDX
+    header[8:12] = (1).to_bytes(2, "little") + (2).to_bytes(2, "little")
+    header[12:48] = b"VENDOR-ID-123456" + b"cathedral-user-data!"
+    body = bytearray(584)  # the TD report body
+    body[0:16] = bytes(range(16))  # TEE_TCB_SVN
+    body[16:112] = b"S" * 48 + b"s" * 48  # MRSEAM, MRSIGNERSEAM
+    body[112:136] = b"A" * 8 + b"T" * 8 + b"X" * 8  # SEAM and TD attributes, XFAM
+    body[136:184] = mr_td
+    # MRCONFIGID, MROWNER, MROWNERCONFIG, RTMR0-3
+    body[184:520] = b"".join(bytes([char]) * 48 for char in b"COo0123")
+    body[520:584] = report_data
+    pem = (
+        b"-----BEGIN CERTIFICATE-----\n"
+        + base64.b64encode(b"synthetic-pck-leaf-cert")
+        + b"\n-----END CERTIFICATE-----\n"
+    )
+    certification = b"prefix" + pem + b"suffix"
+    signature = (
+        b"Q" * 64  # the quote signature
+        + hashlib.sha512(b"cathedral-ak").digest()  # the attestation key
+        + (6).to_bytes(2, "little")  # PCK certificate chain
+        + len(certification).to_bytes(4, "little")
+        + certification
+    )
+    return bytes(header + body) + len(signature).to_bytes(4, "little") + signature
+
+
+def _quote(*, nonce: bytes, hotkey: str, certificate: bytes, **changes) -> bytes:
+    """The box's quote, whose REPORT_DATA binds the prober's nonce, the hotkey
+    and the TLS key (report_data_v2)."""
+
+    report_data = report_data_v2(nonce, hotkey, tls_spki_binding(certificate))
+    return _tdx_quote(report_data, **changes)
+
+
+MEASUREMENT = parse_tdx_quote(_tdx_quote(bytes(64))).measurement
+
+
+def _verdict(quote: bytes, **changes) -> Attested:
+    """The pinned strict TDX verifier's verdict for ``quote``, as
+    cathedral.verify returns it: fully verified, with the platform's
+    stable_platform_id as its chip_id."""
+
+    verdict = Attested(
+        tier=Tier.CC_CPU_TDX,
+        chip_id=_stable_platform_id(PPID),
+        measurement=parse_tdx_quote(quote).measurement,
+        tcb=0,
+        verification_status="VERIFIED",
+        chain_verified=True,
+        tcb_status="UpToDate",
+        debug_enabled=False,
+        collateral_current=True,
+        platform_identity_kind="stable",
+        policy_mode="strict",
+    )
+    return dataclasses.replace(verdict, **changes)
+
+
+def _admit(quote: bytes, verdict: Attested | None = None, **arguments):
+    return admission.admit(
+        _verdict(quote) if verdict is None else verdict,
+        quote,
         verifier_digest=VERIFIER,
-        evidence_sha256=hashlib.sha256(quote).hexdigest(),
-        report_data=report_data_v2(nonce, hotkey, tls_spki_binding(certificate)),
-        stable_platform_id=_stable_platform_id(PPID),
+        attested_at=ATTESTED_AT,
+        **arguments,
     )
 
 
@@ -140,7 +213,7 @@ def _prober_receipt(admitted, *, validator_nonce: str, round_: int) -> dict:
     return receipt.sign_receipt(body, PROBER)
 
 
-def _capacity_policy(tmp_path, measurement_policy: str) -> cs.CapacityPolicy:
+def _capacity_policy(tmp_path, measurement_policy: str, **changes) -> cs.CapacityPolicy:
     table = pricing.sign_price_table(
         {
             "schema": pricing.SCHEMA,
@@ -166,6 +239,7 @@ def _capacity_policy(tmp_path, measurement_policy: str) -> cs.CapacityPolicy:
         "recheck_max_mib": 0,
         "inventory_path": str(tmp_path / "capacity-inventory.json"),
         "measurement_policies": [measurement_policy],
+        **changes,
     }
     return cs.parse_capacity_policy(json.dumps(document).encode(), now=NOW)
 
@@ -176,52 +250,63 @@ def test_an_admitted_tdx_box_is_valued_with_its_evidence(tmp_path) -> None:
         measurement_policy = admission.parse_policy(handle.read())
 
     # 1. Admission: the prober verified the box's quote on the TLS connection
-    #    that serves the sandbox API, for its own fresh nonce.
+    #    that serves the sandbox API, for its own fresh nonce, and hands
+    #    admission the verifier's verdict with the quote bytes.
     certificate = _certificate()
     nonce = os.urandom(32)
+    quote = _quote(nonce=nonce, hotkey=HOTKEY, certificate=certificate)
     registry: dict[str, admission.AdmittedBox] = {}
-    admitted = admission.admit(
-        _attestation(
-            nonce=nonce, hotkey=HOTKEY, certificate=certificate, quote=b"quote-1"
-        ),
-        box_id="tdx-box-1",
-        miner_hotkey=HOTKEY,
-        nonce=nonce,
-        policy=measurement_policy,
-        admitted=registry,
-        tls_certificate_der=certificate,
-    )
+    arguments = {
+        "box_id": "tdx-box-1",
+        "miner_hotkey": HOTKEY,
+        "nonce": nonce,
+        "policy": measurement_policy,
+        "admitted": registry,
+        "tls_certificate_der": certificate,
+    }
+    admitted = _admit(quote, **arguments)
     assert admitted.admitted and admitted.reasons == ()
     assert admitted.hardware_id_kind == "tdx_platform"
     assert admitted.hardware_id == receipt.tdx_hardware_id(_stable_platform_id(PPID))
     evidence = dataclasses.asdict(admitted.evidence)
     assert evidence == {
         "evidence_kind": "tdx",
-        "evidence_sha256": hashlib.sha256(b"quote-1").hexdigest(),
+        "evidence_sha256": hashlib.sha256(quote).hexdigest(),
         "measurement": MEASUREMENT,
         "verifier_digest": VERIFIER,
         "tls_spki_sha256": tls_spki_binding(certificate).digest.hex(),
+        "attestation_nonce": nonce.hex(),
+        "attested_at": "2026-09-28T11:55:00Z",
     }
+    # A partial verification of the same quote gets no evidence.
+    for partial in (
+        _verdict(quote, chain_verified=False),
+        _verdict(quote, policy_mode="compatibility"),
+        _verdict(quote, verification_status="STRUCTURE_OK_CHAIN_UNVERIFIED"),
+    ):
+        refused = _admit(quote, partial, **arguments)
+        assert refused.reasons == (admission.VERIFICATION_INCOMPLETE,)
+        assert refused.evidence is None
     registry[admitted.hardware_id] = admission.AdmittedBox("tdx-box-1", HOTKEY)
 
     # 2. The prober serves this validator's receipts through the feed, each
     #    signed for the nonce the validator put in its request.
     urls: list[str] = []
+    signed: list[dict] = []
 
     def feed(url: str) -> bytes:
         urls.append(url)
         netuid, validator_nonce = url.rsplit("/", 2)[1:]
+        signed.append(
+            _prober_receipt(admitted, validator_nonce=validator_nonce, round_=11)
+        )
         return json.dumps(
             {
                 "schema": cs.FEED_SCHEMA,
                 "netuid": int(netuid),
                 "round": 11,
                 "validator_nonce": validator_nonce,
-                "receipts": [
-                    _prober_receipt(
-                        admitted, validator_nonce=validator_nonce, round_=11
-                    )
-                ],
+                "receipts": [signed[-1]],
             }
         ).encode()
 
@@ -252,18 +337,36 @@ def test_an_admitted_tdx_box_is_valued_with_its_evidence(tmp_path) -> None:
     assert stored["boxes"]["tdx-box-1"]["status"] == "healthy"
     assert stored["boxes"]["tdx-box-1"]["evidence"] == evidence
 
+    # An auditor holding the archived quote ties the receipt to it end to end.
+    verified = receipt.verify_receipt(
+        signed[0],
+        prober_keys=policy.prober_keys,
+        netuid=94,
+        validator_nonce=urls[0].rsplit("/", 1)[1],
+        now=NOW + timedelta(minutes=1),
+        expected_round=11,
+    )
+    assert hashlib.sha256(quote).hexdigest() == verified.evidence.evidence_sha256
+    assert receipt.expected_report_data(verified) == parse_tdx_quote(quote).report_data
+
+    # A validator bounding evidence age tighter than the six minutes since
+    # admission refuses the same receipt.
+    strict = _capacity_policy(tmp_path, policy_file, max_evidence_age_seconds=300)
+    record = cs.CapacityShadow(
+        strict, fetch=feed, now=lambda: NOW + timedelta(minutes=1)
+    ).record(netuid=94, hotkey_to_uid={HOTKEY: 3})
+    assert record["accepted"] == 0
+    assert record["refused"] == {
+        "the receipt's evidence is older than max_evidence_age": 1
+    }
+
     # 4. The same host presented as another box (another hotkey, its own TLS
     #    key and a correctly bound quote) is refused at admission, so it gets
     #    no evidence and the prober cannot sign a receipt for it.
     other_certificate = _certificate()
     other_nonce = os.urandom(32)
-    second = admission.admit(
-        _attestation(
-            nonce=other_nonce,
-            hotkey=OTHER_HOTKEY,
-            certificate=other_certificate,
-            quote=b"quote-2",
-        ),
+    second = _admit(
+        _quote(nonce=other_nonce, hotkey=OTHER_HOTKEY, certificate=other_certificate),
         box_id="tdx-box-2",
         miner_hotkey=OTHER_HOTKEY,
         nonce=other_nonce,
@@ -278,15 +381,25 @@ def test_an_admitted_tdx_box_is_valued_with_its_evidence(tmp_path) -> None:
         _prober_receipt(second, validator_nonce="cd" * 32, round_=11)
 
     # A quote made for the first box does not admit it under another hotkey either.
-    replay = admission.admit(
-        _attestation(
-            nonce=nonce, hotkey=HOTKEY, certificate=certificate, quote=b"quote-1"
-        ),
-        box_id="tdx-box-1",
-        miner_hotkey=OTHER_HOTKEY,
-        nonce=nonce,
-        policy=measurement_policy,
-        admitted={},
-        tls_certificate_der=certificate,
+    replay = _admit(
+        quote, **{**arguments, "miner_hotkey": OTHER_HOTKEY, "admitted": {}}
     )
     assert admission.REPORT_DATA_MISMATCH in replay.reasons and replay.evidence is None
+
+    # A shadow admission policy records a box running an unlisted image but
+    # gives it no evidence, so it is never paid.
+    shadow_policy = admission.parse_policy(
+        json.dumps(
+            {
+                "schema": "cathedral_tdx_measurement_policy_v1",
+                "mode": "shadow",
+                "allowed_measurements": [MEASUREMENT],
+            }
+        ).encode()
+    )
+    unlisted = _admit(
+        _quote(nonce=nonce, hotkey=HOTKEY, certificate=certificate, mr_td=b"N" * 48),
+        **{**arguments, "policy": shadow_policy, "admitted": {}},
+    )
+    assert unlisted.admitted and unlisted.measurement_allowed is False
+    assert unlisted.evidence is None
