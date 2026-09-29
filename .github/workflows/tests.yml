@@ -93,6 +93,18 @@ jobs:
       - name: Boundary tests (the SAT lane stays out)
         run: python -m pytest -q tests/boundary
 
+      # The top-level tests/test_cybergym_round_*.py files are not collected by
+      # any step above. These two are named explicitly: the scoring file pins
+      # the validator's own KING curve to literals, and the curves file pins it
+      # to the publisher's vendored copy, so a change that updates one copy and
+      # misses the other goes red instead of merging green. Both import only
+      # this repo and the standard library.
+      - name: CyberGym KING curve tests
+        run: |
+          python -m pytest -q \
+            tests/test_cybergym_round_scoring.py \
+            tests/test_cybergym_round_curves.py
+
       - name: Compile every tracked Python file
         run: git ls-files '*.py' | xargs python -m py_compile
 
