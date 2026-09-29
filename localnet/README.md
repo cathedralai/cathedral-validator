@@ -95,6 +95,7 @@ Sandbox (`CATHEDRAL_LOCALNET_STUB_EVIDENCE=1`, code in
 - The three fast-block nodes grow by roughly 15 to 20 MB a minute each.
   - `up.sh` starts the colima VM with `LOCALNET_VM_MEMORY_GIB` (default 6) and the container with `--no-purge`.
   - `chain_watchdog.sh` (started by `up.sh`) restarts the container when a node is gone or node memory passes `LOCALNET_CHAIN_MEMORY_LIMIT_MB` (default 3500).
+  - It also stops the chain and the VM, then exits, when the host disk falls below `LOCALNET_MIN_FREE_DISK_GB` (default 8). A full disk broke the VM's docker storage once. Run `up.sh` again once space is back.
   - A restart keeps the chain: a test restart went from block 325 to 429 with netuid 94 intact, and the validator's next cycle confirmed.
   - An older container created without `--no-purge` resets on restart, so the watchdog leaves it alone.
 - Keep the VM small relative to the host.
