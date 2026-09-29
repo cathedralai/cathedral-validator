@@ -154,11 +154,16 @@ command argument, policy field, or log value.
 
 ```bash
 cathedral-validator delivery-probe --api-url https://YOUR_CONTROL_PLANE \
-  --image alpine:3.22 --hold-seconds 30 --create-timeout 60
+  --image alpine:3.22 --max-spend-usd "$APPROVED_PROBE_CEILING" \
+  --hold-seconds 30 --create-timeout 60
 ```
 
+Set `APPROVED_PROBE_CEILING` to an explicitly approved per-sandbox dollar cap.
+The command requires that cap and opts into the `sn94.v1` profile.
 It submits one labelled, idempotent create, observes running, executes `true`
-once, observes the sandbox during the hold, and deletes it. It records create
+once, observes the sandbox during the hold, and requests deletion.
+Exec and delete carry stable derived idempotency keys. A 202/deleting response
+is reported as cleanup requested, not as confirmed deletion. It records create
 and exec latency plus observed mid-life loss. Transport uncertainty is
 `NOT_PROVEN`, not a fabricated loss or success. Neither create nor exec is
 replayed after an ambiguous response; TTL is the cleanup backstop. Redirects

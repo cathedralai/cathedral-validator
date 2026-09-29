@@ -32,7 +32,7 @@ class FakeClient:
             if self.exec_error:
                 raise ProbeError("request_outcome_unknown")
             return {"exit_code": 0, "timed_out": False}
-        return {}
+        return {"state": "deleting"}
 
 
 def run(client):
@@ -42,6 +42,7 @@ def run(client):
         image="alpine:3.22",
         hold_seconds=2,
         create_timeout=5,
+        max_spend_usd="0.01",
         clock=clock.now,
         sleep=clock.sleep,
     )
@@ -52,8 +53,14 @@ def test_probe_records_create_exec_lifetime_and_cleanup():
     result = run(client)
     assert result["status"] == "OBSERVED" and result["lost_sandbox"] is False
     assert result["create_latency_ms"] == 1000
-    assert result["cleanup"] == "deleted"
+    assert result["cleanup"] == "requested"
     assert client.calls[0][3] == result["probe_id"]
+    assert client.calls[0][2]["max_spend_usd"] == "0.01"
+    assert client.calls[-1][3] == result["probe_id"] + ":delete"
+    assert (
+        next(call for call in client.calls if call[1].endswith("/exec"))[3]
+        == result["probe_id"] + ":exec"
+    )
     assert client.calls[-1][:2] == ("DELETE", "/v1/sandboxes/sb-1")
     assert result["admission"] == "not_checked" and result["chain_write"] is False
 
@@ -71,7 +78,7 @@ def test_exec_ambiguity_never_reexecutes_and_deletes():
     result = run(client)
     assert result["status"] == "NOT_PROVEN"
     assert len([call for call in client.calls if call[1].endswith("/exec")]) == 1
-    assert result["cleanup"] == "deleted"
+    assert result["cleanup"] == "requested"
 
 
 def test_lost_running_sandbox_is_counted_separately():

@@ -9,7 +9,7 @@ import sys
 environment = dict(os.environ)
 environment.pop("CATHEDRAL_API_KEY", None)
 result = subprocess.run([str(Path(sys.executable).parent / "cathedral-validator"),
-    "delivery-probe", "--api-url", "https://example.invalid", "--image", "alpine:3.22"],
+    "delivery-probe", "--api-url", "https://example.invalid", "--image", "alpine:3.22", "--max-spend-usd", "0.01"],
     env=environment, capture_output=True, text=True, timeout=10)
 try:
     document = json.loads(result.stdout)

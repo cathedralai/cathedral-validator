@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 import json
 import os
 import re
@@ -74,6 +75,7 @@ def probe(
     image: str,
     hold_seconds: int,
     create_timeout: int,
+    max_spend_usd: str,
     clock=time.monotonic,
     sleep=time.sleep,
 ) -> dict[str, Any]:
@@ -98,6 +100,8 @@ def probe(
             "/v1/sandboxes",
             {
                 "image": image,
+                "profile": "sn94.v1",
+                "max_spend_usd": max_spend_usd,
                 "resources": {"vcpu": 1, "memory_gib": 2, "disk_gib": 5},
                 "ttl_seconds": create_timeout + hold_seconds + 60,
                 "labels": {"owner": "sn94-validator-probe", "probe_id": probe_id},
@@ -123,7 +127,10 @@ def probe(
         result["create_latency_ms"] = round((clock() - started) * 1000, 3)
         executed = clock()
         command = client.call(
-            "POST", path + "/exec", {"cmd": ["true"], "timeout_seconds": 5}
+            "POST",
+            path + "/exec",
+            {"cmd": ["true"], "timeout_seconds": 5},
+            idempotency_key=probe_id + ":exec",
         )
         result["exec_latency_ms"] = round((clock() - executed) * 1000, 3)
         if command.get("exit_code") != 0 or command.get("timed_out") is not False:
@@ -145,8 +152,14 @@ def probe(
     finally:
         if sandbox_id is not None:
             try:
-                client.call("DELETE", "/v1/sandboxes/" + sandbox_id)
-                result["cleanup"] = "deleted"
+                cleanup = client.call(
+                    "DELETE",
+                    "/v1/sandboxes/" + sandbox_id,
+                    idempotency_key=probe_id + ":delete",
+                )
+                result["cleanup"] = (
+                    "deleted" if cleanup.get("state") == "deleted" else "requested"
+                )
             except ProbeError:
                 result["cleanup"] = "ttl_backstop"
         else:
@@ -158,14 +171,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument(
+        "--max-spend-usd", help="Explicit total sandbox spend ceiling; required"
+    )
     parser.add_argument("--hold-seconds", type=int, default=10)
     parser.add_argument("--create-timeout", type=int, default=60)
     args = parser.parse_args(argv)
     try:
         if not 1 <= args.hold_seconds <= 300 or not 1 <= args.create_timeout <= 300:
             raise ProbeError("probe_configuration_refused")
+        ceiling = Decimal(args.max_spend_usd or "0")
+        if not ceiling.is_finite() or not 0 < ceiling <= 1000:
+            raise ProbeError("probe_configuration_refused")
         client = Client(args.api_url, os.environ.get("CATHEDRAL_API_KEY", ""))
-    except ProbeError:
+    except (ProbeError, InvalidOperation):
         print(json.dumps({"code": "probe_configuration_refused", "chain_write": False}))
         return 2
     result = probe(
@@ -173,6 +192,7 @@ def main(argv=None):
         image=args.image,
         hold_seconds=args.hold_seconds,
         create_timeout=args.create_timeout,
+        max_spend_usd=str(ceiling),
     )
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "OBSERVED" else 2
