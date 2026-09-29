@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import base64
+import dataclasses
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -11,6 +14,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from cathedral_thin.independent_runtime import capacity_inventory as inv
 from cathedral_thin.independent_runtime import capacity_shadow as cs
 
 NOW = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
@@ -29,6 +33,9 @@ OWNER = Ed25519PrivateKey.generate()
 SEED = bytes(range(32))
 SAMPLE_NONCE = bytes([7]) * 32
 DIGEST = bytes([3]) * 32
+TEE_6_24 = 6 * 30_000 + 24 * 4_000
+BARE_6_24 = 6 * 18_000 + 24 * 2_500
+_DEFAULT = object()
 
 
 def _hex(key: Ed25519PrivateKey) -> str:
@@ -77,7 +84,8 @@ def _receipt(
     box_id="box-1",
     hotkey=HOTKEY_A,
     hardware="f0" * 32,
-    kind="bare_metal",
+    kind="tee",
+    tee_kind=_DEFAULT,
     vcpus=6,
     memory_gib=24,
     nonce=NONCE,
@@ -85,13 +93,26 @@ def _receipt(
     real_outputs=False,
     key=PROBER,
     key_id="prober-1",
+    sample_count=None,
+    hardware_id_kind=None,
 ):
+    if tee_kind is _DEFAULT:
+        tee_kind = "tdx" if kind == "tee" else None
+    if tee_kind == "tdx":
+        # A TDX box's hardware id comes from the digest in the strict
+        # verifier's stable_platform_id, as the prober derives it.
+        hardware = receipt.tdx_hardware_id(f"tdx-platform-sha256:{hardware}")
     spec = ch.spec_for(SEED, vcpus=vcpus, memory_gib=memory_gib)
-    lanes = ch.sample_lanes(spec, DIGEST, SAMPLE_NONCE, ch.MIN_SAMPLES)
-    outputs = {
-        lane: ch.lane_output(spec, lane) if real_outputs else bytes([lane % 256]) * 32
-        for lane in lanes
-    }
+    deadline_ms = min(60_000, ch.max_deadline_ms(spec))
+    count = sample_count or ch.required_samples(spec.lanes)
+    lanes = ch.sample_lanes(spec, DIGEST, SAMPLE_NONCE, count)
+    outputs = {lane: bytes([lane % 256]) * 32 for lane in lanes}
+    if real_outputs:
+        # Only the one lane the validator's recheck picks (as score_receipts
+        # does) is computed for real: every sampled lane would take too long.
+        pick = hashlib.sha256(bytes.fromhex(nonce) + box_id.encode()).digest()
+        lane = lanes[int.from_bytes(pick[:8], "big") % len(lanes)]
+        outputs[lane] = ch.lane_output(spec, lane)
     body = receipt.make_body(
         netuid=94,
         round=round_,
@@ -99,20 +120,27 @@ def _receipt(
         box_id=box_id,
         miner_hotkey=hotkey,
         kind=kind,
+        tee_kind=tee_kind,
         hardware_id=hardware,
-        hardware_id_kind="probe_fingerprint" if kind == "bare_metal" else "ppid",
         vcpus=vcpus,
         memory_gib=memory_gib,
         challenge=spec,
         result_digest=DIGEST,
         sample_nonce=SAMPLE_NONCE,
+        sample_count=count,
         sampled_outputs=outputs,
-        deadline_ms=60_000,
-        timings_ms={"create": 900, "exec": 40_000, "delete": 300},
+        deadline_ms=deadline_ms,
+        timings_ms={"create": 900, "exec": deadline_ms * 2 // 3, "delete": 300},
         issued_at=NOW,
         valid_for=timedelta(minutes=30),
         prober_key_id=key_id,
     )
+    if hardware_id_kind is not None:
+        # sign_receipt refuses a body of the wrong kind, so a forged one is
+        # signed by hand: only the validator's verification may reject it.
+        body["box"]["hardware_id_kind"] = hardware_id_kind
+        signature = key.sign(receipt.canonical_bytes(body))
+        return {**body, "signature": base64.b64encode(signature).decode()}
     return receipt.sign_receipt(body, key)
 
 
@@ -135,6 +163,9 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
     assert set(policy.prober_keys) == {"prober-1"}
     assert policy.price_table.sequence == 3
     assert policy.digest.startswith("sha256:")
+    assert policy.admit_bare_metal is False
+    assert policy.minimum_price_table_sequence == 1
+    assert policy.price_table_digest is None
 
 
 @pytest.mark.parametrize(
@@ -155,6 +186,16 @@ def test_a_policy_loads_and_pins_its_digest() -> None:
         ({"inventory_path": "/var/lib/x/inventory.txt"}, "inventory_path"),
         ({"inventory_path": "/var/lib/../etc/inventory.json"}, "inventory_path"),
         ({"inventory_path": 7}, "inventory_path"),
+        ({"admit_bare_metal": 1}, "admit_bare_metal must be true or false"),
+        ({"admit_bare_metal": "yes"}, "admit_bare_metal must be true or false"),
+        ({"admit_bare_metal": None}, "admit_bare_metal must be true or false"),
+        ({"minimum_price_table_sequence": 0}, "minimum_price_table_sequence"),
+        ({"minimum_price_table_sequence": True}, "minimum_price_table_sequence"),
+        ({"minimum_price_table_sequence": "3"}, "minimum_price_table_sequence"),
+        ({"minimum_price_table_sequence": 2**63}, "minimum_price_table_sequence"),
+        ({"price_table_digest": "AB" * 32}, "price_table_digest"),
+        ({"price_table_digest": "ab" * 31}, "price_table_digest"),
+        ({"price_table_digest": 7}, "price_table_digest"),
         ({"schema": "other"}, "schema"),
         ({"extra": 1}, "exactly"),
     ],
@@ -171,6 +212,30 @@ def test_a_tampered_or_future_price_table_is_refused() -> None:
         _policy(price_table=tampered)
     with pytest.raises(cs.CapacityPolicyError, match="not effective yet"):
         _policy(price_table=_table(effective_from="2026-10-01T00:00:00Z"))
+
+
+def test_the_price_table_cannot_be_rolled_back_or_swapped() -> None:
+    table = _table()
+    digest = pricing.table_digest(table)
+    policy = _policy(minimum_price_table_sequence=3, price_table_digest=digest)
+    assert policy.minimum_price_table_sequence == 3
+    assert policy.price_table_digest == digest
+    assert policy.price_table.digest == digest
+    with pytest.raises(cs.CapacityPolicyError, match="older than one already verified"):
+        _policy(minimum_price_table_sequence=4)
+    other = _table(currency="eur")
+    with pytest.raises(cs.CapacityPolicyError, match="differs from the one pinned"):
+        _policy(
+            price_table=other, minimum_price_table_sequence=3, price_table_digest=digest
+        )
+    # The pin names the table at the minimum sequence; a newer table replaces it.
+    newer = _table(sequence=4)
+    assert (
+        _policy(
+            price_table=newer, minimum_price_table_sequence=3, price_table_digest=digest
+        ).price_table.sequence
+        == 4
+    )
 
 
 def test_the_policy_file_is_read_safely(tmp_path) -> None:
@@ -191,19 +256,165 @@ def test_the_policy_file_is_read_safely(tmp_path) -> None:
         cs.load_capacity_policy(tmp_path, now=NOW)
 
 
-def test_verified_boxes_are_valued_at_market_price_per_uid() -> None:
+def _mixed_round():
+    return [
+        _receipt(kind="bare_metal"),
+        _receipt(
+            box_id="box-2",
+            hardware="f1" * 32,
+            vcpus=8,
+            memory_gib=32,
+            kind="bare_metal",
+        ),
+        _receipt(box_id="box-3", hotkey=HOTKEY_B, hardware="aa" * 32),
+        _receipt(
+            box_id="box-4", hotkey=HOTKEY_B, hardware="ab" * 32, tee_kind="sev_snp"
+        ),
+    ]
+
+
+def test_with_admit_bare_metal_on_every_verified_box_is_valued_per_uid() -> None:
+    scored = _score(_mixed_round(), policy=_policy(admit_bare_metal=True))
+    bare_large = 8 * 18_000 + 32 * 2_500
+    assert scored["accepted"] == 4 and scored["refused"] == {}
+    assert scored["units"] == [[3, BARE_6_24 + bare_large], [5, 2 * TEE_6_24]]
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert [rows[b]["tee_kind"] for b in ("box-1", "box-3", "box-4")] == [
+        None,
+        "tdx",
+        "sev_snp",
+    ]
+    assert rows["box-4"]["hardware_id_kind"] == "chip_id"
+    assert rows["box-3"]["hardware_id_kind"] == "tdx_platform"
+    assert rows["box-3"]["hardware_id"] == receipt.tdx_hardware_id(
+        "tdx-platform-sha256:" + "aa" * 32
+    )
+
+
+def test_a_tdx_receipt_keyed_by_ppid_is_refused() -> None:
+    scored = _score([_receipt(hardware_id_kind="ppid"), _receipt(box_id="box-2")])
+    assert scored["accepted"] == 1 and scored["units"] == [[3, TEE_6_24]]
+    assert list(scored["refused"]) == [
+        "hardware_id_kind must be tdx_platform for tdx, chip_id for sev_snp and"
+        " probe_fingerprint for bare metal"
+    ]
+
+
+def test_bare_metal_is_refused_by_default_and_tee_still_earns() -> None:
+    scored = _score(_mixed_round())
+    assert scored["accepted"] == 2
+    assert scored["refused"] == {cs.BARE_METAL_REFUSED: 2}
+    assert cs.BARE_METAL_REFUSED == (
+        "bare-metal boxes are not admitted (admit_bare_metal is off)"
+    )
+    assert scored["units"] == [[5, 2 * TEE_6_24]]
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert rows["box-1"]["verdict"] == "REFUSED" and rows["box-1"]["recheck"] == "off"
+    assert rows["box-1"]["kind"] == "bare_metal" and rows["box-1"]["tee_kind"] is None
+    # It still shows in the inventory, as unhealthy with that reason.
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert doc["boxes"]["box-1"]["status"] == inv.UNHEALTHY
+    assert doc["boxes"]["box-1"]["reason"] == cs.BARE_METAL_REFUSED
+    assert doc["boxes"]["box-3"]["status"] == inv.HEALTHY
+    assert doc["boxes"]["box-4"]["tee_kind"] == "sev_snp"
+    assert doc["aggregate"]["healthy_by_kind"] == {
+        "tee": {"boxes": 2, "vcpus": 12, "memory_gib": 48, "value": 2 * TEE_6_24}
+    }
+
+
+def test_a_refused_bare_metal_receipt_cannot_knock_out_a_tee_box_with_its_id() -> None:
+    # Review of T1: a cheap bare-metal receipt reusing a TEE box's id used to
+    # make both "carried more than once", zeroing the TEE box.
+    scored = _score(
+        [
+            _receipt(box_id="victim", kind="bare_metal", hardware="b0" * 32),
+            _receipt(box_id="victim", hotkey=HOTKEY_B, hardware="aa" * 32),
+        ]
+    )
+    assert scored["units"] == [[5, TEE_6_24]]
+    assert scored["refused"] == {cs.BARE_METAL_REFUSED: 1}
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    assert doc["boxes"]["victim"]["status"] == inv.HEALTHY
+    assert doc["boxes"]["victim"]["kind"] == "tee"
+
+
+def test_a_refused_tee_box_keeps_its_own_reason_over_a_bare_metal_one() -> None:
+    # Review of #265: the not-admitted bare-metal row came first, the TEE row
+    # with the same id was refused for another reason, and the inventory kept
+    # the bare-metal row, hiding the TEE box's real reason.
+    scored = _score(
+        [
+            _receipt(box_id="x", kind="bare_metal", hardware="b0" * 32),
+            _receipt(box_id="x", hotkey=HOTKEY_B, hardware="aa" * 32),
+        ],
+        uids={HOTKEY_A: 3},
+    )
+    assert scored["accepted"] == 0
+    doc = inv.update_inventory(None, scored["rows"], netuid=94, round_=7, now=NOW)
+    box = doc["boxes"]["x"]
+    assert box["kind"] == "tee" and box["miner_hotkey"] == HOTKEY_B
+    assert box["status"] == inv.UNHEALTHY
+    assert box["reason"] == "the hotkey is not a serving miner on this netuid"
+
+
+def test_one_receipt_that_breaks_verification_or_valuation_is_contained(
+    monkeypatch,
+) -> None:
+    real_verify = receipt.verify_receipt
+
+    def verify(item, **kwargs):
+        if item.get("box", {}).get("box_id") == "boom":
+            raise RuntimeError("library bug")
+        return real_verify(item, **kwargs)
+
+    monkeypatch.setattr(receipt, "verify_receipt", verify)
     scored = _score(
         [
             _receipt(),
-            _receipt(box_id="box-2", hardware="f1" * 32, vcpus=8, memory_gib=32),
-            _receipt(box_id="box-3", hotkey=HOTKEY_B, hardware="aa" * 32, kind="tee"),
+            _receipt(box_id="boom", hardware="f1" * 32),
+            _receipt(box_id="b3", hardware="f2" * 32),
         ]
     )
-    bare_small = 6 * 18_000 + 24 * 2_500
-    bare_large = 8 * 18_000 + 32 * 2_500
-    tee = 6 * 30_000 + 24 * 4_000
-    assert scored["accepted"] == 3 and scored["refused"] == {}
-    assert scored["units"] == [[3, bare_small + bare_large], [5, tee]]
+    assert scored["accepted"] == 2 and scored["refused"] == {
+        "RuntimeError: library bug": 1
+    }
+    assert scored["units"] == [[3, 2 * TEE_6_24]]
+    monkeypatch.setattr(receipt, "verify_receipt", real_verify)
+
+    class Table:
+        sequence, currency = 3, "usd"
+
+        def value(self, *, kind, vcpus, memory_gib):
+            if vcpus == 8:
+                raise pricing.PriceTableError("vcpus must be a positive integer")
+            return 1
+
+    policy = dataclasses.replace(_policy(), price_table=Table())
+    scored = _score(
+        [_receipt(), _receipt(box_id="b2", hardware="f1" * 32, vcpus=8, memory_gib=32)],
+        policy=policy,
+    )
+    assert scored["accepted"] == 1 and scored["refused"] == {
+        "PriceTableError: vcpus must be a positive integer": 1
+    }
+    assert scored["units"] == [[3, 1]]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interpreter_stop_while_verifying_is_never_contained(
+    monkeypatch, stop
+) -> None:
+    # Only Exception is contained per receipt: a stop request must still stop.
+    real_verify = receipt.verify_receipt
+
+    def verify(item, **kwargs):
+        if item.get("box", {}).get("box_id") == "stop":
+            raise stop
+        return real_verify(item, **kwargs)
+
+    monkeypatch.setattr(receipt, "verify_receipt", verify)
+    with pytest.raises(stop):
+        _score([_receipt(), _receipt(box_id="stop", hardware="f1" * 32)])
 
 
 def test_receipts_for_another_validator_round_or_key_are_refused() -> None:
@@ -248,7 +459,7 @@ def test_one_hotkeys_boxes_on_the_same_hardware_count_once_at_the_higher_value()
             _receipt(box_id="box-large", vcpus=8, memory_gib=32),
         ]
     )
-    assert scored["units"] == [[3, 8 * 18_000 + 32 * 2_500]]
+    assert scored["units"] == [[3, 8 * 30_000 + 32 * 4_000]]
     assert scored["refused"] == {"another box of this hotkey has the same hardware": 1}
 
 
@@ -276,7 +487,33 @@ def test_a_repeated_box_an_unknown_hotkey_and_a_small_box_are_refused() -> None:
     }
 
 
-def test_a_sampled_lane_is_recomputed_within_the_memory_budget() -> None:
+def test_no_real_lane_fits_the_recheck_budget() -> None:
+    # The library refuses any claim with less than MIN_LANE_BYTES of lane per
+    # vCPU, and the pure-Python recheck is capped below that, so every receipt a
+    # prober can issue today is skipped: the recheck is off until a native
+    # checker exists. Raising the cap past the floor must revisit that decision
+    # (docs/CAPACITY_RECEIPTS.md, recheck_max_mib).
+    assert cs.MAX_RECHECK_MIB << 20 < ch.MIN_LANE_BYTES
+    # 8 vCPUs over 5 GiB is the floor exactly: one 512 MiB lane per vCPU.
+    spec = ch.spec_for(SEED, vcpus=8, memory_gib=5)
+    assert spec.blocks * ch.BLOCK_BYTES == ch.MIN_LANE_BYTES
+    smallest = _receipt(vcpus=8, memory_gib=5)
+    scored = _score([smallest], policy=_policy(recheck_max_mib=cs.MAX_RECHECK_MIB))
+    assert scored["rows"][0]["recheck"] == "skipped"
+    assert scored["rows"][0]["verdict"] == cs.ACCEPTED
+    assert scored["recheck_failures"] == 0
+
+
+@pytest.fixture
+def small_lanes(monkeypatch):
+    """Lower the library's lane floor so a test lane is small enough to
+    recompute. This exercises the recheck machinery, kept for a native checker;
+    no real receipt has lanes this small."""
+
+    monkeypatch.setattr(ch, "MIN_LANE_BYTES", 1 << 20)
+
+
+def test_a_sampled_lane_is_recomputed_within_the_memory_budget(small_lanes) -> None:
     # 512 lanes over 1 GiB keeps each lane about 1.6 MiB, small enough to recompute.
     honest = _receipt(box_id="honest", vcpus=512, memory_gib=1, real_outputs=True)
     forged = _receipt(box_id="forged", hardware="f1" * 32, vcpus=512, memory_gib=1)
@@ -293,7 +530,43 @@ def test_a_sampled_lane_is_recomputed_within_the_memory_budget() -> None:
     assert off["rows"][0]["recheck"] == "off" and off["accepted"] == 1
 
 
-def test_the_recheck_stops_at_its_time_budget() -> None:
+def test_a_recheck_that_raises_refuses_only_that_receipt(
+    small_lanes, monkeypatch
+) -> None:
+    def lane_output(spec, lane):
+        raise MemoryError
+
+    monkeypatch.setattr(ch, "lane_output", lane_output)
+    small = _receipt(
+        box_id="small", hardware="f1" * 32
+    )  # its lane is too big to recheck
+    scored = _score(
+        [_receipt(vcpus=512, memory_gib=1), small], policy=_policy(recheck_max_mib=2)
+    )
+    rows = {row["box_id"]: row for row in scored["rows"]}
+    assert rows["box-1"]["recheck"] == "error"
+    assert rows["box-1"]["reason"] == "MemoryError"
+    assert rows["small"]["recheck"] == "skipped"
+    assert scored["units"] == [[3, TEE_6_24]]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_an_interpreter_stop_during_the_recheck_is_never_contained(
+    small_lanes, monkeypatch, stop
+) -> None:
+    calls: list[int] = []
+
+    def lane_output(spec, lane):
+        calls.append(lane)
+        raise stop
+
+    monkeypatch.setattr(ch, "lane_output", lane_output)
+    with pytest.raises(stop):
+        _score([_receipt(vcpus=512, memory_gib=1)], policy=_policy(recheck_max_mib=2))
+    assert len(calls) == 1
+
+
+def test_the_recheck_stops_at_its_time_budget(small_lanes) -> None:
     forged = _receipt(vcpus=512, memory_gib=1)
     ticks = iter([0.0, cs.RECHECK_BUDGET_SECONDS + 1])
     scored = cs.score_receipts(
@@ -335,7 +608,7 @@ def test_each_cycle_fetches_its_own_receipts_with_a_fresh_nonce() -> None:
     first = shadow.record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
     second = shadow.record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
     assert first["status"] == second["status"] == "RECORDED"
-    assert first["units"] == [[3, 6 * 18_000 + 24 * 2_500]]
+    assert first["units"] == [[3, TEE_6_24]]
     assert first["round"] == 7 and first["price_table_sequence"] == 3
     assert urls[0].startswith(URL + "/94/") and urls[0] != urls[1]
 
@@ -367,7 +640,7 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     fetch = _feed(
         [],
         lambda nonce: [
-            _receipt(box_id=f"box-{i}", hardware=f"{i:064x}", nonce=nonce)
+            _receipt(box_id=f"box-{i}", hardware=f"{i + 1:064x}", nonce=nonce)
             for i in range(count)
         ],
     )
@@ -376,7 +649,7 @@ def test_the_record_keeps_a_bounded_number_of_rows() -> None:
     ).record(netuid=94, hotkey_to_uid={HOTKEY_A: 3})
     assert record["receipts"] == record["accepted"] == count
     assert len(record["rows"]) == cs.MAX_EVENT_ROWS and record["rows_omitted"] == 5
-    assert record["units"] == [[3, count * (6 * 18_000 + 24 * 2_500)]]
+    assert record["units"] == [[3, count * TEE_6_24]]
     assert len(json.dumps(record)) < 24_000
 
 
@@ -393,7 +666,7 @@ def test_each_record_updates_the_inventory_file(tmp_path) -> None:
     fetch = _feed(
         [],
         lambda nonce: [
-            _receipt(box_id=f"box-{i}", hardware=f"{i:064x}", nonce=nonce)
+            _receipt(box_id=f"box-{i}", hardware=f"{i + 1:064x}", nonce=nonce)
             for i in range(count)
         ],
     )

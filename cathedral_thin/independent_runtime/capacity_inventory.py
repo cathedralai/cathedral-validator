@@ -8,8 +8,9 @@ quiet, without trusting the control plane's own view:
 
 * ``healthy``: its receipt this cycle verified and was accepted;
 * ``unhealthy``: its receipt verified but was refused (a duplicate, hardware
-  claimed under two hotkeys, a failed recheck, a box too small to use, or a
-  hotkey that is not a serving miner), with the reason;
+  claimed under two hotkeys, a failed recheck, a box too small to use, a
+  hotkey that is not a serving miner, or a bare-metal box while the policy
+  admits only TEE boxes), with the reason;
 * ``missing``: seen before, but no receipt this cycle. After MISSING_CYCLES
   quiet cycles the box is dropped.
 
@@ -40,12 +41,17 @@ HEALTHY = "healthy"
 UNHEALTHY = "unhealthy"
 MISSING = "missing"
 MISSING_CYCLES = 24
+# The reason capacity_shadow gives a verified bare-metal receipt while the
+# policy leaves admit_bare_metal off. Defined here so the inventory can rank
+# such a row below any other row for the same box id.
+BARE_METAL_REFUSED = "bare-metal boxes are not admitted (admit_bare_metal is off)"
 MAX_BOXES = 4096
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 _BOX_FIELDS = (
     "miner_hotkey",
     "uid",
     "kind",
+    "tee_kind",
     "hardware_id_kind",
     "hardware_id",
     "vcpus",
@@ -60,6 +66,16 @@ class CapacityInventoryError(Exception):
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _row_rank(row: Mapping[str, Any]) -> int:
+    """Which of two rows for one box id the inventory keeps (higher wins)."""
+
+    if row.get("verdict") == "ACCEPTED":
+        return 2
+    if row.get("reason") == BARE_METAL_REFUSED:
+        return 0
+    return 1
 
 
 def update_inventory(
@@ -82,12 +98,20 @@ def update_inventory(
         old_boxes = previous["boxes"]
     stamp = _iso(now)
     boxes: dict[str, dict[str, Any]] = {}
+    ranks: dict[str, int] = {}
     for row in rows:
         box_id = row.get("box_id")
-        if not isinstance(box_id, str) or box_id in boxes:
-            # An unverified receipt names no trustworthy box, and a box the feed
-            # carried twice keeps its first (refused) row.
+        if not isinstance(box_id, str):
+            continue  # an unverified receipt names no trustworthy box
+        rank = _row_rank(row)
+        if box_id in boxes and rank <= ranks[box_id]:
+            # A box the feed carried twice keeps its first row, unless a later
+            # row ranks higher: an accepted row above any refused one, and any
+            # refused row above a not-admitted bare-metal one (a bare-metal
+            # receipt reusing a TEE box's id must not hide the TEE box, nor
+            # the TEE box's own refusal reason).
             continue
+        ranks[box_id] = rank
         old = old_boxes.get(box_id)
         old = old if isinstance(old, Mapping) else {}
         healthy = row.get("verdict") == "ACCEPTED"

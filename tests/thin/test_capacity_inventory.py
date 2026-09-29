@@ -19,6 +19,7 @@ def _row(box_id="box-1", verdict="ACCEPTED", **changes):
         "miner_hotkey": "hk-a",
         "uid": 3,
         "kind": "bare_metal",
+        "tee_kind": None,
         "hardware_id_kind": "probe_fingerprint",
         "hardware_id": "f0" * 32,
         "vcpus": 8,
@@ -44,7 +45,12 @@ def _cycle(previous, rows, round_=7, minutes=0, netuid=94):
 
 
 def test_boxes_are_healthy_unhealthy_or_missing_by_what_this_validator_saw() -> None:
-    first = _cycle(None, [_row(), _row("box-2", verdict="REFUSED", kind="tee", uid=5)])
+    first = _cycle(
+        None,
+        [_row(), _row("box-2", verdict="REFUSED", kind="tee", tee_kind="tdx", uid=5)],
+    )
+    assert first["boxes"]["box-2"]["tee_kind"] == "tdx"
+    assert first["boxes"]["box-1"]["tee_kind"] is None
     assert first["boxes"]["box-1"]["status"] == inv.HEALTHY
     assert first["boxes"]["box-1"]["streak"] == 1
     assert first["boxes"]["box-2"]["status"] == inv.UNHEALTHY
@@ -80,19 +86,45 @@ def test_a_quiet_box_is_dropped_after_missing_cycles() -> None:
     assert _cycle(doc, [], round_=99)["boxes"] == {}
 
 
-def test_unverified_receipts_never_enter_and_a_repeated_box_keeps_its_first_row() -> (
+def test_unverified_receipts_never_enter_and_a_repeated_box_prefers_its_accepted_row() -> (
     None
 ):
+    # Scoring refuses both rows of a box the feed carries twice, so an accepted
+    # duplicate only happens beside a refused, not-admitted bare-metal receipt
+    # reusing the id: the accepted row must win. Two refused rows keep the first.
     doc = _cycle(
         None,
         [
             {"verdict": "REFUSED", "reason": "receipt signature does not verify"},
             _row("twice", verdict="REFUSED"),
             _row("twice"),
+            _row("both-refused", verdict="REFUSED", reason="first"),
+            _row("both-refused", verdict="REFUSED", reason="second"),
         ],
     )
-    assert list(doc["boxes"]) == ["twice"]
-    assert doc["boxes"]["twice"]["status"] == inv.UNHEALTHY
+    assert list(doc["boxes"]) == ["both-refused", "twice"]
+    assert doc["boxes"]["twice"]["status"] == inv.HEALTHY
+    assert doc["boxes"]["both-refused"]["reason"] == "first"
+
+
+def test_a_not_admitted_bare_metal_row_ranks_below_any_other_row_for_its_id() -> None:
+    # Review of #265: a TEE row refused for another reason must not be hidden
+    # by an earlier not-admitted bare-metal row, whatever the order.
+    bare = _row("x", verdict="REFUSED", reason=inv.BARE_METAL_REFUSED)
+    tee = _row(
+        "x",
+        verdict="REFUSED",
+        kind="tee",
+        tee_kind="tdx",
+        reason="the hotkey is not a serving miner on this netuid",
+    )
+    for rows in ([bare, tee], [tee, bare]):
+        box = _cycle(None, rows)["boxes"]["x"]
+        assert box["kind"] == "tee"
+        assert box["reason"] == "the hotkey is not a serving miner on this netuid"
+    accepted = _row("x", kind="tee", tee_kind="tdx")
+    for rows in ([bare, tee, accepted], [accepted, tee, bare]):
+        assert _cycle(None, rows)["boxes"]["x"]["status"] == inv.HEALTHY
 
 
 def test_an_inventory_for_another_netuid_or_schema_starts_over() -> None:

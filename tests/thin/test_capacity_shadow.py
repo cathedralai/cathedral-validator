@@ -64,6 +64,26 @@ def test_a_missing_policy_changes_nothing_and_a_bad_one_never_stops_the_validato
     assert event["capacity_shadow"]["status"] == "DISABLED"
 
 
+@pytest.mark.parametrize("digest", [None, "ab" * 32])
+def test_startup_says_once_when_no_price_table_digest_is_pinned(
+    monkeypatch, capsys, digest
+) -> None:
+    from cathedral_thin.independent_runtime import direct_validator as runtime
+
+    policy = SimpleNamespace(price_table_digest=digest, minimum_price_table_sequence=4)
+    monkeypatch.setenv(cs.CAPACITY_POLICY_ENV, "/etc/cathedral-validator/capacity.json")
+    monkeypatch.setattr(runtime, "load_capacity_policy", lambda *_a, **_k: policy)
+    assert runtime._capacity_shadow_from_environment().policy is policy
+    out = capsys.readouterr().out
+    if digest is not None:
+        assert out == ""
+        return
+    event = json.loads(out)["capacity_shadow"]
+    assert event["status"] == "LOADED"
+    assert "price_table_digest is not pinned" in event["warning"]
+    assert "sequence 4" in event["warning"]
+
+
 @pytest.mark.parametrize("error", [RecursionError, ValueError, MemoryError, OSError])
 def test_no_policy_load_error_escapes_startup(monkeypatch, capsys, error) -> None:
     from cathedral_thin.independent_runtime import direct_validator as runtime
