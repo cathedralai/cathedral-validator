@@ -25,6 +25,21 @@ When it is on, and only then, the validator:
 Nothing else changes. Collection, SAT, scoring, the writer's chain gates
 (permit, stake threshold, cooldown, commit-reveal off, version key, era), the
 journal, and finalized confirmation run exactly as on Finney.
+
+Testnet mode (``CATHEDRAL_TESTNET=1``) is the rehearsal before Finney: real
+miners with real TDX hardware on Bittensor's public testnet. It keeps every
+production verifier (the release QVL, the SNP verifier, public-address-only
+dialing) and changes only where the chain is. When it is on, the validator:
+
+* accepts only ``--network test`` or the testnet endpoint, never ``finney``;
+* pins testnet's genesis, so no read or write can land on Finney;
+* requires an explicit ``--netuid``, because netuid 94 on testnet belongs to
+  another team. The release still refuses any netuid but 94 on Finney;
+* signs validator requests for the ``test`` network;
+* journals under a ``testnet-sn<netuid>`` scope, which the updater and status
+  tool never read.
+
+The two modes are mutually exclusive.
 """
 
 from __future__ import annotations
@@ -43,6 +58,15 @@ LOCALNET_STATE_SCOPE = "localnet"
 LOCALNET_STUB_QVL_DIGEST = (
     "981fac396886b2570bad132998e346e86675f2ee373eda17c29e934f8894ccbe"
 )
+TESTNET_ENV = "CATHEDRAL_TESTNET"
+TESTNET_NETWORK = "test"
+TESTNET_ENDPOINT = "wss://test.finney.opentensor.ai:443"
+# Bittensor public testnet genesis, from chain_getBlockHash(0) on 2026-09-29.
+TESTNET_GENESIS_HASH = (
+    "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+)
+TESTNET_REQUEST_NETWORK = "test"
+TESTNET_STATE_SCOPE = "testnet"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _HASH_HEX = frozenset("0123456789abcdef")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
@@ -50,6 +74,10 @@ _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
 class LocalnetRefused(SystemExit):
     """Localnet mode was requested outside its development boundary."""
+
+
+class PublicTestnetRefused(SystemExit):
+    """Testnet mode was requested outside its rehearsal boundary."""
 
 
 def localnet_active() -> bool:
@@ -60,6 +88,23 @@ def localnet_active() -> bool:
         return False
     if value != "1":
         raise LocalnetRefused(f"{LOCALNET_ENV} must be exactly 1 or unset")
+    if os.environ.get(TESTNET_ENV):
+        raise LocalnetRefused(f"{LOCALNET_ENV} and {TESTNET_ENV} cannot both be set")
+    return True
+
+
+def testnet_active() -> bool:
+    """Whether ``CATHEDRAL_TESTNET=1`` is set. Any other value refuses."""
+
+    value = os.environ.get(TESTNET_ENV)
+    if value is None or value == "":
+        return False
+    if value != "1":
+        raise PublicTestnetRefused(f"{TESTNET_ENV} must be exactly 1 or unset")
+    if os.environ.get(LOCALNET_ENV):
+        raise PublicTestnetRefused(
+            f"{TESTNET_ENV} and {LOCALNET_ENV} cannot both be set"
+        )
     return True
 
 
@@ -80,7 +125,11 @@ def localnet_genesis_hash() -> str:
 def expected_genesis_hash() -> str:
     """The genesis every chain read must observe."""
 
-    return localnet_genesis_hash() if localnet_active() else FINNEY_GENESIS_HASH
+    if localnet_active():
+        return localnet_genesis_hash()
+    if testnet_active():
+        return TESTNET_GENESIS_HASH
+    return FINNEY_GENESIS_HASH
 
 
 def require_localnet_network(value: object) -> str:
@@ -110,16 +159,35 @@ def require_localnet_network(value: object) -> str:
     return value
 
 
+def require_testnet_network(value: object) -> str:
+    """Accept only Bittensor's public testnet, by name or by its endpoint."""
+
+    if not isinstance(value, str) or value not in {TESTNET_NETWORK, TESTNET_ENDPOINT}:
+        raise PublicTestnetRefused(
+            f"testnet mode accepts only --network {TESTNET_NETWORK} or "
+            f"--network {TESTNET_ENDPOINT}"
+        )
+    return value
+
+
 def request_network() -> str:
     """The network name signed into every validator request."""
 
-    return LOCALNET_REQUEST_NETWORK if localnet_active() else "finney"
+    if localnet_active():
+        return LOCALNET_REQUEST_NETWORK
+    if testnet_active():
+        return TESTNET_REQUEST_NETWORK
+    return "finney"
 
 
 def state_scope_network() -> str:
     """The network label that scopes the writer journal directory."""
 
-    return LOCALNET_STATE_SCOPE if localnet_active() else "finney"
+    if localnet_active():
+        return LOCALNET_STATE_SCOPE
+    if testnet_active():
+        return TESTNET_STATE_SCOPE
+    return "finney"
 
 
 def allows_private_miner_address(
@@ -143,11 +211,20 @@ __all__ = [
     "LOCALNET_STATE_SCOPE",
     "LOCALNET_STUB_QVL_DIGEST",
     "LocalnetRefused",
+    "PublicTestnetRefused",
+    "TESTNET_ENDPOINT",
+    "TESTNET_ENV",
+    "TESTNET_GENESIS_HASH",
+    "TESTNET_NETWORK",
+    "TESTNET_REQUEST_NETWORK",
+    "TESTNET_STATE_SCOPE",
     "allows_private_miner_address",
     "expected_genesis_hash",
     "localnet_active",
     "localnet_genesis_hash",
     "request_network",
     "require_localnet_network",
+    "require_testnet_network",
     "state_scope_network",
+    "testnet_active",
 ]
