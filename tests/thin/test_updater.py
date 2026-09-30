@@ -2490,6 +2490,8 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert (
         "-m cathedral_thin.independent_runtime.telemetry_exporter --help" in release_job
     )
+    # The smoke check must see the exporter run, not only exit 0.
+    assert "usage: cathedral-validator-telemetry-export" in release_job
 
     smoke = (root / "tests" / "release_smoke" / "run_real_validator.py").read_text()
     assert "snp_production.load_compute_contract()" in smoke
