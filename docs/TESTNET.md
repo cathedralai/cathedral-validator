@@ -101,6 +101,8 @@ The same two hops as Finney (`docs/PRIVATE_TELEMETRY.md`), with the testnet name
   ```
 - **The modes do not mix.** A Finney exporter refuses a testnet event, and a testnet exporter refuses a Finney one. On Finney the exporter accepts no netuid but 94, so the production unit needs no change.
 - **The collector decides separately** whether it accepts `test` events. It checks the validator's permit on chain, so it has to check the chain the event names.
+- **With commit-reveal on, a round's event is written one epoch later**, by the cycle that proves the chain revealed the commit (#281). Without that change the validator writes no event at all on a commit-reveal subnet (#280). The board's edge has to allow for the delay too: an event is about one epoch old when it arrives.
+- **The exporter needs #283.** Before it, the module this command starts never calls `main()`: the command exits 0 and sends nothing.
 
 ## Green checks
 
