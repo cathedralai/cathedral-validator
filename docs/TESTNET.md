@@ -49,6 +49,7 @@ btcli stake add --netuid N --amount-tao 0.5 --network test --wallet cathedral-te
   btcli sudo set --netuid N --name activity_cutoff_factor --value 2000 --network test --wallet cathedral-testnet   # per-mille of tempo: 2000 is two tempos
   ```
   This is a difference from Finney's subnet. Put it back (`13889` is 5000 blocks at tempo 360) when the rehearsal is over.
+- **A paid miner holds a validator permit one epoch later.** Testnet's `StakeThreshold` is 0, the chain gives a permit to the top 64 stakes above it, and a miner's pay is staked on its own hotkey. A validator that leaves out permit holders then reports `direct validator found no serving miner` and stops writing (#284, fixed by #285). On Finney the threshold is 1000 alpha, so the same thing happens to a miner that keeps 1000 alpha on its hotkey.
 
 ## 2. Validator (Linux host)
 
