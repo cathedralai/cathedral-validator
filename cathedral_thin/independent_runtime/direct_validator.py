@@ -304,7 +304,10 @@ def finalized_serving_miners_snapshot(
     keypair: Any,
     netuid: int = NETUID,
 ) -> FinalizedMetagraphSnapshot:
-    """Read every serving non-validator miner at one finalized head.
+    """Read every serving miner at one finalized head.
+
+    A miner is any serving UID but this validator's own. Holding a validator
+    permit does not make a UID a validator: see the comment at the filter.
 
     The snapshot records ``netuid``, so the plan, writer, and telemetry built
     from it name the subnet that was actually read. The default is the compiled
@@ -353,14 +356,17 @@ def finalized_serving_miners_snapshot(
             block_number=block_number,
             block_hash=block_hash,
         )
-    validator_uids = {
-        uid for uid, permit in zip(uids, strict_permits) if permit is True
-    }
 
+    # A permit says a UID may set weights, not that it is a validator. The
+    # chain gives one to the top stakes above its threshold, and a miner is
+    # paid in stake on its own hotkey, so a miner that keeps what it earns
+    # comes to hold one. Leaving permit holders out would drop exactly the
+    # miners that were paid. Only this validator's own UID is left out: every
+    # other serving UID is a candidate, and verification decides what it earns.
     scan = scan_axons(metagraph)
     miners = tuple(
         sorted(
-            (axon for axon in scan.serving if axon.uid not in validator_uids),
+            (axon for axon in scan.serving if axon.uid != validator_uid),
             key=lambda axon: (axon.uid, axon.hotkey),
         )
     )
