@@ -19,28 +19,36 @@ Localnet and testnet mode cannot both be on.
 
 - **A TDX VM with a public IP** for the miner. For example, a GCP c3 confidential VM (TDX) on Ubuntu 24.04. The worker's port must be reachable.
 - **A Linux x86-64 host for the validator.** The release TDX verifier and `snpguest` are Linux x86-64 binaries.
-- **About τ3 of test TAO** in a testnet-only coldkey:
+- **About τ3 of test TAO** across two testnet-only coldkeys, one for the subnet and validator and one for the miner:
   - the subnet lock costs τ1;
-  - testnet's `StakeThreshold` is 0, so a small stake gives the validator its permit.
+  - testnet's `StakeThreshold` is 0, so a small stake gives the validator its permit;
+  - the miner's coldkey needs the registration burn (`btcli subnets burn-cost N --network test`).
 
   Never use a Finney coldkey on testnet.
 
 ## 1. Chain setup (testnet only)
 
 ```bash
-btcli wallet create --wallet-name cathedral-testnet --network test
+btcli wallet create --wallet-name cathedral-testnet --network test         # owns the subnet and the validator
+btcli wallet create --wallet-name cathedral-testnet-miner --network test   # owns the miner; it must not own the subnet
 btcli subnets create --network test --wallet cathedral-testnet   # note the new netuid: N
 btcli sudo start --netuid N --network test --wallet cathedral-testnet   # testnet StartCallDelay is 0
 btcli sudo set --netuid N --name commit_reveal_weights_enabled --value false --network test --wallet cathedral-testnet
 btcli wallet new-hotkey --wallet-name cathedral-testnet --wallet-hotkey validator
-btcli wallet new-hotkey --wallet-name cathedral-testnet --wallet-hotkey miner1
+btcli wallet new-hotkey --wallet-name cathedral-testnet-miner --wallet-hotkey miner1
 btcli subnets register --netuid N --network test --wallet cathedral-testnet --wallet-hotkey validator
-btcli subnets register --netuid N --network test --wallet cathedral-testnet --wallet-hotkey miner1
+btcli subnets register --netuid N --network test --wallet cathedral-testnet-miner --wallet-hotkey miner1
 btcli stake add --netuid N --amount-tao 0.5 --network test --wallet cathedral-testnet --wallet-hotkey validator
 ```
 
 - The direct writer refuses a weights rate limit below 16 blocks. The default of 100 is fine.
 - The validator's permit lands at the first epoch after the stake does.
+- **Register the miner from a different coldkey than the one that owns the subnet.** The chain pays no miner emission to a hotkey the subnet owner's coldkey holds, or to the subnet owner hotkey: it burns or recycles it (`distribute_dividends_and_incentives` in subtensor's `run_coinbase.rs`). The metagraph still shows the amount under `emission`, so a miner registered with the commands above looks paid and is not. The 2026-09-30 rehearsal lost its first epoch's 147.6 alpha this way.
+- **The validator needs a majority of the active stake.** With kappa 0.5 a miner's consensus weight is the stake-weighted median over active validators. The subnet owner hotkey holds the owner's root stake, sets no weights, and counts as active until it has been silent for the activity cutoff (5000 blocks by default). Until then the validator's weights are clipped to zero and miners earn nothing. Either wait, or childkey the owner hotkey to the validator (7200 blocks), or lower the cutoff on the rehearsal subnet:
+  ```bash
+  btcli sudo set --netuid N --name activity_cutoff_factor --value 2000 --network test --wallet cathedral-testnet   # per-mille of tempo: 2000 is two tempos
+  ```
+  This is a difference from Finney's subnet. Put it back (`13889` is 5000 blocks at tempo 360) when the rehearsal is over.
 
 ## 2. Validator (Linux host)
 
@@ -71,7 +79,7 @@ Run the worker the way `localnet/run_miner.sh` does, with two differences:
   ```
 - **Announce the axon:**
   ```bash
-  btcli axon set --netuid N --network test --wallet cathedral-testnet --wallet-hotkey miner1 --ip <public ip> --port <port>
+  btcli axon set --netuid N --network test --wallet cathedral-testnet-miner --wallet-hotkey miner1 --ip <public ip> --port <port>
   ```
 - **Worker:**
   ```bash
@@ -100,7 +108,7 @@ The same two hops as Finney (`docs/PRIVATE_TELEMETRY.md`), with the testnet name
 |---|---|---|
 | 1 | Validator runs in testnet mode | `TESTNET_DEVELOPMENT_MODE`, then `CONFIRMED` cycles |
 | 2 | Real TDX quote passes | The cycle's evidence summary shows the miner verified by the release QVL |
-| 3 | Miner earns | `btcli subnets metagraph N --network test` shows incentive above 0 |
+| 3 | Miner earns | The epoch block carries `IncentiveAlphaEmittedToMiners` with the miner's amount, **and** the miner hotkey's alpha on the subnet rose by it. Incentive above 0 in the metagraph is not enough: an owner-held key shows it and is paid nothing |
 | 4 | Plan B | Commit-reveal on, with `CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-1` (#272): commits reveal and incentive holds |
 | 5 | Recovery | Restart the validator mid-cycle: no double write; the journal recovers |
 | 6 | Public board | The spool's latest event names `test` and netuid N, the exporter prints `EXPORTED`, and the board shows the row labelled Testnet |

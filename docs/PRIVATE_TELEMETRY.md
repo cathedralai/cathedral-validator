@@ -122,5 +122,7 @@ Localnet writes no telemetry: the validator refuses `--telemetry-spool` there,
 and the exporter refuses to run.
 
 On a host that mounts `/run` noexec, the exporter cannot load from the unit's
-default `PEX_ROOT` (#278). Point `PEX_ROOT` at a directory under `/var/lib`
-that the exporter's user owns.
+default `PEX_ROOT` (#278). Let systemd create one under `/var/lib` instead:
+replace the unit's `RuntimeDirectory=` with `StateDirectory=<name>` and set
+`PEX_ROOT=/var/lib/<name>`. The unit runs with `ProtectSystem=strict`, so a
+directory it does not declare is read-only to it, whoever owns it.
