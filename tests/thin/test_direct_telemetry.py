@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from cathedral_thin.independent_runtime.telemetry import (
     validate_public_telemetry_event,
 )
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
+from cathedral_thin.independent_runtime.localnet import LOCALNET_ENV, TESTNET_ENV
 
 VALIDATOR_KEYPAIR = Keypair.create_from_uri("//Alice")
 TDX_MINER_KEYPAIR = Keypair.create_from_uri("//Bob")
@@ -502,3 +504,79 @@ def test_shared_spool_exposes_only_sanitized_events_to_the_reader_group(
     assert path.stat().st_mode & 0o777 == 0o640
     assert path.parent.stat().st_mode & 0o777 == 0o750
     assert latest_telemetry_event(path, expected_reader_gid=gid) == event
+
+
+TESTNET_NETUID = 584
+
+
+def _rows() -> tuple[dict[str, object], ...]:
+    return (
+        _row(41, TDX_MINER_KEYPAIR.ss58_address, "tdx", 10),
+        _row(42, SNP_MINER_KEYPAIR.ss58_address, "sev_snp", 20),
+    )
+
+
+def _testnet_plan() -> DirectWeightPlan:
+    plan = _plan()
+    return replace(plan, snapshot=replace(plan.snapshot, netuid=TESTNET_NETUID))
+
+
+def _snapshot(plan: DirectWeightPlan) -> dict[str, object]:
+    return build_telemetry_snapshot(
+        result_rows=_rows(),
+        plan=plan,
+        receipt=_receipt(),
+        keypair=VALIDATOR_KEYPAIR,
+        observed_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+    )
+
+
+def test_production_events_still_name_finney_and_the_compiled_netuid(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv(TESTNET_ENV, raising=False)
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    event = _snapshot(_plan())
+    assert event["network"] == "finney"
+    assert event["netuid"] == NETUID
+
+
+def test_testnet_events_name_test_and_the_testnet_netuid(monkeypatch) -> None:
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    event = _snapshot(_testnet_plan())
+    assert event["network"] == "test"
+    assert event["netuid"] == TESTNET_NETUID
+    assert validate_public_telemetry_event(event, netuid=TESTNET_NETUID) == event
+    # Same fields as a Finney event: only the chain and subnet differ.
+    monkeypatch.delenv(TESTNET_ENV)
+    assert set(event) == set(_snapshot(_plan()))
+
+
+def test_a_testnet_event_is_refused_outside_testnet_mode_and_the_reverse(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    testnet_event = _snapshot(_testnet_plan())
+    monkeypatch.delenv(TESTNET_ENV)
+    finney_event = _snapshot(_plan())
+    with pytest.raises(TelemetryError):
+        validate_public_telemetry_event(testnet_event, netuid=TESTNET_NETUID)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    with pytest.raises(TelemetryError):
+        validate_public_telemetry_event(finney_event, netuid=NETUID)
+
+
+def test_the_spool_reader_checks_the_netuid_it_is_given(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    event = _snapshot(_testnet_plan())
+    path = canonical_telemetry_path(tmp_path / "direct-writer" / "state.json")
+    TelemetrySpool(path, netuid=TESTNET_NETUID).append(event)
+
+    assert latest_telemetry_event(path, netuid=TESTNET_NETUID) == event
+    # The default is the compiled netuid, which is what the exporter used
+    # before it took --netuid. It must not accept another subnet's event.
+    with pytest.raises(TelemetryError):
+        latest_telemetry_event(path)

@@ -11,7 +11,7 @@ Testnet mode (`CATHEDRAL_TESTNET=1`, code in `cathedral_thin/independent_runtime
 | `--netuid` | 94 only | Required and explicit, because netuid 94 on testnet is another team's subnet |
 | Request network | `finney` | `test` |
 | Journal scope | `finney-sn94-...` | `testnet-sn<netuid>-...`, which the updater and status tool never read |
-| Telemetry | Optional | Refused, because telemetry events are Finney-only |
+| Telemetry | Optional. Events say `finney` and netuid 94 | Optional. Events say `test` and the `--netuid` the validator runs on |
 
 Localnet and testnet mode cannot both be on.
 
@@ -78,6 +78,22 @@ Run the worker the way `localnet/run_miner.sh` does, with two differences:
   python -m cathedral.cli worker serve ... --validator-network test --validator-netuid N --public-endpoint https://<public ip>:<port>
   ```
 
+## 4. Telemetry (optional)
+
+The same two hops as Finney (`docs/PRIVATE_TELEMETRY.md`), with the testnet names. Nothing else changes, so the path that fills the public board is rehearsed too.
+
+- **Validator:** add `--telemetry-spool /absolute/path/events.jsonl --telemetry-reader-group <group>`. Each event says `"network": "test"` and the netuid the validator runs on, and is signed by the validator hotkey like a Finney event.
+- **Exporter:** run it in testnet mode and name the same netuid:
+  ```bash
+  CATHEDRAL_TESTNET=1 PEX_INTERPRETER=1 cathedral-validator \
+    -m cathedral_thin.independent_runtime.telemetry_exporter \
+    --netuid N --spool /absolute/path/events.jsonl --reader-group <group> \
+    --endpoint <collector URL> \
+    --ingest-token-file <file> --sites-authorization-file <file>
+  ```
+- **The modes do not mix.** A Finney exporter refuses a testnet event, and a testnet exporter refuses a Finney one. On Finney the exporter accepts no netuid but 94, so the production unit needs no change.
+- **The collector decides separately** whether it accepts `test` events. It checks the validator's permit on chain, so it has to check the chain the event names.
+
 ## Green checks
 
 | # | Check | Evidence |
@@ -87,4 +103,5 @@ Run the worker the way `localnet/run_miner.sh` does, with two differences:
 | 3 | Miner earns | `btcli subnets metagraph N --network test` shows incentive above 0 |
 | 4 | Plan B | Commit-reveal on, with `CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-1` (#272): commits reveal and incentive holds |
 | 5 | Recovery | Restart the validator mid-cycle: no double write; the journal recovers |
-| 6 | Same file as Finney | The candidate that passed 1-5 is the one signed for Finney |
+| 6 | Public board | The spool's latest event names `test` and netuid N, the exporter prints `EXPORTED`, and the board shows the row labelled Testnet |
+| 7 | Same file as Finney | The candidate that passed 1-6 is the one signed for Finney |

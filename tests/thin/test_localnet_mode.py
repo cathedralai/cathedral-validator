@@ -236,3 +236,31 @@ def test_journal_scope_never_says_finney_in_localnet_mode(monkeypatch) -> None:
     assert direct_state_scope(94) == "finney-sn94-mechanism-0"
     monkeypatch.setenv(localnet.LOCALNET_ENV, "1")
     assert direct_state_scope(94) == "localnet-sn94-mechanism-0"
+
+
+def test_main_refuses_the_telemetry_spool_in_localnet_mode_before_the_chain(
+    local, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        runtime, "make_subtensor", lambda *_a, **_k: pytest.fail("reached the chain")
+    )
+    with pytest.raises(SystemExit, match="unset --telemetry-spool"):
+        runtime.main(
+            [
+                "--network",
+                "ws://127.0.0.1:9944",
+                "--expected-hotkey",
+                "5Validator",
+                "--qvl",
+                str(STUB),
+                "--snp-policy",
+                str(tmp_path / "policy.json"),
+                "--snpguest",
+                "unused",
+                "--telemetry-spool",
+                str(tmp_path / "spool"),
+                "--telemetry-reader-group",
+                "staff",
+                "--confirm-direct-write",
+            ]
+        )
