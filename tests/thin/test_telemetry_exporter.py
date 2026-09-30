@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import urllib.error
 from datetime import UTC, datetime
 from pathlib import Path
@@ -276,3 +278,31 @@ def test_exporter_refuses_localnet_mode(monkeypatch) -> None:
     monkeypatch.setenv(LOCALNET_ENV, "1")
     with pytest.raises(TelemetryExportError, match="development chain"):
         _export_netuid(None)
+
+
+def test_running_the_module_runs_the_exporter() -> None:
+    # The unit starts the exporter with ``-m``. A module that only defines
+    # main() exits 0 without reading the spool, which looks like success.
+    root = Path(__file__).resolve().parents[2]
+    command = [
+        sys.executable,
+        "-m",
+        "cathedral_thin.independent_runtime.telemetry_exporter",
+    ]
+
+    usage = subprocess.run(
+        [*command, "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert usage.returncode == 0
+    assert "usage: cathedral-validator-telemetry-export" in usage.stdout
+
+    bare = subprocess.run(
+        command, cwd=root, capture_output=True, text=True, check=False, timeout=120
+    )
+    assert bare.returncode == 2
+    assert "the following arguments are required" in bare.stderr

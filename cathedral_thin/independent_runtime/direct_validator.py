@@ -45,6 +45,7 @@ from .axon import (
     observed_genesis_hash,
     scan_axons,
 )
+from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DirectValidatorError,
@@ -89,6 +90,7 @@ from .telemetry import (
     PendingTelemetryStore,
     TelemetryError,
     TelemetrySpool,
+    applied_reveal_receipt,
     build_telemetry_candidate,
     journal_pending_plan_matches,
     journal_receipt_for_plan,
@@ -302,7 +304,10 @@ def finalized_serving_miners_snapshot(
     keypair: Any,
     netuid: int = NETUID,
 ) -> FinalizedMetagraphSnapshot:
-    """Read every serving non-validator miner at one finalized head.
+    """Read every serving miner at one finalized head.
+
+    A miner is any serving UID but this validator's own. Holding a validator
+    permit does not make a UID a validator: see the comment at the filter.
 
     The snapshot records ``netuid``, so the plan, writer, and telemetry built
     from it name the subnet that was actually read. The default is the compiled
@@ -351,14 +356,17 @@ def finalized_serving_miners_snapshot(
             block_number=block_number,
             block_hash=block_hash,
         )
-    validator_uids = {
-        uid for uid, permit in zip(uids, strict_permits) if permit is True
-    }
 
+    # A permit says a UID may set weights, not that it is a validator. The
+    # chain gives one to the top stakes above its threshold, and a miner is
+    # paid in stake on its own hotkey, so a miner that keeps what it earns
+    # comes to hold one. Leaving permit holders out would drop exactly the
+    # miners that were paid. Only this validator's own UID is left out: every
+    # other serving UID is a candidate, and verification decides what it earns.
     scan = scan_axons(metagraph)
     miners = tuple(
         sorted(
-            (axon for axon in scan.serving if axon.uid not in validator_uids),
+            (axon for axon in scan.serving if axon.uid != validator_uid),
             key=lambda axon: (axon.uid, axon.hotkey),
         )
     )
@@ -716,7 +724,12 @@ def _run_direct_cycle_unlocked(
     the cycle exactly as before.
     """
 
-    from .direct_writer import STATUS_EXPIRED
+    from .direct_writer import (
+        STATUS_COMMITTED,
+        STATUS_EXPIRED,
+        STATUS_REVEAL_UNPROVEN,
+        STATUS_REVEALED,
+    )
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
@@ -729,7 +742,15 @@ def _run_direct_cycle_unlocked(
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
-        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+        # A proven reveal, like a proven expiry, leaves nothing to wait for,
+        # so this cycle goes on to score and commit, as it does once a commit
+        # is gone and its reveal can no longer be read. A commit still
+        # awaiting its reveal ends the cycle: nothing is signed until then.
+        if getattr(recovered, "status", None) not in {
+            STATUS_EXPIRED,
+            STATUS_REVEALED,
+            STATUS_REVEAL_UNPROVEN,
+        }:
             return recovery_event
         report_recovery(recovery_event)
     if (
@@ -852,6 +873,26 @@ def _run_direct_cycle_unlocked(
                 reconciled_event_id = str(prior_event["event_id"])
         except Exception:
             pass
+    if getattr(receipt, "status", None) == STATUS_COMMITTED:
+        # A timelocked commit has written no weights yet, so nothing is
+        # published. The round's sanitized facts exist only in this cycle, so
+        # they are kept for the cycle that proves the reveal: that one
+        # publishes them with the block in which the chain applied the vector.
+        if pending_telemetry is not None:
+            try:
+                pending_telemetry.prepare(
+                    build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                    plan,
+                    None,
+                )
+                event["telemetry"] = {"status": "AWAITING_REVEAL"}
+            except Exception:
+                # As for a plain write: a local projection failure is
+                # reported and never changes the commit.
+                event["telemetry"] = {"status": "FAILED"}
+        if reconciled_event_id is not None:
+            event["reconciled_telemetry_event_id"] = reconciled_event_id
+        return event
     if telemetry_sink is not None:
         try:
             if pending_telemetry is None:
@@ -898,7 +939,9 @@ def _recovered_cycle_event(
         writer=writer,
         keypair=keypair,
         telemetry_sink=telemetry_sink,
-        expected_receipt=recovered,
+        # A proven reveal is published as the write it is: confirmed at the
+        # block the chain applied the vector.
+        expected_receipt=applied_reveal_receipt(recovered),
     ) or {"status": "NO_FINALIZED_EVENT"}
     return event
 
@@ -1283,6 +1326,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "telemetry never leaves a development chain; unset --telemetry-spool "
             "in localnet mode"
         )
+    try:
+        commit_reveal = parse_commit_reveal_opt_in(
+            os.environ.get(COMMIT_REVEAL_OPT_IN_ENV)
+        )
+    except DirectValidatorError as exc:
+        raise SystemExit(f"commit-reveal opt-in refused: {exc}") from exc
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -1374,10 +1423,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         DirectSubmissionContradiction,
         DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
+        STATUS_COMMITTED,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        STATUS_REVEALED,
         bound_rpc_waits,
     )
+
+    # A --once run succeeds on a proven write. Under the commit-reveal opt-in
+    # that is a proven commit or a proven reveal; neither status exists
+    # otherwise.
+    once_success = {
+        STATUS_CONFIRMED,
+        STATUS_RECOVERED,
+        STATUS_COMMITTED,
+        STATUS_REVEALED,
+    }
 
     try:
         bound_rpc_waits(subtensor)
@@ -1388,6 +1449,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
         netuid=netuid,
+        # Passed only when opted in, so the default construction is unchanged.
+        **({} if commit_reveal is None else {"commit_reveal": commit_reveal}),
     )
     pool_inventory: tuple[Path, str] | None = None
     if options.pool_inventory is not None:
@@ -1475,11 +1538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
             if options.once:
-                return (
-                    0
-                    if startup_recovery.status in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if startup_recovery.status in once_success else 2
             time.sleep(options.interval_seconds)
         elif startup_ambiguity is None and telemetry_sink is not None:
             # A prior process can stop after writer recovery commits the
@@ -1554,11 +1613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
             _notify_cycle_status(event)
             if options.once:
-                return (
-                    0
-                    if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if event.get("status") in once_success else 2
             time.sleep(options.interval_seconds)
 
 
