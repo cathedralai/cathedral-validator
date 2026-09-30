@@ -26,6 +26,8 @@ Install the isolated exporter after the validator's `cathedral-validator`
 operating-system user and signed release already exist:
 
 ```bash
+# Ubuntu 24.04 ships without /etc/sysusers.d.
+sudo install -d -o root -g root -m 0755 /etc/sysusers.d /etc/tmpfiles.d
 sudo install -o root -g root -m 0644 \
   deploy/validator-telemetry/cathedral-validator-telemetry.sysusers \
   /etc/sysusers.d/cathedral-validator-telemetry.conf
@@ -118,3 +120,7 @@ Finney events for netuid 94 only, as before.
 
 Localnet writes no telemetry: the validator refuses `--telemetry-spool` there,
 and the exporter refuses to run.
+
+On a host that mounts `/run` noexec, the exporter cannot load from the unit's
+default `PEX_ROOT` (#278). Point `PEX_ROOT` at a directory under `/var/lib`
+that the exporter's user owns.
