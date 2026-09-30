@@ -90,6 +90,7 @@ from .telemetry import (
     PendingTelemetryStore,
     TelemetryError,
     TelemetrySpool,
+    applied_reveal_receipt,
     build_telemetry_candidate,
     journal_pending_plan_matches,
     journal_receipt_for_plan,
@@ -851,11 +852,10 @@ def _run_direct_cycle_unlocked(
             # The inventory is a public projection of this round. Failing to
             # write it never changes the round, its weights, or its receipt.
             event["pool_inventory"] = {"status": "FAILED"}
-    if getattr(receipt, "status", None) in {STATUS_EXPIRED, STATUS_COMMITTED}:
+    if getattr(receipt, "status", None) == STATUS_EXPIRED:
         # The writer proved these bytes can never land and nothing was
         # written, so there is no finalized receipt for telemetry; a prior
-        # pending candidate keeps waiting for the next confirmed write. A
-        # timelocked commit has written no weights yet either.
+        # pending candidate keeps waiting for the next confirmed write.
         return event
     reconciled_event_id: str | None = None
     if pending_telemetry is not None:
@@ -867,6 +867,26 @@ def _run_direct_cycle_unlocked(
                 reconciled_event_id = str(prior_event["event_id"])
         except Exception:
             pass
+    if getattr(receipt, "status", None) == STATUS_COMMITTED:
+        # A timelocked commit has written no weights yet, so nothing is
+        # published. The round's sanitized facts exist only in this cycle, so
+        # they are kept for the cycle that proves the reveal: that one
+        # publishes them with the block in which the chain applied the vector.
+        if pending_telemetry is not None:
+            try:
+                pending_telemetry.prepare(
+                    build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                    plan,
+                    None,
+                )
+                event["telemetry"] = {"status": "AWAITING_REVEAL"}
+            except Exception:
+                # As for a plain write: a local projection failure is
+                # reported and never changes the commit.
+                event["telemetry"] = {"status": "FAILED"}
+        if reconciled_event_id is not None:
+            event["reconciled_telemetry_event_id"] = reconciled_event_id
+        return event
     if telemetry_sink is not None:
         try:
             if pending_telemetry is None:
@@ -913,7 +933,9 @@ def _recovered_cycle_event(
         writer=writer,
         keypair=keypair,
         telemetry_sink=telemetry_sink,
-        expected_receipt=recovered,
+        # A proven reveal is published as the write it is: confirmed at the
+        # block the chain applied the vector.
+        expected_receipt=applied_reveal_receipt(recovered),
     ) or {"status": "NO_FINALIZED_EVENT"}
     return event
 

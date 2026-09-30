@@ -1,6 +1,6 @@
 # Private validator telemetry
 
-The direct validator writes one sanitized snapshot only after a finalized weight submission. A separate timer sends the latest snapshot to Cathedral's private collector. Export failure never affects scoring or chain writes.
+The direct validator writes one sanitized snapshot only after a finalized weight submission. On a commit-reveal subnet that is the reveal, about one epoch after the round: see "Commit-reveal subnets" in [AUTO_UPDATE.md](AUTO_UPDATE.md). A separate timer sends the latest snapshot to Cathedral's private collector. Export failure never affects scoring or chain writes.
 
 The exported snapshot contains the validator UID and hotkey, finalized block,
 miner UID and hotkey, distinct verified compute count, TDX and SEV-SNP counts,
