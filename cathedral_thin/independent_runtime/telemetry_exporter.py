@@ -220,3 +220,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = ["TelemetryExportError", "export_event", "main"]
+
+
+if __name__ == "__main__":
+    # The service starts the exporter with ``-m``. Without this the module
+    # only defines main() and exits 0 having exported nothing.
+    raise SystemExit(main())
