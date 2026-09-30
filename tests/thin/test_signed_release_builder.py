@@ -102,7 +102,7 @@ def _validator_pex(path: Path) -> None:
                 "cathedral-scaffold[snp-production] @ "
                 "file:///reviewed/cathedral_scaffold-1.2.3-py3-none-any.whl",
                 "cathedral@ git+https://github.com/cathedralai/"
-                "cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+                "cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
             ],
             "strip_pex_env": True,
         }

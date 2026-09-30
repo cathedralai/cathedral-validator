@@ -123,8 +123,9 @@ The file must be a regular file (not a symlink) and not world-writable:
 
 Without the variable nothing runs. A policy that does not load, for any reason, is reported
 once at start (`"capacity_shadow": {"status": "DISABLED"}`) and the validator carries on as
-before. It also needs a cathedral-sandbox that includes `cathedral.capacity`; the pinned one
-does not yet, so until the pin moves the record says `DISABLED`.
+before. It also needs a cathedral-sandbox that includes `cathedral.capacity`. The pinned one
+(1299443, cathedral-sandbox main after #251) does, with the verifier-verdict admission API; a
+validator on an older pin without it records `DISABLED`.
 
 ## What each cycle does
 

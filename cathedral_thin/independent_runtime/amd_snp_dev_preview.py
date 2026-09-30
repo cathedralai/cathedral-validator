@@ -47,10 +47,12 @@ from cathedral_thin.independent_runtime.validator_request import (
     validate_public_worker_endpoint,
 )
 
-# Exact reviewed cathedral-sandbox merge commit from cathedral-sandbox#189.
+# Exact reviewed cathedral-sandbox merge commit of cathedral-sandbox#251
+# (sandbox main on 2026-09-30; before it, #189's 8dde6ea). Keep it equal to
+# snp_production.SANDBOX_CONTRACT_COMMIT and the pyproject pins. PEP 610
 # provenance checks prevent a local, mutable, wheel-only, or different Compute
 # tree from silently becoming this verifier contract.
-COMPUTE_CONTRACT_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
+COMPUTE_CONTRACT_COMMIT = "12994431072685a1401fbadf76d0c17679149ece"
 
 CONFIG_SCHEMA = "cathedral_amd_sev_snp_development_preview_config_v1"
 PREVIEW_SCHEMA = "cathedral_amd_sev_snp_development_preview_v1"

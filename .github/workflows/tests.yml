@@ -186,6 +186,33 @@ jobs:
             tests/thin/test_independent_collect.py \
             tests/thin/test_cross_repo_validator_request_wire.py
 
+      # test_capacity_end_to_end.py and test_capacity_shadow_receipts.py skip
+      # in the tests job for the same reason: the provenance `cathedral` has no
+      # cathedral.capacity. The pinned Sandbox revision has the library and
+      # admission's verifier-verdict API, so they run here (80 tests, beside
+      # the 29 in the two files that need no library). The check runs first so
+      # a pin without them fails the job instead of skipping those 80.
+      - name: Capacity shadow scoring against the pinned Sandbox library
+        run: |
+          python - <<'PY'
+          import inspect
+
+          from cathedral.capacity import admission, challenge, pricing, receipt
+
+          assert challenge and pricing and receipt
+          if "attested" not in inspect.signature(admission.admit).parameters:
+              raise SystemExit(
+                  "the pinned cathedral-sandbox admission predates the verifier "
+                  "verdict API; the capacity tests would skip, not run"
+              )
+          print("cathedral.capacity imported; the capacity tests will run")
+          PY
+          python -m pytest -q -rs \
+            tests/thin/test_capacity_end_to_end.py \
+            tests/thin/test_capacity_shadow_receipts.py \
+            tests/thin/test_capacity_shadow.py \
+            tests/thin/test_capacity_inventory.py
+
   publisher:
     # GATING for the validator-facing tests, advisory for the rest.
     #
@@ -392,7 +419,7 @@ jobs:
         run: |
           project_wheel="$(find /tmp/cathedral-validator-project-one -maxdepth 1 -name '*.whl' -print -quit)"
           project_requirement="cathedral-scaffold[snp-production] @ file://${project_wheel}"
-          compute_requirement='cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb'
+          compute_requirement='cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece'
           for compute_requirements_pex in /tmp/cathedral-compute-requirements-one.pex /tmp/cathedral-compute-requirements-two.pex; do
             pex \
               "$compute_requirement" \

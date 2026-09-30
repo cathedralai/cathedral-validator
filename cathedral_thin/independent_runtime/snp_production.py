@@ -28,8 +28,10 @@ from .amd_snp_dev_preview import (
 )
 from .owner_policy_file import read_owner_policy_file
 
-# The exact reviewed AMD production contract merged by cathedral-sandbox#189.
-SANDBOX_CONTRACT_COMMIT = "8dde6eaca27116eed53386a1fa33ec70b74a01fb"
+# The exact reviewed AMD production contract: the cathedral-sandbox#251 merge
+# commit (sandbox main on 2026-09-30). verify_snp is unchanged since #189's
+# 8dde6ea, the previous pin.
+SANDBOX_CONTRACT_COMMIT = "12994431072685a1401fbadf76d0c17679149ece"
 POLICY_SCHEMA = "cathedral_amd_sev_snp_policy_v1"
 MAX_POLICY_BYTES = 128 * 1024
 _MEASUREMENT = re.compile(r"[0-9a-f]{96}")
