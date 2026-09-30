@@ -110,7 +110,7 @@ def main():
                 "cathedral-scaffold[snp-production] @ "
                 "file:///reviewed/cathedral_scaffold-1.2.3-py3-none-any.whl",
                 "cathedral@ git+https://github.com/cathedralai/"
-                "cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+                "cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
             ],
             "strip_pex_env": True,
         }
@@ -2519,7 +2519,7 @@ def test_release_workflows_activate_locked_production_contract() -> None:
     )
     compute_requirement = (
         "compute_requirement='cathedral @ git+https://github.com/cathedralai/"
-        "cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb'"
+        "cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece'"
     )
     for name in ("tests.yml", "release-candidate.yml"):
         workflow = (root / ".github" / "workflows" / name).read_text()

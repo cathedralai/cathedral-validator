@@ -47,7 +47,7 @@ not a weight vector and is never accepted by a writer.
 
 The optional `snp-dev` dependency is pinned to an immutable
 `cathedral-sandbox` commit:
-`8dde6eaca27116eed53386a1fa33ec70b74a01fb`. The command verifies the installed
+`12994431072685a1401fbadf76d0c17679149ece`. The command verifies the installed
 package's PEP 610 VCS provenance and refuses a different, local, mutable, or
 wheel-only tree.
 

@@ -101,22 +101,31 @@ integration = [
     "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b2ad1eddf9235921f8f680342605d5c8a84a8d87",
 ]
 # Development-only AMD SEV-SNP verifier/client contract. This is the exact
-# reviewed cathedral-sandbox merge commit from cathedral-sandbox#189. The
-# command also verifies PEP 610 VCS provenance at runtime and refuses a local,
-# wheel-only, mutable, or different tree.
+# reviewed cathedral-sandbox merge commit of cathedral-sandbox#251 (sandbox main
+# on 2026-09-30; the previous pin was #189's 8dde6ea). It adds the
+# cathedral.capacity library the capacity shadow scorer needs. The command also
+# verifies PEP 610 VCS provenance at runtime and refuses a local, wheel-only,
+# mutable, or different tree.
 snp-dev = [
-    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
 ]
 # Production direct-validator SNP verification uses the same exact reviewed
-# contract. Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT. The signed
+# contract. Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT,
+# COMPUTE_CONTRACT_COMMIT, the release builder's _COMPUTE_COMMIT, both release
+# workflows and requirements/validator-release-cpython312-linux-x86_64.pex.lock
+# (whose digest is the builder's EXPECTED_RUNTIME_LOCK_SHA256). The signed
 # updater accepts only PEX-INFO which carries this extra and the same immutable
 # Cathedral Sandbox VCS requirement.
 snp-production = [
-    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@8dde6eaca27116eed53386a1fa33ec70b74a01fb",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
 ]
 
 # GPU qualification runs in a separate environment from snp-production/dev.
-# Do not combine these extras: their immutable sandbox contracts differ.
+# Do not combine these extras: their immutable sandbox contracts differ. This
+# pin is deliberately not moved with the SNP contract: 08438dd is the reviewed
+# head of the G4 GPU branch (its tree is identical to sandbox main's squash
+# merge 6689d00, #202), accepted by scripts/accept_gpu_prelaunch.sh. Moving it
+# needs its own GPU acceptance run.
 gpu = [
     "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@08438dd842d25c901bd4a908f306390421cc7052",
 ]
