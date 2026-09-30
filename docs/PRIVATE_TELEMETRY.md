@@ -26,6 +26,8 @@ Install the isolated exporter after the validator's `cathedral-validator`
 operating-system user and signed release already exist:
 
 ```bash
+# Ubuntu 24.04 ships without /etc/sysusers.d.
+sudo install -d -o root -g root -m 0755 /etc/sysusers.d /etc/tmpfiles.d
 sudo install -o root -g root -m 0644 \
   deploy/validator-telemetry/cathedral-validator-telemetry.sysusers \
   /etc/sysusers.d/cathedral-validator-telemetry.conf
@@ -107,3 +109,20 @@ sudo systemctl status cathedral-validator-telemetry.service --no-pager
 Enable the timer only after the private collector URL and both credentials
 exist. Repeated delivery is safe because the collector deduplicates by event
 ID.
+
+## Testnet
+
+Testnet mode (`docs/TESTNET.md`) uses the same two hops. The validator's events
+name `test` and the testnet netuid instead of `finney` and 94. The exporter
+runs with `CATHEDRAL_TESTNET=1` and an explicit `--netuid`; without both it
+refuses a testnet event. The production unit above passes neither, so it sends
+Finney events for netuid 94 only, as before.
+
+Localnet writes no telemetry: the validator refuses `--telemetry-spool` there,
+and the exporter refuses to run.
+
+On a host that mounts `/run` noexec, the exporter cannot load from the unit's
+default `PEX_ROOT` (#278). Let systemd create one under `/var/lib` instead:
+replace the unit's `RuntimeDirectory=` with `StateDirectory=<name>` and set
+`PEX_ROOT=/var/lib/<name>`. The unit runs with `ProtectSystem=strict`, so a
+directory it does not declare is read-only to it, whoever owns it.

@@ -13,6 +13,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from cathedral_thin.independent.constants import MAX_NETUID, NETUID
+
+from .localnet import localnet_active, testnet_active
 from .telemetry import (
     MAX_TELEMETRY_EVENT_BYTES,
     TelemetryError,
@@ -177,7 +180,42 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ingest-token-file", type=Path, required=True)
     parser.add_argument("--sites-authorization-file", type=Path, required=True)
     parser.add_argument("--reader-group", required=True)
+    # Read as a string and resolved by ``_export_netuid``, so a bad value is a
+    # FAILED record like every other refusal here, not an argparse exit.
+    parser.add_argument("--netuid", default=None)
     return parser
+
+
+def _export_netuid(value: str | None) -> int:
+    """The subnet whose events this exporter may send.
+
+    Absent, it is the compiled netuid, exactly as before the flag existed. On
+    Finney no other value is accepted, matching the validator. Testnet mode
+    (``CATHEDRAL_TESTNET=1``) needs it named, because netuid 94 on testnet is
+    another team's subnet. Localnet has nothing to send: the validator writes
+    no spool there.
+    """
+
+    if localnet_active():
+        raise TelemetryExportError("telemetry never leaves a development chain")
+    testnet = testnet_active()
+    if value is None:
+        if testnet:
+            raise TelemetryExportError("testnet mode needs an explicit --netuid")
+        return NETUID
+    if (
+        not value.isascii()
+        or not value.isdigit()
+        or str(int(value)) != value
+        or not 0 < int(value) <= MAX_NETUID
+    ):
+        raise TelemetryExportError("--netuid must be a canonical decimal subnet number")
+    netuid = int(value)
+    if not testnet and netuid != NETUID:
+        raise TelemetryExportError(
+            f"--netuid {netuid} is not the netuid this release was built for ({NETUID})"
+        )
+    return netuid
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -190,6 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         event = latest_telemetry_event(
             options.spool,
             expected_reader_gid=reader_gid,
+            netuid=_export_netuid(options.netuid),
         )
         ingest_token = _secret(options.ingest_token_file, label="ingest token")
         sites_authorization = _secret(

@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from cathedral_thin.independent.constants import NETUID
+from cathedral_thin.independent_runtime.localnet import LOCALNET_ENV, TESTNET_ENV
 from cathedral_thin.independent_runtime.telemetry_exporter import (
     TelemetryExportError,
     _distinct_secret_files,
+    _export_netuid,
     _secret,
     export_event,
 )
@@ -241,3 +244,35 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
             root / "cathedral_thin" / "independent_runtime" / "telemetry_exporter.py"
         ).read_text()
     )
+
+
+def test_exporter_netuid_is_the_compiled_one_on_finney(monkeypatch) -> None:
+    monkeypatch.delenv(TESTNET_ENV, raising=False)
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    assert _export_netuid(None) == NETUID
+    assert _export_netuid(str(NETUID)) == NETUID
+    with pytest.raises(TelemetryExportError, match="not the netuid this release"):
+        _export_netuid("584")
+
+
+def test_exporter_needs_an_explicit_netuid_in_testnet_mode(monkeypatch) -> None:
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    with pytest.raises(TelemetryExportError, match="explicit --netuid"):
+        _export_netuid(None)
+    assert _export_netuid("584") == 584
+
+
+@pytest.mark.parametrize("value", ["0", "0584", "-1", "65536", "5 84", "x", ""])
+def test_exporter_refuses_a_malformed_netuid(monkeypatch, value: str) -> None:
+    monkeypatch.delenv(LOCALNET_ENV, raising=False)
+    monkeypatch.setenv(TESTNET_ENV, "1")
+    with pytest.raises(TelemetryExportError):
+        _export_netuid(value)
+
+
+def test_exporter_refuses_localnet_mode(monkeypatch) -> None:
+    monkeypatch.delenv(TESTNET_ENV, raising=False)
+    monkeypatch.setenv(LOCALNET_ENV, "1")
+    with pytest.raises(TelemetryExportError, match="development chain"):
+        _export_netuid(None)

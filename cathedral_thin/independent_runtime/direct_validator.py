@@ -1278,10 +1278,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     _pinned_network(options.network)
     netuid = _configured_netuid(options.netuid)
-    if options.telemetry_spool is not None and (localnet_active() or testnet_active()):
+    if options.telemetry_spool is not None and localnet_active():
         raise SystemExit(
-            "telemetry publishes Finney events only; unset --telemetry-spool "
-            "in localnet or testnet mode"
+            "telemetry never leaves a development chain; unset --telemetry-spool "
+            "in localnet mode"
         )
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (

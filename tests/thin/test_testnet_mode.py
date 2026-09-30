@@ -144,13 +144,16 @@ def test_main_refuses_finney_in_testnet_mode_before_the_chain(
         )
 
 
-def test_main_refuses_telemetry_in_testnet_mode_before_the_chain(
+def test_main_does_not_refuse_the_telemetry_spool_in_testnet_mode(
     testnet, monkeypatch, tmp_path
 ) -> None:
+    # Testnet mirrors Finney, telemetry included. Startup gets past the
+    # telemetry gate and stops at the next one, the verifier pin, because the
+    # placeholder QVL path does not exist. It still never reaches the chain.
     monkeypatch.setattr(
         runtime, "make_subtensor", lambda *_a, **_k: pytest.fail("reached the chain")
     )
-    with pytest.raises(SystemExit, match="telemetry publishes Finney events only"):
+    with pytest.raises(QuoteVerifyError, match="could not be opened"):
         runtime.main(
             [
                 "--network",
