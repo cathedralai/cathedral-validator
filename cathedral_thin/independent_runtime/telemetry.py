@@ -33,6 +33,13 @@ MAX_TELEMETRY_HISTORY_BYTES = 16 * 1024 * 1024
 MAX_TELEMETRY_HISTORY_EVENTS = 720
 SUPPORTED_TEE_KINDS = frozenset({"tdx", "sev_snp"})
 FINALIZED_SUBMISSION_STATUSES = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
+# The writer's status for a timelocked commit the chain has revealed and
+# applied (direct_writer.STATUS_REVEALED; this module cannot import the writer).
+REVEALED_SUBMISSION_STATUS = "REVEALED_CONFIRMED"
+# A timelocked commit that is stored but has applied no weights
+# (direct_writer.STATUS_COMMITTED). It stays the stored receipt of an attempt
+# whose reveal is awaited, unproven or not applied.
+COMMITTED_SUBMISSION_STATUS = "COMMITTED"
 
 
 class TelemetryError(RuntimeError):
@@ -952,6 +959,68 @@ def _plan_identity_sha256(identity: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_document_bytes(identity)).hexdigest()
 
 
+def applied_reveal_receipt(receipt: DirectSubmissionReceipt) -> DirectSubmissionReceipt:
+    """The finalized receipt a proven reveal stands for in a public event.
+
+    On a commit-reveal subnet the weights of a round are written when the
+    chain reveals the commit, not when the commit lands. The public event
+    reports that write: ``CONFIRMED`` at the block the chain applied the
+    vector. Any other receipt is returned unchanged.
+    """
+
+    if (
+        not isinstance(receipt, DirectSubmissionReceipt)
+        or receipt.status != REVEALED_SUBMISSION_STATUS
+    ):
+        return receipt
+    return DirectSubmissionReceipt(
+        status="CONFIRMED",
+        attempt_id=receipt.attempt_id,
+        extrinsic_hash=receipt.extrinsic_hash,
+        block_hash=receipt.block_hash,
+        block_number=receipt.block_number,
+        recovered=False,
+        confirmation_heads=receipt.confirmation_heads,
+    )
+
+
+def _journal_reveal_receipt(last: Mapping[str, Any]) -> DirectSubmissionReceipt | None:
+    """Rebuild the applied-reveal receipt from a journaled revealed attempt.
+
+    ``None`` when the journal does not prove the exact vector applied to the
+    UIDs the round scored: the reveal carries no outcome, was not applied, or
+    landed on a UID re-registered since the commit. No event may describe
+    such a round.
+    """
+
+    commit = last.get("receipt")
+    reveal = last.get("reveal")
+    outcome = reveal.get("outcome") if isinstance(reveal, Mapping) else None
+    if (
+        not isinstance(commit, Mapping)
+        or not isinstance(outcome, Mapping)
+        or outcome.get("applied") is not True
+        or outcome.get("remapped_dests")
+    ):
+        return None
+    try:
+        return applied_reveal_receipt(
+            DirectSubmissionReceipt(
+                status=REVEALED_SUBMISSION_STATUS,
+                attempt_id=str(last["attempt_id"]),
+                extrinsic_hash=str(commit["extrinsic_hash"]),
+                block_hash=outcome["consumed_block_hash"],
+                block_number=outcome["consumed_block"],
+                recovered=True,
+                confirmation_heads=tuple(
+                    (int(row[0]), str(row[1])) for row in outcome["confirmation_heads"]
+                ),
+            )
+        )
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise TelemetryError("journaled reveal outcome is malformed") from exc
+
+
 def journal_pending_plan_matches(
     state_path: Path,
     plan_identity_sha256: str,
@@ -981,7 +1050,14 @@ def journal_receipt_for_plan(
         raise TelemetryError("direct writer last attempt is malformed")
     if _plan_identity_sha256(last.get("identity")) != plan_identity_sha256:
         return None
-    return _stored_submission_receipt(last.get("receipt"))
+    if last.get("status") == REVEALED_SUBMISSION_STATUS:
+        return _journal_reveal_receipt(last)
+    receipt = _stored_submission_receipt(last.get("receipt"))
+    if receipt.status == COMMITTED_SUBMISSION_STATUS:
+        # A commit has written no weights. Until its reveal is proven there
+        # is no finalized receipt, and none ever if the reveal is not.
+        return None
+    return receipt
 
 
 def latest_telemetry_event(
@@ -1038,6 +1114,7 @@ __all__ = [
     "TELEMETRY_SCHEMA",
     "TelemetryError",
     "TelemetrySpool",
+    "applied_reveal_receipt",
     "build_telemetry_snapshot",
     "build_telemetry_candidate",
     "canonical_telemetry_path",
