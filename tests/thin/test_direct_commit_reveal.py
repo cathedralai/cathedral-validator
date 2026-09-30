@@ -11,7 +11,9 @@ bittensor-drand ciphertext, which only a live chain can.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,13 +21,22 @@ from typing import Any
 
 import pytest
 from async_substrate_interface.errors import SubstrateRequestException
+from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import MORTAL_PERIOD_BLOCKS, NETUID, W
 from cathedral_thin.independent_runtime import commit_reveal as cr
 from cathedral_thin.independent_runtime import direct_writer as writer_runtime
 from cathedral_thin.independent_runtime import qvl as qvl_runtime
-from cathedral_thin.independent_runtime.direct_contract import DirectValidatorError
-from cathedral_thin.independent_runtime.direct_validator import run_direct_cycle
+from cathedral_thin.independent_runtime import direct_validator as validator_runtime
+from cathedral_thin.independent_runtime import telemetry as telemetry_runtime
+from cathedral_thin.independent_runtime.direct_contract import (
+    DirectSubmissionReceipt,
+    DirectValidatorError,
+)
+from cathedral_thin.independent_runtime.direct_validator import (
+    build_direct_plan,
+    run_direct_cycle,
+)
 from cathedral_thin.independent_runtime.direct_writer import (
     STATUS_AWAITING_REVEAL,
     STATUS_COMMITTED,
@@ -43,6 +54,14 @@ from cathedral_thin.independent_runtime.direct_writer import (
 from cathedral_thin.independent_runtime.updater import (
     UpdateRefused,
     require_idle_direct_writer_journal,
+)
+from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
+from cathedral_thin.independent_runtime.telemetry import (
+    PendingTelemetryStore,
+    TelemetrySpool,
+    applied_reveal_receipt,
+    journal_receipt_for_plan,
+    latest_telemetry_event,
 )
 from tests.thin import test_direct_validator as base
 
@@ -1216,3 +1235,404 @@ def test_cli_refuses_a_malformed_opt_in_before_wallet_access(monkeypatch) -> Non
 
     with pytest.raises(SystemExit, match="commit-reveal opt-in refused"):
         runtime.main(base._CLI_ARGUMENTS)
+
+
+# Telemetry: a revealed commit is the write the public event reports ------------
+
+
+def _identity_sha256(planned) -> str:
+    return (
+        "sha256:"
+        + hashlib.sha256(canonical_document_bytes(planned.identity())).hexdigest()
+    )
+
+
+def test_a_proven_reveal_reads_from_the_journal_as_a_confirmed_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned, _encryptor = commit_once(tmp_path, monkeypatch)
+    plan_id = _identity_sha256(planned)
+
+    # Stored, not revealed: no weights are written, so nothing is finalized.
+    assert journal_receipt_for_plan(instance.state_path, plan_id) is None
+    subtensor.substrate.finalized_number = 300
+    assert instance.recover().status == STATUS_AWAITING_REVEAL
+    assert journal_receipt_for_plan(instance.state_path, plan_id) is None
+
+    subtensor.substrate.chain.reveal_block = REVEAL_BLOCK
+    subtensor.substrate.finalized_number = REVEAL_BLOCK + 30
+    revealed = instance.recover()
+    assert revealed is not None and revealed.status == STATUS_REVEALED
+
+    public = journal_receipt_for_plan(instance.state_path, plan_id)
+    assert public == applied_reveal_receipt(revealed)
+    assert public.status == STATUS_CONFIRMED
+    assert public.recovered is False
+    assert public.block_number == REVEAL_BLOCK
+    assert public.block_hash == revealed.block_hash
+    assert (
+        public.extrinsic_hash
+        == journal(instance)["last_attempt"]["receipt"]["extrinsic_hash"]
+    )
+    # The shape the telemetry reader depends on, as the writer really wrote it.
+    last = journal(instance)["last_attempt"]
+    assert set(last) == {
+        "attempt_id",
+        "status",
+        "identity",
+        "intent",
+        "receipt",
+        "reveal",
+    }
+    assert set(last["reveal"]["outcome"]) == {
+        "applied",
+        "consumed_block",
+        "consumed_block_hash",
+        "confirmation_heads",
+        "remapped_dests",
+    }
+    # Another plan is never answered with this attempt's receipt.
+    assert journal_receipt_for_plan(instance.state_path, "sha256:" + "0" * 64) is None
+
+
+def test_a_reveal_that_landed_on_a_reregistered_uid_is_not_reported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned, _encryptor = commit_once(tmp_path, monkeypatch)
+    subtensor.remap_after = REVEAL_BLOCK - 5
+    subtensor.substrate.chain.reveal_block = REVEAL_BLOCK
+    subtensor.substrate.finalized_number = REVEAL_BLOCK + 3
+    assert instance.recover().status == STATUS_REVEALED
+
+    # The event would name the hotkey the round scored, not the one paid.
+    assert (
+        journal_receipt_for_plan(instance.state_path, _identity_sha256(planned)) is None
+    )
+
+
+def test_an_unproven_reveal_is_not_reported(tmp_path: Path, monkeypatch) -> None:
+    instance, subtensor, planned, _encryptor = commit_once(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    substrate.chain.reveal_block = REVEAL_BLOCK
+    substrate.finalized_number = REVEAL_BLOCK + 300
+    substrate.chain.discarded = set(range(0, REVEAL_BLOCK + 300 - 256))
+    assert instance.recover().status == STATUS_REVEAL_UNPROVEN
+
+    assert (
+        journal_receipt_for_plan(instance.state_path, _identity_sha256(planned)) is None
+    )
+
+
+def test_only_a_proven_reveal_is_republished_as_confirmed() -> None:
+    def receipt(status: str, recovered: bool) -> DirectSubmissionReceipt:
+        return DirectSubmissionReceipt(
+            status=status,
+            attempt_id="sha256:" + "1" * 64,
+            extrinsic_hash="0x" + "2" * 64,
+            block_hash="0x" + "3" * 64,
+            block_number=REVEAL_BLOCK,
+            recovered=recovered,
+        )
+
+    for status, recovered in (
+        (STATUS_CONFIRMED, False),
+        (STATUS_COMMITTED, False),
+        (STATUS_AWAITING_REVEAL, True),
+        (STATUS_REVEAL_UNPROVEN, True),
+        (STATUS_EXPIRED, True),
+    ):
+        unchanged = receipt(status, recovered)
+        assert applied_reveal_receipt(unchanged) is unchanged
+    stub = SimpleNamespace(status=STATUS_REVEALED)
+    assert applied_reveal_receipt(stub) is stub
+
+
+def _telemetry_round(keypair, marker: str):
+    observed = replace(
+        base.snapshot(miners=(base.MINER_ONE_AXON,)),
+        validator_hotkey=keypair.ss58_address,
+    )
+    row = base.machine_row(marker)
+    row["tee_kind"] = "tdx"
+    row["phase_timings_ms"] = {"binding": 1}
+    scored = base.round_result(row, miners=(base.MINER_ONE_AXON,))
+    return observed, scored, build_direct_plan(observed, scored)
+
+
+def _write_journal(path: Path, last_attempt: dict[str, Any]) -> None:
+    # The telemetry reader accepts only the writer's canonical bytes.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        canonical_document_bytes(
+            {
+                "schema": "cathedral_direct_validator_state_v1",
+                "pending": None,
+                "last_attempt": last_attempt,
+            }
+        )
+    )
+    os.chmod(path, 0o600)
+
+
+def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    keypair = Keypair.create_from_uri("//Alice")
+    observed, scored, planned = _telemetry_round(keypair, "committed")
+    commit = DirectSubmissionReceipt(
+        status=STATUS_COMMITTED,
+        attempt_id="sha256:" + "1" * 64,
+        extrinsic_hash="0x" + "2" * 64,
+        block_hash="0x" + "3" * 64,
+        block_number=INCLUSION,
+        recovered=False,
+    )
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    pending = PendingTelemetryStore(spool)
+    state_path = tmp_path / "writer" / "state.json"
+    adapter = SimpleNamespace(qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST)
+    monkeypatch.setattr(
+        validator_runtime, "finalized_serving_miners_snapshot", lambda *_a: observed
+    )
+    monkeypatch.setattr(
+        validator_runtime, "score_multicompute_round", lambda **_k: scored
+    )
+
+    committed = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=adapter,
+        writer=SimpleNamespace(
+            recover=lambda: None,
+            submit=lambda _plan, **_kwargs: commit,
+            state_path=state_path,
+        ),
+        telemetry_sink=spool,
+        report_recovery=base.no_expired_recovery,
+    )
+
+    # Nothing is published while the weights are still secret.
+    assert committed["status"] == STATUS_COMMITTED
+    assert committed["telemetry"] == {"status": "AWAITING_REVEAL"}
+    assert not spool.path.exists()
+    assert pending.plan_identity_sha256() == _identity_sha256(planned)
+    kept = json.loads(pending.path.read_bytes())
+    assert kept["receipt"] is None
+    round_observed_at = kept["candidate"]["observed_at"]
+
+    # While the commit awaits its reveal the round stays unpublished.
+    heads = [
+        [REVEAL_BLOCK + offset, "0x" + f"{offset + 4}" * 64] for offset in range(3)
+    ]
+    attempt = {
+        "attempt_id": commit.attempt_id,
+        "status": STATUS_COMMITTED,
+        "identity": planned.identity(),
+        "intent": {},
+        "receipt": commit.as_document(),
+        "reveal": {
+            "commit_epoch": EPOCH,
+            "present_through_block": INCLUSION,
+            "outcome": None,
+        },
+    }
+    _write_journal(state_path, attempt)
+    awaiting = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=adapter,
+        writer=SimpleNamespace(
+            recover=lambda: replace(
+                commit, status=STATUS_AWAITING_REVEAL, recovered=True
+            ),
+            state_path=state_path,
+        ),
+        telemetry_sink=spool,
+        report_recovery=base.no_expired_recovery,
+    )
+    assert awaiting["status"] == STATUS_AWAITING_REVEAL
+    assert awaiting["telemetry"] == {"status": "NO_FINALIZED_EVENT"}
+    assert not spool.path.exists()
+    assert pending.path.exists()
+
+    # The reveal is proven: that cycle publishes the round it committed.
+    attempt["status"] = STATUS_REVEALED
+    attempt["reveal"] = {
+        "commit_epoch": EPOCH,
+        "present_through_block": REVEAL_BLOCK - 1,
+        "outcome": {
+            "applied": True,
+            "consumed_block": REVEAL_BLOCK,
+            "consumed_block_hash": heads[0][1],
+            "confirmation_heads": heads,
+            "remapped_dests": [],
+        },
+    }
+    _write_journal(state_path, attempt)
+    revealed = DirectSubmissionReceipt(
+        status=STATUS_REVEALED,
+        attempt_id=commit.attempt_id,
+        extrinsic_hash=commit.extrinsic_hash,
+        block_hash=heads[0][1],
+        block_number=REVEAL_BLOCK,
+        recovered=True,
+        confirmation_heads=tuple((row[0], row[1]) for row in heads),
+    )
+    reported: list[dict[str, Any]] = []
+
+    def stop_after_recovery(*_args):
+        raise DirectValidatorError("stop after recovery")
+
+    monkeypatch.setattr(
+        validator_runtime, "finalized_serving_miners_snapshot", stop_after_recovery
+    )
+    with pytest.raises(DirectValidatorError, match="stop after recovery"):
+        run_direct_cycle(
+            subtensor=object(),
+            keypair=keypair,
+            verifier_adapter=adapter,
+            writer=SimpleNamespace(recover=lambda: revealed, state_path=state_path),
+            telemetry_sink=spool,
+            report_recovery=reported.append,
+        )
+
+    assert [event["status"] for event in reported] == [STATUS_REVEALED]
+    event = latest_telemetry_event(spool.path)
+    assert reported[0]["telemetry"] == {
+        "status": "SPOOLED",
+        "event_id": event["event_id"],
+    }
+    assert event["submission"] == {
+        "status": STATUS_CONFIRMED,
+        "block_number": REVEAL_BLOCK,
+        "block_hash": heads[0][1],
+        "recovered": False,
+    }
+    # The event is the committed round: its time, its anchor and its machines.
+    assert event["observed_at"] == round_observed_at
+    assert event["anchor"]["block_number"] == observed.block_number
+    assert [miner["uid"] for miner in event["miners"]] == [base.MINER_ONE_AXON.uid]
+    assert event["miners"][0]["weight_u16"] == W
+    assert not pending.path.exists()
+    assert len(spool.path.read_text().splitlines()) == 1
+
+
+def test_a_commit_first_publishes_a_prior_round_that_is_already_bound(
+    tmp_path: Path, monkeypatch
+) -> None:
+    keypair = Keypair.create_from_uri("//Alice")
+    observed, scored, planned = _telemetry_round(keypair, "earlier")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    pending = PendingTelemetryStore(spool)
+    # An earlier round whose finalized receipt was bound, then not spooled.
+    earlier = DirectSubmissionReceipt(
+        status=STATUS_CONFIRMED,
+        attempt_id="sha256:" + "5" * 64,
+        extrinsic_hash="0x" + "6" * 64,
+        block_hash="0x" + "7" * 64,
+        block_number=REVEAL_BLOCK,
+        recovered=False,
+    )
+    pending.prepare(
+        telemetry_runtime.build_telemetry_candidate(
+            result_rows=scored.rows, plan=planned
+        ),
+        planned,
+        earlier,
+    )
+    commit = DirectSubmissionReceipt(
+        status=STATUS_COMMITTED,
+        attempt_id="sha256:" + "1" * 64,
+        extrinsic_hash="0x" + "2" * 64,
+        block_hash="0x" + "3" * 64,
+        block_number=INCLUSION,
+        recovered=False,
+    )
+    monkeypatch.setattr(
+        validator_runtime, "finalized_serving_miners_snapshot", lambda *_a: observed
+    )
+    monkeypatch.setattr(
+        validator_runtime, "score_multicompute_round", lambda **_k: scored
+    )
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(recover=lambda: None, submit=lambda _p, **_k: commit),
+        telemetry_sink=spool,
+        report_recovery=base.no_expired_recovery,
+    )
+
+    event = latest_telemetry_event(spool.path)
+    assert event["submission"]["block_number"] == REVEAL_BLOCK
+    assert result["reconciled_telemetry_event_id"] == event["event_id"]
+    assert result["telemetry"] == {"status": "AWAITING_REVEAL"}
+    # The new commit's round now waits in its place.
+    assert json.loads(pending.path.read_bytes())["receipt"] is None
+
+
+def test_a_failed_round_projection_never_changes_a_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    keypair = Keypair.create_from_uri("//Alice")
+    observed, scored, _planned = _telemetry_round(keypair, "unprojected")
+    commit = SimpleNamespace(
+        status=STATUS_COMMITTED, as_document=lambda: {"status": STATUS_COMMITTED}
+    )
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    monkeypatch.setattr(
+        validator_runtime, "finalized_serving_miners_snapshot", lambda *_a: observed
+    )
+    monkeypatch.setattr(
+        validator_runtime, "score_multicompute_round", lambda **_k: scored
+    )
+
+    def broken(**_kwargs):
+        raise telemetry_runtime.TelemetryError("no candidate")
+
+    monkeypatch.setattr(validator_runtime, "build_telemetry_candidate", broken)
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(recover=lambda: None, submit=lambda _p, **_k: commit),
+        telemetry_sink=spool,
+        report_recovery=base.no_expired_recovery,
+    )
+
+    assert result["status"] == STATUS_COMMITTED
+    assert result["telemetry"] == {"status": "FAILED"}
+    assert not PendingTelemetryStore(spool).path.exists()
+
+
+def test_a_commit_without_a_telemetry_sink_reports_no_telemetry(monkeypatch) -> None:
+    keypair = Keypair.create_from_uri("//Alice")
+    observed, scored, _planned = _telemetry_round(keypair, "quiet")
+    commit = SimpleNamespace(
+        status=STATUS_COMMITTED, as_document=lambda: {"status": STATUS_COMMITTED}
+    )
+    monkeypatch.setattr(
+        validator_runtime, "finalized_serving_miners_snapshot", lambda *_a: observed
+    )
+    monkeypatch.setattr(
+        validator_runtime, "score_multicompute_round", lambda **_k: scored
+    )
+
+    result = run_direct_cycle(
+        subtensor=object(),
+        keypair=keypair,
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=SimpleNamespace(recover=lambda: None, submit=lambda _p, **_k: commit),
+        report_recovery=base.no_expired_recovery,
+    )
+
+    assert result["status"] == STATUS_COMMITTED
+    assert "telemetry" not in result

@@ -480,6 +480,14 @@ refuses unless the locks are free and the journal holds exactly that stop for
 with code 0. Start the service; its next cycle signs a fresh commit at a newer
 anchor.
 
+With private telemetry on, a round is published when its weights apply, not
+when its commit lands. The `COMMITTED` cycle keeps the round's sanitized
+snapshot locally and reports `telemetry: AWAITING_REVEAL`. The cycle that
+proves the reveal signs and spools it with the block in which the chain
+applied the vector, so an event is about one epoch older than its write. A
+commit that is not applied, that landed on a re-registered UID, or whose
+reveal cannot be proven publishes nothing.
+
 If the subnet owner turns commit-reveal off, the validator refuses until the
 drop-in is removed (then `sudo systemctl daemon-reload` and restart), and then
 writes plain weights again. A commit already signed is still recovered and
