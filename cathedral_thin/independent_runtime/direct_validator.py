@@ -45,6 +45,7 @@ from .axon import (
     observed_genesis_hash,
     scan_axons,
 )
+from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DirectValidatorError,
@@ -716,7 +717,12 @@ def _run_direct_cycle_unlocked(
     the cycle exactly as before.
     """
 
-    from .direct_writer import STATUS_EXPIRED
+    from .direct_writer import (
+        STATUS_COMMITTED,
+        STATUS_EXPIRED,
+        STATUS_REVEAL_UNPROVEN,
+        STATUS_REVEALED,
+    )
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
@@ -729,7 +735,15 @@ def _run_direct_cycle_unlocked(
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
-        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+        # A proven reveal, like a proven expiry, leaves nothing to wait for,
+        # so this cycle goes on to score and commit, as it does once a commit
+        # is gone and its reveal can no longer be read. A commit still
+        # awaiting its reveal ends the cycle: nothing is signed until then.
+        if getattr(recovered, "status", None) not in {
+            STATUS_EXPIRED,
+            STATUS_REVEALED,
+            STATUS_REVEAL_UNPROVEN,
+        }:
             return recovery_event
         report_recovery(recovery_event)
     if (
@@ -837,10 +851,11 @@ def _run_direct_cycle_unlocked(
             # The inventory is a public projection of this round. Failing to
             # write it never changes the round, its weights, or its receipt.
             event["pool_inventory"] = {"status": "FAILED"}
-    if getattr(receipt, "status", None) == STATUS_EXPIRED:
+    if getattr(receipt, "status", None) in {STATUS_EXPIRED, STATUS_COMMITTED}:
         # The writer proved these bytes can never land and nothing was
         # written, so there is no finalized receipt for telemetry; a prior
-        # pending candidate keeps waiting for the next confirmed write.
+        # pending candidate keeps waiting for the next confirmed write. A
+        # timelocked commit has written no weights yet either.
         return event
     reconciled_event_id: str | None = None
     if pending_telemetry is not None:
@@ -1283,6 +1298,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "telemetry never leaves a development chain; unset --telemetry-spool "
             "in localnet mode"
         )
+    try:
+        commit_reveal = parse_commit_reveal_opt_in(
+            os.environ.get(COMMIT_REVEAL_OPT_IN_ENV)
+        )
+    except DirectValidatorError as exc:
+        raise SystemExit(f"commit-reveal opt-in refused: {exc}") from exc
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -1374,10 +1395,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         DirectSubmissionContradiction,
         DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
+        STATUS_COMMITTED,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        STATUS_REVEALED,
         bound_rpc_waits,
     )
+
+    # A --once run succeeds on a proven write. Under the commit-reveal opt-in
+    # that is a proven commit or a proven reveal; neither status exists
+    # otherwise.
+    once_success = {
+        STATUS_CONFIRMED,
+        STATUS_RECOVERED,
+        STATUS_COMMITTED,
+        STATUS_REVEALED,
+    }
 
     try:
         bound_rpc_waits(subtensor)
@@ -1388,6 +1421,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
         netuid=netuid,
+        # Passed only when opted in, so the default construction is unchanged.
+        **({} if commit_reveal is None else {"commit_reveal": commit_reveal}),
     )
     pool_inventory: tuple[Path, str] | None = None
     if options.pool_inventory is not None:
@@ -1475,11 +1510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
             if options.once:
-                return (
-                    0
-                    if startup_recovery.status in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if startup_recovery.status in once_success else 2
             time.sleep(options.interval_seconds)
         elif startup_ambiguity is None and telemetry_sink is not None:
             # A prior process can stop after writer recovery commits the
@@ -1554,11 +1585,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
             _notify_cycle_status(event)
             if options.once:
-                return (
-                    0
-                    if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if event.get("status") in once_success else 2
             time.sleep(options.interval_seconds)
 
 

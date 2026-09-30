@@ -8,6 +8,14 @@ too close to the end of its mortal era is dropped before it reaches disk.
 A write that is included in a finalized block and fails its dispatch stops the
 validator. Only ``record_finalized_failure`` clears it, after proving that
 failure from finalized chain state; it also never signs or resubmits.
+
+On a subnet with commit-reveal enabled the writer refuses, exactly as before,
+unless the operator opted in to timelocked commits (``commit_reveal.py``).
+Then the same journaled, era-pinned, hash-recovered extrinsic carries the
+vector encrypted to a drand round instead of in plain text. Its stored commit
+is proven at inclusion and the attempt is recorded ``COMMITTED``; later cycles
+prove from finalized state that the chain's own automatic reveal applied the
+exact vector, or record that it did not and stop. No reveal extrinsic exists.
 """
 
 from __future__ import annotations
@@ -28,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 from bittensor.core.extrinsics.pallets import SubtensorModule
-from bittensor.utils import get_mechid_storage_index
+from bittensor.utils import get_mechid_storage_index, ss58_address_to_bytes
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
@@ -41,6 +49,25 @@ from cathedral_thin.independent.constants import (
 from cathedral_thin.independent.submit import build_mechanism_weights_kwargs
 
 from .axon import finalized_head, observed_genesis_hash
+from .commit_reveal import (
+    BLOCK_TIME_SECONDS,
+    COMMIT_REVEAL_CALL,
+    COMMIT_REVEAL_CALL_FUNCTION,
+    COMMIT_REVEAL_OPT_IN_ENV,
+    COMMIT_REVEAL_VERSION,
+    DRAND_ROUND_TOLERANCE,
+    MAX_COMMIT_BYTES,
+    MAX_REVEAL_PERIOD_EPOCHS,
+    CommitRevealOptIn,
+    EpochSchedule,
+    canonical_bytes_hex,
+    chain_expected_reveal_round,
+    decoded_commit_rows,
+    default_commit_encryptor,
+    drand_round_at,
+    next_epoch_fire_block,
+    predict_first_reveal_block,
+)
 from .localnet import expected_genesis_hash, state_scope_network
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
@@ -64,6 +91,24 @@ STATUS_EXPIRED = "EXPIRED_WITHOUT_INCLUSION"
 STATUS_FINALIZED_FAILED = "FINALIZED_FAILED"
 # Pending phase the writer journals when its exact call finalized with failure.
 PHASE_FINALIZED_FAILED = "finalized_failed"
+# Timelocked commit-reveal, operator opt-in only. COMMITTED is the terminal
+# status of the commit extrinsic itself: included, successful, and its stored
+# commit proven. The attempt then moves to REVEALED_CONFIRMED once finalized
+# state proves the chain's automatic reveal applied the exact vector, or to
+# REVEAL_NOT_APPLIED once it proves the commit was consumed without it.
+# COMMITTED_AWAITING_REVEAL is only ever a receipt, never a journal status.
+STATUS_COMMITTED = "COMMITTED"
+STATUS_AWAITING_REVEAL = "COMMITTED_AWAITING_REVEAL"
+STATUS_REVEALED = "REVEALED_CONFIRMED"
+STATUS_REVEAL_NOT_APPLIED = "REVEAL_NOT_APPLIED"
+# The commit is gone from finalized state but the blocks that prove what its
+# reveal did are older than the node still serves. Nothing more can be proven
+# on that node, so the attempt closes unproven and the writer continues.
+STATUS_REVEAL_UNPROVEN = "REVEAL_UNPROVEN"
+# How far behind the finalized head the last block that still held the commit
+# may be before unreadable history closes the attempt as unproven rather than
+# waiting for the next cycle. A pruning node keeps 256 blocks of state.
+REVEAL_HISTORY_LIMIT_BLOCKS = 200
 MAX_STATE_BYTES = 1_048_576
 DIRECT_STATE_ROOT = Path.home() / ".local/state/cathedral-validator/direct-writer"
 CONFIRMATION_WAIT_SECONDS = 60.0
@@ -135,6 +180,17 @@ class DirectSubmissionFinalizedFailure(DirectSubmissionContradiction):
     It stays a contradiction for every existing handler. The validator stops
     on it with its own exit code, and only ``record_finalized_failure`` clears
     the pending intent.
+    """
+
+
+class DirectCommitNotRevealed(DirectSubmissionContradiction):
+    """A proven timelocked commit was consumed without applying its vector.
+
+    Nothing was written, and the journal already records the terminal
+    ``REVEAL_NOT_APPLIED`` proof. It is a contradiction so the validator stops
+    with the exit code its unit never restarts: the chain refused a vector
+    every pre-sign check accepted, which needs an operator before another
+    commit.
     """
 
 
@@ -432,6 +488,91 @@ def _subtensor_max_upscale_to_u16(weights: tuple[int, ...]) -> tuple[int, ...]:
     )
 
 
+_COMMIT_REVEAL_FIELDS = frozenset(
+    {
+        "call",
+        "commit",
+        "reveal_round",
+        "commit_reveal_version",
+        "reveal_period_epochs",
+        "block_time_seconds",
+        "hotkey_public_key",
+        "schedule",
+        "drand_last_stored_round",
+        "next_epoch_block",
+        "first_reveal_block",
+        "expected_reveal_round",
+        "local_drand_round",
+    }
+)
+_SCHEDULE_FIELDS = frozenset(
+    {
+        "block",
+        "tempo",
+        "last_epoch_block",
+        "pending_epoch_at",
+        "subnet_epoch_index",
+        "blocks_since_last_step",
+    }
+)
+_REVEAL_FIELDS = frozenset({"commit_epoch", "present_through_block", "outcome"})
+_COMMITTED_ATTEMPT_FIELDS = frozenset(
+    {"attempt_id", "status", "identity", "intent", "receipt", "reveal"}
+)
+
+
+def _plain_nonnegative(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _commit_reveal_document(intent: object) -> dict[str, Any] | None:
+    """Return a journaled intent's timelocked-commit record, or ``None``.
+
+    A plain intent has no ``commit_reveal`` key and stays byte-identical to
+    earlier releases. A present record must be exactly the shape the writer
+    journals; anything else is a contradiction, never a guess.
+    """
+
+    if not isinstance(intent, Mapping) or "commit_reveal" not in intent:
+        return None
+    document = intent["commit_reveal"]
+    schedule = document.get("schedule") if isinstance(document, Mapping) else None
+    commit = document.get("commit") if isinstance(document, Mapping) else None
+    public_key = (
+        document.get("hotkey_public_key") if isinstance(document, Mapping) else None
+    )
+    if (
+        not isinstance(document, dict)
+        or set(document) != _COMMIT_REVEAL_FIELDS
+        or document["call"] != COMMIT_REVEAL_CALL
+        or not isinstance(commit, str)
+        or canonical_bytes_hex(commit) != commit
+        or not 0 < (len(commit) - 2) // 2 <= MAX_COMMIT_BYTES
+        or not isinstance(public_key, str)
+        or canonical_bytes_hex(public_key) != public_key
+        or len(public_key) != 66
+        or document["commit_reveal_version"] != COMMIT_REVEAL_VERSION
+        or document["block_time_seconds"] != BLOCK_TIME_SECONDS
+        or not isinstance(schedule, dict)
+        or set(schedule) != _SCHEDULE_FIELDS
+        or not all(_plain_nonnegative(value) for value in schedule.values())
+        or not all(
+            _plain_nonnegative(document[name])
+            for name in (
+                "reveal_round",
+                "reveal_period_epochs",
+                "drand_last_stored_round",
+                "next_epoch_block",
+                "first_reveal_block",
+                "expected_reveal_round",
+                "local_drand_round",
+            )
+        )
+    ):
+        raise DirectSubmissionContradiction("journaled timelocked commit is malformed")
+    return document
+
+
 def _plain_detail(value: object) -> object:
     """Copy one decoded dispatch-error detail as JSON data."""
 
@@ -546,6 +687,30 @@ def _read_fresh_snapshot(
     return finalized_serving_miners_snapshot(subtensor, keypair, netuid)
 
 
+def _hotkey_public_key(keypair: Any) -> bytes:
+    """Return the signer's 32-byte public key, bound to its SS58 address.
+
+    The chain applies a revealed payload only when the ``hotkey`` inside it
+    decodes to the committing account (``reveal_commits.rs:142-150``), so the
+    key is derived from the address that signs and cross-checked against the
+    key the keypair reports.
+    """
+
+    address = str(getattr(keypair, "ss58_address", ""))
+    try:
+        derived = bytes(ss58_address_to_bytes(address))
+    except Exception as exc:
+        raise DirectValidatorError(
+            "validator hotkey address does not decode to a public key"
+        ) from exc
+    declared = getattr(keypair, "public_key", None)
+    if len(derived) != 32 or (declared is not None and bytes(declared) != derived):
+        raise DirectValidatorError(
+            "validator hotkey public key does not match its address"
+        )
+    return derived
+
+
 def direct_state_scope(netuid: int) -> str:
     """Return the journal directory that scopes one subnet's mechanism writes.
 
@@ -600,6 +765,11 @@ class DirectWeightWriter:
         snapshot_reader: Callable[[Any, Any], FinalizedMetagraphSnapshot] | None = None,
         call_builder: Callable[[Mapping[str, Any]], Any] | None = None,
         netuid: int = NETUID,
+        commit_reveal: CommitRevealOptIn | None = None,
+        commit_encryptor: Callable[..., tuple[bytes, int]] | None = None,
+        commit_call_builder: Callable[[Mapping[str, Any]], Any] | None = None,
+        hotkey_public_key: Callable[[Any], bytes] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.subtensor = subtensor
         self.keypair = keypair
@@ -609,6 +779,19 @@ class DirectWeightWriter:
             _read_fresh_snapshot, netuid=self.netuid
         )
         self.call_builder = call_builder or self._build_call
+        # Timelocked commit-reveal is off unless the operator opted in. With it
+        # absent every path below is the one earlier releases ran. Recovery of
+        # a journaled commit never depends on it: a commit signed under the
+        # opt-in is still recovered and proven after the opt-in is removed.
+        if commit_reveal is not None and not isinstance(
+            commit_reveal, CommitRevealOptIn
+        ):
+            raise DirectValidatorError("commit-reveal opt-in is invalid")
+        self.commit_reveal = commit_reveal
+        self.commit_encryptor = commit_encryptor
+        self.commit_call_builder = commit_call_builder or self._build_commit_call
+        self.hotkey_public_key = hotkey_public_key or _hotkey_public_key
+        self.wall_clock = wall_clock
 
     def _prepare_parent(self) -> None:
         parent = self.state_path.parent
@@ -787,6 +970,17 @@ class DirectWeightWriter:
             dests=list(kwargs["dests"]),
             weights=list(kwargs["weights"]),
             version_key=int(kwargs["version_key"]),
+        )
+
+    def _build_commit_call(self, document: Mapping[str, Any]) -> Any:
+        # The same composer the pinned SDK uses for this call (bittensor 10.5.0
+        # core/extrinsics/weights.py:103-109).
+        return SubtensorModule(self.subtensor).commit_timelocked_mechanism_weights(
+            netuid=int(document["netuid"]),
+            mecid=int(document["mecid"]),
+            commit=bytes.fromhex(str(document["commit"])[2:]),
+            reveal_round=int(document["reveal_round"]),
+            commit_reveal_version=int(document["commit_reveal_version"]),
         )
 
     def _validate_plan(self, plan: DirectWeightPlan) -> dict[str, Any]:
@@ -1073,8 +1267,20 @@ class DirectWeightWriter:
         # and never reads the `MaxWeightsLimit` storage behind the SDK's
         # `max_weight_limit()`, so a legacy stored value must not refuse a
         # write the chain accepts. It is not read.
-        if commit_reveal is not COMMIT_REVEAL_ENABLED:
-            raise DirectValidatorError("SN94 commit-reveal policy blocks direct writes")
+        if self.commit_reveal is None:
+            if commit_reveal is not COMMIT_REVEAL_ENABLED:
+                raise DirectValidatorError(
+                    "SN94 commit-reveal policy blocks direct writes"
+                )
+        elif commit_reveal is not True:
+            # The opt-in names the chain policy the operator expects. A chain
+            # that turned commit-reveal off is not silently written in plain
+            # text by a process configured for commits.
+            raise DirectValidatorError(
+                "chain commit-reveal is disabled but the operator opted in to "
+                f"timelocked commits; remove {COMMIT_REVEAL_OPT_IN_ENV} to write "
+                "plain weights"
+            )
         if mechanism_count <= MECID:
             raise DirectValidatorError("SN94 mechanism 0 is unavailable")
         if version_key != 0 and VERSION_KEY < version_key:
@@ -1094,6 +1300,264 @@ class DirectWeightWriter:
             "weights_version_key": version_key,
             "validator_stake_rao": validator_stake,
             "stake_threshold_rao": stake_threshold,
+        }
+
+    def _raw_storage(
+        self, module: str, function: str, params: list[Any], block_hash: str
+    ) -> Any:
+        """Read one storage value at one block, telling absence from failure.
+
+        The pinned client's ``query`` answers a node error, such as state the
+        node already discarded, with the storage default
+        (``async_substrate_interface/sync_substrate.py:1771-1779``). That
+        reads exactly like a real empty value; on Finney a block about 400
+        deep reads ``SubnetEpochIndex`` as 0 that way. Every read that
+        concludes anything from absence goes through ``state_getStorage``
+        instead: a node that cannot serve the block raises, and ``None``
+        means the key is really unset at that block.
+        """
+
+        substrate = self.subtensor.substrate
+        try:
+            key = substrate.create_storage_key(
+                module, function, params, block_hash=block_hash
+            )
+            response = substrate.rpc_request(
+                "state_getStorage", [key.to_hex(), block_hash]
+            )
+            if (
+                not isinstance(response, Mapping)
+                or "error" in response
+                or "result" not in response
+            ):
+                raise ValueError("storage response has no result")
+            result = response["result"]
+            if result is None:
+                return None
+            if not isinstance(result, str) or not result.startswith("0x"):
+                raise ValueError("storage response is not hex")
+            decoded = substrate.decode_scale(
+                key.value_scale_type, bytes.fromhex(result[2:])
+            )
+        except Exception as exc:
+            raise DirectSubmissionAmbiguous(
+                f"{module}.{function} at {block_hash} is unreadable"
+            ) from exc
+        return getattr(decoded, "value", decoded)
+
+    def _require_commit_reveal_context(
+        self,
+        fresh: FinalizedMetagraphSnapshot,
+        *,
+        presign_deadline: float,
+    ) -> dict[str, Any]:
+        """Refuse a timelocked commit unless the chain matches the opt-in.
+
+        Everything is read at the finalized sign head: the reveal period and
+        payload version the opt-in names, the epoch schedule bittensor-drand
+        predicts the reveal from, the chain's own drand head, and every commit
+        of this hotkey the chain still holds. A defaulted read is refused, a
+        commit that could land in the next epoch is refused, and a local clock
+        that disagrees with the chain's drand head is refused.
+        """
+
+        opt_in = self.commit_reveal
+        if opt_in is None:
+            raise DirectValidatorError("commit-reveal context without an opt-in")
+        substrate = self.subtensor.substrate
+        block_hash = fresh.block_hash
+        index = int(get_mechid_storage_index(self.netuid, MECID))
+
+        def read(module: str, function: str, params: list[Any]) -> int:
+            value = _nonnegative_int(
+                substrate.query(
+                    module=module,
+                    storage_function=function,
+                    params=params,
+                    block_hash=block_hash,
+                ),
+                label=f"{module}.{function}",
+            )
+            _require_presign_time(presign_deadline, stage=f"{function} RPC")
+            return value
+
+        try:
+            _require_presign_time(presign_deadline, stage="commit-reveal preflight")
+            public_key = self.hotkey_public_key(self.keypair)
+            reveal_period = read("SubtensorModule", "RevealPeriodEpochs", [self.netuid])
+            version = read("SubtensorModule", "CommitRevealWeightsVersion", [])
+            schedule = EpochSchedule(
+                last_epoch_block=read(
+                    "SubtensorModule", "LastEpochBlock", [self.netuid]
+                ),
+                pending_epoch_at=read(
+                    "SubtensorModule", "PendingEpochAt", [self.netuid]
+                ),
+                subnet_epoch_index=read(
+                    "SubtensorModule", "SubnetEpochIndex", [self.netuid]
+                ),
+                tempo=read("SubtensorModule", "Tempo", [self.netuid]),
+                blocks_since_last_step=read(
+                    "SubtensorModule", "BlocksSinceLastStep", [self.netuid]
+                ),
+                current_block=fresh.block_number,
+            )
+            drand_head = read("Drand", "LastStoredRound", [])
+            outstanding = 0
+            # Commits are keyed by the epoch they landed in and removed once
+            # their reveal epoch passes, so these keys hold every live one.
+            for epoch in range(
+                max(0, schedule.subnet_epoch_index - reveal_period),
+                schedule.subnet_epoch_index + 2,
+            ):
+                stored = self._raw_storage(
+                    "SubtensorModule",
+                    "TimelockedWeightCommits",
+                    [index, epoch],
+                    block_hash,
+                )
+                _require_presign_time(presign_deadline, stage="stored commits RPC")
+                rows = decoded_commit_rows([] if stored is None else stored)
+                if rows is None:
+                    raise DirectValidatorError(
+                        "stored timelocked commits are malformed"
+                    )
+                outstanding += sum(row[0] == fresh.validator_hotkey for row in rows)
+        except DirectSubmissionAmbiguous as exc:
+            raise DirectValidatorError(
+                "finalized commit-reveal state is unreadable"
+            ) from exc
+        except DirectValidatorError:
+            raise
+        except Exception as exc:
+            raise DirectValidatorError(
+                "finalized commit-reveal state is unavailable"
+            ) from exc
+        if reveal_period != opt_in.reveal_period_epochs:
+            raise DirectValidatorError(
+                f"chain reveal period is {reveal_period} epochs but the opt-in "
+                f"expects {opt_in.reveal_period_epochs}"
+            )
+        if version != COMMIT_REVEAL_VERSION:
+            raise DirectValidatorError(
+                f"chain commit-reveal version is {version}, not the pinned "
+                f"{COMMIT_REVEAL_VERSION}"
+            )
+        if (
+            schedule.tempo == 0
+            or schedule.subnet_epoch_index == 0
+            or schedule.last_epoch_block == 0
+            or drand_head == 0
+        ):
+            raise DirectValidatorError(
+                "finalized commit-reveal state reads as storage defaults"
+            )
+        if outstanding:
+            raise DirectValidatorError(
+                "this hotkey already has an unrevealed timelocked commit on chain"
+            )
+        next_epoch = next_epoch_fire_block(schedule)
+        if next_epoch <= fresh.block_number + MORTAL_PERIOD_BLOCKS:
+            # The chain keys a commit by the epoch of its inclusion block. One
+            # that lands in the next epoch reveals an epoch after the round it
+            # was encrypted to, so anyone could read it an epoch early.
+            raise DirectValidatorError(
+                f"the next epoch starts at block {next_epoch}, inside the "
+                f"signing era of block {fresh.block_number}"
+            )
+        first_reveal = predict_first_reveal_block(schedule, reveal_period)
+        expected_round = chain_expected_reveal_round(
+            drand_last_stored_round=drand_head,
+            sign_block=fresh.block_number,
+            first_reveal_block=first_reveal,
+        )
+        local_round = drand_round_at(float(self.wall_clock()))
+        if abs(local_round - drand_head) > DRAND_ROUND_TOLERANCE:
+            raise DirectValidatorError(
+                f"local clock is at drand round {local_round} but the chain's "
+                f"drand head at the sign block is {drand_head}"
+            )
+        _require_presign_time(presign_deadline, stage="commit-reveal preflight")
+        return {
+            "reveal_period_epochs": reveal_period,
+            "commit_reveal_version": version,
+            "hotkey_public_key": "0x" + public_key.hex(),
+            "schedule": schedule,
+            "drand_last_stored_round": drand_head,
+            "next_epoch_block": next_epoch,
+            "first_reveal_block": first_reveal,
+            "expected_reveal_round": expected_round,
+            "local_drand_round": local_round,
+        }
+
+    def _timelocked_commit(
+        self,
+        kwargs: Mapping[str, Any],
+        context: Mapping[str, Any],
+        *,
+        presign_deadline: float,
+    ) -> dict[str, Any]:
+        """Encrypt the exact plan vector and check the round it was locked to.
+
+        The ciphertext comes from the pinned library call the SDK itself makes
+        (bittensor-drand 2.0.0 ``get_encrypted_commit_v2``), over the same
+        dests, weights and version key the plain call would carry. Its reveal
+        round depends on the local clock, so it must agree with the round the
+        chain's own drand head predicts before anything is signed.
+        """
+
+        schedule = context["schedule"]
+        encryptor = self.commit_encryptor or default_commit_encryptor()
+        try:
+            commit, reveal_round = encryptor(
+                uids=list(kwargs["dests"]),
+                weights=list(kwargs["weights"]),
+                version_key=int(kwargs["version_key"]),
+                last_epoch_block=schedule.last_epoch_block,
+                pending_epoch_at=schedule.pending_epoch_at,
+                subnet_epoch_index=schedule.subnet_epoch_index,
+                tempo=schedule.tempo,
+                blocks_since_last_step=schedule.blocks_since_last_step,
+                current_block=schedule.current_block,
+                subnet_reveal_period_epochs=context["reveal_period_epochs"],
+                block_time=float(BLOCK_TIME_SECONDS),
+                hotkey=bytes.fromhex(context["hotkey_public_key"][2:]),
+            )
+        except Exception as exc:
+            raise DirectValidatorError(
+                "timelocked commit could not be encrypted"
+            ) from exc
+        _require_presign_time(presign_deadline, stage="commit encryption")
+        if (
+            not isinstance(commit, (bytes, bytearray))
+            or not 0 < len(commit) <= MAX_COMMIT_BYTES
+        ):
+            raise DirectValidatorError("timelocked commit is not a bounded byte string")
+        if not _plain_nonnegative(reveal_round):
+            raise DirectValidatorError("timelocked commit reveal round is invalid")
+        if reveal_round <= context["drand_last_stored_round"]:
+            raise DirectValidatorError(
+                f"reveal round {reveal_round} is already on chain"
+            )
+        if abs(reveal_round - context["expected_reveal_round"]) > DRAND_ROUND_TOLERANCE:
+            raise DirectValidatorError(
+                f"reveal round {reveal_round} disagrees with the chain-derived "
+                f"round {context['expected_reveal_round']}"
+            )
+        return {
+            "call": COMMIT_REVEAL_CALL,
+            "commit": "0x" + bytes(commit).hex(),
+            "reveal_round": reveal_round,
+            "commit_reveal_version": context["commit_reveal_version"],
+            "reveal_period_epochs": context["reveal_period_epochs"],
+            "block_time_seconds": BLOCK_TIME_SECONDS,
+            "hotkey_public_key": context["hotkey_public_key"],
+            "schedule": schedule.document(),
+            "drand_last_stored_round": context["drand_last_stored_round"],
+            "next_epoch_block": context["next_epoch_block"],
+            "first_reveal_block": context["first_reveal_block"],
+            "expected_reveal_round": context["expected_reveal_round"],
+            "local_drand_round": context["local_drand_round"],
         }
 
     def _require_broadcast_window(
@@ -1177,6 +1641,22 @@ class DirectWeightWriter:
         kwargs = intent.get("kwargs")
         if not isinstance(call, Mapping) or not isinstance(kwargs, Mapping):
             return False
+        commit = _commit_reveal_document(intent)
+        if commit is not None:
+            # The pinned client decodes the ciphertext argument as 0x hex
+            # (observed on Finney SN94 commits).
+            return (
+                str(observed.get("address")) == str(intent.get("validator_hotkey"))
+                and call.get("call_module") == "SubtensorModule"
+                and call.get("call_function") == COMMIT_REVEAL_CALL_FUNCTION
+                and _chain_call_arg(call, "netuid") == kwargs.get("netuid")
+                and _chain_call_arg(call, "mecid") == kwargs.get("mecid")
+                and canonical_bytes_hex(_chain_call_arg(call, "commit"))
+                == commit["commit"]
+                and _chain_call_arg(call, "reveal_round") == commit["reveal_round"]
+                and _chain_call_arg(call, "commit_reveal_version")
+                == commit["commit_reveal_version"]
+            )
         return (
             str(observed.get("address")) == str(intent.get("validator_hotkey"))
             and call.get("call_module") == "SubtensorModule"
@@ -1448,6 +1928,530 @@ class DirectWeightWriter:
             confirmation_heads=tuple(proven),
         )
 
+    def _confirm_effect(
+        self,
+        pending: Mapping[str, Any],
+        located: DirectSubmissionReceipt,
+        *,
+        recovered: bool,
+    ) -> tuple[DirectSubmissionReceipt, dict[str, Any] | None]:
+        """Prove what a finalized successful write changed, by write kind.
+
+        A plain write is proven exactly as before. A timelocked commit changes
+        no weights until the chain reveals it, so its effect is the stored
+        commit, and the returned record lets later cycles prove the reveal.
+        """
+
+        if _commit_reveal_document(pending.get("intent")) is None:
+            return (
+                self._confirm_finalized_effect(pending, located, recovered=recovered),
+                None,
+            )
+        return self._confirm_commit_stored(pending, located, recovered=recovered)
+
+    def _canonical_height(self, block_number: int, *, label: str) -> str:
+        try:
+            return _canonical_hash(
+                _uncached_block_hash(self.subtensor.substrate, block_number),
+                label=label,
+            )
+        except DirectSubmissionAmbiguous:
+            raise
+        except Exception as exc:
+            raise DirectSubmissionAmbiguous(
+                f"{label} {block_number} hash is unavailable"
+            ) from exc
+
+    def _confirm_commit_stored(
+        self,
+        pending: Mapping[str, Any],
+        located: DirectSubmissionReceipt,
+        *,
+        recovered: bool,
+    ) -> tuple[DirectSubmissionReceipt, dict[str, Any]]:
+        """Prove the exact commit is stored where the chain will reveal it.
+
+        At the finalized inclusion block, under the epoch key the chain gave
+        it (``weights.rs:365-401``), the hotkey holds exactly one entry and it
+        is ``(hotkey, inclusion block, ciphertext, reveal round)``; the commit
+        also moved this UID's ``LastUpdate`` to that block. Two later heads
+        must be finalized, as for a plain write.
+        """
+
+        if located.block_number is None or located.block_hash is None:
+            raise DirectSubmissionContradiction(
+                "finalized extrinsic has no inclusion block"
+            )
+        deadline = time.monotonic() + CONFIRMATION_WAIT_SECONDS
+        while True:
+            try:
+                finalized_number, _finalized_hash = finalized_head(self.subtensor)
+            except Exception as exc:
+                raise DirectSubmissionAmbiguous(
+                    "later finalized heads are unavailable"
+                ) from exc
+            if finalized_number >= located.block_number + 2:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DirectSubmissionAmbiguous(
+                    "two later finalized heads are not available yet"
+                )
+            time.sleep(min(CONFIRMATION_POLL_SECONDS, remaining))
+        validator_uid, validator_hotkey, _uids, _dests, _weights = (
+            self._confirmation_contract(pending)
+        )
+        commit = _commit_reveal_document(pending["intent"])
+        heads: list[tuple[int, str]] = []
+        for block_number in range(located.block_number, located.block_number + 3):
+            block_hash = self._canonical_height(
+                block_number, label="confirmation block"
+            )
+            if (
+                block_number == located.block_number
+                and block_hash != located.block_hash
+            ):
+                raise DirectSubmissionContradiction(
+                    "finalized inclusion hash is no longer canonical"
+                )
+            heads.append((block_number, block_hash))
+        index = int(get_mechid_storage_index(self.netuid, MECID))
+        inclusion = located.block_hash
+        epoch = self._raw_storage(
+            "SubtensorModule", "SubnetEpochIndex", [self.netuid], inclusion
+        )
+        if not _plain_nonnegative(epoch) or epoch == 0:
+            raise DirectSubmissionAmbiguous(
+                f"epoch index at commit block {located.block_number} is unreadable"
+            )
+        signed_row = (
+            validator_hotkey,
+            located.block_number,
+            commit["commit"],
+            commit["reveal_round"],
+        )
+        keys: list[int] = []
+        # The commit belongs to the look-ahead epoch of its block: the stored
+        # counter, or one more when that block's epoch was deferred.
+        for key in (epoch, epoch + 1):
+            stored = self._raw_storage(
+                "SubtensorModule", "TimelockedWeightCommits", [index, key], inclusion
+            )
+            rows = decoded_commit_rows([] if stored is None else stored)
+            if rows is None:
+                raise DirectSubmissionAmbiguous(
+                    f"stored commits at block {located.block_number} are unreadable"
+                )
+            mine = [row for row in rows if row[0] == validator_hotkey]
+            if signed_row in mine:
+                if len(mine) != 1:
+                    raise DirectSubmissionContradiction(
+                        "another timelocked commit of this hotkey is stored beside "
+                        "the signed one"
+                    )
+                keys.append(key)
+            elif mine:
+                raise DirectSubmissionContradiction(
+                    "another timelocked commit of this hotkey is stored"
+                )
+        if len(keys) != 1:
+            raise DirectSubmissionContradiction(
+                "the signed timelocked commit is not stored at its inclusion block"
+            )
+        last_update = self._raw_storage(
+            "SubtensorModule", "LastUpdate", [index], inclusion
+        )
+        owner = self._raw_storage(
+            "SubtensorModule", "Keys", [self.netuid, validator_uid], inclusion
+        )
+        if (
+            not isinstance(last_update, (list, tuple))
+            or validator_uid >= len(last_update)
+            or last_update[validator_uid] != located.block_number
+        ):
+            raise DirectSubmissionContradiction(
+                "the commit did not set this validator's last update"
+            )
+        if owner != validator_hotkey:
+            raise DirectSubmissionContradiction(
+                f"validator mapping changed at finalized block {located.block_number}"
+            )
+        receipt = DirectSubmissionReceipt(
+            status=STATUS_COMMITTED,
+            attempt_id=located.attempt_id,
+            extrinsic_hash=located.extrinsic_hash,
+            block_hash=located.block_hash,
+            block_number=located.block_number,
+            recovered=recovered,
+            confirmation_heads=tuple(heads),
+        )
+        reveal = {
+            "commit_epoch": keys[0],
+            "present_through_block": located.block_number,
+            "outcome": None,
+        }
+        return receipt, reveal
+
+    def _commit_presence(
+        self, block_number: int, *, index: int, key: int, row: tuple[Any, ...]
+    ) -> tuple[bool, int]:
+        """Whether the exact stored commit is still held at one finalized block.
+
+        Presence is positive evidence. Absence is concluded only from a
+        storage read the node answered, at a block whose epoch index it also
+        answered as a real value.
+        """
+
+        block_hash = self._canonical_height(block_number, label="reveal search block")
+        stored = self._raw_storage(
+            "SubtensorModule", "TimelockedWeightCommits", [index, key], block_hash
+        )
+        rows = decoded_commit_rows([] if stored is None else stored)
+        if rows is None:
+            raise DirectSubmissionAmbiguous(
+                f"stored commits at block {block_number} are unreadable"
+            )
+        matches = sum(candidate == row for candidate in rows)
+        if matches > 1:
+            raise DirectSubmissionContradiction(
+                "the signed timelocked commit is stored more than once"
+            )
+        epoch = self._raw_storage(
+            "SubtensorModule", "SubnetEpochIndex", [self.netuid], block_hash
+        )
+        if not _plain_nonnegative(epoch) or epoch == 0 or epoch + 1 < key:
+            raise DirectSubmissionAmbiguous(
+                f"epoch index at block {block_number} is unreadable"
+            )
+        return matches == 1, epoch
+
+    def _block_events(self, block_hash: str, block_number: int) -> list[Mapping]:
+        """Events of one block, refusing the empty list a failed read becomes."""
+
+        try:
+            events = self.subtensor.substrate.get_events(block_hash=block_hash)
+        except Exception as exc:
+            raise DirectSubmissionAmbiguous(
+                f"events of block {block_number} are unavailable"
+            ) from exc
+        if not isinstance(events, (list, tuple)) or not all(
+            isinstance(record, Mapping) and isinstance(record.get("event"), Mapping)
+            for record in events
+        ):
+            raise DirectSubmissionAmbiguous(
+                f"events of block {block_number} are unreadable"
+            )
+        # Every block applies its timestamp inherent, so a real event list is
+        # never without an extrinsic outcome.
+        if not any(
+            (record["event"].get("module_id"), record["event"].get("event_id"))
+            in {("System", "ExtrinsicSuccess"), ("System", "ExtrinsicFailed")}
+            for record in events
+        ):
+            raise DirectSubmissionAmbiguous(
+                f"events of block {block_number} hold no extrinsic outcome"
+            )
+        return list(events)
+
+    def _reveal_count(
+        self, events: list[Mapping], *, index: int, hotkey: str, block_number: int
+    ) -> int:
+        count = 0
+        for record in events:
+            event = record["event"]
+            if (event.get("module_id"), event.get("event_id")) != (
+                "SubtensorModule",
+                "TimelockedWeightsRevealed",
+            ):
+                continue
+            attributes = event.get("attributes")
+            # TimelockedWeightsRevealed(NetUidStorageIndex, AccountId)
+            # (macros/events.rs:428), decoded as [index, "ss58"].
+            if (
+                not isinstance(attributes, (list, tuple))
+                or len(attributes) != 2
+                or not _plain_nonnegative(attributes[0])
+                or not isinstance(attributes[1], str)
+            ):
+                raise DirectSubmissionAmbiguous(
+                    f"a reveal event of block {block_number} is unreadable"
+                )
+            if attributes[0] == index and attributes[1] == hotkey:
+                count += 1
+        return count
+
+    def _prove_revealed_rows(
+        self,
+        consumed: int,
+        contract: tuple[int, str, dict[int, str], tuple[int, ...], tuple[int, ...]],
+        *,
+        index: int,
+    ) -> tuple[tuple[tuple[int, str], ...], list[list[Any]]]:
+        """Prove the stored row the reveal wrote, and name any remapped UID.
+
+        The chain stores the max-upscaled vector (``weights.rs:835-851``),
+        read here at the reveal block and two later finalized blocks. The
+        commit was signed about an epoch earlier, so a weighted UID may have
+        been re-registered to another hotkey by the reveal block; that is the
+        chain's fact to report, not a contradiction to stop on.
+        """
+
+        validator_uid, validator_hotkey, uid_hotkeys, dests, weights = contract
+        expected = tuple(zip(dests, _subtensor_max_upscale_to_u16(weights)))
+        heads: list[tuple[int, str]] = []
+        for block_number in range(consumed, consumed + 3):
+            block_hash = self._canonical_height(
+                block_number, label="reveal confirmation block"
+            )
+            stored = self._raw_storage(
+                "SubtensorModule", "Weights", [index, validator_uid], block_hash
+            )
+            owner = self._raw_storage(
+                "SubtensorModule", "Keys", [self.netuid, validator_uid], block_hash
+            )
+            if stored is None or _stored_weight_rows(stored) != expected:
+                raise DirectSubmissionContradiction(
+                    f"stored mechanism row differs at finalized block {block_number}"
+                )
+            if owner != validator_hotkey:
+                raise DirectSubmissionContradiction(
+                    f"validator mapping changed at finalized block {block_number}"
+                )
+            heads.append((block_number, block_hash))
+        remapped: list[list[Any]] = []
+        for uid in dests:
+            owner = self._raw_storage(
+                "SubtensorModule", "Keys", [self.netuid, uid], heads[0][1]
+            )
+            if owner != uid_hotkeys[uid]:
+                remapped.append(
+                    [uid, uid_hotkeys[uid], owner if isinstance(owner, str) else None]
+                )
+        return tuple(heads), remapped
+
+    def _record_reveal_unproven(
+        self,
+        state: dict[str, Any],
+        last: dict[str, Any],
+        receipt: Mapping[str, Any],
+        *,
+        head_number: int,
+        error: Exception,
+    ) -> DirectSubmissionReceipt:
+        """Close a commit that is gone but whose reveal can no longer be read.
+
+        The finalized head no longer holds the commit, read from state the
+        node served, so the chain will never reveal it again. The blocks that
+        would say whether it applied are older than a pruning node keeps, so
+        waiting cannot prove anything more on this node. The attempt is
+        recorded as unproven, not applied or failed, and the writer goes on:
+        the next commit's own pre-sign check still refuses while any commit of
+        this hotkey is stored.
+        """
+
+        head_hash = self._canonical_height(head_number, label="finalized head")
+        reveal = dict(last["reveal"])
+        reveal["outcome"] = {
+            "applied": None,
+            "absent_at_block": head_number,
+            "absent_at_block_hash": head_hash,
+            "unreadable": f"{type(error).__name__}: {error}"[:256],
+        }
+        last["status"] = STATUS_REVEAL_UNPROVEN
+        last["reveal"] = reveal
+        self._write_state(state)
+        _LOG.warning(
+            "timelocked commit %s is no longer stored at finalized block %d, and "
+            "the history that proves its reveal is unreadable here: %s",
+            receipt["extrinsic_hash"],
+            head_number,
+            error,
+        )
+        return DirectSubmissionReceipt(
+            status=STATUS_REVEAL_UNPROVEN,
+            attempt_id=str(last["attempt_id"]),
+            extrinsic_hash=str(receipt["extrinsic_hash"]),
+            block_hash=head_hash,
+            block_number=head_number,
+            recovered=True,
+        )
+
+    def _resolve_reveal(self, state: dict[str, Any]) -> DirectSubmissionReceipt | None:
+        """Prove what the chain's automatic reveal did with the last commit.
+
+        Nothing is signed or sent. While the exact stored commit is still
+        held, the reveal is awaited. Once finalized state no longer holds it,
+        the block that consumed it is found and its events read: the chain's
+        ``TimelockedWeightsRevealed`` for this hotkey plus the exact stored row
+        prove the vector applied; its absence proves the commit was dropped
+        without writing anything (``reveal_commits.rs:73-200``).
+        """
+
+        last = state.get("last_attempt")
+        if not isinstance(last, dict) or last.get("status") != STATUS_COMMITTED:
+            return None
+        identity = last.get("identity")
+        intent = last.get("intent")
+        receipt = last.get("receipt")
+        reveal = last.get("reveal")
+        if (
+            set(last) != _COMMITTED_ATTEMPT_FIELDS
+            or not isinstance(identity, dict)
+            or not isinstance(intent, dict)
+            or _attempt_id(identity, intent) != last.get("attempt_id")
+            or not isinstance(receipt, dict)
+            or receipt.get("status") != STATUS_COMMITTED
+            or receipt.get("attempt_id") != last.get("attempt_id")
+            or receipt.get("extrinsic_hash") != intent.get("extrinsic_hash")
+            or not _plain_nonnegative(receipt.get("block_number"))
+            or not isinstance(reveal, dict)
+            or set(reveal) != _REVEAL_FIELDS
+            or reveal["outcome"] is not None
+            or not _plain_nonnegative(reveal["commit_epoch"])
+            or not _plain_nonnegative(reveal["present_through_block"])
+            or reveal["present_through_block"] < receipt["block_number"]
+        ):
+            raise DirectSubmissionContradiction(
+                "committed timelocked attempt is malformed"
+            )
+        commit = _commit_reveal_document(intent)
+        if commit is None:
+            raise DirectSubmissionContradiction(
+                "committed attempt carries no timelocked commit"
+            )
+        contract = self._confirmation_contract(last)
+        validator_hotkey = contract[1]
+        index = int(get_mechid_storage_index(self.netuid, MECID))
+        commit_block = receipt["block_number"]
+        row = (validator_hotkey, commit_block, commit["commit"], commit["reveal_round"])
+        key = reveal["commit_epoch"]
+        awaiting = DirectSubmissionReceipt(
+            status=STATUS_AWAITING_REVEAL,
+            attempt_id=str(last["attempt_id"]),
+            extrinsic_hash=str(receipt["extrinsic_hash"]),
+            block_hash=receipt.get("block_hash"),
+            block_number=commit_block,
+            recovered=True,
+        )
+        try:
+            head_number, _head_hash = finalized_head(self.subtensor)
+        except Exception as exc:
+            raise DirectSubmissionAmbiguous(
+                "finalized head is unavailable during reveal recovery"
+            ) from exc
+        low = reveal["present_through_block"]
+        if head_number <= low:
+            return awaiting
+        present, head_epoch = self._commit_presence(
+            head_number, index=index, key=key, row=row
+        )
+        if present:
+            # Commits whose reveal epoch passed are removed, so one held for
+            # longer than any reveal period can be is not a waiting commit.
+            if head_epoch > key + MAX_REVEAL_PERIOD_EPOCHS + 1:
+                raise DirectSubmissionContradiction(
+                    "the timelocked commit outlived every possible reveal epoch"
+                )
+            reveal["present_through_block"] = head_number
+            self._write_state(state)
+            return awaiting
+        try:
+            low_present, _low_epoch = self._commit_presence(
+                low, index=index, key=key, row=row
+            )
+            if not low_present:
+                raise DirectSubmissionContradiction(
+                    f"the stored commit proven at block {low} is no longer read there"
+                )
+            high = head_number
+            while high - low > 1:
+                middle = (low + high) // 2
+                middle_present, _epoch = self._commit_presence(
+                    middle, index=index, key=key, row=row
+                )
+                if middle_present:
+                    low = middle
+                else:
+                    high = middle
+            consumed = high
+            if head_number < consumed + 2:
+                reveal["present_through_block"] = low
+                self._write_state(state)
+                return awaiting
+            consumed_hash = self._canonical_height(consumed, label="reveal block")
+            events = self._block_events(consumed_hash, consumed)
+            revealed = self._reveal_count(
+                events, index=index, hotkey=validator_hotkey, block_number=consumed
+            )
+            proof = (
+                self._prove_revealed_rows(consumed, contract, index=index)
+                if revealed == 1
+                else None
+            )
+        except DirectSubmissionContradiction:
+            raise
+        except DirectSubmissionAmbiguous as exc:
+            if head_number - reveal["present_through_block"] <= (
+                REVEAL_HISTORY_LIMIT_BLOCKS
+            ):
+                raise
+            return self._record_reveal_unproven(
+                state, last, receipt, head_number=head_number, error=exc
+            )
+        if revealed > 1:
+            raise DirectSubmissionContradiction(
+                f"block {consumed} revealed this hotkey's commit more than once"
+            )
+        if revealed == 0:
+            last["status"] = STATUS_REVEAL_NOT_APPLIED
+            last["reveal"] = {
+                "commit_epoch": key,
+                "present_through_block": low,
+                "outcome": {
+                    "applied": False,
+                    "consumed_block": consumed,
+                    "consumed_block_hash": consumed_hash,
+                },
+            }
+            self._write_state(state)
+            raise DirectCommitNotRevealed(
+                f"timelocked commit {receipt['extrinsic_hash']} was consumed at "
+                f"block {consumed} without applying its weights; nothing was "
+                "written. The chain refused the revealed vector (stake, permit, "
+                "version key or payload) or its drand pulse never arrived. "
+                "Investigate before starting the service again."
+            )
+        heads, remapped = proof
+        last["status"] = STATUS_REVEALED
+        last["reveal"] = {
+            "commit_epoch": key,
+            "present_through_block": low,
+            "outcome": {
+                "applied": True,
+                "consumed_block": consumed,
+                "consumed_block_hash": consumed_hash,
+                "confirmation_heads": [list(head) for head in heads],
+                "remapped_dests": remapped,
+            },
+        }
+        self._write_state(state)
+        if remapped:
+            _LOG.warning(
+                "revealed weights landed on %d UID(s) re-registered since the "
+                "commit: %s",
+                len(remapped),
+                remapped,
+            )
+        return DirectSubmissionReceipt(
+            status=STATUS_REVEALED,
+            attempt_id=str(last["attempt_id"]),
+            extrinsic_hash=str(receipt["extrinsic_hash"]),
+            block_hash=consumed_hash,
+            block_number=consumed,
+            recovered=True,
+            confirmation_heads=heads,
+        )
+
     def _await_finalized_history(
         self, pending: Mapping[str, Any]
     ) -> tuple[str, DirectSubmissionReceipt | None]:
@@ -1514,6 +2518,8 @@ class DirectWeightWriter:
             or kwargs != expected_kwargs
         ):
             raise DirectSubmissionContradiction("pending signed intent is invalid")
+        # A journaled timelocked commit must still be the exact record signed.
+        _commit_reveal_document(intent)
         return extrinsic_hash, era_reference, period
 
     def _locate(
@@ -1617,6 +2623,8 @@ class DirectWeightWriter:
         state: dict[str, Any],
         pending: Mapping[str, Any],
         receipt: DirectSubmissionReceipt,
+        *,
+        reveal: dict[str, Any] | None = None,
     ) -> DirectSubmissionReceipt:
         state["last_attempt"] = {
             "attempt_id": pending["attempt_id"],
@@ -1625,6 +2633,10 @@ class DirectWeightWriter:
             "intent": pending["intent"],
             "receipt": receipt.as_document(),
         }
+        if reveal is not None:
+            # Only a proven timelocked commit carries this; later cycles
+            # prove its reveal from it.
+            state["last_attempt"]["reveal"] = reveal
         state["pending"] = None
         self._write_state(state)
         return receipt
@@ -1636,11 +2648,13 @@ class DirectWeightWriter:
             state = self._read_state()
             pending = self._pending(state)
             if pending is None:
-                return None
+                # Only a proven timelocked commit has anything left to prove;
+                # for every other journal this returns None exactly as before.
+                return self._resolve_reveal(state)
             status, receipt = self._locate(pending)
             if status == "finalized" and receipt is not None:
                 try:
-                    confirmed = self._confirm_finalized_effect(
+                    confirmed, reveal = self._confirm_effect(
                         pending, receipt, recovered=True
                     )
                 except DirectSubmissionContradiction as exc:
@@ -1657,7 +2671,7 @@ class DirectWeightWriter:
                     state["pending"] = pending
                     self._write_state(state)
                     raise
-                return self._finish(state, pending, confirmed)
+                return self._finish(state, pending, confirmed, reveal=reveal)
             if status == "expired" and receipt is not None:
                 return self._finish(state, pending, receipt)
             if status == "failed":
@@ -1991,6 +3005,17 @@ class DirectWeightWriter:
                 raise DirectSubmissionAmbiguous(
                     "a prior signed direct intent must be recovered first"
                 )
+            last_attempt = state.get("last_attempt")
+            if (
+                isinstance(last_attempt, dict)
+                and last_attempt.get("status") == STATUS_COMMITTED
+            ):
+                # A stored commit reveals on the chain's schedule whatever this
+                # process does next. Nothing is signed, commit or plain, until
+                # recovery proves what that reveal did.
+                raise DirectValidatorError(
+                    "the last timelocked commit is not proven revealed yet"
+                )
             previous_anchor = self._last_anchor(state)
             if (
                 previous_anchor is not None
@@ -2010,13 +3035,37 @@ class DirectWeightWriter:
                 plan, fresh, presign_deadline=presign_deadline
             )
             _require_presign_time(presign_deadline, stage="eligibility preflight")
+            commit_context = (
+                None
+                if self.commit_reveal is None
+                else self._require_commit_reveal_context(
+                    fresh, presign_deadline=presign_deadline
+                )
+            )
+            commit_document: dict[str, Any] | None = None
             substrate = self.subtensor.substrate
             try:
                 nonce = substrate.get_account_next_index(plan.snapshot.validator_hotkey)
                 _require_presign_time(presign_deadline, stage="nonce RPC")
                 if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
                     raise ValueError("account nonce is invalid")
-                call = self.call_builder(kwargs)
+                if commit_context is None:
+                    call = self.call_builder(kwargs)
+                else:
+                    commit_document = self._timelocked_commit(
+                        kwargs, commit_context, presign_deadline=presign_deadline
+                    )
+                    call = self.commit_call_builder(
+                        {
+                            "netuid": kwargs["netuid"],
+                            "mecid": kwargs["mecid"],
+                            "commit": commit_document["commit"],
+                            "reveal_round": commit_document["reveal_round"],
+                            "commit_reveal_version": commit_document[
+                                "commit_reveal_version"
+                            ],
+                        }
+                    )
                 _require_presign_time(
                     presign_deadline, stage="immediately before signing"
                 )
@@ -2057,6 +3106,11 @@ class DirectWeightWriter:
                 "kwargs": kwargs,
                 "eligibility": eligibility,
             }
+            if commit_document is not None:
+                # The plaintext vector stays in kwargs; this is what the
+                # signed call carries instead of it, and what recovery and the
+                # reveal proof check against.
+                intent["commit_reveal"] = commit_document
             attempt_id = _attempt_id(identity, intent)
             pending: dict[str, Any] = {
                 "attempt_id": attempt_id,
@@ -2112,7 +3166,7 @@ class DirectWeightWriter:
                 raise
             if status == "finalized" and located is not None:
                 try:
-                    confirmed = self._confirm_finalized_effect(
+                    confirmed, reveal = self._confirm_effect(
                         pending, located, recovered=False
                     )
                 except DirectSubmissionContradiction as exc:
@@ -2129,7 +3183,7 @@ class DirectWeightWriter:
                     state["pending"] = pending
                     self._write_state(state)
                     raise
-                return self._finish(state, pending, confirmed)
+                return self._finish(state, pending, confirmed, reveal=reveal)
             if status == "expired" and located is not None:
                 # The watch returned, so the node reported these bytes
                 # finalized, yet _locate read every block of the era from the
@@ -2172,6 +3226,7 @@ class DirectWeightWriter:
 
 
 __all__ = [
+    "DirectCommitNotRevealed",
     "DirectSubmissionAmbiguous",
     "DirectSubmissionContradiction",
     "DirectSubmissionFinalizedFailure",
@@ -2188,11 +3243,16 @@ __all__ = [
     "FINALIZED_HISTORY_WAIT_SECONDS",
     "DIRECT_STATE_ROOT",
     "STATE_SCHEMA",
+    "STATUS_AWAITING_REVEAL",
+    "STATUS_COMMITTED",
     "STATUS_CONFIRMED",
     "PHASE_FINALIZED_FAILED",
     "STATUS_EXPIRED",
     "STATUS_FINALIZED_FAILED",
     "STATUS_RECOVERED",
+    "STATUS_REVEALED",
+    "STATUS_REVEAL_NOT_APPLIED",
+    "STATUS_REVEAL_UNPROVEN",
     "bound_rpc_waits",
     "canonical_state_path",
     "cycle_lock_path_for_state",

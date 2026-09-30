@@ -422,6 +422,43 @@ updater can roll back to it when a new release fails to become ready. Once
 the host installs a bootstrap whose unit carries the line, the drop-in is
 redundant and harmless (the same file is read twice); remove it at leisure.
 
+## Commit-reveal subnets
+
+On a subnet with commit-reveal enabled the chain refuses plain weight writes,
+and so does the validator: every cycle ends with `SN94 commit-reveal policy
+blocks direct writes`. An operator can opt in to timelocked commits instead.
+Add one line to `/etc/cathedral-validator/direct.env`, naming the reveal
+period the subnet runs (`commit_reveal_period` in its hyperparameters), and
+restart the service:
+
+```bash
+echo 'CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-1' | sudo tee -a /etc/cathedral-validator/direct.env
+sudo systemctl restart cathedral-validator-direct.service
+```
+
+The validator then signs `commit_timelocked_mechanism_weights` carrying the
+same zero-burn vector, encrypted to a drand round, with the same journal and
+recovery rules as a plain write. The chain decrypts and applies it about one
+epoch later by itself; there is no reveal transaction. The validator refuses
+to sign unless commit-reveal is on, the reveal period matches the line above,
+the payload version is 4, and the host clock agrees with the chain's drand
+round.
+
+A cycle reports `COMMITTED` once the commit is proven stored, then
+`COMMITTED_AWAITING_REVEAL` until the reveal, then `REVEALED_CONFIRMED` once
+finalized state proves the exact vector applied, and signs the next commit.
+If the chain consumes the commit without applying it, the validator records
+`REVEAL_NOT_APPLIED`, prints `CONTRADICTION_STOPPED` and exits with code 2.
+Nothing was written. Find the cause (permit, stake, version key, drand) before
+starting the service again; the next start commits afresh. After an outage
+longer than the RPC node keeps state (about 256 blocks), the blocks that prove
+a reveal may be gone; the validator then records `REVEAL_UNPROVEN` for a
+commit the chain no longer holds and continues.
+
+If the subnet owner turns commit-reveal off, the validator refuses until the
+line is removed from `direct.env`, then writes plain weights again. A commit
+already signed is still recovered and proven after the line is removed.
+
 ## Recovery rules
 
 - Do not delete the validator journal or updater state.
