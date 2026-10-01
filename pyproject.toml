@@ -101,13 +101,14 @@ integration = [
     "cathedral-cybergym @ git+https://github.com/cathedralai/cathedral-distill.git@b2ad1eddf9235921f8f680342605d5c8a84a8d87",
 ]
 # Development-only AMD SEV-SNP verifier/client contract. This is the exact
-# reviewed cathedral-sandbox merge commit of cathedral-sandbox#251 (sandbox main
-# on 2026-09-30; the previous pin was #189's 8dde6ea). It adds the
-# cathedral.capacity library the capacity shadow scorer needs. The command also
-# verifies PEP 610 VCS provenance at runtime and refuses a local, wheel-only,
-# mutable, or different tree.
+# reviewed cathedral-sandbox merge commit of cathedral-sandbox#256 (sandbox main
+# on 2026-10-01; the previous pin was #251's 1299443). It carries the
+# cathedral.capacity library the capacity shadow scorer needs, and #256's
+# in-memory AMD certificate cache and KDS backoff in verify/snp.py. The command
+# also verifies PEP 610 VCS provenance at runtime and refuses a local,
+# wheel-only, mutable, or different tree.
 snp-dev = [
-    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@de8a061e1641b8e65fc4b1c5f27ff0ae4066e502",
 ]
 # Production direct-validator SNP verification uses the same exact reviewed
 # contract. Keep this pin synchronized with SANDBOX_CONTRACT_COMMIT,
@@ -117,7 +118,7 @@ snp-dev = [
 # updater accepts only PEX-INFO which carries this extra and the same immutable
 # Cathedral Sandbox VCS requirement.
 snp-production = [
-    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@de8a061e1641b8e65fc4b1c5f27ff0ae4066e502",
 ]
 
 # GPU qualification runs in a separate environment from snp-production/dev.

@@ -419,7 +419,7 @@ jobs:
         run: |
           project_wheel="$(find /tmp/cathedral-validator-project-one -maxdepth 1 -name '*.whl' -print -quit)"
           project_requirement="cathedral-scaffold[snp-production] @ file://${project_wheel}"
-          compute_requirement='cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece'
+          compute_requirement='cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@de8a061e1641b8e65fc4b1c5f27ff0ae4066e502'
           for compute_requirements_pex in /tmp/cathedral-compute-requirements-one.pex /tmp/cathedral-compute-requirements-two.pex; do
             pex \
               "$compute_requirement" \

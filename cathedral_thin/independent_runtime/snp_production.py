@@ -28,10 +28,12 @@ from .amd_snp_dev_preview import (
 )
 from .owner_policy_file import read_owner_policy_file
 
-# The exact reviewed AMD production contract: the cathedral-sandbox#251 merge
-# commit (sandbox main on 2026-09-30). verify_snp is unchanged since #189's
-# 8dde6ea, the previous pin.
-SANDBOX_CONTRACT_COMMIT = "12994431072685a1401fbadf76d0c17679149ece"
+# The exact reviewed AMD production contract: the cathedral-sandbox#256 merge
+# commit (sandbox main on 2026-10-01). #256 gives verify_snp an in-memory AMD
+# certificate cache, jittered KDS backoff and owner-only certificate fetches.
+# It accepts the same evidence as #251's 1299443, the previous pin, except that
+# an authentic chain fetched under a group-writable umask is no longer refused.
+SANDBOX_CONTRACT_COMMIT = "de8a061e1641b8e65fc4b1c5f27ff0ae4066e502"
 POLICY_SCHEMA = "cathedral_amd_sev_snp_policy_v1"
 MAX_POLICY_BYTES = 128 * 1024
 _MEASUREMENT = re.compile(r"[0-9a-f]{96}")

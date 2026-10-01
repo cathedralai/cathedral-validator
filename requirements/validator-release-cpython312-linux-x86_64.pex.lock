@@ -314,9 +314,9 @@
           "artifacts": [
             {
               "algorithm": "sha256",
-              "commit_id": "12994431072685a1401fbadf76d0c17679149ece",
-              "hash": "b7feee81c901c0693614aca09a351498474708bb5521970c8e70fc988c99abca",
-              "url": "git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece"
+              "commit_id": "de8a061e1641b8e65fc4b1c5f27ff0ae4066e502",
+              "hash": "33f2ba009ca9b24f74db9db5790fd084e6cbaec09fa0418bac273e1dbff245d4",
+              "url": "git+https://github.com/cathedralai/cathedral-sandbox.git@de8a061e1641b8e65fc4b1c5f27ff0ae4066e502"
             }
           ],
           "project_name": "cathedral",
@@ -930,7 +930,7 @@
   "prefer_older_binary": false,
   "requirements": [
     "bittensor<11,>=10.4",
-    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@12994431072685a1401fbadf76d0c17679149ece",
+    "cathedral @ git+https://github.com/cathedralai/cathedral-sandbox.git@de8a061e1641b8e65fc4b1c5f27ff0ae4066e502",
     "cryptography>=42",
     "numpy>=1.24"
   ],

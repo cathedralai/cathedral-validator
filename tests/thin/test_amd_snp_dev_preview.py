@@ -667,7 +667,7 @@ def test_preview_import_graph_loads_no_writer():
 def test_packaging_keeps_the_compute_pin_exact():
     with (Path(__file__).parents[2] / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
-    expected = "12994431072685a1401fbadf76d0c17679149ece"
+    expected = "de8a061e1641b8e65fc4b1c5f27ff0ae4066e502"
     assert preview.COMPUTE_CONTRACT_COMMIT == expected
     assert project["optional-dependencies"]["snp-dev"] == [
         "cathedral @ git+https://github.com/cathedralai/"
