@@ -358,7 +358,7 @@ TELEMETRY_PEX_MODULE = "cathedral_thin.independent_runtime.telemetry_exporter"
 VALIDATOR_BUNDLE_SCHEMA = "cathedral_validator_bundle_v2"
 RUNTIME_DISTRIBUTIONS_SCHEMA = "cathedral_validator_pex_distributions_v1"
 EXPECTED_RUNTIME_LOCK_SHA256 = (
-    "b37384340471d3867a02b16ddd244176fae88e4a687453517b92d5c1da24e0c3"
+    "c1dd7c44ed09dbc497631cdc8f7f2e49453ae660e4d990790e323f0ae1444b00"
 )
 VALIDATOR_RELEASE_ENTRYPOINT = "bin/cathedral-validator"
 QVL_RELEASE_PATH = "bin/cathedral-tdx-verifier"
@@ -377,7 +377,7 @@ _REQUIRED_DISTRIBUTIONS = (
 _WHEEL_VERSION = re.compile(r"[0-9][0-9a-z.]*")
 _SOURCE_REVISION = re.compile(r"[0-9a-f]{40}")
 _LOWER_SHA256 = re.compile(r"[0-9a-f]{64}")
-_COMPUTE_COMMIT = "12994431072685a1401fbadf76d0c17679149ece"
+_COMPUTE_COMMIT = "de8a061e1641b8e65fc4b1c5f27ff0ae4066e502"
 _RELEASE_INTERPRETER_CONSTRAINT = "CPython==3.12.*"
 _RELEASE_INTERPRETER_SHEBANG = b"#!/usr/bin/python3.12\n"
 _COMPUTE_REQUIREMENT = (
