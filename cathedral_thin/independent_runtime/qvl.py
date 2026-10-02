@@ -313,11 +313,25 @@ def load_verifier(path: str | None) -> SubprocessQuoteVerifier:
     )
 
 
+def expected_direct_validator_qvl_digest() -> str:
+    """The verifier digest the direct validator must load and record.
+
+    The release pin, except in development localnet mode, where only the
+    committed stub verifier is accepted (see ``localnet.py``).
+    """
+
+    from .localnet import LOCALNET_STUB_QVL_DIGEST, localnet_active
+
+    if localnet_active():
+        return LOCALNET_STUB_QVL_DIGEST
+    return DIRECT_VALIDATOR_QVL_DIGEST
+
+
 def load_direct_validator_verifier(path: str | None) -> SubprocessQuoteVerifier:
     """Load only the verifier binary reviewed for the direct validator."""
 
     return _load_pinned_verifier(
         path,
-        expected_digest=DIRECT_VALIDATOR_QVL_DIGEST,
+        expected_digest=expected_direct_validator_qvl_digest(),
         pin_name="direct-validator",
     )

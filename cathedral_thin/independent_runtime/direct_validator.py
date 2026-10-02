@@ -64,7 +64,14 @@ from .fleet_score import (
     score_multicompute_round,
 )
 from .preview_io import canonical_document_bytes
-from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
+from .localnet import (
+    LOCALNET_ENV,
+    LOCALNET_REQUEST_NETWORK,
+    expected_genesis_hash,
+    localnet_active,
+    require_localnet_network,
+)
+from .qvl import expected_direct_validator_qvl_digest, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
 from . import tdx_measurement
 from .tdx_measurement import (
@@ -519,10 +526,11 @@ def build_direct_plan(
     raw_scores = tuple((uid, len(grouped[uid])) for uid in sorted(grouped))
     uid_hotkeys = {uid: miner_by_uid[uid].hotkey for uid in sorted(miner_by_uid)}
     wire_uids, wire_weights = zero_burn_vector(raw_scores, uid_hotkeys)
+    qvl_digest = expected_direct_validator_qvl_digest()
     evidence = {
         "schema": "cathedral_direct_validator_evidence_v1",
         "anchor": snapshot.identity(),
-        "qvl_digest": DIRECT_VALIDATOR_QVL_DIGEST,
+        "qvl_digest": qvl_digest,
         "fleet": list(result.fleet),
         "machines": rows,
         "exclusions": list(result.exclusions),
@@ -545,7 +553,7 @@ def build_direct_plan(
     )
     plan = DirectWeightPlan(
         snapshot=snapshot,
-        qvl_digest=DIRECT_VALIDATOR_QVL_DIGEST,
+        qvl_digest=qvl_digest,
         evidence_digest=evidence_digest,
         machine_ids_by_uid=tuple(
             (uid, tuple(sorted(grouped[uid]))) for uid in sorted(grouped)
@@ -745,7 +753,10 @@ def _run_direct_cycle_unlocked(
         if getattr(recovered, "status", None) != STATUS_EXPIRED:
             return recovery_event
         report_recovery(recovery_event)
-    if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
+    if (
+        getattr(verifier_adapter, "qvl_digest", None)
+        != expected_direct_validator_qvl_digest()
+    ):
         raise DirectValidatorError(
             "direct validator adapter does not use the pinned QVL digest"
         )
@@ -1005,8 +1016,14 @@ def _add_network_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _pinned_network(value: object) -> str:
-    """Refuse any network the direct validator is not pinned to."""
+    """Refuse any network the direct validator is not pinned to.
 
+    Development localnet mode (``CATHEDRAL_LOCALNET=1``) pins a ws:// endpoint
+    on this host instead, and refuses ``finney``.
+    """
+
+    if localnet_active():
+        return require_localnet_network(value)
     if value != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
     return value
@@ -1274,19 +1291,50 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         raise SystemExit("interval must be positive")
 
+    localnet = localnet_active()
+    if localnet:
+        # Validates the pin before any chain access; refuses the Finney genesis.
+        localnet_genesis = expected_genesis_hash()
     verifier = load_direct_validator_verifier(options.qvl)
     adapter = ComputeAdapter(
         verifier,
         collateral_base_url=INTEL_COLLATERAL,
         qvl_digest=verifier.digest,
     )
+    snp_verifier: SnpProductionVerifier | None
     try:
-        snp_verifier = SnpProductionVerifier(
-            policy=load_snp_policy(options.snp_policy),
-            snpguest_path=options.snpguest,
-        )
+        snp_policy = load_snp_policy(options.snp_policy)
+        if localnet:
+            # The pinned snpguest is a Linux x86-64 binary and the pinned
+            # Compute contract is not installed on a development host. No
+            # localnet miner sends SNP evidence. See localnet.py.
+            snp_verifier = None
+        else:
+            snp_verifier = SnpProductionVerifier(
+                policy=snp_policy,
+                snpguest_path=options.snpguest,
+            )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
+    if localnet:
+        print(
+            json.dumps(
+                {
+                    "status": "LOCALNET_DEVELOPMENT_MODE",
+                    "warning": (
+                        f"{LOCALNET_ENV}=1: stub TDX verifier, local genesis, "
+                        "private miner addresses, no SNP verifier. Never Finney."
+                    ),
+                    "network": options.network,
+                    "genesis": localnet_genesis,
+                    "qvl_digest": verifier.digest,
+                    "request_network": LOCALNET_REQUEST_NETWORK,
+                    "snp_policy_digest": snp_policy.digest,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
     wallet = make_wallet(
