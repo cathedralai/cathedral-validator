@@ -15,7 +15,9 @@ Then the same journaled, era-pinned, hash-recovered extrinsic carries the
 vector encrypted to a drand round instead of in plain text. Its stored commit
 is proven at inclusion and the attempt is recorded ``COMMITTED``; later cycles
 prove from finalized state that the chain's own automatic reveal applied the
-exact vector, or record that it did not and stop. No reveal extrinsic exists.
+exact vector, or record that it did not and stop. That ``REVEAL_NOT_APPLIED``
+stop stays in the journal: every later recovery and submit refuses on it until
+``record_finalized_failure`` records it as reviewed. No reveal extrinsic exists.
 """
 
 from __future__ import annotations
@@ -101,6 +103,11 @@ STATUS_COMMITTED = "COMMITTED"
 STATUS_AWAITING_REVEAL = "COMMITTED_AWAITING_REVEAL"
 STATUS_REVEALED = "REVEALED_CONFIRMED"
 STATUS_REVEAL_NOT_APPLIED = "REVEAL_NOT_APPLIED"
+# Terminal status of a REVEAL_NOT_APPLIED stop once the operator's record
+# command has recorded it as reviewed. Only that command writes it, never the
+# validator. Until then REVEAL_NOT_APPLIED keeps every recovery, submit and
+# update refused, as a finalized_failed pending intent does.
+STATUS_REVEAL_NOT_APPLIED_RECORDED = "REVEAL_NOT_APPLIED_RECORDED"
 # The commit is gone from finalized state but the blocks that prove what its
 # reveal did are older than the node still serves. Nothing more can be proven
 # on that node, so the attempt closes unproven and the writer continues.
@@ -186,11 +193,12 @@ class DirectSubmissionFinalizedFailure(DirectSubmissionContradiction):
 class DirectCommitNotRevealed(DirectSubmissionContradiction):
     """A proven timelocked commit was consumed without applying its vector.
 
-    Nothing was written, and the journal already records the terminal
+    Nothing was written, and the journal already records the
     ``REVEAL_NOT_APPLIED`` proof. It is a contradiction so the validator stops
     with the exit code its unit never restarts: the chain refused a vector
     every pre-sign check accepted, which needs an operator before another
-    commit.
+    commit. The journal keeps the stop, so every later recovery and submit
+    raises it again until ``record_finalized_failure`` records it as reviewed.
     """
 
 
@@ -523,6 +531,39 @@ _COMMITTED_ATTEMPT_FIELDS = frozenset(
 
 def _plain_nonnegative(value: object) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+_REVEAL_NOT_APPLIED_ACTION = (
+    "The journal keeps the validator stopped on it. Find the cause, then clear "
+    "it with `cathedral-validator record-failed-write` while the service is "
+    'stopped; see docs/AUTO_UPDATE.md "Commit-reveal subnets"'
+)
+
+
+def _reveal_not_applied_stop(
+    state: Mapping[str, Any],
+) -> DirectCommitNotRevealed | None:
+    """Return the stop a ``REVEAL_NOT_APPLIED`` last attempt holds, or ``None``.
+
+    The status alone is the stop. A malformed record still stops: only the
+    record command, which validates it in full, may move it on.
+    """
+
+    last = state.get("last_attempt")
+    if not isinstance(last, Mapping) or last.get("status") != STATUS_REVEAL_NOT_APPLIED:
+        return None
+    receipt = last.get("receipt")
+    reveal = last.get("reveal")
+    outcome = reveal.get("outcome") if isinstance(reveal, Mapping) else None
+    extrinsic_hash = (
+        receipt.get("extrinsic_hash") if isinstance(receipt, Mapping) else None
+    )
+    consumed = outcome.get("consumed_block") if isinstance(outcome, Mapping) else None
+    return DirectCommitNotRevealed(
+        f"timelocked commit {extrinsic_hash} was consumed at block {consumed} "
+        "without applying its weights (REVEAL_NOT_APPLIED). "
+        f"{_REVEAL_NOT_APPLIED_ACTION}"
+    )
 
 
 def _commit_reveal_document(intent: object) -> dict[str, Any] | None:
@@ -1269,8 +1310,20 @@ class DirectWeightWriter:
         # write the chain accepts. It is not read.
         if self.commit_reveal is None:
             if commit_reveal is not COMMIT_REVEAL_ENABLED:
+                # The chain refuses a plain weight call while commit-reveal is
+                # on. The refusal names both ways out: the subnet owner's
+                # command, and this host's opt-in. bittensor-cli 9.23.2
+                # `sudo set` takes the hyperparameter as `--param` (or
+                # `--parameter`); `--name` is its alias for `--wallet-name`.
                 raise DirectValidatorError(
-                    "SN94 commit-reveal policy blocks direct writes"
+                    f"subnet {self.netuid} has commit_reveal_weights_enabled "
+                    "set, and this validator is not opted in to timelocked "
+                    "commits, so nothing was signed. The subnet owner turns it "
+                    f"off with `btcli sudo set --netuid {self.netuid} "
+                    "--param commit_reveal_weights_enabled --value false`, and "
+                    "the validator writes on its next cycle after that. "
+                    f"Otherwise the operator opts in with {COMMIT_REVEAL_OPT_IN_ENV} "
+                    '(docs/AUTO_UPDATE.md "Commit-reveal subnets")'
                 )
         elif commit_reveal is not True:
             # The opt-in names the chain policy the operator expects. A chain
@@ -2419,7 +2472,7 @@ class DirectWeightWriter:
                 f"block {consumed} without applying its weights; nothing was "
                 "written. The chain refused the revealed vector (stake, permit, "
                 "version key or payload) or its drand pulse never arrived. "
-                "Investigate before starting the service again."
+                f"{_REVEAL_NOT_APPLIED_ACTION}"
             )
         heads, remapped = proof
         last["status"] = STATUS_REVEALED
@@ -2648,6 +2701,12 @@ class DirectWeightWriter:
             state = self._read_state()
             pending = self._pending(state)
             if pending is None:
+                # A REVEAL_NOT_APPLIED stop persists across restarts: it is
+                # raised again on every start until the record command moves
+                # it on, as a finalized_failed pending intent is.
+                stop = _reveal_not_applied_stop(state)
+                if stop is not None:
+                    raise stop
                 # Only a proven timelocked commit has anything left to prove;
                 # for every other journal this returns None exactly as before.
                 return self._resolve_reveal(state)
@@ -2730,6 +2789,10 @@ class DirectWeightWriter:
         A node that cannot serve that history raises
         ``FailedWriteHistoryUnreadable`` instead of a refusal, also with the
         journal unchanged.
+
+        The same command clears the other stop the validator never clears by
+        itself: a ``REVEAL_NOT_APPLIED`` last attempt, which
+        ``_reveal_not_applied_record`` records as reviewed.
         """
 
         try:
@@ -2758,6 +2821,8 @@ class DirectWeightWriter:
         if pending is None:
             last = state.get("last_attempt")
             last_status = last.get("status") if isinstance(last, dict) else None
+            if last_status == STATUS_REVEAL_NOT_APPLIED:
+                return self._reveal_not_applied_record(state, last)
             raise FailedWriteRecordRefused(
                 f"journal has no pending intent (last attempt: {last_status})"
             )
@@ -2808,6 +2873,79 @@ class DirectWeightWriter:
             "block_hash": proof["block_hash"],
             "extrinsic_index": proof["extrinsic_index"],
             "dispatch_error": proof["dispatch_error"],
+        }
+        return state, record
+
+    def _reveal_not_applied_record(
+        self, state: dict[str, Any], last: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Record a ``REVEAL_NOT_APPLIED`` stop as reviewed, or refuse.
+
+        The validator proved the stop from finalized state when it wrote it:
+        the exact commit stored through one block and gone at the next, with
+        no ``TimelockedWeightsRevealed`` for this hotkey in that block. The
+        chain never reveals a commit it no longer holds, so nothing of this
+        attempt can still land, and recording it cannot double-write. The
+        stop exists so that an operator looks before another commit is
+        signed. This record is that operator's explicit step, so it reads no
+        chain history; by the time an operator acts, a pruning node no longer
+        serves those blocks anyway. It validates the journaled attempt in
+        full, for this writer's signer and netuid, and changes only the
+        status to ``REVEAL_NOT_APPLIED_RECORDED``: the proof, intent and
+        anchor stay, so the anchor keeps fencing reuse.
+        """
+
+        intent = last.get("intent")
+        if not isinstance(intent, dict) or intent.get("validator_hotkey") != str(
+            getattr(self.keypair, "ss58_address", "")
+        ):
+            raise FailedWriteRecordRefused("stopped attempt names another signer")
+        identity = last.get("identity")
+        receipt = last.get("receipt")
+        reveal = last.get("reveal")
+        outcome = reveal.get("outcome") if isinstance(reveal, dict) else None
+        if (
+            set(last) != _COMMITTED_ATTEMPT_FIELDS
+            or not isinstance(identity, dict)
+            or _attempt_id(identity, intent) != last.get("attempt_id")
+            or not isinstance(receipt, dict)
+            or receipt.get("status") != STATUS_COMMITTED
+            or receipt.get("attempt_id") != last.get("attempt_id")
+            or receipt.get("extrinsic_hash") != intent.get("extrinsic_hash")
+            or not _plain_nonnegative(receipt.get("block_number"))
+            or not isinstance(reveal, dict)
+            or set(reveal) != _REVEAL_FIELDS
+            or not _plain_nonnegative(reveal["commit_epoch"])
+            or not _plain_nonnegative(reveal["present_through_block"])
+            or not isinstance(outcome, dict)
+            or set(outcome) != {"applied", "consumed_block", "consumed_block_hash"}
+            or outcome["applied"] is not False
+            or not _plain_nonnegative(outcome["consumed_block"])
+            or not (
+                receipt["block_number"]
+                <= reveal["present_through_block"]
+                < outcome["consumed_block"]
+            )
+        ):
+            raise FailedWriteRecordRefused("stopped timelocked attempt is malformed")
+        # The journaled commit, rebuilt for this writer's netuid, and its
+        # signer identity must still be exactly what was signed.
+        extrinsic_hash, _era_reference, _period = self._signed_intent(last)
+        if _commit_reveal_document(intent) is None:
+            raise FailedWriteRecordRefused(
+                "stopped attempt carries no timelocked commit"
+            )
+        self._confirmation_contract(last)
+        consumed_hash = _canonical_hash(
+            outcome["consumed_block_hash"], label="consumed block"
+        )
+        last["status"] = STATUS_REVEAL_NOT_APPLIED_RECORDED
+        record = {
+            "status": STATUS_REVEAL_NOT_APPLIED_RECORDED,
+            "attempt_id": last["attempt_id"],
+            "extrinsic_hash": extrinsic_hash,
+            "consumed_block": outcome["consumed_block"],
+            "consumed_block_hash": consumed_hash,
         }
         return state, record
 
@@ -3005,6 +3143,11 @@ class DirectWeightWriter:
                 raise DirectSubmissionAmbiguous(
                     "a prior signed direct intent must be recovered first"
                 )
+            # Nothing is signed, commit or plain, over a REVEAL_NOT_APPLIED
+            # stop the operator has not recorded.
+            stop = _reveal_not_applied_stop(state)
+            if stop is not None:
+                raise stop
             last_attempt = state.get("last_attempt")
             if (
                 isinstance(last_attempt, dict)
@@ -3252,6 +3395,7 @@ __all__ = [
     "STATUS_RECOVERED",
     "STATUS_REVEALED",
     "STATUS_REVEAL_NOT_APPLIED",
+    "STATUS_REVEAL_NOT_APPLIED_RECORDED",
     "STATUS_REVEAL_UNPROVEN",
     "bound_rpc_waits",
     "canonical_state_path",
