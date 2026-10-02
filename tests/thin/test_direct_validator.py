@@ -1063,8 +1063,10 @@ def test_commit_reveal_refusal_names_the_owner_command_before_signing(
     assert "No change on this host fixes it" in message
     assert (
         f"`btcli sudo set --netuid {NETUID} "
-        "--name commit_reveal_weights_enabled --value false`"
+        "--param commit_reveal_weights_enabled --value false`"
     ) in message
+    # `--name` is btcli's alias for `--wallet-name`, not the hyperparameter.
+    assert "--name" not in message
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
     assert not instance.state_path.exists()
