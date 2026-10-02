@@ -633,7 +633,9 @@ def _tdx_measurement_summary(
         # The v2 image identities (cathedral-sandbox docs/MRTD.md), the values
         # to list on a provider that sets MROWNER per VM. Present only when
         # the pinned verifier emits them.
-        ranked_images = sorted(image_counts.items(), key=lambda item: (-item[1], item[0]))
+        ranked_images = sorted(
+            image_counts.items(), key=lambda item: (-item[1], item[0])
+        )
         reported_images = ranked_images[:MAX_REPORTED_TDX_MEASUREMENTS]
         summary["observed_images"] = {
             image: {"allowed": tdx_policy.admits(None, image), "machines": machines}

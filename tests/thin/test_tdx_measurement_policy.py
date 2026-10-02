@@ -885,7 +885,11 @@ def test_a_policy_may_list_image_identities(tmp_path):
             load_tdx_measurement_policy(
                 _policy_file(
                     tmp_path,
-                    {"schema": POLICY_SCHEMA, "mode": "shadow", "allowed_measurements": [junk]},
+                    {
+                        "schema": POLICY_SCHEMA,
+                        "mode": "shadow",
+                        "allowed_measurements": [junk],
+                    },
                 )
             )
 
@@ -987,10 +991,14 @@ def test_enforce_refuses_an_unlisted_image(monkeypatch, tmp_path):
     assert rows[FLEET[1]]["identity_error"] == "tdx_measurement_not_allowed"
 
 
-def test_rows_have_no_image_identity_when_the_verifier_emits_none(monkeypatch, tmp_path):
+def test_rows_have_no_image_identity_when_the_verifier_emits_none(
+    monkeypatch, tmp_path
+):
     rows, _plan, result = _round(monkeypatch, _policy(tmp_path, "shadow"))
     assert all("image_measurement" not in rows[e] for e in FLEET)
-    summary = direct_validator._tdx_measurement_summary(result, _policy(tmp_path, "shadow"))
+    summary = direct_validator._tdx_measurement_summary(
+        result, _policy(tmp_path, "shadow")
+    )
     assert "observed_images" not in summary
 
 

@@ -515,12 +515,18 @@ class ComputeAdapter:
         measurement = tdx_measurement_or_none(result.measurement)
         image = tdx_image_measurement_or_none(result.image_measurement)
         if not result.platform_identity_verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS, None, False, measurement, image
+            )
         try:
             identity = require_stable_platform_id(result.stable_platform_id)
         except ComputeEvidenceError:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
-        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True, measurement, image)
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS, None, False, measurement, image
+            )
+        return QuoteIdentityVerdict(
+            QuoteVerdict.PASS, identity, True, measurement, image
+        )
 
     @staticmethod
     def _validate_quote_inputs(quote: bytes, *, expected_report_data: bytes) -> None:

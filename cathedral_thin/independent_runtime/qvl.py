@@ -270,7 +270,9 @@ class SubprocessQuoteVerifier:
             and claims.get("claims_bound_to_quote") is True
         )
         if not isinstance(stable, str) or platform != stable or not verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS, None, False, measurement, image
+            )
         prefix = "tdx-platform-sha256:"
         if (
             not stable.startswith(prefix)
@@ -280,7 +282,9 @@ class SubprocessQuoteVerifier:
                 for character in stable[len(prefix) :]
             )
         ):
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS, None, False, measurement, image
+            )
         return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True, measurement, image)
 
 

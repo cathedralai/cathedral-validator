@@ -142,7 +142,9 @@ class TdxMeasurementPolicy:
     def enforced(self) -> bool:
         return self.mode == "enforce"
 
-    def admits(self, measurement: str | None, image_measurement: str | None = None) -> bool:
+    def admits(
+        self, measurement: str | None, image_measurement: str | None = None
+    ) -> bool:
         """Whether the v1 measurement or the v2 image identity is listed."""
 
         return any(
