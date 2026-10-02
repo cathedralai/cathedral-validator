@@ -137,7 +137,7 @@ not replace finalized chain verification. The service log is
   `commit-reveal policy blocks direct writes`) means the subnet requires
   commit-reveal weights and this release writes weights directly, so nothing
   was signed. No change on your host fixes it. The subnet owner turns it off
-  with `btcli sudo set --netuid 94 --name commit_reveal_weights_enabled --value false`,
+  with `btcli sudo set --netuid 94 --param commit_reveal_weights_enabled --value false`,
   and the validator writes on its next cycle.
 - `FINALIZED_FAILED_STOPPED` means a weight write was included in a finalized
   block and failed on chain. The validator stops and stays stopped. Clear it
