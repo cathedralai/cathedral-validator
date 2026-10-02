@@ -52,8 +52,14 @@ without the rest of the document.
 
 Pass `--pool-inventory /absolute/path/pool-inventory.json` to the direct
 validator. The directory must exist. The file is replaced atomically, mode
-`0644`, after each proven cycle's weight write. The cycle's log line then
-carries `pool_inventory` with `PUBLISHED` and the `inventory_id`, or `FAILED`.
+`0644`, after each scored cycle's writer attempt. This includes an
+`EXPIRED_WITHOUT_INCLUSION` attempt: the inventory can be published even when
+no weights were written. The cycle's log line then carries `pool_inventory`
+with `PUBLISHED` and the `inventory_id`, or `FAILED`.
+
+The signature authenticates the inventory recorded by this validator. It does
+not prove that the cycle's weights were finalized on chain or independently
+prove the underlying TEE facts.
 
 The installed unit passes no inventory flag. Adding one through the telemetry
 arguments file carries the same hazard as any new flag there: an update
