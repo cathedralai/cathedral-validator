@@ -1074,7 +1074,17 @@ class DirectWeightWriter:
         # `max_weight_limit()`, so a legacy stored value must not refuse a
         # write the chain accepts. It is not read.
         if commit_reveal is not COMMIT_REVEAL_ENABLED:
-            raise DirectValidatorError("SN94 commit-reveal policy blocks direct writes")
+            # The chain refuses a direct weight call while commit-reveal is on,
+            # and no setting on the validator host changes that. Only the
+            # subnet owner can, so the refusal names the owner's command.
+            raise DirectValidatorError(
+                f"subnet {self.netuid} has commit_reveal_weights_enabled set, and "
+                "this release writes weights directly, so nothing was signed. "
+                "No change on this host fixes it. The subnet owner turns it off "
+                f"with `btcli sudo set --netuid {self.netuid} "
+                "--name commit_reveal_weights_enabled --value false`; the "
+                "validator keeps checking and writes on its next cycle after that"
+            )
         if mechanism_count <= MECID:
             raise DirectValidatorError("SN94 mechanism 0 is unavailable")
         if version_key != 0 and VERSION_KEY < version_key:

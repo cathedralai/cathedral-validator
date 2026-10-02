@@ -226,6 +226,13 @@ not replace finalized chain verification. The service log is
   validator permit, at the latest finalized block, so nothing was written. The
   validator keeps running, checks again every cycle, and starts writing on its
   own once the permit exists. The status summary reports the same result.
+- `NOT_PROVEN` with a service log error that names
+  `commit_reveal_weights_enabled` (earlier releases say
+  `commit-reveal policy blocks direct writes`) means the subnet requires
+  commit-reveal weights and this release writes weights directly, so nothing
+  was signed. No change on your host fixes it. The subnet owner turns it off
+  with `btcli sudo set --netuid 94 --name commit_reveal_weights_enabled --value false`,
+  and the validator writes on its next cycle.
 - `FINALIZED_FAILED_STOPPED` means a weight write was included in a finalized
   block and failed on chain. The validator stops and stays stopped. Clear it
   only with `cathedral-validator record-failed-write`, which proves the
