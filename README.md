@@ -126,8 +126,17 @@ policy:
 ```json
 {"schema": "cathedral_tdx_measurement_policy_v1",
  "mode": "shadow",
- "allowed_measurements": ["tdx-measurement-sha256:<64 hex>"]}
+ "allowed_measurements": ["tdx-image-sha256:<64 hex>"]}
 ```
+
+Entries are either `tdx-image-sha256:<64 hex>` (the v2 image identity) or
+`tdx-measurement-sha256:<64 hex>` (the v1 launch measurement); a machine
+passes when either of its values is listed. On GCP list the image identity:
+v1 includes MROWNER, which GCP sets per VM, so every new VM of a listed image
+would otherwise fail under `enforce` (cathedral-sandbox#265, docs/MRTD.md).
+The currently pinned TDX verifier release does not emit the image
+identity yet, so under that pin only v1 entries match; the cycle summary
+reports `observed_images` once the pinned verifier emits it.
 
 Generate it from the owner's signed measurement list with cathedral-sandbox's
 `cathedral policy-registry export-measurement-policy` (`--registry`,
