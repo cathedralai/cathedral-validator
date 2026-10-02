@@ -271,10 +271,12 @@ def plan(
     )
 
 
-def test_finalized_snapshot_discovers_all_miners_and_excludes_all_validators() -> None:
+def test_finalized_snapshot_lists_every_serving_uid_but_the_validators_own() -> None:
     graph = Metagraph(
         miners=(MINER_TWO_AXON, MINER_ONE_AXON), include_other_validator=True
     )
+    # This validator's own UID announces an endpoint too. It never scores itself.
+    graph.axons[0] = Axon("7.7.7.7", 8081, serving=True)
 
     observed = finalized_serving_miners_snapshot(
         SnapshotSubtensor(graph), FakeKeypair()
@@ -283,8 +285,30 @@ def test_finalized_snapshot_discovers_all_miners_and_excludes_all_validators() -
     assert observed.block_number == ANCHOR_NUMBER
     assert observed.block_hash == ANCHOR_HASH
     assert observed.validator_uid == 7
-    assert observed.miners == (MINER_ONE_AXON, MINER_TWO_AXON)
-    assert all(miner.hotkey != OTHER_VALIDATOR for miner in observed.miners)
+    # The other permit holder serves, so it is a candidate like any miner:
+    # whether it earns anything is decided by verification, not by its permit.
+    assert observed.miners == (
+        ServingAxon(8, OTHER_VALIDATOR, "9.9.9.9", 8081),
+        MINER_ONE_AXON,
+        MINER_TWO_AXON,
+    )
+    assert all(miner.uid != observed.validator_uid for miner in observed.miners)
+
+
+def test_a_miner_that_holds_a_permit_is_still_a_miner() -> None:
+    # A miner is paid in stake on its own hotkey. Once that stake passes the
+    # chain's threshold the miner holds a validator permit, without ever
+    # setting a weight. On the 2026-09-30 testnet rehearsal this happened one
+    # epoch after the miner's first payout, and the validator then found "no
+    # serving miner" and stopped writing.
+    graph = Metagraph(miners=(MINER_ONE_AXON,))
+    graph.validator_permit[graph.uids.index(MINER_ONE_AXON.uid)] = True
+
+    observed = finalized_serving_miners_snapshot(
+        SnapshotSubtensor(graph), FakeKeypair()
+    )
+
+    assert observed.miners == (MINER_ONE_AXON,)
 
 
 def test_finalized_snapshot_skips_private_miner_without_losing_healthy_miner() -> None:
