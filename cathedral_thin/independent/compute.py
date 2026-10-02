@@ -140,6 +140,11 @@ class QuoteIdentityVerdict:
     # The verifier's TD measurement (``tdx-measurement-sha256:<64 hex>``) on a
     # PASS, for an owner allowlist to judge. None when absent or malformed.
     measurement: str | None = None
+    # The verifier's v2 image identity (``tdx-image-sha256:<64 hex>``,
+    # cathedral-sandbox docs/MRTD.md) on a PASS. It leaves out MROWNER, which
+    # GCP sets per VM. None when the pinned verifier predates it or it is
+    # malformed.
+    image_measurement: str | None = None
 
 
 @runtime_checkable
@@ -153,8 +158,9 @@ class QuoteIdentityVerifier(Protocol):
     ) -> QuoteIdentityVerdict: ...
 
 
-def tdx_measurement_or_none(value: object) -> str | None:
-    prefix = "tdx-measurement-sha256:"
+def tdx_measurement_or_none(
+    value: object, prefix: str = "tdx-measurement-sha256:"
+) -> str | None:
     if (
         isinstance(value, str)
         and value.startswith(prefix)
@@ -163,6 +169,10 @@ def tdx_measurement_or_none(value: object) -> str | None:
     ):
         return value
     return None
+
+
+def tdx_image_measurement_or_none(value: object) -> str | None:
+    return tdx_measurement_or_none(value, "tdx-image-sha256:")
 
 
 def require_stable_platform_id(value: object) -> str:
@@ -503,13 +513,14 @@ class ComputeAdapter:
         if result.verdict is not QuoteVerdict.PASS:
             return QuoteIdentityVerdict(result.verdict, None, False)
         measurement = tdx_measurement_or_none(result.measurement)
+        image = tdx_image_measurement_or_none(result.image_measurement)
         if not result.platform_identity_verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
         try:
             identity = require_stable_platform_id(result.stable_platform_id)
         except ComputeEvidenceError:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
-        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True, measurement)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, identity, True, measurement, image)
 
     @staticmethod
     def _validate_quote_inputs(quote: bytes, *, expected_report_data: bytes) -> None:

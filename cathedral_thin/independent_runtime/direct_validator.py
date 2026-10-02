@@ -592,10 +592,14 @@ def _tdx_measurement_summary(
         if row.get("measurement_policy_digest") == tdx_policy.digest
     ]
     counts: dict[str, int] = {}
+    image_counts: dict[str, int] = {}
     for row in judged:
         measurement = row.get("measurement")
         if isinstance(measurement, str):
             counts[measurement] = counts.get(measurement, 0) + 1
+        image = row.get("image_measurement")
+        if isinstance(image, str):
+            image_counts[image] = image_counts.get(image, 0) + 1
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     reported = ranked[:MAX_REPORTED_TDX_MEASUREMENTS]
     summary: dict[str, object] = {
@@ -610,13 +614,32 @@ def _tdx_measurement_summary(
         ),
         "observed": {
             measurement: {
-                "allowed": tdx_policy.admits(measurement),
+                # A machine is admitted by its v1 value or its v2 image
+                # identity, so a v1 value counts as allowed when any machine
+                # reporting it was.
+                "allowed": tdx_policy.admits(measurement)
+                or any(
+                    row.get("measurement") == measurement
+                    and row.get("measurement_allowed") is True
+                    for row in judged
+                ),
                 "machines": machines,
             }
             for measurement, machines in sorted(reported)
         },
         "observed_omitted": len(ranked) - len(reported),
     }
+    if image_counts:
+        # The v2 image identities (cathedral-sandbox docs/MRTD.md), the values
+        # to list on a provider that sets MROWNER per VM. Present only when
+        # the pinned verifier emits them.
+        ranked_images = sorted(image_counts.items(), key=lambda item: (-item[1], item[0]))
+        reported_images = ranked_images[:MAX_REPORTED_TDX_MEASUREMENTS]
+        summary["observed_images"] = {
+            image: {"allowed": tdx_policy.admits(None, image), "machines": machines}
+            for image, machines in sorted(reported_images)
+        }
+        summary["observed_images_omitted"] = len(ranked_images) - len(reported_images)
     if tdx_policy.registry_release is not None:
         summary["registry_release"] = tdx_policy.registry_release
     return summary

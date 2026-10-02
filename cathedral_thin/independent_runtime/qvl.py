@@ -25,6 +25,7 @@ from pathlib import Path
 from cathedral_thin.independent.compute import (
     QuoteIdentityVerdict,
     QuoteVerdict,
+    tdx_image_measurement_or_none,
     tdx_measurement_or_none,
 )
 
@@ -260,6 +261,7 @@ class SubprocessQuoteVerifier:
         if verdict is not QuoteVerdict.PASS or claims is None:
             return QuoteIdentityVerdict(verdict, None, False)
         measurement = tdx_measurement_or_none(claims.get("measurement"))
+        image = tdx_image_measurement_or_none(claims.get("image_measurement"))
         stable = claims.get("stable_platform_id")
         platform = claims.get("platform_id")
         verified = (
@@ -268,7 +270,7 @@ class SubprocessQuoteVerifier:
             and claims.get("claims_bound_to_quote") is True
         )
         if not isinstance(stable, str) or platform != stable or not verified:
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
         prefix = "tdx-platform-sha256:"
         if (
             not stable.startswith(prefix)
@@ -278,8 +280,8 @@ class SubprocessQuoteVerifier:
                 for character in stable[len(prefix) :]
             )
         ):
-            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement)
-        return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True, measurement)
+            return QuoteIdentityVerdict(QuoteVerdict.PASS, None, False, measurement, image)
+        return QuoteIdentityVerdict(QuoteVerdict.PASS, stable, True, measurement, image)
 
 
 def _load_pinned_verifier(

@@ -314,7 +314,9 @@ def _collect_candidate(
                 row["verdict"] = identity.verdict.value
                 verdict_pass = identity.verdict is QuoteVerdict.PASS
                 if tdx_policy is not None and verdict_pass:
-                    allowed = tdx_policy.admits(identity.measurement)
+                    allowed = tdx_policy.admits(
+                        identity.measurement, identity.image_measurement
+                    )
                     row.update(
                         {
                             "measurement": identity.measurement,
@@ -323,6 +325,10 @@ def _collect_candidate(
                             "measurement_policy_digest": tdx_policy.digest,
                         }
                     )
+                    # Only when the pinned verifier emits it, so rows under a
+                    # verifier without the v2 identity are unchanged.
+                    if identity.image_measurement is not None:
+                        row["image_measurement"] = identity.image_measurement
                     if not allowed and tdx_policy.enforced:
                         # A genuine TD running an image the owner has not
                         # admitted: the quote is fine, the workload is not.

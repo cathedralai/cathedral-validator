@@ -44,6 +44,7 @@ from cathedral_thin.independent_runtime.tdx_measurement import (
     TDX_MEASUREMENT_POLICY_ENV,
     TdxMeasurementPolicyError,
     load_tdx_measurement_policy,
+    reference_image_measurement,
     reference_measurement,
 )
 
@@ -864,3 +865,142 @@ def test_moving_the_verifier_pin_requires_rechecking_the_measurement():
     # checked against the contract vector or a known quote, then
     # MEASUREMENT_CONTRACT_QVL_DIGEST moved with it.
     assert MEASUREMENT_CONTRACT_QVL_DIGEST == DIRECT_VALIDATOR_QVL_DIGEST
+
+
+# -- the v2 image identity (cathedral-sandbox #265) ----------------------------
+
+IMAGE = "tdx-image-sha256:" + "3" * 64
+OTHER_IMAGE = "tdx-image-sha256:" + "4" * 64
+
+
+def test_a_policy_may_list_image_identities(tmp_path):
+    policy = _policy(tmp_path, "enforce", (IMAGE, GOOD))
+    assert policy.allowed_measurements == frozenset({IMAGE, GOOD})
+    # v1 or v2 admits; neither does not.
+    assert policy.admits(GOOD) and policy.admits(BAD, IMAGE)
+    assert policy.admits(None, IMAGE)
+    assert not policy.admits(BAD, OTHER_IMAGE) and not policy.admits(None, None)
+    for junk in (IMAGE.upper(), IMAGE + "0", "tdx-image-sha256:" + "3" * 63):
+        with pytest.raises(TdxMeasurementPolicyError):
+            load_tdx_measurement_policy(
+                _policy_file(
+                    tmp_path,
+                    {"schema": POLICY_SCHEMA, "mode": "shadow", "allowed_measurements": [junk]},
+                )
+            )
+
+
+def test_the_pinned_verifier_output_carries_the_image_identity(tmp_path):
+    stable = "tdx-platform-sha256:" + "a" * 64
+    claims = {
+        "intel_verified": True,
+        "report_data_match": True,
+        "stable_platform_id": stable,
+        "platform_id": stable,
+        "platform_identity_kind": "stable",
+        "platform_identity_verified": True,
+        "claims_bound_to_quote": True,
+        "measurement": GOOD,
+        "image_measurement": IMAGE,
+    }
+    verifier = SubprocessQuoteVerifier(fd_verifier_script(tmp_path, claims))
+    result = verifier.verify_with_identity(b"quote", expected_report_data=b"r" * 64)
+    assert (result.measurement, result.image_measurement) == (GOOD, IMAGE)
+    # A verifier from before the v2 identity, or a malformed value: None.
+    for junk in (None, IMAGE.upper(), GOOD, IMAGE + "\n", 7):
+        if junk is None:
+            claims.pop("image_measurement", None)
+        else:
+            claims["image_measurement"] = junk
+        verifier = SubprocessQuoteVerifier(fd_verifier_script(tmp_path, claims))
+        result = verifier.verify_with_identity(b"quote", expected_report_data=b"r" * 64)
+        assert result.verdict is QuoteVerdict.PASS and result.image_measurement is None
+        assert result.measurement == GOOD
+
+
+def test_the_adapter_keeps_the_image_identity():
+    class Verifier:
+        def verify(self, quote, *, expected_report_data):
+            return QuoteVerdict.PASS
+
+        def verify_with_identity(
+            self, quote, *, expected_report_data, deadline_monotonic=None
+        ):
+            return QuoteIdentityVerdict(
+                QuoteVerdict.PASS, "tdx-platform-sha256:" + "b" * 64, True, GOOD, IMAGE
+            )
+
+    adapter = ComputeAdapter(
+        Verifier(), collateral_base_url=INTEL_COLLATERAL, qvl_digest="a" * 64
+    )
+    result = adapter.verify_quote_with_identity(
+        b"q" * 64, expected_report_data=b"r" * 64
+    )
+    assert (result.measurement, result.image_measurement) == (GOOD, IMAGE)
+
+
+class _ImageVerifier(fd._Verifier):
+    """Two VMs from one image: GCP sets MROWNER per VM, so their v1 values
+    differ (neither listed) while their v2 image identity is the same."""
+
+    def verify_with_identity(
+        self, quote, *, expected_report_data, deadline_monotonic=None
+    ):
+        marker = quote[-1]
+        return QuoteIdentityVerdict(
+            QuoteVerdict.PASS,
+            "tdx-platform-sha256:" + f"{marker:064x}",
+            True,
+            "tdx-measurement-sha256:" + f"{marker + 16:064x}",
+            {1: IMAGE, 2: IMAGE}.get(marker, OTHER_IMAGE),
+        )
+
+
+def test_enforce_pays_every_vm_of_a_listed_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        _MeasuringVerifier, "verify_with_identity", _ImageVerifier.verify_with_identity
+    )
+    policy = _policy(tmp_path, "enforce", (IMAGE,))
+    rows, plan, result = _round(monkeypatch, policy)
+    assert plan.raw_scores == ((fd.BOB_AXON.uid, 2),)
+    for endpoint in FLEET:
+        assert rows[endpoint]["measurement_allowed"] is True
+        assert rows[endpoint]["image_measurement"] == IMAGE
+        assert rows[endpoint]["verdict"] == QuoteVerdict.PASS.value
+    summary = direct_validator._tdx_measurement_summary(result, policy)
+    assert summary["observed_images"] == {IMAGE: {"allowed": True, "machines": 2}}
+    assert all(entry["allowed"] for entry in summary["observed"].values())
+
+
+def test_enforce_refuses_an_unlisted_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        _MeasuringVerifier, "verify_with_identity", _ImageVerifier.verify_with_identity
+    )
+    # Marker 1 is listed by its v1 value; marker 2 has only its image, unlisted.
+    first_v1 = "tdx-measurement-sha256:" + f"{1 + 16:064x}"
+    rows, plan, _result = _round(
+        monkeypatch, _policy(tmp_path, "enforce", (first_v1, OTHER_IMAGE))
+    )
+    assert plan.raw_scores == ((fd.BOB_AXON.uid, 1),)
+    assert rows[FLEET[0]]["measurement_allowed"] is True
+    assert rows[FLEET[1]]["verdict"] == QuoteVerdict.FAIL.value
+    assert rows[FLEET[1]]["identity_error"] == "tdx_measurement_not_allowed"
+
+
+def test_rows_have_no_image_identity_when_the_verifier_emits_none(monkeypatch, tmp_path):
+    rows, _plan, result = _round(monkeypatch, _policy(tmp_path, "shadow"))
+    assert all("image_measurement" not in rows[e] for e in FLEET)
+    summary = direct_validator._tdx_measurement_summary(result, _policy(tmp_path, "shadow"))
+    assert "observed_images" not in summary
+
+
+def test_the_image_formula_matches_the_verifiers_contract_vector():
+    # cathedral-sandbox cmd/cathedral-tdx-verifier/image_identity_test.go,
+    # TestImageMeasurementMatchesPythonContractVector.
+    fields = (b"T" * 8, b"X" * 8, b"M" * 48, b"0" * 48, b"1" * 48, b"2" * 48, b"3" * 48)
+    assert reference_image_measurement(fields) == (
+        "tdx-image-sha256:"
+        "5c1e249b50fa545864ca0f4e3f58c7c40114fb4afa7e59ac79714f9c5bb3856c"
+    )
+    with pytest.raises(ValueError):
+        reference_image_measurement(fields[:-1])

@@ -25,6 +25,16 @@ a Docker install doing exactly that). RTMR3 follows what the guest extends at
 runtime. So a miner who patches their own guest drops out under enforce until
 the new value is listed; start in shadow mode and list what the fleet reports.
 
+The policy may list either of the pinned verifier's two values: the v1
+``tdx-measurement-sha256`` measurement above, or the v2
+``tdx-image-sha256`` image identity (``image_measurement``; cathedral-sandbox
+docs/MRTD.md, "Image identity"), a SHA-256 over TD attributes, XFAM, MRTD and
+RTMR0-3 only. v1 includes MROWNER, which GCP sets per VM, so two honest VMs
+from one image have different v1 values there and only a v2 entry lists the
+image (cathedral-sandbox #265). A machine is admitted when its v1 value or its
+v2 value is listed. A verifier release from before the v2 identity emits no
+``image_measurement``, so under such a pin v2 entries admit nothing.
+
 The measurement is the pinned verifier's formula (``reference_measurement``
 below). Every allowlist entry depends on it, so a new verifier pin must be
 checked to produce the same values before it replaces
@@ -59,7 +69,8 @@ POLICY_SCHEMA = "cathedral_tdx_measurement_policy_v1"
 TDX_MEASUREMENT_POLICY_ENV = "CATHEDRAL_TDX_MEASUREMENT_POLICY"
 MAX_POLICY_BYTES = 128 * 1024
 MODES = ("shadow", "enforce")
-MEASUREMENT = re.compile(r"tdx-measurement-sha256:[0-9a-f]{64}")
+# A v1 launch measurement or a v2 image identity.
+MEASUREMENT = re.compile(r"tdx-(?:measurement|image)-sha256:[0-9a-f]{64}")
 # The optional env file the unit reads. A bootstrap from before the policy
 # existed has no EnvironmentFile line for it (docs/AUTO_UPDATE.md), so startup
 # says when this file exists but the variable is unset.
@@ -75,6 +86,7 @@ MEASUREMENT_CONTRACT_QVL_DIGEST = (
     "4b6fbaf12def5e4284b54f557c5c29e472d7666f0160a11a5472fdcf462db148"
 )
 MEASUREMENT_DOMAIN = b"cathedral-tdx-measurement-v1\0"
+IMAGE_MEASUREMENT_DOMAIN = b"cathedral-tdx-image-v1\0"
 
 
 _FIELD_LENGTHS = (8, 8, 48, 48, 48, 48, 48, 48, 48, 48)
@@ -93,6 +105,22 @@ def reference_measurement(fields: tuple[bytes, ...]) -> str:
         raise ValueError("a TDX measurement needs the ten fields at their lengths")
     digest = hashlib.sha256(MEASUREMENT_DOMAIN + b"".join(fields)).hexdigest()
     return "tdx-measurement-sha256:" + digest
+
+
+_IMAGE_FIELD_LENGTHS = (8, 8, 48, 48, 48, 48, 48)
+
+
+def reference_image_measurement(fields: tuple[bytes, ...]) -> str:
+    """The verifier's v2 image identity over TD_ATTRIBUTES, XFAM, MRTD and
+    RTMR0-3, in that order (sandbox docs/MRTD.md, "Image identity").
+
+    Reference only, like :func:`reference_measurement`.
+    """
+
+    if tuple(len(field) for field in fields) != _IMAGE_FIELD_LENGTHS:
+        raise ValueError("a TDX image identity needs the seven fields at their lengths")
+    digest = hashlib.sha256(IMAGE_MEASUREMENT_DOMAIN + b"".join(fields)).hexdigest()
+    return "tdx-image-sha256:" + digest
 
 
 class TdxMeasurementPolicyError(Exception):
@@ -114,8 +142,13 @@ class TdxMeasurementPolicy:
     def enforced(self) -> bool:
         return self.mode == "enforce"
 
-    def admits(self, measurement: str | None) -> bool:
-        return measurement is not None and measurement in self.allowed_measurements
+    def admits(self, measurement: str | None, image_measurement: str | None = None) -> bool:
+        """Whether the v1 measurement or the v2 image identity is listed."""
+
+        return any(
+            value is not None and value in self.allowed_measurements
+            for value in (measurement, image_measurement)
+        )
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -178,7 +211,7 @@ def load_tdx_measurement_policy(path: str | Path) -> TdxMeasurementPolicy:
     ):
         raise TdxMeasurementPolicyError(
             "TDX measurement policy allowed_measurements must be a sorted, unique list "
-            "of tdx-measurement-sha256:<64 hex>"
+            "of tdx-measurement-sha256:<64 hex> or tdx-image-sha256:<64 hex>"
         )
     if document["mode"] == "enforce" and not measurements:
         raise TdxMeasurementPolicyError(
