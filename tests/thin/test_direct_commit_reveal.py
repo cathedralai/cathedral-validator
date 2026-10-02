@@ -32,11 +32,17 @@ from cathedral_thin.independent_runtime.direct_writer import (
     STATUS_CONFIRMED,
     STATUS_EXPIRED,
     STATUS_REVEAL_NOT_APPLIED,
+    STATUS_REVEAL_NOT_APPLIED_RECORDED,
     STATUS_REVEAL_UNPROVEN,
     STATUS_REVEALED,
     DirectCommitNotRevealed,
     DirectSubmissionAmbiguous,
     DirectWeightWriter,
+    FailedWriteRecordRefused,
+)
+from cathedral_thin.independent_runtime.updater import (
+    UpdateRefused,
+    require_idle_direct_writer_journal,
 )
 from tests.thin import test_direct_validator as base
 
@@ -505,11 +511,20 @@ def test_chain_on_without_opt_in_is_refused_exactly_as_before(
         tmp_path, monkeypatch, opt_in=None
     )
 
-    with pytest.raises(
-        DirectValidatorError, match="^SN94 commit-reveal policy blocks direct writes$"
-    ):
+    with pytest.raises(DirectValidatorError) as refused:
         base.submit_before_deadline(instance, planned)
 
+    message = str(refused.value)
+    assert message.startswith(f"subnet {NETUID} has commit_reveal_weights_enabled set")
+    assert "nothing was signed" in message
+    # The owner command names the hyperparameter with `--param`; `--name` is
+    # btcli's alias for `--wallet-name`.
+    assert (
+        f"`btcli sudo set --netuid {NETUID} "
+        "--param commit_reveal_weights_enabled --value false`"
+    ) in message
+    assert "--name" not in message
+    assert cr.COMMIT_REVEAL_OPT_IN_ENV in message
     assert subtensor.substrate.sign_calls == 0
     assert subtensor.substrate.submit_calls == 0
     assert encryptor.calls == []
@@ -677,7 +692,242 @@ def test_commit_consumed_without_its_reveal_is_recorded_and_stops(
         "consumed_block": REVEAL_BLOCK,
         "consumed_block_hash": subtensor.substrate.block_hash(REVEAL_BLOCK),
     }
+    # The stop is not a one-shot: the next recovery raises it again.
+    with pytest.raises(DirectCommitNotRevealed, match="record-failed-write"):
+        instance.recover()
+
+
+def stopped_on_reveal_not_applied(tmp_path: Path, monkeypatch):
+    """Commit, then let the chain consume the commit without applying it."""
+
+    instance, subtensor, planned, encryptor = commit_once(tmp_path, monkeypatch)
+    chain = subtensor.substrate.chain
+    chain.reveal_block = REVEAL_BLOCK
+    chain.reveal_applied = False
+    subtensor.substrate.finalized_number = REVEAL_BLOCK + 3
+    with pytest.raises(DirectCommitNotRevealed, match="without applying"):
+        instance.recover()
+    assert journal(instance)["last_attempt"]["status"] == STATUS_REVEAL_NOT_APPLIED
+    return instance, subtensor, planned, encryptor
+
+
+def test_reveal_not_applied_survives_a_restart_and_blocks_every_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned, encryptor = stopped_on_reveal_not_applied(
+        tmp_path, monkeypatch
+    )
+    substrate = subtensor.substrate
+    stopped = instance.state_path.read_bytes()
+    reads = list(substrate.chain.raw_reads)
+    # Much later, past every block the reveal search read.
+    substrate.finalized_number = REVEAL_BLOCK + 500
+
+    # A restarted process, opted in or not, finds the same stop on recovery
+    # and refuses to sign anything, commit or plain.
+    restarted, _subtensor, _planned, restarted_encryptor = cr_writer(
+        tmp_path, monkeypatch
+    )
+    restarted.subtensor = subtensor
+    plain = DirectWeightWriter(
+        subtensor=subtensor,
+        keypair=base.FakeKeypair(),
+        call_builder=lambda _kwargs: "direct-call",
+    )
+    for writer_object in (instance, restarted, plain):
+        assert writer_object.state_path == instance.state_path
+        with pytest.raises(DirectCommitNotRevealed, match="REVEAL_NOT_APPLIED"):
+            writer_object.recover()
+        with pytest.raises(DirectCommitNotRevealed, match="record-failed-write"):
+            base.submit_before_deadline(writer_object, planned)
+
+    assert substrate.sign_calls == substrate.submit_calls == 1
+    assert len(encryptor.calls) == 1
+    assert restarted_encryptor.calls == []
+    # The stop reads nothing more from the chain and leaves the journal as is.
+    assert substrate.chain.raw_reads == reads
+    assert instance.state_path.read_bytes() == stopped
+    # The updater, which would restart the service, refuses as it does for a
+    # pending finalized_failed write.
+    with pytest.raises(UpdateRefused, match="REVEAL_NOT_APPLIED"):
+        require_idle_direct_writer_journal(instance.state_path)
+    tool = base._status_tool()
+    last = journal(instance)["last_attempt"]
+    assert tool._last_attempt_summary(last, expected_identity=VALIDATOR) == (
+        STATUS_REVEAL_NOT_APPLIED,
+        REVEAL_BLOCK,
+    )
+
+
+def test_record_failed_write_clears_a_reveal_not_applied_stop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned, _encryptor = stopped_on_reveal_not_applied(
+        tmp_path, monkeypatch
+    )
+    substrate = subtensor.substrate
+    stopped = journal(instance)
+    reads = list(substrate.chain.raw_reads)
+
+    # Another signer's command never touches this journal.
+    class OtherKeypair:
+        ss58_address = "5OtherValidator"
+
+    other = DirectWeightWriter(subtensor=subtensor, keypair=OtherKeypair())
+    other.state_path = instance.state_path
+    with pytest.raises(FailedWriteRecordRefused, match="another signer"):
+        other.record_finalized_failure()
+    # Nor does it run while the validator holds its locks.
+    for held in (instance.cycle_locked, instance.process_locked):
+        with held():
+            with pytest.raises(FailedWriteRecordRefused, match="lock"):
+                instance.record_finalized_failure()
+    assert journal(instance) == stopped
+
+    record = instance.record_finalized_failure()
+
+    assert record == {
+        "status": STATUS_REVEAL_NOT_APPLIED_RECORDED,
+        "attempt_id": stopped["last_attempt"]["attempt_id"],
+        "extrinsic_hash": stopped["last_attempt"]["intent"]["extrinsic_hash"],
+        "consumed_block": REVEAL_BLOCK,
+        "consumed_block_hash": substrate.block_hash(REVEAL_BLOCK),
+    }
+    recorded = journal(instance)
+    # Only the status moved; the proof, the intent and the anchor stay.
+    expected = json.loads(json.dumps(stopped))
+    expected["last_attempt"]["status"] = STATUS_REVEAL_NOT_APPLIED_RECORDED
+    assert recorded == expected
+    assert substrate.chain.raw_reads == reads
+    assert substrate.sign_calls == substrate.submit_calls == 1
+
+    # Cleared: recovery has nothing left to prove, the updater goes ahead,
+    # and submit gets past the stop to the anchor fence the record kept.
     assert instance.recover() is None
+    require_idle_direct_writer_journal(instance.state_path)
+    with pytest.raises(DirectValidatorError, match="already attempted this"):
+        base.submit_before_deadline(instance, planned)
+    assert substrate.sign_calls == 1
+    tool = base._status_tool()
+    assert tool._last_attempt_summary(
+        recorded["last_attempt"], expected_identity=VALIDATOR
+    ) == (STATUS_REVEAL_NOT_APPLIED_RECORDED, REVEAL_BLOCK)
+    # A second record finds nothing to clear.
+    with pytest.raises(FailedWriteRecordRefused, match="no pending intent"):
+        instance.record_finalized_failure()
+    assert journal(instance) == recorded
+
+
+def test_record_refuses_a_tampered_reveal_not_applied_stop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, _subtensor, _planned, _encryptor = stopped_on_reveal_not_applied(
+        tmp_path, monkeypatch
+    )
+    stopped = journal(instance)
+    for tamper in (
+        lambda last: last["reveal"]["outcome"].update(applied=True),
+        lambda last: last["reveal"]["outcome"].update(
+            consumed_block=last["reveal"]["present_through_block"]
+        ),
+        lambda last: last["receipt"].update(status=STATUS_CONFIRMED),
+        lambda last: last["intent"]["kwargs"].update(netuid=NETUID + 1),
+        lambda last: last.pop("reveal"),
+    ):
+        document = json.loads(json.dumps(stopped))
+        tamper(document["last_attempt"])
+        instance.state_path.write_text(json.dumps(document), encoding="ascii")
+        before = instance.state_path.read_bytes()
+        with pytest.raises(FailedWriteRecordRefused):
+            instance.record_finalized_failure()
+        assert instance.state_path.read_bytes() == before
+        # Tampered or not, the status alone keeps the validator stopped.
+        with pytest.raises(DirectCommitNotRevealed):
+            instance.recover()
+
+
+def test_cli_stops_on_reveal_not_applied_until_the_record_command_clears_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from cathedral_thin.independent_runtime import direct_validator as runtime
+    from cathedral_thin.independent_runtime import failed_write_recovery
+
+    instance, subtensor, planned, _encryptor = stopped_on_reveal_not_applied(
+        tmp_path, monkeypatch
+    )
+    base._cli_with_real_writer(monkeypatch, instance, subtensor, [planned.snapshot])
+    monkeypatch.setattr(
+        runtime, "_notify_ready", lambda: pytest.fail("stopped writer reported ready")
+    )
+
+    # Every start stops before readiness with the never-restarted exit code.
+    for _start in range(2):
+        assert runtime.main(base.VALIDATOR_ARGS) == runtime.EXIT_CONTRADICTION_STOPPED
+        (stop,) = base._lines(capsys)
+        assert stop["status"] == "CONTRADICTION_STOPPED"
+        assert "REVEAL_NOT_APPLIED" in stop["error"]
+        assert "record-failed-write" in stop["error"]
+    assert subtensor.substrate.sign_calls == 1
+
+    # The operator's record command, with its own key-less writer.
+    assert runtime.main(base.RECORD_ARGS) == failed_write_recovery.EXIT_RECORDED
+    (recorded,) = base._lines(capsys)
+    assert (
+        recorded["status"] == failed_write_recovery.STATUS_REVEAL_NOT_APPLIED_RECORDED
+    )
+    assert recorded["consumed_block"] == REVEAL_BLOCK
+    assert journal(instance)["last_attempt"]["status"] == (
+        STATUS_REVEAL_NOT_APPLIED_RECORDED
+    )
+    assert instance.recover() is None
+
+
+def test_status_tool_reports_the_reveal_stop_and_its_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import time
+
+    instance, _subtensor, _planned, _encryptor = stopped_on_reveal_not_applied(
+        tmp_path, monkeypatch
+    )
+    tool = base._status_tool()
+    release = "sha256:" + "1" * 64
+
+    def direct_summary(_identity: str) -> dict[str, Any]:
+        last = journal(instance)["last_attempt"]
+        result, block = tool._last_attempt_summary(last, expected_identity=VALIDATOR)
+        return {
+            "pending": False,
+            "pending_phase": None,
+            "last_result": result,
+            "block_number": block,
+            "recorded_unix": int(time.time()),
+        }
+
+    monkeypatch.setattr(tool, "_systemd_state", lambda *_args: False)
+    monkeypatch.setattr(tool, "_current_release", lambda: release)
+    monkeypatch.setattr(tool, "_release_metadata_summary", lambda _now: None)
+    monkeypatch.setattr(tool, "_release_metadata_warning", lambda _summary: None)
+    monkeypatch.setattr(tool, "_identity", lambda: VALIDATOR)
+    monkeypatch.setattr(
+        tool,
+        "_updater_summary",
+        lambda: {
+            "archive_digest": release,
+            "channel": "stable",
+            "pending_recovery": False,
+        },
+    )
+    monkeypatch.setattr(tool, "_direct_summary", direct_summary)
+
+    report = tool.collect()
+
+    assert report["result"] == "REVEAL_NOT_APPLIED_STOPPED"
+    assert "`cathedral-validator record-failed-write`" in report["action"]
+    assert "Commit-reveal subnets" in report["action"]
+
+    instance.record_finalized_failure()
+    assert tool.collect()["result"] == "NEEDS_REVIEW"
 
 
 def test_unreadable_recent_history_during_the_reveal_search_changes_nothing(

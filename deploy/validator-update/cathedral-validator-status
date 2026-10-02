@@ -46,9 +46,18 @@ _FINALIZED_FAILED = "FINALIZED_FAILED"
 _COMMITTED = "COMMITTED"
 _REVEALED = "REVEALED_CONFIRMED"
 _REVEAL_NOT_APPLIED = "REVEAL_NOT_APPLIED"
+# Written only by `record-failed-write` over a REVEAL_NOT_APPLIED stop; the
+# reveal record is unchanged.
+_REVEAL_NOT_APPLIED_RECORDED = "REVEAL_NOT_APPLIED_RECORDED"
 _REVEAL_UNPROVEN = "REVEAL_UNPROVEN"
 _COMMIT_REVEAL_RESULTS = frozenset(
-    {_COMMITTED, _REVEALED, _REVEAL_NOT_APPLIED, _REVEAL_UNPROVEN}
+    {
+        _COMMITTED,
+        _REVEALED,
+        _REVEAL_NOT_APPLIED,
+        _REVEAL_NOT_APPLIED_RECORDED,
+        _REVEAL_UNPROVEN,
+    }
 )
 _COMMIT_REVEAL_CALL = "SubtensorModule.commit_timelocked_mechanism_weights"
 _TERMINAL_RESULTS = (
@@ -79,6 +88,16 @@ _FINALIZED_FAILED_ACTION = (
     "`cathedral-validator record-failed-write` as the validator user, as "
     'docs/AUTO_UPDATE.md "Failed weight write" shows. It proves the failure '
     "from finalized chain state before it records anything. Then start "
+    "cathedral-validator-direct.service."
+)
+_REVEAL_NOT_APPLIED_STOPPED = "REVEAL_NOT_APPLIED_STOPPED"
+_REVEAL_NOT_APPLIED_ACTION = (
+    "A timelocked commit was consumed on chain without applying its weights, "
+    "and the validator stopped. Nothing was written. The journal keeps it "
+    "stopped and updates refuse. Do not delete or edit the journal. Find the "
+    "cause (permit, stake, version key, drand), then run "
+    "`cathedral-validator record-failed-write` as the validator user, as "
+    'docs/AUTO_UPDATE.md "Commit-reveal subnets" shows. Then start '
     "cathedral-validator-direct.service."
 )
 _ELIGIBILITY_RESULTS = frozenset({"NO_PERMIT", "NOT_REGISTERED"})
@@ -782,6 +801,11 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
     if direct["pending_phase"] == _PHASE_FINALIZED_FAILED:
         report["result"] = _FINALIZED_FAILED_STOPPED
         report["action"] = _FINALIZED_FAILED_ACTION
+    elif direct["last_result"] == _REVEAL_NOT_APPLIED and not direct["pending"]:
+        # The same kind of stop with no pending intent: only the record
+        # command clears it, so it outranks every state below.
+        report["result"] = _REVEAL_NOT_APPLIED_STOPPED
+        report["action"] = _REVEAL_NOT_APPLIED_ACTION
     elif not report["service_active"]:
         report["result"] = "NEEDS_REVIEW"
         report["action"] = (
