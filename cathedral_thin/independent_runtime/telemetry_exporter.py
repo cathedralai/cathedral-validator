@@ -177,7 +177,43 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ingest-token-file", type=Path, required=True)
     parser.add_argument("--sites-authorization-file", type=Path, required=True)
     parser.add_argument("--reader-group", required=True)
+    parser.add_argument(
+        "--netuid",
+        help=(
+            "subnet the exported events must name; defaults to "
+            "CATHEDRAL_VALIDATOR_NETUID from the validator's direct.env"
+        ),
+    )
     return parser
+
+
+NETUID_ENVIRONMENT = "CATHEDRAL_VALIDATOR_NETUID"
+
+
+def _configured_netuid(
+    value: str | None, environ: Mapping[str, str] | None = None
+) -> int:
+    """The exporter checks events against the netuid the validator runs on."""
+
+    environment = os.environ if environ is None else environ
+    configured = environment.get(NETUID_ENVIRONMENT)
+    if value is not None and configured is not None and value != configured:
+        raise TelemetryExportError(
+            f"--netuid {value} disagrees with {NETUID_ENVIRONMENT}={configured}"
+        )
+    raw = value if value is not None else configured
+    if raw is None:
+        raise TelemetryExportError(
+            f"no netuid is configured: set {NETUID_ENVIRONMENT} or pass --netuid"
+        )
+    if (
+        not raw.isascii()
+        or not raw.isdigit()
+        or str(int(raw)) != raw
+        or int(raw) > (1 << 16) - 1
+    ):
+        raise TelemetryExportError("netuid must be a canonical decimal u16 integer")
+    return int(raw)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -190,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         event = latest_telemetry_event(
             options.spool,
             expected_reader_gid=reader_gid,
+            netuid=_configured_netuid(options.netuid),
         )
         ingest_token = _secret(options.ingest_token_file, label="ingest token")
         sites_authorization = _secret(

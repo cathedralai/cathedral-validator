@@ -22,14 +22,14 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .capacity_shadow import (
     CAPACITY_POLICY_ENV,
@@ -289,14 +289,12 @@ class ValidatorNotEligible(DirectValidatorError):
 def finalized_serving_miners_snapshot(
     subtensor: Any,
     keypair: Any,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> FinalizedMetagraphSnapshot:
     """Read every serving non-validator miner at one finalized head.
 
     The snapshot records ``netuid``, so the plan, writer, and telemetry built
-    from it name the subnet that was actually read. The default is the compiled
-    netuid for callers that predate the setting; the validator's entry point
-    always passes the value it resolved.
+    from it name the subnet that was actually read.
     """
 
     netuid = require_netuid(netuid)
@@ -957,7 +955,7 @@ def run_direct_cycle(
     snp_verifier: SnpProductionVerifier | None = None,
     tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
-    netuid: int = NETUID,
+    netuid: int,
     pool_inventory: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
@@ -966,9 +964,8 @@ def run_direct_cycle(
     ``DirectWeightWriter`` always supplies the per-signer flock.
 
     ``netuid`` is the subnet this cycle reads, challenges on behalf of, and
-    hands to the writer, which refuses a plan for any subnet but its own. The
-    default is the compiled netuid for callers that predate the setting;
-    ``main`` always passes the value it resolved.
+    hands to the writer, which refuses a plan for any subnet but its own.
+    ``main`` passes the value it resolved from configuration.
     """
 
     netuid = require_netuid(netuid)
@@ -1024,14 +1021,16 @@ def _add_netuid_argument(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="NETUID",
         help=(
-            "subnet to validate; this release accepts only the netuid it was "
-            "built for, which is also what omitting the flag selects"
+            "subnet to validate; defaults to CATHEDRAL_VALIDATOR_NETUID from "
+            "direct.env, and must agree with it when both are given"
         ),
     )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-validator")
+    # No abbreviations: a later flag must never change what a shortened flag
+    # means, and a shortened flag fails the same way on every release.
+    parser = argparse.ArgumentParser(prog="cathedral-validator", allow_abbrev=False)
     _add_network_argument(parser)
     _add_netuid_argument(parser)
     parser.add_argument("--wallet-name", default="validator")
@@ -1079,45 +1078,55 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configured_netuid(values: Sequence[str] | None) -> int:
-    """Resolve ``--netuid`` for a release that runs only its compiled netuid.
+NETUID_ENVIRONMENT = "CATHEDRAL_VALIDATOR_NETUID"
 
-    An absent flag behaves exactly as before the flag existed. A value is
-    parsed here rather than by argparse because an argparse error exits with
-    status 2, which the unit's ``RestartPreventExitStatus=2`` never restarts.
-    Every refusal below is a ``SystemExit`` message, status 1, like the other
-    configuration refusals in ``main``.
 
-    Any value other than the compiled netuid is refused for now. The updater
-    and the status tool still spell out the journal directory for the compiled
-    netuid, and the updater's cycle lock sits beside that journal. A writer on
-    another netuid would journal and lock where neither of them looks, so an
-    update could activate in the middle of a signing cycle.
-    """
-
-    if values is None:
-        return NETUID
-    if len(values) != 1:
-        # argparse would silently keep the last one, and the unit still expands
-        # a free-form argument variable after the managed flags.
-        raise SystemExit("--netuid may be given only once")
-    value = values[0]
+def _canonical_netuid(value: str, source: str) -> int:
     if (
         not value.isascii()
         or not value.isdigit()
         or str(int(value)) != value
         or int(value) > MAX_NETUID
     ):
-        raise SystemExit("--netuid must be a canonical decimal u16 integer")
-    netuid = int(value)
-    if netuid != NETUID:
+        raise SystemExit(f"{source} must be a canonical decimal u16 integer")
+    return int(value)
+
+
+def _configured_netuid(
+    values: Sequence[str] | None, environ: Mapping[str, str] | None = None
+) -> int:
+    """Resolve the one subnet to validate from deploy-time configuration.
+
+    The netuid comes from ``--netuid`` or from ``CATHEDRAL_VALIDATOR_NETUID``,
+    which the unit's ``direct.env`` provides; nothing is compiled in. Both may
+    be given only if they agree, and at least one must be. Every refusal is a
+    ``SystemExit`` message, status 1, which the unit restarts; an argparse
+    error would exit with status 2, which ``RestartPreventExitStatus=2`` never
+    restarts, so the value is parsed here rather than by argparse.
+
+    The updater, the status tool and the boot gate read the same setting from
+    ``direct.env`` to locate this netuid's journal and the cycle lock beside
+    it, so an update never activates in the middle of this writer's cycle.
+    """
+
+    environment = os.environ if environ is None else environ
+    if values is not None and len(values) != 1:
+        # argparse would silently keep the last one, and the unit still expands
+        # a free-form argument variable after the managed flags.
+        raise SystemExit("--netuid may be given only once")
+    flag = None if values is None else _canonical_netuid(values[0], "--netuid")
+    raw = environment.get(NETUID_ENVIRONMENT)
+    configured = None if raw is None else _canonical_netuid(raw, NETUID_ENVIRONMENT)
+    if flag is None and configured is None:
         raise SystemExit(
-            f"--netuid {netuid} is not the netuid this release was built for "
-            f"({NETUID}); non-default netuids arrive with a later release, "
-            "because the updater and status tool still locate the journal "
-            "and cycle lock by the built-in value"
+            f"no netuid is configured: set {NETUID_ENVIRONMENT} in "
+            "/etc/cathedral-validator/direct.env or pass --netuid"
         )
-    return netuid
+    if flag is not None and configured is not None and flag != configured:
+        raise SystemExit(
+            f"--netuid {flag} disagrees with {NETUID_ENVIRONMENT}={configured}"
+        )
+    return flag if flag is not None else configured
 
 
 def _capacity_shadow_from_environment() -> CapacityShadow | None:

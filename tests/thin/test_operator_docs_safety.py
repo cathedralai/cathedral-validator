@@ -340,7 +340,8 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     # Operating detail that left the README lives here.
     assert "/var/lib/cathedral-validator/.local/state/cathedral-validator/" in guide
     assert (
-        "direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json" in guide
+        "direct-writer/finney-sn<netuid>-mechanism-0/<validator-hotkey>/state.json"
+        in guide
     )
     assert "`RestartPreventExitStatus=2 3`" in guide
     # The one command that clears a failed on-chain write, run as the service
@@ -356,7 +357,10 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     assert "`RECORD_REFUSED`" in guide
     assert "`RECORD_RETRY_WITH_ARCHIVE` (exit code 75) is not a refusal" in guide
     assert "--archive-endpoint=wss://" in guide
-    assert "--network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58" in guide
+    assert (
+        "--network=finney --netuid=YOUR_NETUID "
+        "--expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58" in guide
+    )
     assert "OnFailure=YOUR-ALERT.service" in guide
     assert "cathedral-validator-boot-reconcile.service" in guide
     assert "Never delete or replace the journal" in guide

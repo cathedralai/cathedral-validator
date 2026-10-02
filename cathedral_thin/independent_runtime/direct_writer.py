@@ -35,7 +35,6 @@ from cathedral_thin.independent.constants import (
     FINNEY_GENESIS_HASH,
     MECID,
     MORTAL_PERIOD_BLOCKS,
-    NETUID,
     VERSION_KEY,
     W,
 )
@@ -549,20 +548,17 @@ def _read_fresh_snapshot(
 def direct_state_scope(netuid: int) -> str:
     """Return the journal directory that scopes one subnet's mechanism writes.
 
-    For the compiled netuid this is byte-identical to the scope every earlier
-    release wrote, which is where existing hosts keep their journal and where
-    the updater and status tool, which still spell it out, look for it.
+    For the netuid every earlier release was built for, this is byte-identical
+    to the scope those releases wrote, which is where existing hosts keep their
+    journal. The updater and the status tool derive the same directory from
+    ``CATHEDRAL_VALIDATOR_NETUID`` in direct.env.
     """
 
     return f"finney-sn{require_netuid(netuid)}-mechanism-{MECID}"
 
 
-def canonical_state_path(keypair: Any, *, netuid: int = NETUID) -> Path:
-    """Return the one operational journal path for this Finney signer and netuid.
-
-    The default is the compiled netuid for callers that predate the setting;
-    the validator's entry point always passes the value it resolved.
-    """
+def canonical_state_path(keypair: Any, *, netuid: int) -> Path:
+    """Return the one operational journal path for this Finney signer and netuid."""
 
     hotkey = str(getattr(keypair, "ss58_address", ""))
     if not hotkey or not hotkey.isascii() or not hotkey.isalnum() or len(hotkey) > 64:
@@ -588,8 +584,7 @@ class DirectWeightWriter:
 
     ``netuid`` is the one subnet this writer signs for. It scopes the journal,
     every pre-sign chain read, and the exact call, and a plan read on any other
-    subnet is refused. The default is the compiled netuid for callers that
-    predate the setting; the validator's entry point always passes it.
+    subnet is refused. The validator passes the netuid it was configured with.
     """
 
     def __init__(
@@ -599,7 +594,7 @@ class DirectWeightWriter:
         keypair: Any,
         snapshot_reader: Callable[[Any, Any], FinalizedMetagraphSnapshot] | None = None,
         call_builder: Callable[[Mapping[str, Any]], Any] | None = None,
-        netuid: int = NETUID,
+        netuid: int,
     ) -> None:
         self.subtensor = subtensor
         self.keypair = keypair
@@ -674,14 +669,50 @@ class DirectWeightWriter:
         ):
             yield
 
+    def _signer_lock_path(self) -> Path:
+        """The process lock for this hotkey on every subnet.
+
+        The journal and its locks are scoped by netuid, so two processes
+        configured for different subnets would never meet there. This lock is
+        keyed on the hotkey alone, so one key never signs from two processes.
+        """
+
+        signers = DIRECT_STATE_ROOT / "signers"
+        path = signers / self.state_path.parent.name / "process.lock"
+        for directory in (signers, path.parent):
+            if directory.is_symlink():
+                raise DirectValidatorError("direct signer lock parent is a symlink")
+            try:
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError as exc:
+                raise DirectValidatorError(
+                    "direct signer lock parent is unusable"
+                ) from exc
+            metadata = directory.stat()
+            if (
+                metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+            ):
+                raise DirectValidatorError(
+                    "direct signer lock parent is not owner-controlled"
+                )
+        return path
+
     @contextmanager
     def process_locked(self) -> Iterator[None]:
-        """Ensure one recurring direct-validator process per signer."""
+        """Ensure one recurring direct-validator process per signer.
+
+        The signer lock is taken first, so a process for this hotkey on any
+        other subnet is refused before this subnet's lock is touched.
+        """
 
         with self._exclusive_runtime_lock(
-            self.state_path.with_name("process.lock"), label="process", wait=False
+            self._signer_lock_path(), label="signer process", wait=False
         ):
-            yield
+            with self._exclusive_runtime_lock(
+                self.state_path.with_name("process.lock"), label="process", wait=False
+            ):
+                yield
 
     @contextmanager
     def _locked(self) -> Iterator[None]:

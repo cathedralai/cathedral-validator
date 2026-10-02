@@ -24,9 +24,13 @@ UPDATER_STATE = Path("/var/lib/cathedral-validator-update/state.json")
 UPDATER_VERIFIED_METADATA = Path(
     "/var/lib/cathedral-validator-update/verified-metadata.json"
 )
-DIRECT_SCOPE = Path(
-    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer/finney-sn94-mechanism-0"
+# The writer's journal lives under this root, in the scope for the netuid
+# direct.env configures; see _direct_scope().
+DIRECT_WRITER_STATE_ROOT = Path(
+    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer"
 )
+DIRECT_NETUID_VARIABLE = "CATHEDRAL_VALIDATOR_NETUID"
+MAX_DIRECT_NETUID = (1 << 16) - 1
 DIRECT_UNIT = "cathedral-validator-direct.service"
 STABLE_TIMER = "cathedral-validator-update.timer"
 MAX_STATE_BYTES = 1024 * 1024
@@ -193,6 +197,29 @@ def _identity() -> str:
     if not _is_bittensor_ss58(identity):
         raise StatusUnavailable("identity is invalid")
     return identity
+
+
+def _direct_scope() -> Path:
+    """The journal scope for the netuid the validator unit is configured with."""
+
+    raw = _read_controlled_file(ETC / "direct.env", maximum=4096)
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise StatusUnavailable("direct configuration is not ASCII") from exc
+    prefix = f"{DIRECT_NETUID_VARIABLE}="
+    values = [line[len(prefix) :] for line in lines if line.startswith(prefix)]
+    if len(values) != 1:
+        raise StatusUnavailable("direct configuration must assign the netuid once")
+    value = values[0]
+    if (
+        not value.isascii()
+        or not value.isdigit()
+        or str(int(value)) != value
+        or int(value) > MAX_DIRECT_NETUID
+    ):
+        raise StatusUnavailable("direct configuration netuid is invalid")
+    return DIRECT_WRITER_STATE_ROOT / f"finney-sn{int(value)}-mechanism-0"
 
 
 def _systemd_state(runner: Runner, verb: str, unit: str) -> bool:
@@ -578,7 +605,7 @@ def _pending_phase(pending: object, *, expected_identity: str) -> str | None:
 
 
 def _direct_summary(identity: str) -> dict[str, Any]:
-    path = DIRECT_SCOPE / identity / "state.json"
+    path = _direct_scope() / identity / "state.json"
     try:
         service_uid = pwd.getpwnam("cathedral-validator").pw_uid
     except KeyError as exc:
