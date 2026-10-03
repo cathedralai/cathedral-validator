@@ -1158,10 +1158,11 @@ def _capacity_shadow_event(
 ) -> dict[str, Any] | None:
     """This cycle's shadow capacity record, as its own event line.
 
-    It runs after the cycle has returned and its event is printed: after the
-    weight write and its telemetry, and outside the cycle lock, so neither a
-    slow feed nor a recheck can delay a write, lose its telemetry or its log
-    line, or hold off an update. Recovery events get no record.
+    It runs after the scored cycle's writer attempt has returned and its event
+    is printed, outside the cycle lock. An expired-without-inclusion attempt
+    can still have a scored plan and anchor, so this shadow record does not
+    imply that weights were written or finalized. Recovery events get no
+    record.
     """
 
     anchor = event.get("anchor")

@@ -129,8 +129,10 @@ validator on an older pin without it records `DISABLED`.
 
 ## What each cycle does
 
-After a cycle has written its weights and their telemetry, and released the cycle lock, the
-validator:
+After a scored cycle's writer attempt returns and releases the cycle lock, the
+validator runs this shadow check. It can also run when the attempt returns
+`EXPIRED_WITHOUT_INCLUSION`, when no weights were written; a shadow record does
+not prove that weights were finalized on chain. The validator:
 
 1. makes a fresh 32-byte nonce and fetches `GET <receipts_url>/<netuid>/<nonce>`. The feed
    answers `{"schema": "cathedral_capacity_receipt_feed_v1", "netuid", "round",
