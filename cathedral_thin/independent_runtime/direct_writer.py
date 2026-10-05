@@ -42,7 +42,6 @@ from bittensor.utils import get_mechid_storage_index, ss58_address_to_bytes
 
 from cathedral_thin.independent.constants import (
     COMMIT_REVEAL_ENABLED,
-    FINNEY_GENESIS_HASH,
     MECID,
     MORTAL_PERIOD_BLOCKS,
     NETUID,
@@ -760,7 +759,9 @@ def direct_state_scope(netuid: int) -> str:
     the updater and status tool, which still spell it out, look for it.
     """
 
-    return f"finney-sn{require_netuid(netuid)}-mechanism-{MECID}"
+    from .testnet import state_scope_network
+
+    return f"{state_scope_network()}-sn{require_netuid(netuid)}-mechanism-{MECID}"
 
 
 def canonical_state_path(keypair: Any, *, netuid: int = NETUID) -> Path:
@@ -2995,9 +2996,12 @@ class DirectWeightWriter:
         """
 
         substrate = self.subtensor.substrate
-        if self._history_block_hash(substrate, 0) != FINNEY_GENESIS_HASH:
+        from .testnet import expected_genesis_hash, testnet_active
+
+        if self._history_block_hash(substrate, 0) != expected_genesis_hash():
+            label = "testnet" if testnet_active() else "Finney"
             raise FailedWriteRecordRefused(
-                "the node's chain is not the pinned Finney genesis"
+                f"the node's chain is not the pinned {label} genesis"
             )
         finalized_number, finalized_hash = self._history(
             "finalized head", finalized_head, self.subtensor

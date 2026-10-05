@@ -20,9 +20,13 @@ key into a website, collector, repository, or test fixture.
 
 The code still refuses other production netuids than the compiled SN94.
 Changing `--netuid` on an old SN39 installation is not a supported migration.
-Deployment-config work remains in #268. Guarded rehearsal work (#277/#279)
-must be integrated and requalified against this exact release before mainnet;
-an older testnet run or fake-chain unit tests do not qualify this artifact.
+This integration adapts the preserved #277 rehearsal work narrowly: exact
+`CATHEDRAL_TESTNET=1`, `--network test --netuid 584`, a pinned testnet genesis,
+separate `testnet-sn584-...` journals, and test-network signed requests/events.
+It adds no localnet stub, verifier bypass or private miner-address exception.
+Production network, verifier and journal defaults remain unchanged. Broader
+deployment-config work remains in #268. An older #279 testnet run or fake-chain
+unit tests do not qualify this exact artifact.
 
 ## Before any mainnet change
 
@@ -61,6 +65,11 @@ commit-reveal round age. It does not itself repair the private collector.
 That collector must validate the event signature and actual chain identity /
 permit for the selected network, preserve zero burn and vector completeness,
 and accept an older observation only within the documented reveal-age bound.
+The existing private collector's source has been adapted for both fixed chain
+endpoints/genesis pins without replacing its cryptographic or chain checks.
+Its ingestion and snapshot routes enforce the same freshness bound. This
+source preparation is not evidence of deployment, exporter activation or a
+real accepted event.
 
 Require exporter `EXPORTED` with the exact event ID, collector snapshot 200,
 and public `/v1/leaderboard/snapshot` 200 with the same network, anchor,
@@ -79,3 +88,21 @@ The production telemetry service/timer had no unit file installed, and `/run`
 was mounted `noexec`. The public board's snapshot previously returned 404.
 These observations explain the remaining operational work; they are not a
 successful SN94 cutover or a populated leaderboard.
+
+## Exact public-testnet rehearsal
+
+Use a dedicated testnet-only wallet and the separately approved rehearsal
+host/services. Do not reuse the Finney key. Run this **same signed release**
+with `CATHEDRAL_TESTNET=1`, `--network test`, and `--netuid 584`; the exporter
+needs the same environment and explicit netuid. Keep its spool and credentials
+separate from production. Testnet mode keeps both release verifiers enabled.
+It never enables the production updater or status unit for a testnet journal.
+The testnet process is managed separately from the production signed channel.
+
+First independently confirm the subnet's live commit-reveal policy matches
+the selected opt-in. Require applied reveal, interrupted-cycle recovery and
+the persistent not-applied stop against the installed digest. Then require
+the exact exporter event acknowledgement, collector acceptance and public
+testnet-labelled projection. A Python-signed fixture proves cross-language
+serialization and signature compatibility only, never real hardware or chain
+qualification. Stop the rehearsal feed before selecting the mainnet feed.

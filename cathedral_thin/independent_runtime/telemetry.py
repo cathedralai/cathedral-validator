@@ -22,6 +22,7 @@ from cathedral_thin.independent.constants import NETUID, W
 
 from .direct_contract import DirectSubmissionReceipt, DirectWeightPlan
 from .preview_io import canonical_document_bytes
+from .testnet import request_network
 
 TELEMETRY_SCHEMA = "cathedral_validator_telemetry_v2"
 TELEMETRY_PENDING_SCHEMA = "cathedral_validator_telemetry_pending_v3"
@@ -270,7 +271,7 @@ def _build_telemetry_snapshot_base(
     base: dict[str, Any] = {
         "schema": TELEMETRY_SCHEMA,
         "observed_at": observed,
-        "network": "finney",
+        "network": request_network(),
         "netuid": plan.netuid,
         "validator": {
             "uid": plan.snapshot.validator_uid,
@@ -421,7 +422,7 @@ def validate_public_telemetry_event(
     observed_netuid = document.get("netuid")
     if (
         document.get("schema") != TELEMETRY_SCHEMA
-        or document.get("network") != "finney"
+        or document.get("network") != request_network()
         or isinstance(netuid, bool)
         or not isinstance(netuid, int)
         or isinstance(observed_netuid, bool)
@@ -1064,6 +1065,7 @@ def latest_telemetry_event(
     path: Path,
     *,
     expected_reader_gid: int | None = None,
+    netuid: int = NETUID,
 ) -> dict[str, Any]:
     """Read and validate the latest event for the separate exporter."""
 
@@ -1104,7 +1106,7 @@ def latest_telemetry_event(
         raise TelemetryError("latest telemetry event schema is invalid")
     if _canonical_json_bytes(document) != line:
         raise TelemetryError("latest telemetry event is not canonical JSON")
-    return validate_public_telemetry_event(document)
+    return validate_public_telemetry_event(document, netuid=netuid)
 
 
 __all__ = [

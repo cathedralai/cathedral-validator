@@ -29,7 +29,7 @@ import bittensor as bt
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .capacity_shadow import (
     CAPACITY_POLICY_ENV,
@@ -65,6 +65,12 @@ from .fleet_score import (
     score_multicompute_round,
 )
 from .preview_io import canonical_document_bytes
+from .testnet import (
+    configured_netuid,
+    expected_genesis_hash,
+    require_testnet_network,
+    testnet_active,
+)
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
 from . import tdx_measurement
@@ -1077,6 +1083,8 @@ def _add_network_argument(parser: argparse.ArgumentParser) -> None:
 def _pinned_network(value: object) -> str:
     """Refuse any network the direct validator is not pinned to."""
 
+    if testnet_active():
+        return require_testnet_network(value)
     if value != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
     return value
@@ -1165,29 +1173,7 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     update could activate in the middle of a signing cycle.
     """
 
-    if values is None:
-        return NETUID
-    if len(values) != 1:
-        # argparse would silently keep the last one, and the unit still expands
-        # a free-form argument variable after the managed flags.
-        raise SystemExit("--netuid may be given only once")
-    value = values[0]
-    if (
-        not value.isascii()
-        or not value.isdigit()
-        or str(int(value)) != value
-        or int(value) > MAX_NETUID
-    ):
-        raise SystemExit("--netuid must be a canonical decimal u16 integer")
-    netuid = int(value)
-    if netuid != NETUID:
-        raise SystemExit(
-            f"--netuid {netuid} is not the netuid this release was built for "
-            f"({NETUID}); non-default netuids arrive with a later release, "
-            "because the updater and status tool still locate the journal "
-            "and cycle lock by the built-in value"
-        )
-    return netuid
+    return configured_netuid(list(values) if values is not None else None)
 
 
 def _capacity_shadow_from_environment() -> CapacityShadow | None:
@@ -1363,6 +1349,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
+    if testnet_active():
+        _print_event(
+            {
+                "status": "TESTNET_REHEARSAL_MODE",
+                "network": "test",
+                "netuid": netuid,
+                "genesis": expected_genesis_hash(),
+                "qvl_digest": verifier.digest,
+                "warning": "Public testnet only; release verifiers unchanged",
+            }
+        )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
     wallet = make_wallet(
