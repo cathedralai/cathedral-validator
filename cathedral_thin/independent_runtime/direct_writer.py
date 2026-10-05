@@ -2695,6 +2695,28 @@ class DirectWeightWriter:
         self._write_state(state)
         return receipt
 
+    def _require_recovery_genesis(self) -> None:
+        """Pin the responding node before its history can change a journal."""
+
+        from .testnet import expected_genesis_hash, testnet_active
+
+        try:
+            # Do not reuse the client's cached block-0 hash: an RPC endpoint
+            # can be repointed while the same client and journal survive.
+            genesis = _canonical_hash(
+                _uncached_block_hash(self.subtensor.substrate, 0),
+                label="recovery genesis",
+            )
+        except Exception as exc:
+            raise DirectSubmissionAmbiguous(
+                "pinned genesis is unavailable during recovery"
+            ) from exc
+        if genesis != expected_genesis_hash():
+            label = "testnet" if testnet_active() else "Finney"
+            raise DirectSubmissionAmbiguous(
+                f"the node's chain is not the pinned {label} genesis during recovery"
+            )
+
     def recover(self) -> DirectSubmissionReceipt | None:
         """Confirm one signed hash and stored row without signing or resubmitting."""
 
@@ -2708,9 +2730,21 @@ class DirectWeightWriter:
                 stop = _reveal_not_applied_stop(state)
                 if stop is not None:
                     raise stop
-                # Only a proven timelocked commit has anything left to prove;
-                # for every other journal this returns None exactly as before.
+                # An idle journal and a persistent stop need no chain access.
+                last = state.get("last_attempt")
+                if not isinstance(last, dict) or last.get("status") != STATUS_COMMITTED:
+                    return None
+                self._require_recovery_genesis()
                 return self._resolve_reveal(state)
+            self._signed_intent(pending)
+            if pending["phase"] == PHASE_FINALIZED_FAILED:
+                # A known terminal failure is not reclassified by a changed
+                # or unavailable RPC. Only the operator's record command
+                # can move this stop on.
+                raise DirectSubmissionFinalizedFailure(
+                    "signed direct extrinsic finalized with failure"
+                )
+            self._require_recovery_genesis()
             status, receipt = self._locate(pending)
             if status == "finalized" and receipt is not None:
                 try:

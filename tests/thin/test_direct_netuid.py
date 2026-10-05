@@ -1258,7 +1258,7 @@ def test_cli_refuses_another_netuid_before_any_verifier_wallet_or_chain(
     assert isinstance(message, str)
     assert message.startswith(
         f"--netuid {OTHER_NETUID} is not the netuid this release was built for "
-        f"({NETUID}); non-default netuids arrive with a later release"
+        f"({NETUID}); other production netuids are not supported"
     )
 
 
@@ -1396,7 +1396,7 @@ def test_refused_netuid_exits_with_the_restartable_status_not_the_argparse_one()
     )
 
     assert completed.returncode == 1, completed.stderr
-    assert "non-default netuids arrive with a later release" in completed.stderr
+    assert "other production netuids are not supported" in completed.stderr
 
 
 def test_telemetry_arguments_file_warns_against_carrying_the_netuid() -> None:

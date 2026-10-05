@@ -27,6 +27,9 @@ It adds no localnet stub, verifier bypass or private miner-address exception.
 Production network, verifier and journal defaults remain unchanged. Broader
 deployment-config work remains in #268. An older #279 testnet run or fake-chain
 unit tests do not qualify this exact artifact.
+Recovery checks the selected chain's genesis directly from the node before
+reading pending-intent or reveal history. A wrong/unreadable genesis leaves the
+journal unchanged; existing terminal stops remain stopped without chain access.
 
 ## Before any mainnet change
 

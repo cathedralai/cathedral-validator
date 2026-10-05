@@ -1117,6 +1117,89 @@ def test_crash_between_journal_and_submit_is_recovered_by_hash_never_resent(
         assert journal(restarted)["last_attempt"]["status"] == STATUS_EXPIRED
 
 
+@pytest.mark.parametrize("phase", ("pending", "committed"))
+@pytest.mark.parametrize("genesis_result", ("wrong", "missing", "unavailable"))
+def test_recovery_pins_uncached_genesis_before_history_or_journal_mutation(
+    tmp_path: Path, monkeypatch, phase: str, genesis_result: str
+) -> None:
+    instance, subtensor, planned, _encryptor = cr_writer(tmp_path, monkeypatch)
+    substrate = subtensor.substrate
+    if phase == "pending":
+
+        def crash(*_args, **_kwargs):
+            raise ProcessDied()
+
+        monkeypatch.setattr(substrate, "submit_extrinsic", crash)
+        with pytest.raises(ProcessDied):
+            base.submit_before_deadline(instance, planned)
+        # A wrong chain at this height used to clear the intent as expired.
+        substrate.finalized_number = SIGN_HEAD + MORTAL_PERIOD_BLOCKS + 100
+    else:
+        base.submit_before_deadline(instance, planned)
+        substrate.chain.reveal_block = REVEAL_BLOCK
+        substrate.finalized_number = REVEAL_BLOCK + 3
+
+    before = instance.state_path.read_bytes()
+    signed, submitted = substrate.sign_calls, substrate.submit_calls
+    # Seed a correct client cache before repointing the responding node.
+    assert substrate.get_block_hash(0) == base.FINNEY_GENESIS_HASH
+    reads: list[tuple[str, list[object]]] = []
+
+    def repointed_node(method, params):
+        reads.append((method, params))
+        assert (method, params) == ("chain_getBlockHash", [0])
+        if genesis_result == "unavailable":
+            raise ConnectionError("node unavailable")
+        return {"result": "0x" + "a" * 64 if genesis_result == "wrong" else None}
+
+    monkeypatch.setattr(substrate, "rpc_request", repointed_node)
+    monkeypatch.setattr(
+        substrate,
+        "get_chain_finalised_head",
+        lambda: pytest.fail("history queried before genesis was authenticated"),
+    )
+    with pytest.raises(DirectSubmissionAmbiguous, match="genesis"):
+        instance.recover()
+
+    assert reads == [("chain_getBlockHash", [0])]
+    assert instance.state_path.read_bytes() == before
+    assert (substrate.sign_calls, substrate.submit_calls) == (signed, submitted)
+
+
+@pytest.mark.parametrize("stop", ("reveal_not_applied", "finalized_failed"))
+def test_recovery_keeps_terminal_stop_without_any_genesis_or_history_rpc(
+    tmp_path: Path, monkeypatch, stop: str
+) -> None:
+    if stop == "reveal_not_applied":
+        instance, subtensor, _plan, _encryptor = stopped_on_reveal_not_applied(
+            tmp_path, monkeypatch
+        )
+        error = DirectCommitNotRevealed
+    else:
+        instance, subtensor, _plan = base.stopped_on_failed_write(tmp_path, monkeypatch)
+        error = base.DirectSubmissionFinalizedFailure
+    before = instance.state_path.read_bytes()
+    monkeypatch.setattr(
+        subtensor.substrate,
+        "rpc_request",
+        lambda *_a, **_k: pytest.fail("terminal stop must not query the chain"),
+    )
+    with pytest.raises(error):
+        instance.recover()
+    assert instance.state_path.read_bytes() == before
+
+
+def test_idle_recovery_does_not_need_a_chain_connection(tmp_path: Path, monkeypatch):
+    instance, subtensor, _planned, _encryptor = cr_writer(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subtensor.substrate,
+        "rpc_request",
+        lambda *_a, **_k: pytest.fail("idle recovery must not query the chain"),
+    )
+    assert instance.recover() is None
+    assert not instance.state_path.exists()
+
+
 def test_duplicate_submit_is_refused_while_a_commit_awaits_its_reveal(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -16,7 +16,11 @@ from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH
 from cathedral_thin.independent_runtime import direct_validator as runtime
 from cathedral_thin.independent_runtime import testnet as rehearsal
 from cathedral_thin.independent_runtime.axon import observed_genesis_hash
-from cathedral_thin.independent_runtime.direct_writer import direct_state_scope
+from cathedral_thin.independent_runtime.direct_writer import (
+    DirectSubmissionAmbiguous,
+    DirectWeightWriter,
+    direct_state_scope,
+)
 from cathedral_thin.independent_runtime.errors import ChainClientError
 from cathedral_thin.independent_runtime.telemetry import (
     TelemetryError,
@@ -130,6 +134,37 @@ def test_genesis_pin_cannot_cross_networks(monkeypatch):
     )
     with pytest.raises(ChainClientError):
         observed_genesis_hash(node(FINNEY_GENESIS_HASH))
+
+
+@pytest.mark.parametrize("testnet", (False, True))
+def test_recovery_genesis_guard_uses_the_selected_chain_not_client_cache(
+    monkeypatch, testnet
+):
+    if testnet:
+        monkeypatch.setenv(rehearsal.TESTNET_ENV, "1")
+    expected = rehearsal.expected_genesis_hash()
+    wrong = FINNEY_GENESIS_HASH if testnet else rehearsal.TESTNET_GENESIS_HASH
+    reads = []
+    response = [expected]
+
+    def node_rpc(method, params):
+        reads.append((method, params))
+        return {"result": response[0]}
+
+    instance = DirectWeightWriter(
+        subtensor=SimpleNamespace(
+            substrate=SimpleNamespace(
+                rpc_request=node_rpc, get_block_hash=lambda _n: expected
+            )
+        ),
+        keypair=VALIDATOR_KEYPAIR,
+        netuid=584 if testnet else 94,
+    )
+    instance._require_recovery_genesis()
+    response[0] = wrong
+    with pytest.raises(DirectSubmissionAmbiguous, match="pinned .* genesis"):
+        instance._require_recovery_genesis()
+    assert reads == [("chain_getBlockHash", [0]), ("chain_getBlockHash", [0])]
 
 
 @pytest.mark.parametrize(
