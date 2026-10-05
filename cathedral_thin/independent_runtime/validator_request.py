@@ -39,6 +39,7 @@ from cathedral_thin.independent.fetch_policy import is_globally_routable_address
 
 from .errors import IndependentLiveError
 from .https import HttpsEvidenceTransport, canonical_post_body
+from .testnet import request_network
 
 VALIDATOR_REQUEST_SCHEMA = "cathedral_validator_request_v1"
 WORKER_FLEET_SCHEMA = "cathedral_worker_fleet_v1"
@@ -126,11 +127,13 @@ def build_validator_request_header(
     nonce: bytes,
     issued_at: datetime,
     expires_at: datetime,
-    network: str = NETWORK,
+    network: str | None = None,
     netuid: int = NETUID,
 ) -> str:
     """Return standard-base64 canonical JSON signed by ``keypair.sign``."""
 
+    if network is None:
+        network = request_network()
     if (
         network not in {"finney", "test"}
         or type(netuid) is not int
@@ -257,9 +260,11 @@ class SignedValidatorTransport:
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[int], bytes] | None = None,
         expected_spki: bytes | None = None,
-        network: str = NETWORK,
+        network: str | None = None,
         netuid: int = NETUID,
     ) -> None:
+        if network is None:
+            network = request_network()
         if not isinstance(transport, HttpsEvidenceTransport):
             raise IndependentLiveError(
                 "signed validator access requires the hardened HTTPS transport"

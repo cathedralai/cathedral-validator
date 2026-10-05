@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .testnet import configured_netuid
+
 from .telemetry import (
     MAX_TELEMETRY_EVENT_BYTES,
     TelemetryError,
@@ -171,12 +173,15 @@ def export_event(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cathedral-validator-telemetry-export")
+    parser = argparse.ArgumentParser(
+        prog="cathedral-validator-telemetry-export", allow_abbrev=False
+    )
     parser.add_argument("--spool", type=Path, required=True)
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--ingest-token-file", type=Path, required=True)
     parser.add_argument("--sites-authorization-file", type=Path, required=True)
     parser.add_argument("--reader-group", required=True)
+    parser.add_argument("--netuid", action="append")
     return parser
 
 
@@ -184,12 +189,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
         try:
+            netuid = configured_netuid(options.netuid)
+        except SystemExit as exc:
+            raise TelemetryExportError(str(exc)) from exc
+        try:
             reader_gid = grp.getgrnam(options.reader_group).gr_gid
         except KeyError as exc:
             raise TelemetryExportError("telemetry reader group does not exist") from exc
         event = latest_telemetry_event(
             options.spool,
             expected_reader_gid=reader_gid,
+            netuid=netuid,
         )
         ingest_token = _secret(options.ingest_token_file, label="ingest token")
         sites_authorization = _secret(
@@ -220,3 +230,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = ["TelemetryExportError", "export_event", "main"]
+
+
+if __name__ == "__main__":
+    # The service starts the exporter with ``-m``. Without this the module
+    # only defines main() and exits 0 having exported nothing.
+    raise SystemExit(main())

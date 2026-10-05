@@ -548,6 +548,19 @@ def require_idle_direct_writer_journal(path: Path) -> None:
         state["last_attempt"], dict
     ):
         raise UpdateRefused("direct writer journal contradicts the supported schema")
+    # A timelocked commit the chain consumed without applying it stops the
+    # validator with no pending intent. Like a finalized_failed pending write,
+    # it blocks the update (which would restart the service) until the
+    # operator's record-failed-write command records it as reviewed.
+    if (
+        state["last_attempt"] is not None
+        and state["last_attempt"].get("status") == "REVEAL_NOT_APPLIED"
+    ):
+        raise UpdateRefused(
+            "direct writer journal is stopped on a timelocked commit the chain "
+            "consumed without applying it (REVEAL_NOT_APPLIED); clear it with "
+            "cathedral-validator record-failed-write"
+        )
 
 
 def direct_writer_journal_path(

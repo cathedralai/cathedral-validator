@@ -10,6 +10,14 @@ then records the intent as terminal (``FINALIZED_FAILED``). It loads no key,
 never signs or broadcasts, and changes nothing unless it records. It must run
 as the validator's service user with the service's ``HOME``, while the
 validator is stopped. See ``docs/AUTO_UPDATE.md``.
+
+The same command clears a timelocked commit the chain consumed without
+applying it (``REVEAL_NOT_APPLIED``, commit-reveal opt-in only). The
+validator stops with exit code 2 on that journal and keeps refusing every
+start, commit and update until this command records it as reviewed
+(``REVEAL_NOT_APPLIED_RECORDED``). The validator already proved that stop
+from finalized state, so this branch validates the journal and reads no chain
+history.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from .direct_writer import (
 )
 
 STATUS_RECORDED = "FINALIZED_FAILED_RECORDED"
+STATUS_REVEAL_NOT_APPLIED_RECORDED = "REVEAL_NOT_APPLIED_RECORDED"
 STATUS_REFUSED = "RECORD_REFUSED"
 STATUS_RETRY_WITH_ARCHIVE = "RECORD_RETRY_WITH_ARCHIVE"
 STATUS_NOT_PROVEN = "RECORD_NOT_PROVEN"
@@ -83,7 +92,9 @@ def _parser() -> argparse.ArgumentParser:
         prog=f"cathedral-validator {RECORD_FAILED_WRITE_COMMAND}",
         description=(
             "Prove from finalized chain state that the stopped weight write "
-            "failed on chain, then record it as terminal. Never signs."
+            "failed on chain, then record it as terminal; or record a stopped "
+            "timelocked commit the chain consumed without applying it "
+            "(REVEAL_NOT_APPLIED) as reviewed. Never signs."
         ),
     )
     _add_network_argument(parser)
@@ -161,7 +172,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # or the status tool, to read what the journal holds now.
         _print({"status": STATUS_NOT_PROVEN, "error": f"{type(exc).__name__}: {exc}"})
         return EXIT_REFUSED
-    _print({"status": STATUS_RECORDED, **record})
+    # A reviewed REVEAL_NOT_APPLIED stop names its own status; a proven failed
+    # write prints FINALIZED_FAILED_RECORDED exactly as before.
+    status = record.pop("status", STATUS_RECORDED)
+    _print({"status": status, **record})
     return EXIT_RECORDED
 
 
@@ -174,5 +188,6 @@ __all__ = [
     "STATUS_RECORDED",
     "STATUS_REFUSED",
     "STATUS_RETRY_WITH_ARCHIVE",
+    "STATUS_REVEAL_NOT_APPLIED_RECORDED",
     "main",
 ]

@@ -2303,10 +2303,9 @@ def test_deploy_contract_is_unprivileged_hotkey_only_and_operational() -> None:
         direct.rindex("EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env")
     )
     assert "Environment=HOME=/var/lib/cathedral-validator" in direct
-    assert "Environment=PEX_ROOT=/run/cathedral-validator-pex" in direct
-    assert (
-        "RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex" in direct
-    )
+    assert "Environment=PEX_ROOT=/var/lib/cathedral-validator/pex" in direct
+    assert "PEX_ROOT=/run/" not in direct
+    assert "RuntimeDirectory=cathedral-validator-wallet\n" in direct
     assert "/var/lib/cathedral-validator/.cache/pex" not in direct
     assert "--wallet-path=/run/cathedral-validator-wallet" in direct
     assert "--expected-hotkey=${CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY}" in direct
@@ -2490,6 +2489,8 @@ def test_real_linux_release_job_builds_and_starts_the_production_pex() -> None:
     assert (
         "-m cathedral_thin.independent_runtime.telemetry_exporter --help" in release_job
     )
+    # The smoke check must see the exporter run, not only exit 0.
+    assert "usage: cathedral-validator-telemetry-export" in release_job
 
     smoke = (root / "tests" / "release_smoke" / "run_real_validator.py").read_text()
     assert "snp_production.load_compute_contract()" in smoke

@@ -19,14 +19,14 @@ NotifyAccess=main
 User=cathedral-validator
 Group=cathedral-validator
 Environment=HOME=/var/lib/cathedral-validator
-Environment=PEX_ROOT=/run/cathedral-validator-pex
+Environment=PEX_ROOT=/var/lib/cathedral-validator/pex
 Environment=CATHEDRAL_VALIDATOR_TELEMETRY_ARGS=
 EnvironmentFile=/etc/cathedral-validator/direct.env
 EnvironmentFile=-/etc/cathedral-validator/direct-telemetry.env
 EnvironmentFile=-/etc/cathedral-validator/direct-tdx-measurement.env
 EnvironmentFile=/etc/cathedral-validator/identity.env
 LoadCredential=validator-hotkey:/etc/cathedral-validator/validator-hotkey
-RuntimeDirectory=cathedral-validator-wallet cathedral-validator-pex
+RuntimeDirectory=cathedral-validator-wallet
 RuntimeDirectoryMode=0700
 StateDirectory=cathedral-validator
 StateDirectoryMode=0700
@@ -60,7 +60,7 @@ ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
 ReadOnlyPaths=/opt/cathedral-validator/current
-ReadWritePaths=/var/lib/cathedral-validator /run/cathedral-validator-wallet /run/cathedral-validator-pex -/var/lib/cathedral-validator-telemetry
+ReadWritePaths=/var/lib/cathedral-validator /run/cathedral-validator-wallet -/var/lib/cathedral-validator-telemetry
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

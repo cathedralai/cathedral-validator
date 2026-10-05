@@ -29,7 +29,7 @@ import bittensor as bt
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, MAX_NETUID, NETUID
+from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .capacity_shadow import (
     CAPACITY_POLICY_ENV,
@@ -45,6 +45,7 @@ from .axon import (
     observed_genesis_hash,
     scan_axons,
 )
+from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DirectValidatorError,
@@ -64,6 +65,12 @@ from .fleet_score import (
     score_multicompute_round,
 )
 from .preview_io import canonical_document_bytes
+from .testnet import (
+    configured_netuid,
+    expected_genesis_hash,
+    require_testnet_network,
+    testnet_active,
+)
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
 from . import tdx_measurement
@@ -78,6 +85,7 @@ from .telemetry import (
     PendingTelemetryStore,
     TelemetryError,
     TelemetrySpool,
+    applied_reveal_receipt,
     build_telemetry_candidate,
     journal_pending_plan_matches,
     journal_receipt_for_plan,
@@ -291,7 +299,10 @@ def finalized_serving_miners_snapshot(
     keypair: Any,
     netuid: int = NETUID,
 ) -> FinalizedMetagraphSnapshot:
-    """Read every serving non-validator miner at one finalized head.
+    """Read every serving miner at one finalized head.
+
+    A miner is any serving UID but this validator's own. Holding a validator
+    permit does not make a UID a validator: see the comment at the filter.
 
     The snapshot records ``netuid``, so the plan, writer, and telemetry built
     from it name the subnet that was actually read. The default is the compiled
@@ -340,14 +351,17 @@ def finalized_serving_miners_snapshot(
             block_number=block_number,
             block_hash=block_hash,
         )
-    validator_uids = {
-        uid for uid, permit in zip(uids, strict_permits) if permit is True
-    }
 
+    # A permit says a UID may set weights, not that it is a validator. The
+    # chain gives one to the top stakes above its threshold, and a miner is
+    # paid in stake on its own hotkey, so a miner that keeps what it earns
+    # comes to hold one. Leaving permit holders out would drop exactly the
+    # miners that were paid. Only this validator's own UID is left out: every
+    # other serving UID is a candidate, and verification decides what it earns.
     scan = scan_axons(metagraph)
     miners = tuple(
         sorted(
-            (axon for axon in scan.serving if axon.uid not in validator_uids),
+            (axon for axon in scan.serving if axon.uid != validator_uid),
             key=lambda axon: (axon.uid, axon.hotkey),
         )
     )
@@ -729,7 +743,12 @@ def _run_direct_cycle_unlocked(
     the cycle exactly as before.
     """
 
-    from .direct_writer import STATUS_EXPIRED
+    from .direct_writer import (
+        STATUS_COMMITTED,
+        STATUS_EXPIRED,
+        STATUS_REVEAL_UNPROVEN,
+        STATUS_REVEALED,
+    )
 
     pending_telemetry = (
         PendingTelemetryStore(telemetry_sink) if telemetry_sink is not None else None
@@ -742,7 +761,15 @@ def _run_direct_cycle_unlocked(
             keypair=keypair,
             telemetry_sink=telemetry_sink,
         )
-        if getattr(recovered, "status", None) != STATUS_EXPIRED:
+        # A proven reveal, like a proven expiry, leaves nothing to wait for,
+        # so this cycle goes on to score and commit, as it does once a commit
+        # is gone and its reveal can no longer be read. A commit still
+        # awaiting its reveal ends the cycle: nothing is signed until then.
+        if getattr(recovered, "status", None) not in {
+            STATUS_EXPIRED,
+            STATUS_REVEALED,
+            STATUS_REVEAL_UNPROVEN,
+        }:
             return recovery_event
         report_recovery(recovery_event)
     if getattr(verifier_adapter, "qvl_digest", None) != DIRECT_VALIDATOR_QVL_DIGEST:
@@ -778,6 +805,33 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
+    reconciled_event_id: str | None = None
+    prepared_before_commit = False
+    if (
+        pending_telemetry is not None
+        and getattr(writer, "commit_reveal", None) is not None
+    ):
+        # A hard kill cannot run the ambiguity handler below. Keep only the
+        # sanitized facts before a timelocked write can sign; the journal is
+        # still authoritative and no event is signed/published until reveal.
+        # Plain writes retain their existing post-submission projection order.
+        try:
+            prior_event = pending_telemetry.finalize(keypair=keypair)
+            if prior_event is not None:
+                reconciled_event_id = str(prior_event["event_id"])
+        except Exception:
+            pass
+        try:
+            pending_telemetry.prepare(
+                build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                plan,
+                None,
+            )
+            prepared_before_commit = True
+        except Exception:
+            # Telemetry availability never controls scoring or chain writes.
+            # The post-submit path retries and reports a projection failure.
+            pass
     try:
         receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
     except Exception as exc:
@@ -852,8 +906,7 @@ def _run_direct_cycle_unlocked(
         # written, so there is no finalized receipt for telemetry; a prior
         # pending candidate keeps waiting for the next confirmed write.
         return event
-    reconciled_event_id: str | None = None
-    if pending_telemetry is not None:
+    if pending_telemetry is not None and not prepared_before_commit:
         try:
             # A prior candidate contains its own finalized receipt. Reconcile
             # only after this cycle's authoritative chain write has finished.
@@ -862,6 +915,27 @@ def _run_direct_cycle_unlocked(
                 reconciled_event_id = str(prior_event["event_id"])
         except Exception:
             pass
+    if getattr(receipt, "status", None) == STATUS_COMMITTED:
+        # A timelocked commit has written no weights yet, so nothing is
+        # published. The round's sanitized facts exist only in this cycle, so
+        # they are kept for the cycle that proves the reveal: that one
+        # publishes them with the block in which the chain applied the vector.
+        if pending_telemetry is not None:
+            try:
+                if not prepared_before_commit:
+                    pending_telemetry.prepare(
+                        build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                        plan,
+                        None,
+                    )
+                event["telemetry"] = {"status": "AWAITING_REVEAL"}
+            except Exception:
+                # As for a plain write: a local projection failure is
+                # reported and never changes the commit.
+                event["telemetry"] = {"status": "FAILED"}
+        if reconciled_event_id is not None:
+            event["reconciled_telemetry_event_id"] = reconciled_event_id
+        return event
     if telemetry_sink is not None:
         try:
             if pending_telemetry is None:
@@ -908,7 +982,9 @@ def _recovered_cycle_event(
         writer=writer,
         keypair=keypair,
         telemetry_sink=telemetry_sink,
-        expected_receipt=recovered,
+        # A proven reveal is published as the write it is: confirmed at the
+        # block the chain applied the vector.
+        expected_receipt=applied_reveal_receipt(recovered),
     ) or {"status": "NO_FINALIZED_EVENT"}
     return event
 
@@ -1007,6 +1083,8 @@ def _add_network_argument(parser: argparse.ArgumentParser) -> None:
 def _pinned_network(value: object) -> str:
     """Refuse any network the direct validator is not pinned to."""
 
+    if testnet_active():
+        return require_testnet_network(value)
     if value != "finney":
         raise SystemExit("direct validator is pinned to the Finney network")
     return value
@@ -1095,29 +1173,7 @@ def _configured_netuid(values: Sequence[str] | None) -> int:
     update could activate in the middle of a signing cycle.
     """
 
-    if values is None:
-        return NETUID
-    if len(values) != 1:
-        # argparse would silently keep the last one, and the unit still expands
-        # a free-form argument variable after the managed flags.
-        raise SystemExit("--netuid may be given only once")
-    value = values[0]
-    if (
-        not value.isascii()
-        or not value.isdigit()
-        or str(int(value)) != value
-        or int(value) > MAX_NETUID
-    ):
-        raise SystemExit("--netuid must be a canonical decimal u16 integer")
-    netuid = int(value)
-    if netuid != NETUID:
-        raise SystemExit(
-            f"--netuid {netuid} is not the netuid this release was built for "
-            f"({NETUID}); non-default netuids arrive with a later release, "
-            "because the updater and status tool still locate the journal "
-            "and cycle lock by the built-in value"
-        )
-    return netuid
+    return configured_netuid(list(values) if values is not None else None)
 
 
 def _capacity_shadow_from_environment() -> CapacityShadow | None:
@@ -1266,6 +1322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--confirm-direct-write is required before any chain access")
     _pinned_network(options.network)
     netuid = _configured_netuid(options.netuid)
+    try:
+        commit_reveal = parse_commit_reveal_opt_in(
+            os.environ.get(COMMIT_REVEAL_OPT_IN_ENV)
+        )
+    except DirectValidatorError as exc:
+        raise SystemExit(f"commit-reveal opt-in refused: {exc}") from exc
     expected_hotkey = _expected_hotkey(options.expected_hotkey)
     if (
         not isinstance(options.interval_seconds, float)
@@ -1287,6 +1349,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SnpProductionError as exc:
         raise SystemExit(f"AMD SEV-SNP production verifier refused: {exc}") from exc
+    if testnet_active():
+        _print_event(
+            {
+                "status": "TESTNET_REHEARSAL_MODE",
+                "network": "test",
+                "netuid": netuid,
+                "genesis": expected_genesis_hash(),
+                "qvl_digest": verifier.digest,
+                "warning": "Public testnet only; release verifiers unchanged",
+            }
+        )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
     wallet = make_wallet(
@@ -1306,10 +1379,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         DirectSubmissionContradiction,
         DirectSubmissionFinalizedFailure,
         DirectWeightWriter,
+        STATUS_COMMITTED,
         STATUS_CONFIRMED,
         STATUS_RECOVERED,
+        STATUS_REVEALED,
         bound_rpc_waits,
     )
+
+    # A --once run succeeds on a proven write. Under the commit-reveal opt-in
+    # that is a proven commit or a proven reveal; neither status exists
+    # otherwise.
+    once_success = {
+        STATUS_CONFIRMED,
+        STATUS_RECOVERED,
+        STATUS_COMMITTED,
+        STATUS_REVEALED,
+    }
 
     try:
         bound_rpc_waits(subtensor)
@@ -1320,6 +1405,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         subtensor=subtensor,
         keypair=keypair,
         netuid=netuid,
+        # Passed only when opted in, so the default construction is unchanged.
+        **({} if commit_reveal is None else {"commit_reveal": commit_reveal}),
     )
     pool_inventory: tuple[Path, str] | None = None
     if options.pool_inventory is not None:
@@ -1407,11 +1494,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
             if options.once:
-                return (
-                    0
-                    if startup_recovery.status in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if startup_recovery.status in once_success else 2
             time.sleep(options.interval_seconds)
         elif startup_ambiguity is None and telemetry_sink is not None:
             # A prior process can stop after writer recovery commits the
@@ -1486,11 +1569,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
             _notify_cycle_status(event)
             if options.once:
-                return (
-                    0
-                    if event.get("status") in {STATUS_CONFIRMED, STATUS_RECOVERED}
-                    else 2
-                )
+                return 0 if event.get("status") in once_success else 2
             time.sleep(options.interval_seconds)
 
 

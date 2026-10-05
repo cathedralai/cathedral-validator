@@ -13,7 +13,6 @@ from typing import Any
 
 from cathedral_thin.independent.constants import (
     CANARY_HOTKEY,
-    FINNEY_GENESIS_HASH,
     REFUSE_HOTKEYS,
 )
 from cathedral_thin.independent.fetch_policy import is_globally_routable_address
@@ -140,9 +139,12 @@ def observed_genesis_hash(subtensor: Any) -> str:
     if not text.startswith("0x"):
         text = "0x" + text
     text = text.lower()
-    if text != FINNEY_GENESIS_HASH:
+    from .testnet import expected_genesis_hash, testnet_active
+
+    if text != expected_genesis_hash():
+        label = "testnet" if testnet_active() else "Finney"
         raise ChainClientError(
-            f"observed genesis {text} is not the pinned Finney genesis"
+            f"observed genesis {text} is not the pinned {label} genesis"
         )
     return text
 
