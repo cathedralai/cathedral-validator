@@ -1374,8 +1374,9 @@ def _write_journal(path: Path, last_attempt: dict[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
+@pytest.mark.parametrize("kill_mid_commit", [False, True])
 def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, kill_mid_commit: bool
 ) -> None:
     keypair = Keypair.create_from_uri("//Alice")
     observed, scored, planned = _telemetry_round(keypair, "committed")
@@ -1398,22 +1399,40 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
         validator_runtime, "score_multicompute_round", lambda **_k: scored
     )
 
-    committed = run_direct_cycle(
-        subtensor=object(),
-        keypair=keypair,
-        verifier_adapter=adapter,
-        writer=SimpleNamespace(
-            recover=lambda: None,
-            submit=lambda _plan, **_kwargs: commit,
-            state_path=state_path,
-        ),
-        telemetry_sink=spool,
-        report_recovery=base.no_expired_recovery,
-    )
+    def submit(_plan, **_kwargs):
+        # The file must exist before the writer gets control, not in an
+        # exception handler that SIGKILL/OOM would never run.
+        assert pending.plan_identity_sha256() == _identity_sha256(planned)
+        assert json.loads(pending.path.read_bytes())["receipt"] is None
+        assert not spool.path.exists()
+        if kill_mid_commit:
+            raise SystemExit("simulate hard exit before submit returns")
+        return commit
+
+    def cycle():
+        return run_direct_cycle(
+            subtensor=object(),
+            keypair=keypair,
+            verifier_adapter=adapter,
+            writer=SimpleNamespace(
+                recover=lambda: None,
+                submit=submit,
+                state_path=state_path,
+                commit_reveal=cr.CommitRevealOptIn(1),
+            ),
+            telemetry_sink=spool,
+            report_recovery=base.no_expired_recovery,
+        )
+
+    if kill_mid_commit:
+        with pytest.raises(SystemExit, match="simulate hard exit"):
+            cycle()
+    else:
+        committed = cycle()
+        assert committed["status"] == STATUS_COMMITTED
+        assert committed["telemetry"] == {"status": "AWAITING_REVEAL"}
 
     # Nothing is published while the weights are still secret.
-    assert committed["status"] == STATUS_COMMITTED
-    assert committed["telemetry"] == {"status": "AWAITING_REVEAL"}
     assert not spool.path.exists()
     assert pending.plan_identity_sha256() == _identity_sha256(planned)
     kept = json.loads(pending.path.read_bytes())

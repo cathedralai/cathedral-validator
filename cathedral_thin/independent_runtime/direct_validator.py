@@ -799,6 +799,33 @@ def _run_direct_cycle_unlocked(
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
     evidence_cycle_elapsed_ms = max(0, int((evidence_completed - cycle_started) * 1000))
+    reconciled_event_id: str | None = None
+    prepared_before_commit = False
+    if (
+        pending_telemetry is not None
+        and getattr(writer, "commit_reveal", None) is not None
+    ):
+        # A hard kill cannot run the ambiguity handler below. Keep only the
+        # sanitized facts before a timelocked write can sign; the journal is
+        # still authoritative and no event is signed/published until reveal.
+        # Plain writes retain their existing post-submission projection order.
+        try:
+            prior_event = pending_telemetry.finalize(keypair=keypair)
+            if prior_event is not None:
+                reconciled_event_id = str(prior_event["event_id"])
+        except Exception:
+            pass
+        try:
+            pending_telemetry.prepare(
+                build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                plan,
+                None,
+            )
+            prepared_before_commit = True
+        except Exception:
+            # Telemetry availability never controls scoring or chain writes.
+            # The post-submit path retries and reports a projection failure.
+            pass
     try:
         receipt = writer.submit(plan, cycle_deadline_monotonic=cycle_deadline)
     except Exception as exc:
@@ -873,8 +900,7 @@ def _run_direct_cycle_unlocked(
         # written, so there is no finalized receipt for telemetry; a prior
         # pending candidate keeps waiting for the next confirmed write.
         return event
-    reconciled_event_id: str | None = None
-    if pending_telemetry is not None:
+    if pending_telemetry is not None and not prepared_before_commit:
         try:
             # A prior candidate contains its own finalized receipt. Reconcile
             # only after this cycle's authoritative chain write has finished.
@@ -890,11 +916,12 @@ def _run_direct_cycle_unlocked(
         # publishes them with the block in which the chain applied the vector.
         if pending_telemetry is not None:
             try:
-                pending_telemetry.prepare(
-                    build_telemetry_candidate(result_rows=result.rows, plan=plan),
-                    plan,
-                    None,
-                )
+                if not prepared_before_commit:
+                    pending_telemetry.prepare(
+                        build_telemetry_candidate(result_rows=result.rows, plan=plan),
+                        plan,
+                        None,
+                    )
                 event["telemetry"] = {"status": "AWAITING_REVEAL"}
             except Exception:
                 # As for a plain write: a local projection failure is

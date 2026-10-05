@@ -197,8 +197,10 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
     assert "User=cathedral-telemetry" in service
     assert "Group=cathedral-telemetry" in service
     assert "Environment=PEX_INTERPRETER=1" in service
-    assert "Environment=PEX_ROOT=/run/cathedral-validator-telemetry-pex" in service
-    assert "RuntimeDirectory=cathedral-validator-telemetry-pex" in service
+    assert "Environment=PEX_ROOT=/var/lib/cathedral-validator-telemetry-pex" in service
+    assert "StateDirectory=cathedral-validator-telemetry-pex" in service
+    assert "StateDirectoryMode=0700" in service
+    assert "PEX_ROOT=/run/" not in service
     assert "ConditionFileIsExecutable=/usr/bin/python3.12" in service
     assert (
         "ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator "
@@ -235,7 +237,13 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
     )
     assert "--telemetry-reader-group cathedral-telemetry" in guide
     assert "systemd-sysusers" in guide
+    assert "install -d -o root -g root -m 0755 /etc/sysusers.d /etc/tmpfiles.d" in guide
     assert "systemd-tmpfiles --create" in guide
+    recovery_guide = (root / "docs" / "AUTO_UPDATE.md").read_text()
+    assert "PEX_ROOT=/run/cathedral-validator-record-pex" not in recovery_guide
+    assert (
+        recovery_guide.count("--setenv=PEX_ROOT=/var/lib/cathedral-validator/pex") == 2
+    )
     assert "enable --now cathedral-validator-telemetry.timer" in guide
     assert (
         "bittensor"

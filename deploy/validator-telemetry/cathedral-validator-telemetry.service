@@ -9,11 +9,11 @@ ConditionFileIsExecutable=/usr/bin/python3.12
 Type=oneshot
 User=cathedral-telemetry
 Group=cathedral-telemetry
-Environment=PEX_ROOT=/run/cathedral-validator-telemetry-pex
+Environment=PEX_ROOT=/var/lib/cathedral-validator-telemetry-pex
 Environment=PEX_INTERPRETER=1
 EnvironmentFile=/etc/cathedral-validator-telemetry/export.env
-RuntimeDirectory=cathedral-validator-telemetry-pex
-RuntimeDirectoryMode=0700
+StateDirectory=cathedral-validator-telemetry-pex
+StateDirectoryMode=0700
 ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator -m cathedral_thin.independent_runtime.telemetry_exporter --spool /var/lib/cathedral-validator-telemetry/events.jsonl --reader-group cathedral-telemetry --endpoint ${CATHEDRAL_TELEMETRY_ENDPOINT} --ingest-token-file ${CATHEDRAL_TELEMETRY_TOKEN_FILE} --sites-authorization-file ${CATHEDRAL_TELEMETRY_SITES_AUTH_FILE}
 UMask=0077
 NoNewPrivileges=true

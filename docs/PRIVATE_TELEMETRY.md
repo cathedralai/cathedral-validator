@@ -26,6 +26,7 @@ Install the isolated exporter after the validator's `cathedral-validator`
 operating-system user and signed release already exist:
 
 ```bash
+sudo install -d -o root -g root -m 0755 /etc/sysusers.d /etc/tmpfiles.d
 sudo install -o root -g root -m 0644 \
   deploy/validator-telemetry/cathedral-validator-telemetry.sysusers \
   /etc/sysusers.d/cathedral-validator-telemetry.conf
@@ -56,6 +57,21 @@ one shared directory. The exporter runs the telemetry module from the same
 signed PEX selected by `/opt/cathedral-validator/current`, so validator and
 exporter code promote or roll back together. It never uses an independently
 installed `/usr/local/bin` copy.
+
+The exporter unpacks its PEX in its own mode-0700 state directory,
+`/var/lib/cathedral-validator-telemetry-pex`. The direct service uses
+`/var/lib/cathedral-validator/pex`. Both must be on an executable filesystem:
+`/run` may be mounted `noexec`, which prevents native PEX modules loading.
+The exporter still cannot access validator state or the hotkey. These unit
+changes need a new signed bootstrap; updating runtime bytes alone does not
+replace installed units.
+
+With timelocked commit-reveal enabled, the sanitized candidate is persisted
+before the writer may sign. A restart binds it to the exact journaled plan
+and publishes only after the chain's applied reveal is proven. A crash before
+signing leaves an unpublished candidate, not a claimed weight result. If local
+telemetry persistence fails, chain writes remain independent and that round
+can still be absent from the board; check the reported telemetry failure.
 
 Install the optional direct-service arguments:
 

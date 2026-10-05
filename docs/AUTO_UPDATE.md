@@ -286,9 +286,8 @@ stopped:
 ```bash
 sudo systemd-run --pipe --wait --collect \
   --uid=cathedral-validator --gid=cathedral-validator \
-  --property=RuntimeDirectory=cathedral-validator-record-pex \
   --setenv=HOME=/var/lib/cathedral-validator \
-  --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
+  --setenv=PEX_ROOT=/var/lib/cathedral-validator/pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
   --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
 ```
@@ -341,9 +340,8 @@ stop usually needs an archive node. Run the same command with
 ```bash
 sudo systemd-run --pipe --wait --collect \
   --uid=cathedral-validator --gid=cathedral-validator \
-  --property=RuntimeDirectory=cathedral-validator-record-pex \
   --setenv=HOME=/var/lib/cathedral-validator \
-  --setenv=PEX_ROOT=/run/cathedral-validator-record-pex \
+  --setenv=PEX_ROOT=/var/lib/cathedral-validator/pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
   --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58 \
   --archive-endpoint=wss://archive.chain.opentensor.ai:443
