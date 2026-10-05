@@ -40,10 +40,45 @@ _CHAIN_HASH = re.compile(r"0x[0-9a-f]{64}")
 _ATTEMPT_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _FINALIZED_RESULTS = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
 _FINALIZED_FAILED = "FINALIZED_FAILED"
-_TERMINAL_RESULTS = _FINALIZED_RESULTS | {
-    "EXPIRED_WITHOUT_INCLUSION",
-    _FINALIZED_FAILED,
-}
+# Timelocked commit-reveal (operator opt-in). The attempt's receipt is always
+# the commit's own COMMITTED receipt; the attempt status then records what the
+# chain's automatic reveal did, proven by the writer from finalized state.
+_COMMITTED = "COMMITTED"
+_REVEALED = "REVEALED_CONFIRMED"
+_REVEAL_NOT_APPLIED = "REVEAL_NOT_APPLIED"
+# Written only by `record-failed-write` over a REVEAL_NOT_APPLIED stop; the
+# reveal record is unchanged.
+_REVEAL_NOT_APPLIED_RECORDED = "REVEAL_NOT_APPLIED_RECORDED"
+_REVEAL_UNPROVEN = "REVEAL_UNPROVEN"
+_COMMIT_REVEAL_RESULTS = frozenset(
+    {
+        _COMMITTED,
+        _REVEALED,
+        _REVEAL_NOT_APPLIED,
+        _REVEAL_NOT_APPLIED_RECORDED,
+        _REVEAL_UNPROVEN,
+    }
+)
+_COMMIT_REVEAL_CALL = "SubtensorModule.commit_timelocked_mechanism_weights"
+_TERMINAL_RESULTS = (
+    _FINALIZED_RESULTS
+    | _COMMIT_REVEAL_RESULTS
+    | {
+        "EXPIRED_WITHOUT_INCLUSION",
+        _FINALIZED_FAILED,
+    }
+)
+_INTENT_FIELDS = frozenset(
+    {
+        "extrinsic_hash",
+        "validator_hotkey",
+        "nonce",
+        "era_reference_block",
+        "mortal_period_blocks",
+        "kwargs",
+        "eligibility",
+    }
+)
 _PENDING_PHASE = re.compile(r"[a-z_]{1,40}")
 _PHASE_FINALIZED_FAILED = "finalized_failed"
 _FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
@@ -53,6 +88,16 @@ _FINALIZED_FAILED_ACTION = (
     "`cathedral-validator record-failed-write` as the validator user, as "
     'docs/AUTO_UPDATE.md "Failed weight write" shows. It proves the failure '
     "from finalized chain state before it records anything. Then start "
+    "cathedral-validator-direct.service."
+)
+_REVEAL_NOT_APPLIED_STOPPED = "REVEAL_NOT_APPLIED_STOPPED"
+_REVEAL_NOT_APPLIED_ACTION = (
+    "A timelocked commit was consumed on chain without applying its weights, "
+    "and the validator stopped. Nothing was written. The journal keeps it "
+    "stopped and updates refuse. Do not delete or edit the journal. Find the "
+    "cause (permit, stake, version key, drand), then run "
+    "`cathedral-validator record-failed-write` as the validator user, as "
+    'docs/AUTO_UPDATE.md "Commit-reveal subnets" shows. Then start '
     "cathedral-validator-direct.service."
 )
 _ELIGIBILITY_RESULTS = frozenset({"NO_PERMIT", "NOT_REGISTERED"})
@@ -422,6 +467,12 @@ def _last_attempt_summary(
     fields = {"attempt_id", "status", "identity", "intent", "receipt"}
     if isinstance(last, dict) and last.get("status") == _FINALIZED_FAILED:
         fields.add("failure")
+    if (
+        isinstance(last, dict)
+        and isinstance(last.get("status"), str)
+        and last["status"] in _COMMIT_REVEAL_RESULTS
+    ):
+        fields.add("reveal")
     if not isinstance(last, dict) or set(last) != fields:
         raise StatusUnavailable("direct journal last attempt is invalid")
     attempt_id = last["attempt_id"]
@@ -437,16 +488,15 @@ def _last_attempt_summary(
         or not isinstance(identity, dict)
         or identity.get("schema") != "cathedral_direct_validator_plan_v1"
         or not isinstance(intent, dict)
-        or set(intent)
-        != {
-            "extrinsic_hash",
-            "validator_hotkey",
-            "nonce",
-            "era_reference_block",
-            "mortal_period_blocks",
-            "kwargs",
-            "eligibility",
-        }
+        or set(intent) - {"commit_reveal"} != _INTENT_FIELDS
+        or (
+            "commit_reveal" in intent
+            and (
+                not isinstance(intent["commit_reveal"], dict)
+                or intent["commit_reveal"].get("call") != _COMMIT_REVEAL_CALL
+            )
+        )
+        or ("commit_reveal" not in intent and result in _COMMIT_REVEAL_RESULTS)
         or intent.get("validator_hotkey") != expected_identity
         or not _nonnegative_int(intent.get("nonce"))
         or not _nonnegative_int(intent.get("era_reference_block"))
@@ -477,8 +527,9 @@ def _last_attempt_summary(
     }:
         raise StatusUnavailable("direct journal receipt is invalid")
     extrinsic_hash = receipt["extrinsic_hash"]
+    receipt_result = _COMMITTED if result in _COMMIT_REVEAL_RESULTS else result
     if (
-        receipt["status"] != result
+        receipt["status"] != receipt_result
         or receipt["attempt_id"] != attempt_id
         or not isinstance(extrinsic_hash, str)
         or _CHAIN_HASH.fullmatch(extrinsic_hash) is None
@@ -524,6 +575,15 @@ def _last_attempt_summary(
         return result, block_number
     expected_recovered = result == "RECOVERED_CONFIRMED"
     heads = receipt["confirmation_heads"]
+    reported_block = block_number
+    if result in _COMMIT_REVEAL_RESULTS:
+        # A commit is COMMITTED whether its own submit or a later recovery
+        # proved it, so either recovered value is valid here. The reported
+        # block is where the reveal applied, once it has.
+        expected_recovered = receipt["recovered"]
+        reported_block = _reveal_summary_block(last["reveal"], result, block_number)
+        if reported_block is None:
+            raise StatusUnavailable("direct journal reveal record is invalid")
     if (
         not _nonnegative_int(block_number)
         or not isinstance(block_hash, str)
@@ -549,7 +609,69 @@ def _last_attempt_summary(
             raise StatusUnavailable("direct journal receipt is invalid")
     if heads[0][1] != block_hash:
         raise StatusUnavailable("direct journal receipt is invalid")
-    return result, block_number
+    return result, reported_block
+
+
+def _reveal_summary_block(reveal: object, result: str, commit_block: int) -> int | None:
+    """Validate a timelocked commit's reveal record; name its block or None."""
+
+    if (
+        not isinstance(reveal, dict)
+        or set(reveal) != {"commit_epoch", "present_through_block", "outcome"}
+        or not _nonnegative_int(reveal["commit_epoch"])
+        or not _nonnegative_int(reveal["present_through_block"])
+        or reveal["present_through_block"] < commit_block
+    ):
+        return None
+    outcome = reveal["outcome"]
+    if result == _COMMITTED:
+        return commit_block if outcome is None else None
+    if result == _REVEAL_UNPROVEN:
+        if (
+            not isinstance(outcome, dict)
+            or set(outcome)
+            != {"applied", "absent_at_block", "absent_at_block_hash", "unreadable"}
+            or outcome["applied"] is not None
+            or not _nonnegative_int(outcome["absent_at_block"])
+            or outcome["absent_at_block"] <= reveal["present_through_block"]
+            or not isinstance(outcome["absent_at_block_hash"], str)
+            or _CHAIN_HASH.fullmatch(outcome["absent_at_block_hash"]) is None
+            or not isinstance(outcome["unreadable"], str)
+        ):
+            return None
+        return outcome["absent_at_block"]
+    applied = result == _REVEALED
+    fields = {"applied", "consumed_block", "consumed_block_hash"}
+    if applied:
+        fields |= {"confirmation_heads", "remapped_dests"}
+    if (
+        not isinstance(outcome, dict)
+        or set(outcome) != fields
+        or outcome["applied"] is not applied
+        or not _nonnegative_int(outcome["consumed_block"])
+        or outcome["consumed_block"] <= reveal["present_through_block"]
+        or not isinstance(outcome["consumed_block_hash"], str)
+        or _CHAIN_HASH.fullmatch(outcome["consumed_block_hash"]) is None
+    ):
+        return None
+    if applied:
+        heads = outcome["confirmation_heads"]
+        if (
+            not isinstance(heads, list)
+            or len(heads) != 3
+            or not isinstance(outcome["remapped_dests"], list)
+            or any(
+                not isinstance(row, list)
+                or len(row) != 2
+                or row[0] != outcome["consumed_block"] + offset
+                or not isinstance(row[1], str)
+                or _CHAIN_HASH.fullmatch(row[1]) is None
+                for offset, row in enumerate(heads)
+            )
+            or heads[0][1] != outcome["consumed_block_hash"]
+        ):
+            return None
+    return outcome["consumed_block"]
 
 
 def _pending_phase(pending: object, *, expected_identity: str) -> str | None:
@@ -679,6 +801,11 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
     if direct["pending_phase"] == _PHASE_FINALIZED_FAILED:
         report["result"] = _FINALIZED_FAILED_STOPPED
         report["action"] = _FINALIZED_FAILED_ACTION
+    elif direct["last_result"] == _REVEAL_NOT_APPLIED and not direct["pending"]:
+        # The same kind of stop with no pending intent: only the record
+        # command clears it, so it outranks every state below.
+        report["result"] = _REVEAL_NOT_APPLIED_STOPPED
+        report["action"] = _REVEAL_NOT_APPLIED_ACTION
     elif not report["service_active"]:
         report["result"] = "NEEDS_REVIEW"
         report["action"] = (
@@ -702,7 +829,8 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
         and updater["channel"] == "stable"
         and not updater["pending_recovery"]
         and not direct["pending"]
-        and direct["last_result"] in {"CONFIRMED", "RECOVERED_CONFIRMED"}
+        and direct["last_result"]
+        in {"CONFIRMED", "RECOVERED_CONFIRMED", _COMMITTED, _REVEALED}
         and direct["recorded_age_seconds"] <= MAX_CONFIRMED_AGE_SECONDS
     ):
         report["result"] = "OPERATING_CONFIRMED"

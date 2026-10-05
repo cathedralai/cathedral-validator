@@ -422,6 +422,69 @@ updater can roll back to it when a new release fails to become ready. Once
 the host installs a bootstrap whose unit carries the line, the drop-in is
 redundant and harmless (the same file is read twice); remove it at leisure.
 
+## Commit-reveal subnets
+
+On a subnet with commit-reveal enabled the chain refuses plain weight writes,
+and so does the validator: every cycle ends with an error that names
+`commit_reveal_weights_enabled` and the subnet owner's command to turn it off:
+
+```bash
+btcli sudo set --netuid 94 --param commit_reveal_weights_enabled --value false
+```
+
+An operator can opt in to timelocked commits instead. Name the reveal period
+the subnet runs (`commit_reveal_period` in its hyperparameters) in a drop-in,
+not in `/etc/cathedral-validator/direct.env`, which setup compares byte for
+byte. Then reload and restart:
+
+```bash
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/cathedral-validator-direct.service.d
+printf '[Service]\nEnvironment=CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-1\n' |
+  sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/commit-reveal.conf \
+  >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart cathedral-validator-direct.service
+```
+
+The validator then signs `commit_timelocked_mechanism_weights` carrying the
+same zero-burn vector, encrypted to a drand round, with the same journal and
+recovery rules as a plain write. The chain decrypts and applies it about one
+epoch later by itself; there is no reveal transaction. The validator refuses
+to sign unless commit-reveal is on, the reveal period matches the drop-in,
+the payload version is 4, and the host clock agrees with the chain's drand
+round.
+
+A cycle reports `COMMITTED` once the commit is proven stored, then
+`COMMITTED_AWAITING_REVEAL` until the reveal, then `REVEALED_CONFIRMED` once
+finalized state proves the exact vector applied, and signs the next commit.
+After an outage longer than the RPC node keeps state (about 256 blocks), the
+blocks that prove a reveal may be gone; the validator then records
+`REVEAL_UNPROVEN` for a commit the chain no longer holds and continues.
+
+If the chain consumes the commit without applying it, the validator records
+`REVEAL_NOT_APPLIED`, prints `CONTRADICTION_STOPPED` and exits with code 2.
+Nothing was written. The journal keeps this stop, as it keeps a
+`FINALIZED_FAILED_STOPPED` write: every later start stops the same way before
+it reports ready, nothing is signed (commit or plain), and the updater
+refuses. `sudo cathedral-validator-status` reports
+`REVEAL_NOT_APPLIED_STOPPED`. Find the cause (permit, stake, version key,
+drand) first. Then clear the stop with the `record-failed-write` command
+from [Failed weight write](#failed-weight-write), run the same way, as the
+validator's service user while the validator is stopped. For this stop the
+command reads no chain history: the validator already proved it from
+finalized state, and the chain never reveals a commit it no longer holds. It
+refuses unless the locks are free and the journal holds exactly that stop for
+`--expected-hotkey`. It then changes only the attempt's status, to
+`REVEAL_NOT_APPLIED_RECORDED`, prints `REVEAL_NOT_APPLIED_RECORDED` and exits
+with code 0. Start the service; its next cycle signs a fresh commit at a newer
+anchor.
+
+If the subnet owner turns commit-reveal off, the validator refuses until the
+drop-in is removed (then `sudo systemctl daemon-reload` and restart), and then
+writes plain weights again. A commit already signed is still recovered and
+proven after the drop-in is removed.
+
 ## Recovery rules
 
 - Do not delete the validator journal or updater state.
@@ -435,6 +498,8 @@ redundant and harmless (the same file is read twice); remove it at leisure.
 - A `CONTRADICTION_STOPPED` validator needs journal and finalized-chain review.
 - A `FINALIZED_FAILED_STOPPED` validator is cleared only by
   `record-failed-write` ([Failed weight write](#failed-weight-write)).
+- A `REVEAL_NOT_APPLIED` stop is cleared only by `record-failed-write`
+  ([Commit-reveal subnets](#commit-reveal-subnets)).
 
 The updater has no access to the hotkey. The root updater verifies and switches
 files. The unprivileged validator service alone receives the hotkey through a
