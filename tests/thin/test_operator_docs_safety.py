@@ -74,6 +74,10 @@ def test_readme_is_the_small_public_guide() -> None:
         "## Trust",
     ]
     assert guide.startswith("# Cathedral Validator\n")
+    assert len(guide.splitlines()) <= 120
+    assert "Cathedral rewards verified compute" in guide
+    assert "This repository is for validator operators" in guide
+    assert "Subnet commit-reveal must be disabled" in guide
     assert (
         "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
         in guide
@@ -419,3 +423,51 @@ def test_tracked_documentation_has_no_removed_onboarding_anchors() -> None:
         text = path.read_text(encoding="utf-8")
         assert "README.md#quickstart" not in text, path.relative_to(ROOT)
         assert "VALIDATOR.md#" not in text, path.relative_to(ROOT)
+
+
+def test_advanced_operator_policies_remain_linked_and_honest() -> None:
+    guide = _readme()
+    runbook = (ROOT / "docs" / "OPERATOR_RUNBOOK.md").read_text()
+    assert "docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist" in guide
+    assert "docs/OPERATOR_RUNBOOK.md#optional-scoped-infra-handling" in guide
+    assert "by default any" in runbook and "guest image passes" in runbook
+    assert 'In `"mode": "shadow"` the machines are paid as before' in runbook
+    assert "does not emit the image" in runbook
+    assert "Environment=CATHEDRAL_INFRA_HALT=scoped" in runbook
+    assert "honest machines lose that round's share" in runbook
+    assert "A round with no PASS of an INFRA kind still halts" in runbook
+
+
+OPERATOR_LINK_DOCUMENTS = ["README.md", "docs/OPERATOR_RUNBOOK.md"]
+LINK_ROOT = ROOT
+
+
+def test_current_operator_markdown_links_resolve() -> None:
+    """Moving instructions must not strand operators at missing files/anchors."""
+    from urllib.parse import unquote, urlsplit
+
+    def prose(text: str) -> str:
+        # Shell examples contain headings and example URL syntax, not doc links.
+        return re.sub(r"^(`{3,}|~{3,}).*?^\1[^\n]*$", "", text, flags=re.M | re.S)
+
+    def anchors(text: str) -> set[str]:
+        headings = re.findall(r"^#{1,6} (.+)$", prose(text), flags=re.M)
+        return {
+            re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+            for heading in headings
+        }
+
+    for relative in OPERATOR_LINK_DOCUMENTS:
+        path = LINK_ROOT / relative
+        targets = re.findall(r"\[[^\]]*\]\(([^)\s]+)\)", prose(path.read_text()))
+        assert targets, f"{relative}: link check matched nothing"
+        for target in targets:
+            url = urlsplit(target)
+            if url.scheme or url.netloc:
+                continue
+            destination = path.parent / unquote(url.path) if url.path else path
+            assert destination.is_file(), f"{relative}: missing {target}"
+            if url.fragment and destination.suffix == ".md":
+                assert unquote(url.fragment) in anchors(destination.read_text()), (
+                    f"{relative}: missing anchor {target}"
+                )
