@@ -18,15 +18,17 @@ key into a website, collector, repository, or test fixture.
   reported telemetry failure, never permission to invent a row or retry a
   contradictory chain write.
 
-The code still refuses other production netuids than the compiled SN94.
-Changing `--netuid` on an old SN39 installation is not a supported migration.
+Production takes its netuid from deploy configuration only:
+`CATHEDRAL_VALIDATOR_NETUID` in `/etc/cathedral-validator/direct.env`, which
+the unit passes as `--netuid`; nothing is compiled in. The updater, status tool
+and boot gate read the same setting to find the writer's journal. Changing
+`--netuid` on an old SN39 installation is not a supported migration.
 This integration adapts the preserved #277 rehearsal work narrowly: exact
 `CATHEDRAL_TESTNET=1`, `--network test --netuid 584`, a pinned testnet genesis,
 separate `testnet-sn584-...` journals, and test-network signed requests/events.
 It adds no localnet stub, verifier bypass or private miner-address exception.
-Production network, verifier and journal defaults remain unchanged. Broader
-deployment-config work remains in #268. An older #279 testnet run or fake-chain
-unit tests do not qualify this exact artifact.
+Production network, verifier and journal defaults remain unchanged. An older
+#279 testnet run or fake-chain unit tests do not qualify this exact artifact.
 Recovery checks the selected chain's genesis directly from the node before
 reading pending-intent or reveal history. A wrong/unreadable genesis leaves the
 journal unchanged; existing terminal stops remain stopped without chain access.
