@@ -8,8 +8,9 @@ No localnet, fake quote verifier or private-address exception is introduced.
 from __future__ import annotations
 
 import os
+from typing import Mapping
 
-from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH, MAX_NETUID, NETUID
+from cathedral_thin.independent.constants import FINNEY_GENESIS_HASH, MAX_NETUID
 
 TESTNET_ENV = "CATHEDRAL_TESTNET"
 TESTNET_ENDPOINT = "wss://test.finney.opentensor.ai:443"
@@ -48,29 +49,62 @@ def state_scope_network() -> str:
     return "testnet" if testnet_active() else "finney"
 
 
-def configured_netuid(values: list[str] | tuple[str, ...] | None) -> int:
-    rehearsal = testnet_active()
-    if values is None:
-        if rehearsal:
-            raise SystemExit("testnet mode needs an explicit --netuid 584")
-        return NETUID
-    if len(values) != 1:
-        raise SystemExit("--netuid may be given only once")
-    value = values[0]
+NETUID_ENVIRONMENT = "CATHEDRAL_VALIDATOR_NETUID"
+
+
+def _canonical_netuid(value: str, source: str) -> int:
     if (
         not value.isascii()
         or not value.isdigit()
         or str(int(value)) != value
         or int(value) > MAX_NETUID
     ):
-        raise SystemExit("--netuid must be a canonical decimal u16 integer")
-    netuid = int(value)
-    if rehearsal:
-        if netuid != TESTNET_NETUID:
+        raise SystemExit(f"{source} must be a canonical decimal u16 integer")
+    return int(value)
+
+
+def configured_netuid(
+    values: list[str] | tuple[str, ...] | None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the one subnet to validate from deploy-time configuration.
+
+    The netuid comes from ``--netuid`` or from ``CATHEDRAL_VALIDATOR_NETUID``,
+    which the units read from ``direct.env``; nothing is compiled in. Both may
+    be given only if they agree, and at least one must be. Every refusal is a
+    ``SystemExit`` message, status 1, which the unit restarts; an argparse
+    error would exit with status 2, which ``RestartPreventExitStatus=2`` never
+    restarts, so the value is parsed here rather than by argparse.
+
+    The updater, the status tool and the boot gate read the same setting from
+    ``direct.env`` to locate this netuid's journal and the cycle lock beside
+    it, so an update never activates in the middle of the writer's cycle.
+
+    A testnet rehearsal ignores ``direct.env`` and accepts only an explicit
+    ``--netuid 584``, so a production setting can never select it.
+    """
+
+    if values is not None and len(values) != 1:
+        # argparse would silently keep the last one, and the unit still expands
+        # a free-form argument variable after the managed flags.
+        raise SystemExit("--netuid may be given only once")
+    flag = None if values is None else _canonical_netuid(values[0], "--netuid")
+    if testnet_active():
+        if flag is None:
+            raise SystemExit("testnet mode needs an explicit --netuid 584")
+        if flag != TESTNET_NETUID:
             raise SystemExit("this rehearsal accepts only public-testnet netuid 584")
-    elif netuid != NETUID:
+        return flag
+    environment = os.environ if environ is None else environ
+    raw = environment.get(NETUID_ENVIRONMENT)
+    configured = None if raw is None else _canonical_netuid(raw, NETUID_ENVIRONMENT)
+    if flag is None and configured is None:
         raise SystemExit(
-            f"--netuid {netuid} is not the netuid this release was built for "
-            f"({NETUID}); other production netuids are not supported"
+            f"no netuid is configured: set {NETUID_ENVIRONMENT} in "
+            "/etc/cathedral-validator/direct.env or pass --netuid"
         )
-    return netuid
+    if flag is not None and configured is not None and flag != configured:
+        raise SystemExit(
+            f"--netuid {flag} disagrees with {NETUID_ENVIRONMENT}={configured}"
+        )
+    return flag if flag is not None else configured

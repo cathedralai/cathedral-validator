@@ -22,7 +22,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import cathedral_thin.independent_runtime.updater as updater_module
 from cathedral_thin.independent_runtime.preview_io import canonical_document_bytes
 from cathedral_thin.independent_runtime.updater import (
-    DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
+    DIRECT_WRITER_STATE_ROOT,
+    direct_journal_scope_root,
     DEFAULT_OPERATION_TIMEOUT_SECONDS,
     DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS,
     METADATA_SCHEMA,
@@ -379,8 +380,13 @@ def test_updater_derives_the_only_journal_for_the_expected_hotkey(
     )
 
     assert updater.journal == scope / "5ExpectedValidator" / "state.json"
-    assert direct_writer_journal_path("5ExpectedValidator") == (
-        DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT / "5ExpectedValidator" / "state.json"
+    assert direct_writer_journal_path(
+        "5ExpectedValidator", scope_root=direct_journal_scope_root(7)
+    ) == (
+        DIRECT_WRITER_STATE_ROOT
+        / "finney-sn7-mechanism-0"
+        / "5ExpectedValidator"
+        / "state.json"
     )
 
 
@@ -1992,6 +1998,7 @@ def test_first_install_cli_requires_the_bootstrap_bound_metadata_digest(
         "load_expected_hotkey_identity",
         lambda _path: "5ExpectedValidator",
     )
+    monkeypatch.setattr(updater_module, "load_direct_netuid", lambda _path: 7)
     monkeypatch.setattr(updater_module, "load_pinned_public_key", lambda _path: "key")
     monkeypatch.setattr(updater_module, "SignedReleaseUpdater", FakeUpdater)
     monkeypatch.setattr(updater_module.pwd, "getpwnam", lambda _name: ServiceAccount())
@@ -2252,6 +2259,7 @@ def test_boot_reconcile_cli_accepts_no_release_channel_inputs(
         "load_expected_hotkey_identity",
         lambda _path: "5ExpectedValidator",
     )
+    monkeypatch.setattr(updater_module, "load_direct_netuid", lambda _path: 7)
     monkeypatch.setattr(updater_module, "SignedReleaseUpdater", FakeUpdater)
 
     refused = updater_module.main(

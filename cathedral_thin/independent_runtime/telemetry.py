@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from cathedral_thin.independent.constants import NETUID, W
+from cathedral_thin.independent.constants import W
 
 from .direct_contract import DirectSubmissionReceipt, DirectWeightPlan
 from .preview_io import canonical_document_bytes
@@ -351,12 +351,11 @@ def finalize_telemetry_candidate(
     receipt: DirectSubmissionReceipt,
     *,
     keypair: Any,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> dict[str, Any]:
     """Bind durable sanitized round facts to one finalized chain receipt.
 
-    ``netuid`` is the subnet the signed event must name. The default is the
-    compiled netuid for callers that predate the setting; the pending store
+    ``netuid`` is the subnet the signed event must name; the pending store
     passes its spool's netuid.
     """
 
@@ -393,13 +392,12 @@ def finalize_telemetry_candidate(
 def validate_public_telemetry_event(
     document: Mapping[str, Any],
     *,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> dict[str, Any]:
     """Refuse unknown fields before a separate process exports the event.
 
-    ``netuid`` is the only subnet an accepted event may name. The default is
-    the compiled netuid, which the separate exporter still relies on; the
-    validator passes the netuid it runs on.
+    ``netuid`` is the only subnet an accepted event may name. The validator and
+    the separate exporter each pass the netuid they were configured with.
     """
 
     if not isinstance(document, Mapping):
@@ -618,9 +616,8 @@ def _bounded_history(existing: bytes, line: bytes) -> bytes:
 class TelemetrySpool:
     """Owner-only bounded JSONL history, written atomically per cycle.
 
-    ``netuid`` is the only subnet an event in this spool may name. The default
-    is the compiled netuid for callers that predate the setting; the
-    validator's entry point passes the netuid it runs on.
+    ``netuid`` is the only subnet an event in this spool may name; the
+    validator passes the netuid it was configured with.
     """
 
     def __init__(
@@ -628,7 +625,7 @@ class TelemetrySpool:
         path: Path,
         *,
         reader_gid: int | None = None,
-        netuid: int = NETUID,
+        netuid: int,
     ) -> None:
         self.path = path
         self.reader_gid = reader_gid
@@ -1065,9 +1062,12 @@ def latest_telemetry_event(
     path: Path,
     *,
     expected_reader_gid: int | None = None,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> dict[str, Any]:
-    """Read and validate the latest event for the separate exporter."""
+    """Read and validate the latest event for the separate exporter.
+
+    ``netuid`` is the one subnet an exported event may name.
+    """
 
     if path.is_symlink():
         raise TelemetryError("telemetry spool is a symlink")

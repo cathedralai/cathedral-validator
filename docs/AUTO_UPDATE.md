@@ -240,8 +240,16 @@ The direct writer keeps its journal at:
 
 ```text
 /var/lib/cathedral-validator/.local/state/cathedral-validator/
-  direct-writer/finney-sn94-mechanism-0/<validator-hotkey>/state.json
+  direct-writer/finney-sn<netuid>-mechanism-0/<validator-hotkey>/state.json
 ```
+
+`<netuid>` is `CATHEDRAL_VALIDATOR_NETUID` in `/etc/cathedral-validator/direct.env`,
+which setup copies from the signed example. The updater, the status tool and
+the boot gate read it there to find the journal and the cycle lock beside it,
+and refuse to run while it is missing or malformed. A bootstrap that brings
+this setting rewrites a `direct.env` that is exactly the previous signed
+example to exactly the new one, which adds only the netuid every earlier
+runtime was built for; it never touches a file an operator changed.
 
 Never delete or replace the journal to clear an error. The service uses
 `RestartPreventExitStatus=2 3`, so a contradiction (exit code 2) and a failed
@@ -289,13 +297,14 @@ sudo systemd-run --pipe --wait --collect \
   --setenv=HOME=/var/lib/cathedral-validator \
   --setenv=PEX_ROOT=/var/lib/cathedral-validator/pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
-  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+  --network=finney --netuid=YOUR_NETUID --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
 ```
 
 `--network` takes the same value as the unit's `ExecStart` and is checked the
-same way the validator checks it. `--netuid` is accepted exactly as the
-validator accepts it; leave it out unless the unit passes one, so the command
-reads the same journal the validator writes. The command loads no key, and
+same way the validator checks it. `--netuid` must be the
+`CATHEDRAL_VALIDATOR_NETUID` value in `/etc/cathedral-validator/direct.env`, so
+the command reads the same journal the validator writes; `systemd-run` does not
+load that file, and the command refuses to run without a netuid. The command loads no key, and
 never signs or broadcasts. It:
 
 1. refuses unless the validator process, the cycle lock it shares with the
@@ -343,7 +352,7 @@ sudo systemd-run --pipe --wait --collect \
   --setenv=HOME=/var/lib/cathedral-validator \
   --setenv=PEX_ROOT=/var/lib/cathedral-validator/pex \
   /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write \
-  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58 \
+  --network=finney --netuid=YOUR_NETUID --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58 \
   --archive-endpoint=wss://archive.chain.opentensor.ai:443
 ```
 

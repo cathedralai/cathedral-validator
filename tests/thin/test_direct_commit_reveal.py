@@ -65,6 +65,14 @@ from cathedral_thin.independent_runtime.telemetry import (
 )
 from tests.thin import test_direct_validator as base
 
+
+@pytest.fixture(autouse=True)
+def _configured_netuid(monkeypatch):
+    """The unit's direct.env gives every validator process its netuid."""
+
+    monkeypatch.setenv("CATHEDRAL_VALIDATOR_NETUID", str(NETUID))
+
+
 VALIDATOR = base.VALIDATOR
 SIGN_HEAD = base.ANCHOR_NUMBER + 1
 INCLUSION = base.ANCHOR_NUMBER + 2
@@ -379,6 +387,7 @@ def cr_writer(
     instance = DirectWeightWriter(
         subtensor=subtensor,
         keypair=base.FakeKeypair(),
+        netuid=NETUID,
         snapshot_reader=lambda _subtensor, _keypair: replace(
             base.snapshot(substrate.sign_head, miners=miners),
             block_hash=substrate.block_hash(substrate.sign_head),
@@ -751,6 +760,7 @@ def test_reveal_not_applied_survives_a_restart_and_blocks_every_write(
     plain = DirectWeightWriter(
         subtensor=subtensor,
         keypair=base.FakeKeypair(),
+        netuid=NETUID,
         call_builder=lambda _kwargs: "direct-call",
     )
     for writer_object in (instance, restarted, plain):
@@ -792,7 +802,9 @@ def test_record_failed_write_clears_a_reveal_not_applied_stop(
     class OtherKeypair:
         ss58_address = "5OtherValidator"
 
-    other = DirectWeightWriter(subtensor=subtensor, keypair=OtherKeypair())
+    other = DirectWeightWriter(
+        netuid=NETUID, subtensor=subtensor, keypair=OtherKeypair()
+    )
     other.state_path = instance.state_path
     with pytest.raises(FailedWriteRecordRefused, match="another signer"):
         other.record_finalized_failure()
@@ -1210,6 +1222,7 @@ def test_duplicate_submit_is_refused_while_a_commit_awaits_its_reveal(
 
     # Removing the opt-in does not unlock a plain write over a stored commit.
     plain = DirectWeightWriter(
+        netuid=NETUID,
         subtensor=subtensor,
         keypair=base.FakeKeypair(),
         call_builder=lambda _kwargs: "direct-call",
@@ -1228,7 +1241,9 @@ def test_a_commit_is_proven_even_after_the_opt_in_is_removed(
     with pytest.raises(DirectSubmissionAmbiguous):
         base.submit_before_deadline(instance, planned)
 
-    plain = DirectWeightWriter(subtensor=subtensor, keypair=base.FakeKeypair())
+    plain = DirectWeightWriter(
+        netuid=NETUID, subtensor=subtensor, keypair=base.FakeKeypair()
+    )
     receipt = plain.recover()
 
     assert receipt is not None and receipt.status == STATUS_COMMITTED
@@ -1240,6 +1255,7 @@ def test_a_commit_is_proven_even_after_the_opt_in_is_removed(
 
 def _cycle_with(writer_object) -> dict[str, Any]:
     return run_direct_cycle(
+        netuid=NETUID,
         subtensor=object(),
         keypair=base.FakeKeypair(),
         verifier_adapter=SimpleNamespace(
@@ -1471,7 +1487,7 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
         block_number=INCLUSION,
         recovered=False,
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = PendingTelemetryStore(spool)
     state_path = tmp_path / "writer" / "state.json"
     adapter = SimpleNamespace(qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST)
@@ -1494,6 +1510,7 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
 
     def cycle():
         return run_direct_cycle(
+            netuid=NETUID,
             subtensor=object(),
             keypair=keypair,
             verifier_adapter=adapter,
@@ -1540,6 +1557,7 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
     }
     _write_journal(state_path, attempt)
     awaiting = run_direct_cycle(
+        netuid=NETUID,
         subtensor=object(),
         keypair=keypair,
         verifier_adapter=adapter,
@@ -1590,6 +1608,7 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
     )
     with pytest.raises(DirectValidatorError, match="stop after recovery"):
         run_direct_cycle(
+            netuid=NETUID,
             subtensor=object(),
             keypair=keypair,
             verifier_adapter=adapter,
@@ -1599,7 +1618,7 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
         )
 
     assert [event["status"] for event in reported] == [STATUS_REVEALED]
-    event = latest_telemetry_event(spool.path)
+    event = latest_telemetry_event(spool.path, netuid=NETUID)
     assert reported[0]["telemetry"] == {
         "status": "SPOOLED",
         "event_id": event["event_id"],
@@ -1624,7 +1643,7 @@ def test_a_commit_first_publishes_a_prior_round_that_is_already_bound(
 ) -> None:
     keypair = Keypair.create_from_uri("//Alice")
     observed, scored, planned = _telemetry_round(keypair, "earlier")
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = PendingTelemetryStore(spool)
     # An earlier round whose finalized receipt was bound, then not spooled.
     earlier = DirectSubmissionReceipt(
@@ -1658,6 +1677,7 @@ def test_a_commit_first_publishes_a_prior_round_that_is_already_bound(
     )
 
     result = run_direct_cycle(
+        netuid=NETUID,
         subtensor=object(),
         keypair=keypair,
         verifier_adapter=SimpleNamespace(
@@ -1668,7 +1688,7 @@ def test_a_commit_first_publishes_a_prior_round_that_is_already_bound(
         report_recovery=base.no_expired_recovery,
     )
 
-    event = latest_telemetry_event(spool.path)
+    event = latest_telemetry_event(spool.path, netuid=NETUID)
     assert event["submission"]["block_number"] == REVEAL_BLOCK
     assert result["reconciled_telemetry_event_id"] == event["event_id"]
     assert result["telemetry"] == {"status": "AWAITING_REVEAL"}
@@ -1684,7 +1704,7 @@ def test_a_failed_round_projection_never_changes_a_commit(
     commit = SimpleNamespace(
         status=STATUS_COMMITTED, as_document=lambda: {"status": STATUS_COMMITTED}
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     monkeypatch.setattr(
         validator_runtime, "finalized_serving_miners_snapshot", lambda *_a: observed
     )
@@ -1698,6 +1718,7 @@ def test_a_failed_round_projection_never_changes_a_commit(
     monkeypatch.setattr(validator_runtime, "build_telemetry_candidate", broken)
 
     result = run_direct_cycle(
+        netuid=NETUID,
         subtensor=object(),
         keypair=keypair,
         verifier_adapter=SimpleNamespace(
@@ -1727,6 +1748,7 @@ def test_a_commit_without_a_telemetry_sink_reports_no_telemetry(monkeypatch) -> 
     )
 
     result = run_direct_cycle(
+        netuid=NETUID,
         subtensor=object(),
         keypair=keypair,
         verifier_adapter=SimpleNamespace(

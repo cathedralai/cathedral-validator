@@ -181,7 +181,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ingest-token-file", type=Path, required=True)
     parser.add_argument("--sites-authorization-file", type=Path, required=True)
     parser.add_argument("--reader-group", required=True)
-    parser.add_argument("--netuid", action="append")
+    parser.add_argument(
+        "--netuid",
+        action="append",
+        help=(
+            "subnet the exported events must name; defaults to "
+            "CATHEDRAL_VALIDATOR_NETUID from the validator's direct.env"
+        ),
+    )
     return parser
 
 
