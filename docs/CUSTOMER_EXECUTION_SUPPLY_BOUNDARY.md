@@ -90,7 +90,10 @@ Do not relax condition 3 to unblock miner rewards. Add the miner teardown eviden
 the lane shadow-only until it exists. Draft + verify helpers: cathedral-sandbox
 `docs/MINER_TEARDOWN_EVIDENCE.md` and `cathedral/miner_lifecycle_receipt.py`
 (`cathedral_miner_lifecycle_receipt_v1`) — control-plane signed observation only; miner self-report
-is rejected. Polaris must still *issue* receipts after an independent observation before rewards.
+is rejected. Polaris issuer + ingest stub:
+`polariscomputer` `cathedral_miner_lifecycle_issuer.py` /
+`docs/MINER_LIFECYCLE_RECEIPT_ISSUER.md`. Live observation hooks and reward-policy
+activation remain separate.
 
 Seed capacity is Cathedral-operated. Using its measurements as a comparative baseline that scores
 miner capacity would let the operator set the bar it grades competitors against. Seed benchmark data
