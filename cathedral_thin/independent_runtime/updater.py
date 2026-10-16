@@ -60,10 +60,16 @@ MAX_METADATA_BYTES = 131_072
 MAX_ARCHIVE_BYTES = 536_870_912
 MAX_TREE_FILES = 20_000
 MAX_TREE_BYTES = 1_073_741_824
-DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT = Path(
-    "/var/lib/cathedral-validator/.local/state/cathedral-validator/"
-    "direct-writer/finney-sn94-mechanism-0"
+# The writer keeps one journal per subnet under this root, in the directory
+# direct_writer.direct_state_scope() names. The netuid is deploy-time
+# configuration: the updater reads it from direct.env, the same file that
+# gives it to the validator, and never compiles one in.
+DIRECT_WRITER_STATE_ROOT = Path(
+    "/var/lib/cathedral-validator/.local/state/cathedral-validator/direct-writer"
 )
+DIRECT_NETUID_VARIABLE = "CATHEDRAL_VALIDATOR_NETUID"
+MAX_DIRECT_NETUID = (1 << 16) - 1
+DEFAULT_DIRECT_ENV_FILE = Path("/etc/cathedral-validator/direct.env")
 DEFAULT_IDENTITY_FILE = Path("/etc/cathedral-validator/identity.env")
 _HEX = frozenset("0123456789abcdef")
 _PENDING_PREPARED = "prepared"
@@ -563,13 +569,7 @@ def require_idle_direct_writer_journal(path: Path) -> None:
         )
 
 
-def direct_writer_journal_path(
-    expected_hotkey: object,
-    *,
-    scope_root: Path = DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
-) -> Path:
-    """Derive the only writer journal accepted for one public hotkey identity."""
-
+def _require_path_safe_hotkey(expected_hotkey: object) -> str:
     if (
         not isinstance(expected_hotkey, str)
         or not 1 <= len(expected_hotkey) <= 64
@@ -577,6 +577,34 @@ def direct_writer_journal_path(
         or not expected_hotkey.isalnum()
     ):
         raise UpdateRefused("expected validator hotkey is not path-safe")
+    return expected_hotkey
+
+
+def direct_journal_scope_root(netuid: object) -> Path:
+    """Return the writer's journal scope for one configured subnet.
+
+    It must name the directory ``direct_writer.direct_state_scope(netuid)``
+    names under the service's state root, because the updater takes its cycle
+    lock beside that journal.
+    """
+
+    if (
+        isinstance(netuid, bool)
+        or not isinstance(netuid, int)
+        or not 0 <= netuid <= MAX_DIRECT_NETUID
+    ):
+        raise UpdateRefused("direct validator netuid is invalid")
+    return DIRECT_WRITER_STATE_ROOT / f"finney-sn{netuid}-mechanism-0"
+
+
+def direct_writer_journal_path(
+    expected_hotkey: object,
+    *,
+    scope_root: Path,
+) -> Path:
+    """Derive the only writer journal accepted for one public hotkey identity."""
+
+    _require_path_safe_hotkey(expected_hotkey)
     if (
         not scope_root.is_absolute()
         or ".." in scope_root.parts
@@ -619,9 +647,53 @@ def load_expected_hotkey_identity(
         or assignments[0].count("=") != 1
     ):
         raise UpdateRefused("validator identity file has unexpected fields")
-    expected_hotkey = assignments[0][len(prefix) :]
-    direct_writer_journal_path(expected_hotkey)
-    return expected_hotkey
+    return _require_path_safe_hotkey(assignments[0][len(prefix) :])
+
+
+def load_direct_netuid(path: Path, *, expected_uid: int = 0) -> int:
+    """Read the configured netuid from the root-controlled direct.env.
+
+    The file is the validator unit's EnvironmentFile. Exactly one assignment
+    of the netuid must be present, as a canonical decimal u16, so the updater
+    locates the same journal and cycle lock the writer uses.
+    """
+
+    if not path.is_absolute() or path.is_symlink():
+        raise UpdateRefused("direct validator configuration path is invalid")
+    try:
+        metadata = path.stat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise UpdateRefused("direct validator configuration is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or not 1 <= len(raw) <= 4096
+    ):
+        raise UpdateRefused("direct validator configuration is not root-controlled")
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise UpdateRefused("direct validator configuration is not ASCII") from exc
+    prefix = f"{DIRECT_NETUID_VARIABLE}="
+    values = [line[len(prefix) :] for line in lines if line.startswith(prefix)]
+    if len(values) != 1:
+        raise UpdateRefused(
+            f"direct validator configuration must assign {DIRECT_NETUID_VARIABLE} "
+            "exactly once"
+        )
+    value = values[0]
+    if (
+        not value.isascii()
+        or not value.isdigit()
+        or str(int(value)) != value
+        or int(value) > MAX_DIRECT_NETUID
+    ):
+        raise UpdateRefused(
+            f"{DIRECT_NETUID_VARIABLE} must be a canonical decimal u16 integer"
+        )
+    return int(value)
 
 
 def _state_path(root: Path) -> Path:
@@ -983,7 +1055,7 @@ class SignedReleaseUpdater:
         install_root: Path,
         state_root: Path,
         expected_hotkey: str,
-        journal_scope_root: Path = DEFAULT_DIRECT_JOURNAL_SCOPE_ROOT,
+        journal_scope_root: Path,
         expected_uid: int = 0,
         fetcher: Callable[[str, int], bytes] | None = None,
         service_restarter: Callable[[Sequence[str]], None] | None = None,
@@ -2183,6 +2255,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=DEFAULT_IDENTITY_FILE,
     )
+    parser.add_argument(
+        "--direct-env-file",
+        type=Path,
+        default=DEFAULT_DIRECT_ENV_FILE,
+    )
     parser.add_argument("--minimum-sequence", type=int)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -2227,10 +2304,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("the updater must run as root")
     try:
         expected_hotkey = load_expected_hotkey_identity(options.identity_file)
+        netuid = load_direct_netuid(options.direct_env_file)
         updater = SignedReleaseUpdater(
             install_root=options.install_root,
             state_root=options.state_root,
             expected_hotkey=expected_hotkey,
+            journal_scope_root=direct_journal_scope_root(netuid),
         )
         if options.reconcile_boot:
             if any(
@@ -2319,7 +2398,9 @@ __all__ = [
     "parse_release_metadata",
     "release_tree_sha256",
     "require_idle_direct_writer_journal",
+    "direct_journal_scope_root",
     "direct_writer_journal_path",
+    "load_direct_netuid",
     "load_expected_hotkey_identity",
 ]
 

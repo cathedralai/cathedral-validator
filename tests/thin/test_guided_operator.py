@@ -957,7 +957,7 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     etc = tmp_path / "etc" / "cathedral-validator"
     install = tmp_path / "opt" / "cathedral-validator"
     state = tmp_path / "var" / "lib" / "cathedral-validator-update" / "state.json"
-    scope = (
+    writer_root = (
         tmp_path
         / "var"
         / "lib"
@@ -966,7 +966,6 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         / "state"
         / "cathedral-validator"
         / "direct-writer"
-        / "finney-sn94-mechanism-0"
     )
     monkeypatch.setattr(status, "ETC", etc)
     monkeypatch.setattr(status, "INSTALL_ROOT", install)
@@ -974,12 +973,16 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         status, "UPDATER_VERIFIED_METADATA", state.with_name("verified-metadata.json")
     )
-    monkeypatch.setattr(status, "DIRECT_SCOPE", scope)
+    monkeypatch.setattr(status, "DIRECT_WRITER_STATE_ROOT", writer_root)
     monkeypatch.setattr(status, "ROOT_UID", os.geteuid())
     monkeypatch.setattr(
         status.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=os.geteuid())
     )
     _write(etc / "identity.env", f"CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY={HOTKEY}\n")
+    _write(
+        etc / "direct.env",
+        (ROOT / "deploy/validator-update/direct.env.example").read_bytes(),
+    )
     _write(
         state,
         json.dumps(
@@ -1064,7 +1067,7 @@ def _status_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         },
     }
     _write(
-        scope / HOTKEY / "state.json",
+        status._direct_scope() / HOTKEY / "state.json",
         json.dumps(
             {
                 "schema": "cathedral_direct_validator_state_v1",
@@ -1095,7 +1098,7 @@ def test_status_fails_closed_for_pending_or_unreadable_state(
     monkeypatch, tmp_path: Path
 ) -> None:
     _status_paths(monkeypatch, tmp_path)
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     _write(
         journal,
         json.dumps(
@@ -1134,7 +1137,7 @@ def test_status_requires_complete_bound_confirmation_record(
     monkeypatch, tmp_path: Path, mutation
 ) -> None:
     _status_paths(monkeypatch, tmp_path)
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     document = json.loads(journal.read_text())
     document["last_attempt"] = mutation(document["last_attempt"])
     journal.write_text(json.dumps(document))
@@ -1150,7 +1153,7 @@ def test_status_accepts_complete_recovered_confirmation(
     monkeypatch, tmp_path: Path
 ) -> None:
     _status_paths(monkeypatch, tmp_path)
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     document = json.loads(journal.read_text())
     last = document["last_attempt"]
     last["status"] = "RECOVERED_CONFIRMED"
@@ -1169,7 +1172,7 @@ def test_status_accepts_complete_expiry_without_reporting_success(
     monkeypatch, tmp_path: Path
 ) -> None:
     _status_paths(monkeypatch, tmp_path)
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     document = json.loads(journal.read_text())
     last = document["last_attempt"]
     last["status"] = "EXPIRED_WITHOUT_INCLUSION"
@@ -1207,7 +1210,7 @@ def test_status_never_reads_hotkey_file(monkeypatch, tmp_path: Path) -> None:
 
 def test_status_confirmation_freshness_boundary(monkeypatch, tmp_path: Path) -> None:
     _status_paths(monkeypatch, tmp_path)
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     recorded = 1_700_000_000
     os.utime(journal, (recorded, recorded))
 
@@ -1244,7 +1247,7 @@ def _status_line_runner(
 
 def _idle_journal() -> None:
     _write(
-        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        status._direct_scope() / HOTKEY / "state.json",
         json.dumps(
             {
                 "schema": "cathedral_direct_validator_state_v1",
@@ -1355,7 +1358,7 @@ def test_status_eligibility_never_hides_a_stopped_service_or_pending_recovery(
     # The status tool names a pending intent's phase, and one without a valid
     # phase is sent to "Inspect", so the pending intent here carries one.
     _write(
-        status.DIRECT_SCOPE / HOTKEY / "state.json",
+        status._direct_scope() / HOTKEY / "state.json",
         json.dumps(
             {
                 "schema": "cathedral_direct_validator_state_v1",
@@ -1407,7 +1410,7 @@ def _rebound(pending: dict, **intent_changes) -> dict:
 
 
 def _journal_document() -> tuple[Path, dict]:
-    journal = status.DIRECT_SCOPE / HOTKEY / "state.json"
+    journal = status._direct_scope() / HOTKEY / "state.json"
     return journal, json.loads(journal.read_text())
 
 

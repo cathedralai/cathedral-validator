@@ -271,6 +271,13 @@ def plan(
     )
 
 
+@pytest.fixture(autouse=True)
+def _configured_netuid(monkeypatch):
+    """The unit's direct.env gives every validator process its netuid."""
+
+    monkeypatch.setenv("CATHEDRAL_VALIDATOR_NETUID", str(NETUID))
+
+
 def test_finalized_snapshot_lists_every_serving_uid_but_the_validators_own() -> None:
     graph = Metagraph(
         miners=(MINER_TWO_AXON, MINER_ONE_AXON), include_other_validator=True
@@ -279,7 +286,7 @@ def test_finalized_snapshot_lists_every_serving_uid_but_the_validators_own() -> 
     graph.axons[0] = Axon("7.7.7.7", 8081, serving=True)
 
     observed = finalized_serving_miners_snapshot(
-        SnapshotSubtensor(graph), FakeKeypair()
+        SnapshotSubtensor(graph), FakeKeypair(), netuid=NETUID
     )
 
     assert observed.block_number == ANCHOR_NUMBER
@@ -305,7 +312,7 @@ def test_a_miner_that_holds_a_permit_is_still_a_miner() -> None:
     graph.validator_permit[graph.uids.index(MINER_ONE_AXON.uid)] = True
 
     observed = finalized_serving_miners_snapshot(
-        SnapshotSubtensor(graph), FakeKeypair()
+        SnapshotSubtensor(graph), FakeKeypair(), netuid=NETUID
     )
 
     assert observed.miners == (MINER_ONE_AXON,)
@@ -316,7 +323,7 @@ def test_finalized_snapshot_skips_private_miner_without_losing_healthy_miner() -
     graph = Metagraph(miners=(private, MINER_ONE_AXON))
 
     observed = finalized_serving_miners_snapshot(
-        SnapshotSubtensor(graph), FakeKeypair()
+        SnapshotSubtensor(graph), FakeKeypair(), netuid=NETUID
     )
 
     assert observed.miners == (MINER_ONE_AXON,)
@@ -339,6 +346,7 @@ def test_cycle_with_only_unroutable_miners_refuses_without_writer_submit() -> No
             ),
             writer=writer_object,
             report_recovery=no_expired_recovery,
+            netuid=NETUID,
         )
 
 
@@ -348,9 +356,13 @@ def test_finalized_snapshot_refuses_no_serving_miners_or_missing_permit() -> Non
     no_permit.validator_permit[0] = False
 
     with pytest.raises(DirectValidatorError, match="no serving miner"):
-        finalized_serving_miners_snapshot(SnapshotSubtensor(no_miner), FakeKeypair())
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(no_miner), FakeKeypair(), netuid=NETUID
+        )
     with pytest.raises(DirectValidatorError, match="lacks a finalized permit"):
-        finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(no_permit), FakeKeypair(), netuid=NETUID
+        )
 
 
 def test_finalized_snapshot_names_a_missing_permit_with_hotkey_and_block() -> None:
@@ -358,7 +370,9 @@ def test_finalized_snapshot_names_a_missing_permit_with_hotkey_and_block() -> No
     no_permit.validator_permit[0] = False
 
     with pytest.raises(runtime.ValidatorNotEligible) as caught:
-        finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(no_permit), FakeKeypair(), netuid=NETUID
+        )
 
     assert caught.value.event() == {
         "status": "NO_PERMIT",
@@ -377,7 +391,7 @@ def test_finalized_snapshot_names_an_unregistered_hotkey_with_hotkey_and_block()
 
     with pytest.raises(runtime.ValidatorNotEligible) as caught:
         finalized_serving_miners_snapshot(
-            SnapshotSubtensor(unregistered), FakeKeypair()
+            SnapshotSubtensor(unregistered), FakeKeypair(), netuid=NETUID
         )
 
     assert isinstance(caught.value, DirectValidatorError)
@@ -399,7 +413,9 @@ def test_finalized_snapshot_keeps_generic_refusal_for_inconsistent_permit_rows()
     graph.validator_permit.pop()
 
     with pytest.raises(DirectValidatorError, match="rows are inconsistent") as caught:
-        finalized_serving_miners_snapshot(SnapshotSubtensor(graph), FakeKeypair())
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(graph), FakeKeypair(), netuid=NETUID
+        )
     assert not isinstance(caught.value, runtime.ValidatorNotEligible)
 
 
@@ -408,7 +424,9 @@ def test_finalized_snapshot_refuses_a_truthy_non_boolean_permit() -> None:
     graph.validator_permit[0] = 1
 
     with pytest.raises(DirectValidatorError, match="explicit boolean"):
-        finalized_serving_miners_snapshot(SnapshotSubtensor(graph), FakeKeypair())
+        finalized_serving_miners_snapshot(
+            SnapshotSubtensor(graph), FakeKeypair(), netuid=NETUID
+        )
 
 
 def test_plan_counts_unique_verified_machines_per_uid_and_normalizes_zero_burn() -> (
@@ -1002,6 +1020,7 @@ def writer(
             block_hash=subtensor.substrate.block_hash(subtensor.substrate.sign_head),
         ),
         call_builder=lambda _kwargs: "direct-call",
+        netuid=NETUID,
     )
     return instance, subtensor, selected
 
@@ -1021,10 +1040,16 @@ def test_writer_uses_one_canonical_signer_network_path(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
-    first = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
-    second = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
+    first = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair(), netuid=NETUID)
+    second = DirectWeightWriter(
+        subtensor=object(), keypair=FakeKeypair(), netuid=NETUID
+    )
 
-    assert first.state_path == second.state_path == canonical_state_path(FakeKeypair())
+    assert (
+        first.state_path
+        == second.state_path
+        == canonical_state_path(FakeKeypair(), netuid=NETUID)
+    )
     assert first.state_path == (
         tmp_path / "finney-sn94-mechanism-0" / VALIDATOR / "state.json"
     )
@@ -1034,8 +1059,10 @@ def test_writer_process_lock_allows_only_one_recurring_instance(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(writer_runtime, "DIRECT_STATE_ROOT", tmp_path)
-    first = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
-    second = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair())
+    first = DirectWeightWriter(subtensor=object(), keypair=FakeKeypair(), netuid=NETUID)
+    second = DirectWeightWriter(
+        subtensor=object(), keypair=FakeKeypair(), netuid=NETUID
+    )
 
     with first.process_locked():
         with pytest.raises(DirectSubmissionAmbiguous, match="process lock"):
@@ -2280,6 +2307,7 @@ def test_cycle_recovers_before_collecting_or_signing(monkeypatch) -> None:
         verifier_adapter=object(),
         writer=writer_object,
         report_recovery=lambda _event: pytest.fail("a confirmed recovery fell through"),
+        netuid=NETUID,
     )
 
     assert result["status"] == STATUS_RECOVERED
@@ -2335,6 +2363,7 @@ def test_cycle_recovers_an_expired_intent_then_signs_a_fresh_write(
             ),
             writer=instance,
             report_recovery=reports.append,
+            netuid=NETUID,
         )
 
     if fresh_anchor == "newer":
@@ -2400,7 +2429,7 @@ def test_cycle_reports_an_expired_submission_without_telemetry(
         block_number=None,
         recovered=True,
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     monkeypatch.setattr(
         runtime, "finalized_serving_miners_snapshot", lambda *_args: snapshot()
     )
@@ -2426,6 +2455,7 @@ def test_cycle_reports_an_expired_submission_without_telemetry(
         ),
         telemetry_sink=spool,
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert result["status"] == STATUS_EXPIRED
@@ -2477,6 +2507,7 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
         ),
         writer=writer_object,
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert seen_axons == [miners]
@@ -2539,6 +2570,7 @@ def test_cycle_lock_covers_recovery_collection_and_submission(monkeypatch) -> No
             submit=submit,
         ),
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert result["status"] == STATUS_CONFIRMED
@@ -2585,8 +2617,11 @@ def test_telemetry_failure_never_prevents_a_finalized_weight_write(
             qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
         ),
         writer=writer_object,
-        telemetry_sink=TelemetrySpool(tmp_path / "telemetry" / "events.jsonl"),
+        telemetry_sink=TelemetrySpool(
+            tmp_path / "telemetry" / "events.jsonl", netuid=NETUID
+        ),
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert submitted and submitted[0].raw_scores == ((19, 1),)
@@ -2633,7 +2668,7 @@ def test_existing_pending_telemetry_waits_for_fresh_finalized_write(
         block_number=ANCHOR_NUMBER + 1,
         recovered=False,
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = runtime.PendingTelemetryStore(spool)
     pending.prepare(
         runtime.build_telemetry_candidate(
@@ -2691,6 +2726,7 @@ def test_existing_pending_telemetry_waits_for_fresh_finalized_write(
         ),
         telemetry_sink=spool,
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert order == [
@@ -2728,6 +2764,7 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
     spool = TelemetrySpool(
         tmp_path / "telemetry" / "events.jsonl",
         reader_gid=os.getegid(),
+        netuid=NETUID,
     )
     writer_state = tmp_path / "direct-writer" / "state.json"
     writer_state.parent.mkdir(mode=0o700)
@@ -2778,6 +2815,7 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
             ),
             telemetry_sink=spool,
             report_recovery=no_expired_recovery,
+            netuid=NETUID,
         )
 
     pending_path = spool.path.with_name("pending.json")
@@ -2903,6 +2941,7 @@ def test_ambiguous_write_persists_candidate_only_after_submit_for_recovery(
         ),
         telemetry_sink=spool,
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     events = [json.loads(line) for line in spool.path.read_text().splitlines()]
@@ -2939,7 +2978,7 @@ def test_prior_pending_ambiguity_never_overwrites_another_telemetry_plan(
     prior_result = round_result(prior_row, miners=(MINER_ONE_AXON,))
     current_result = round_result(current_row, miners=(MINER_ONE_AXON,))
     prior_plan = build_direct_plan(prior_observed, prior_result)
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = runtime.PendingTelemetryStore(spool)
     pending.prepare(
         runtime.build_telemetry_candidate(
@@ -2989,6 +3028,7 @@ def test_prior_pending_ambiguity_never_overwrites_another_telemetry_plan(
             ),
             telemetry_sink=spool,
             report_recovery=no_expired_recovery,
+            netuid=NETUID,
         )
 
     assert pending.path.read_bytes() == pending_before
@@ -3011,7 +3051,7 @@ def test_recovered_receipt_refuses_a_different_pending_telemetry_plan(
     scored = round_result(row, miners=(MINER_ONE_AXON,))
     pending_plan = build_direct_plan(pending_observed, scored)
     journal_plan = build_direct_plan(journal_observed, scored)
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = runtime.PendingTelemetryStore(spool)
     pending.prepare(
         runtime.build_telemetry_candidate(
@@ -3055,6 +3095,7 @@ def test_recovered_receipt_refuses_a_different_pending_telemetry_plan(
         ),
         telemetry_sink=spool,
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert result["status"] == STATUS_RECOVERED
@@ -3078,6 +3119,7 @@ def test_cycle_refuses_an_adapter_with_another_qvl_pin(monkeypatch) -> None:
             verifier_adapter=SimpleNamespace(qvl_digest="0" * 64),
             writer=writer_object,
             report_recovery=no_expired_recovery,
+            netuid=NETUID,
         )
 
 
@@ -3112,6 +3154,7 @@ def test_snapshot_and_scoring_share_one_end_to_end_presign_deadline(
             ),
             writer=writer_object,
             report_recovery=no_expired_recovery,
+            netuid=NETUID,
         )
     assert submitted == []
 
@@ -3148,6 +3191,7 @@ def test_evidence_elapsed_excludes_writer_chain_wait(monkeypatch) -> None:
         ),
         writer=SimpleNamespace(recover=lambda: None, submit=submit),
         report_recovery=no_expired_recovery,
+        netuid=NETUID,
     )
 
     assert deadlines == [220.0]

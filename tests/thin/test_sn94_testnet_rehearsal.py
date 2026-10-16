@@ -62,14 +62,25 @@ def test_localnet_is_not_a_shortcut(monkeypatch):
 
 
 def test_production_pins_and_scope_are_unchanged():
+    # Production takes its netuid from deploy configuration only; the testnet
+    # is selected by CATHEDRAL_TESTNET and its pinned chain, never by a netuid.
+    configured = {"CATHEDRAL_VALIDATOR_NETUID": "94"}
     assert runtime._pinned_network("finney") == "finney"
-    assert runtime._configured_netuid(None) == 94
+    assert runtime._configured_netuid(None, configured) == 94
     assert rehearsal.expected_genesis_hash() == FINNEY_GENESIS_HASH
     assert direct_state_scope(94) == "finney-sn94-mechanism-0"
     with pytest.raises(SystemExit):
         runtime._pinned_network("test")
-    with pytest.raises(SystemExit):
-        runtime._configured_netuid(["584"])
+    with pytest.raises(SystemExit, match="no netuid is configured"):
+        runtime._configured_netuid(None, {})
+
+
+def test_rehearsal_ignores_the_production_netuid_setting(monkeypatch):
+    monkeypatch.setenv(rehearsal.TESTNET_ENV, "1")
+    configured = {"CATHEDRAL_VALIDATOR_NETUID": "94"}
+    assert runtime._configured_netuid(["584"], configured) == 584
+    with pytest.raises(SystemExit, match="explicit --netuid 584"):
+        runtime._configured_netuid(None, configured)
 
 
 def test_rehearsal_requires_exact_chain_and_explicit_subnet(monkeypatch):

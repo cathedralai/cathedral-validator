@@ -2331,3 +2331,85 @@ def test_installed_files_are_root_style_modes_and_manifest_is_immutable(tmp_path
         )
     for command in installer.OPERATOR_ASSETS:
         assert stat.S_IMODE((root / "usr/local/sbin" / command).stat().st_mode) == 0o755
+
+
+def _direct_env_host(tmp_path: Path, body: bytes | None) -> tuple[Path, Path]:
+    root = tmp_path / "host"
+    root.mkdir(mode=0o700)
+    direct = root / "etc/cathedral-validator/direct.env"
+    if body is not None:
+        direct.parent.mkdir(parents=True)
+        direct.write_bytes(body)
+        direct.chmod(0o600)
+    return root, direct
+
+
+def _install_host(verified, root: Path) -> None:
+    installer.install_verified_bundle(
+        verified,
+        root=root,
+        expected_owner=os.geteuid(),
+        python_executable=Path("/usr/bin/python3.12"),
+        runner=_fake_runner([]),
+    )
+
+
+def _example_without_netuid(example: bytes) -> bytes:
+    return b"".join(
+        line
+        for line in example.splitlines(keepends=True)
+        if not line.startswith(b"CATHEDRAL_VALIDATOR_NETUID=")
+    )
+
+
+def test_bootstrap_gives_a_host_set_up_from_the_previous_example_its_netuid(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    example = verified.files["payload/examples/direct.env.example"].body
+    previous = _example_without_netuid(example)
+    assert previous != example
+    root, direct = _direct_env_host(tmp_path, previous)
+
+    _install_host(verified, root)
+
+    assert direct.read_bytes() == example
+    assert stat.S_IMODE(direct.stat().st_mode) == 0o600
+    _install_host(verified, root)
+    assert direct.read_bytes() == example
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"operator-direct\n",
+        b"CATHEDRAL_VALIDATOR_NETUID=12\n",
+    ],
+    ids=["operator-edited", "operator-netuid"],
+)
+def test_bootstrap_never_rewrites_a_direct_env_it_did_not_write(tmp_path, body):
+    verified, _, _ = _verified(tmp_path / "source")
+    root, direct = _direct_env_host(tmp_path, body)
+
+    _install_host(verified, root)
+
+    assert direct.read_bytes() == body
+
+
+def test_bootstrap_leaves_a_host_without_direct_env_to_setup(tmp_path):
+    verified, _, _ = _verified(tmp_path / "source")
+    root, direct = _direct_env_host(tmp_path, None)
+
+    _install_host(verified, root)
+
+    assert not direct.exists()
+
+
+def test_bootstrap_whose_example_has_no_netuid_migrates_nothing(tmp_path):
+    values = _inputs(tmp_path / "inputs")
+    example = values["assets"].joinpath("direct.env.example")
+    example.write_bytes(_example_without_netuid(example.read_bytes()))
+    verified, _ = _verify_values(tmp_path / "artifacts", values)
+    root, direct = _direct_env_host(tmp_path, b"# older\n" + example.read_bytes())
+
+    _install_host(verified, root)
+
+    assert direct.read_bytes() == b"# older\n" + example.read_bytes()

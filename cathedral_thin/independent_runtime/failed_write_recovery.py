@@ -89,6 +89,7 @@ def _archive_endpoint(value: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         prog=f"cathedral-validator {RECORD_FAILED_WRITE_COMMAND}",
         description=(
             "Prove from finalized chain state that the stopped weight write "

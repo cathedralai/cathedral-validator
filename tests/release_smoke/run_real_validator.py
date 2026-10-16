@@ -57,6 +57,24 @@ def _require_ephemeral_pex_import(module: ModuleType) -> None:
         raise SystemExit(f"{module.__name__} resolved from the source checkout")
 
 
+def _example_netuid() -> str:
+    example_raw = os.environ.get("CATHEDRAL_RELEASE_SMOKE_DIRECT_ENV")
+    example = (
+        Path(example_raw)
+        if example_raw
+        else Path(__file__).resolve().parents[2]
+        / "deploy/validator-update/direct.env.example"
+    )
+    values = [
+        line.removeprefix("CATHEDRAL_VALIDATOR_NETUID=")
+        for line in example.read_text("ascii").splitlines()
+        if line.startswith("CATHEDRAL_VALIDATOR_NETUID=")
+    ]
+    if len(values) != 1:
+        raise SystemExit("the signed direct example must assign the netuid once")
+    return values[0]
+
+
 def main() -> int:
     _require_ephemeral_pex_import(runtime)
     _require_ephemeral_pex_import(snp_production)
@@ -106,6 +124,9 @@ def main() -> int:
             server.bind(str(notify_path))
             server.settimeout(3.0)
             os.environ["NOTIFY_SOCKET"] = str(notify_path)
+            # The unit's EnvironmentFile gives the validator its netuid from
+            # direct.env, which setup copies from the signed example.
+            os.environ["CATHEDRAL_VALIDATOR_NETUID"] = _example_netuid()
             result = runtime.main(
                 [
                     "--qvl",

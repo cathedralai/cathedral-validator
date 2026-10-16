@@ -31,7 +31,6 @@ from cathedral_thin.independent.constants import (
     MAX_DESTS,
     MAX_NETUID,
     MULTICOMPUTE_MACHINE_WORK_UNIT_CAP,
-    NETUID,
 )
 from cathedral_thin.independent.errors import SatWorkError
 from cathedral_thin.independent.sat import (
@@ -859,14 +858,13 @@ def score_multicompute_round(
     snp_verifier: SnpProductionVerifier | None = None,
     tdx_policy: TdxMeasurementPolicy | None = None,
     cycle_deadline_monotonic: float | None = None,
-    netuid: int = NETUID,
+    netuid: int,
 ) -> MultiComputeRound:
     """Attest roots, discover fleets, deduplicate, challenge, and aggregate.
 
     Every signed validator request names ``netuid``, and the signature binds
     it, so a request made for one subnet cannot stand in for another. The
-    default is the compiled netuid for callers that predate the setting; the
-    direct validator always passes the netuid its snapshot was read on.
+    direct validator passes the netuid its snapshot was read on.
     """
 
     # Not direct_contract.require_netuid: that module imports the submission
