@@ -46,7 +46,7 @@ it enables nothing. See [Bootstrap trust](docs/AUTO_UPDATE.md#bootstrap-trust).
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 -o install.sh \
   https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/scripts/install.sh &&
-echo '7f4056ba35b4c8d836c30c363f1095d4cdd0ea0edeb3fe229d2638dd905358ef  install.sh' | sha256sum -c &&
+echo '097c4d2285826860d0ab45fdf64a240a9883b5fec29fe271f57724efed02826f  install.sh' | sha256sum -c &&
 sudo bash install.sh
 ```
 
