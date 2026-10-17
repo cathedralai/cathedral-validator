@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cathedral.computer/schemas/cathedral_validator_roster_v1.json",
+  "title": "cathedral_validator_roster_v1",
+  "description": "Validator-signed private roster of verified SEV-SNP machines (cathedral-validator canary 8). Built from the positive machine rows of direct_validator (uid, hotkey, endpoint, machine_id). roster_id = 'sha256:' + hex(sha256(canonical JSON of the document without roster_id and signature)); canonical JSON = json.dumps(doc, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False), no floats. signature = sr25519 by validator.hotkey over b'cathedral-validator-roster-v1\\x00' + roster_id (ASCII). POST the canonical bytes to /v1/cathedral/snp/roster with 'Authorization: Bearer <ingest token>' and 'Content-Type: application/json'. The API refuses: an unpinned validator hotkey, another network/netuid, generated_at older than its intake window or more than 60 s ahead, a sequence not greater than the last accepted one for that validator, a repeated roster_id, rows out of order, a repeated machine_id or endpoint, more than 256 rows or more than 262144 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "network", "netuid", "validator", "sequence", "block", "generated_at", "rows", "roster_id", "signature"],
+  "properties": {
+    "schema": {"const": "cathedral_validator_roster_v1"},
+    "network": {"enum": ["finney", "test"], "description": "finney with netuid 94 (mainnet) or test with netuid 584 (testnet)."},
+    "netuid": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "validator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "hotkey"],
+      "properties": {
+        "uid": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "hotkey": {"$ref": "#/$defs/ss58", "description": "The signing validator hotkey; must be pinned in CATHEDRAL_SNP_JOIN_VALIDATOR_HOTKEYS."}
+      }
+    },
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 4611686018427387904, "description": "Strictly increasing per validator hotkey across posts (for example the export counter persisted beside the telemetry export state)."},
+    "block": {"type": "integer", "minimum": 0, "maximum": 4611686018427387904, "description": "Chain block of the scoring round the rows come from."},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "description": "UTC, whole seconds."},
+    "rows": {
+      "type": "array",
+      "maxItems": 256,
+      "description": "Positive (paid) machine rows of this round, sorted by (uid, machine_id, endpoint); machine_id and endpoint each unique. An empty list is valid.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uid", "hotkey", "endpoint", "machine_id"],
+        "properties": {
+          "uid": {"type": "integer", "minimum": 0, "maximum": 65535},
+          "hotkey": {"$ref": "#/$defs/ss58"},
+          "endpoint": {"type": "string", "maxLength": 255, "pattern": "^https://[0-9a-fA-F.:\\[\\]]+:[0-9]{1,5}/?$", "description": "The miner's verified axon origin: explicit HTTPS origin on a public IP literal (validate_public_worker_endpoint). The API looks for the customer guest on the same IP at port 8444."},
+          "machine_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "snp_production._machine_id: hex(sha256(b'cathedral.amd-sev-snp.hardware-v1\\x00' + generation + b'\\x00' + CHIP_ID)), generation in milan/genoa/turin from the verified report."}
+        }
+      }
+    },
+    "roster_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value_base64"],
+      "properties": {
+        "algorithm": {"const": "sr25519"},
+        "value_base64": {"type": "string", "description": "Standard base64 (with padding) of the 64-byte signature."}
+      }
+    }
+  },
+  "$defs": {
+    "ss58": {"type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{47,48}$", "description": "Canonical Bittensor SS58 (format 42) AccountId32."}
+  }
+}

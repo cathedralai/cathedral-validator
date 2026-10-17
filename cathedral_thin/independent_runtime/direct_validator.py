@@ -73,6 +73,7 @@ from .testnet import (
 )
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST, load_direct_validator_verifier
 from .snp_production import SnpProductionError, SnpProductionVerifier, load_snp_policy
+from .snp_roster import SnpRosterExport, snp_roster_from_environment
 from . import tdx_measurement
 from .tdx_measurement import (
     TDX_MEASUREMENT_POLICY_ENV,
@@ -731,6 +732,7 @@ def _run_direct_cycle_unlocked(
     tdx_policy: TdxMeasurementPolicy | None = None,
     telemetry_sink: TelemetrySpool | None = None,
     pool_inventory: tuple[Path, str] | None = None,
+    snp_roster: SnpRosterExport | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
@@ -901,6 +903,32 @@ def _run_direct_cycle_unlocked(
             # The inventory is a public projection of this round. Failing to
             # write it never changes the round, its weights, or its receipt.
             event["pool_inventory"] = {"status": "FAILED"}
+    if snp_roster is not None:
+        # After the write returned, whatever its status: the roster reports
+        # what this round verified, which a commit awaiting its reveal or an
+        # expired extrinsic does not change. Never raises into the cycle.
+        try:
+            from .snp_roster import export_cycle_roster
+            from .testnet import request_network
+
+            event["snp_roster"] = export_cycle_roster(
+                snp_roster,
+                healthy_rows=_positive_machine_rows(result, snapshot.miners),
+                network=request_network(),
+                netuid=snapshot.netuid,
+                block_number=snapshot.block_number,
+                validator_uid=snapshot.validator_uid,
+                keypair=keypair,
+            )
+        except Exception as exc:  # noqa: BLE001 - never fails the cycle
+            from .snp_roster import SnpRosterError
+
+            event["snp_roster"] = {
+                "status": "FAILED",
+                "error": str(exc)[:200]
+                if isinstance(exc, SnpRosterError)
+                else type(exc).__name__,
+            }
     if getattr(receipt, "status", None) == STATUS_EXPIRED:
         # The writer proved these bytes can never land and nothing was
         # written, so there is no finalized receipt for telemetry; a prior
@@ -1035,6 +1063,7 @@ def run_direct_cycle(
     telemetry_sink: TelemetrySpool | None = None,
     netuid: int = NETUID,
     pool_inventory: tuple[Path, str] | None = None,
+    snp_roster: SnpRosterExport | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -1071,6 +1100,7 @@ def run_direct_cycle(
             tdx_policy=tdx_policy,
             telemetry_sink=telemetry_sink,
             pool_inventory=pool_inventory,
+            snp_roster=snp_roster,
         )
 
 
@@ -1362,6 +1392,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
+    snp_roster, snp_roster_event = snp_roster_from_environment()
+    if snp_roster_event is not None:
+        _print_event(snp_roster_event)
     wallet = make_wallet(
         bt,
         name=options.wallet_name,
@@ -1530,6 +1563,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report_recovery=_print_event,
                     netuid=netuid,
                     pool_inventory=pool_inventory,
+                    snp_roster=snp_roster,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
                 shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)
