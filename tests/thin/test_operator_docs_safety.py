@@ -77,7 +77,9 @@ def test_readme_is_the_small_public_guide() -> None:
     assert len(guide.splitlines()) <= 120
     assert "Cathedral rewards verified compute" in guide
     assert "This repository is for validator operators" in guide
-    assert "Subnet commit-reveal must be disabled" in guide
+    assert "commit-reveal" in guide
+    assert "timelocked commits" in guide
+    assert "Commit-reveal subnets" in guide
     assert (
         "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
         in guide

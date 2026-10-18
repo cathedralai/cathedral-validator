@@ -30,7 +30,11 @@ See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-a
 - A reviewed SNP policy; use the [policy template](docs/AUTO_UPDATE.md#before-installation).
 - Outbound access to Finney, GitHub, advertised miner endpoints and vendor
   verification collateral. No inbound ports or public address are needed.
-- Subnet commit-reveal must be disabled for this writer. Check all
+- Check the subnet's commit-reveal setting before you install. Plain weight
+  writes need commit-reveal **disabled**. Live Finney SN94 currently has
+  commit-reveal **enabled** — operators on CR-on subnets must opt in to
+  timelocked commits (see
+  [Commit-reveal subnets](docs/AUTO_UPDATE.md#commit-reveal-subnets)). Check all
   [chain rules](docs/OPERATOR_RUNBOOK.md#3-check-the-subnet-accepts-direct-writes) first.
 
 Never copy a coldkey, mnemonic, or coldkey password to this host. The
