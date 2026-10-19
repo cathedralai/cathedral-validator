@@ -263,7 +263,7 @@ def test_python_generated_wire_fixture_stays_collector_compatible() -> None:
     )
 
     assert fixture_path.read_bytes() == canonical_document_bytes(fixture)
-    assert validate_public_telemetry_event(fixture) == fixture
+    assert validate_public_telemetry_event(fixture, netuid=NETUID) == fixture
     assert {key: value for key, value in generated.items() if key != "signature"} == {
         key: value for key, value in fixture.items() if key != "signature"
     }
@@ -279,7 +279,7 @@ def test_signed_snapshot_refuses_content_and_signature_tampering(tmp_path) -> No
         receipt=_receipt(),
         keypair=VALIDATOR_KEYPAIR,
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
 
     changed_content = deepcopy(event)
     changed_content["miners"][0]["weight_u16"] = 1
@@ -324,7 +324,9 @@ def test_spool_refuses_a_signed_event_whose_weights_are_not_finalized(tmp_path) 
     }
 
     with pytest.raises(TelemetryError, match="weights do not match"):
-        TelemetrySpool(tmp_path / "telemetry" / "events.jsonl").append(event)
+        TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID).append(
+            event
+        )
 
 
 def test_snapshot_refuses_a_nonfinalized_submission_receipt() -> None:
@@ -400,13 +402,13 @@ def test_owner_only_spool_round_trips_canonical_latest_event(tmp_path) -> None:
     )
     state_path = tmp_path / "direct-writer" / "state.json"
     path = canonical_telemetry_path(state_path)
-    spool = TelemetrySpool(path)
+    spool = TelemetrySpool(path, netuid=NETUID)
 
     spool.append(event)
 
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
-    assert latest_telemetry_event(path) == event
+    assert latest_telemetry_event(path, netuid=NETUID) == event
 
 
 def test_spool_refuses_a_symlink(tmp_path) -> None:
@@ -426,7 +428,7 @@ def test_spool_refuses_a_symlink(tmp_path) -> None:
     path.symlink_to(outside)
 
     with pytest.raises(TelemetryError, match="symlink"):
-        TelemetrySpool(path).append(event)
+        TelemetrySpool(path, netuid=NETUID).append(event)
     assert outside.read_text(encoding="ascii") == "do not replace"
 
 
@@ -438,7 +440,7 @@ def test_pending_candidate_survives_until_the_finalized_receipt(tmp_path) -> Non
         ),
         plan=_plan(),
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = PendingTelemetryStore(spool)
     receipt = _receipt()
 
@@ -450,7 +452,7 @@ def test_pending_candidate_survives_until_the_finalized_receipt(tmp_path) -> Non
 
     assert event is not None
     assert event["submission"]["status"] == "CONFIRMED"
-    assert latest_telemetry_event(spool.path) == event
+    assert latest_telemetry_event(spool.path, netuid=NETUID) == event
     assert not pending.path.exists()
 
 
@@ -463,7 +465,7 @@ def test_pending_candidate_durably_binds_a_recovered_receipt(tmp_path) -> None:
         ),
         plan=plan,
     )
-    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl", netuid=NETUID)
     pending = PendingTelemetryStore(spool)
     receipt = _receipt()
     plan_identity_sha256 = (
@@ -478,7 +480,7 @@ def test_pending_candidate_durably_binds_a_recovered_receipt(tmp_path) -> None:
     event = pending.finalize(keypair=VALIDATOR_KEYPAIR)
     assert event is not None
     assert event["submission"]["block_number"] == receipt.block_number
-    assert latest_telemetry_event(spool.path) == event
+    assert latest_telemetry_event(spool.path, netuid=NETUID) == event
     assert not pending.path.exists()
 
 
@@ -497,8 +499,8 @@ def test_shared_spool_exposes_only_sanitized_events_to_the_reader_group(
     path = tmp_path / "shared" / "events.jsonl"
     gid = os.getegid()
 
-    TelemetrySpool(path, reader_gid=gid).append(event)
+    TelemetrySpool(path, reader_gid=gid, netuid=NETUID).append(event)
 
     assert path.stat().st_mode & 0o777 == 0o640
     assert path.parent.stat().st_mode & 0o777 == 0o750
-    assert latest_telemetry_event(path, expected_reader_gid=gid) == event
+    assert latest_telemetry_event(path, expected_reader_gid=gid, netuid=NETUID) == event

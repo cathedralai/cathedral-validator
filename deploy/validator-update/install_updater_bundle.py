@@ -1417,6 +1417,49 @@ def _destinations(root: Path, bundle: VerifiedBundle) -> dict[Path, tuple[bytes,
     return result
 
 
+DIRECT_ENV_RELATIVE_PATH = "etc/cathedral-validator/direct.env"
+DIRECT_NETUID_ASSIGNMENT = b"CATHEDRAL_VALIDATOR_NETUID="
+
+
+def _direct_env_migration(
+    root: Path,
+    bundle: VerifiedBundle,
+    *,
+    expected_owner: int,
+) -> tuple[Path, bytes] | None:
+    """Return the direct.env body a host set up from the previous example needs.
+
+    Setup copies the signed direct.env example byte for byte and refuses any
+    later change, so a host set up before the netuid became configuration
+    holds exactly this bundle's example without its netuid line. Only that
+    file is rewritten, to exactly this bundle's example. The netuid it gains
+    comes from the signed example, and is the netuid every earlier runtime was
+    built for, so the running writer and any pending intent already match it.
+    Any other content is left alone; the updater then refuses to run until the
+    operator assigns the netuid.
+    """
+
+    path = _relative(root, DIRECT_ENV_RELATIVE_PATH)
+    if not path.exists() and not path.is_symlink():
+        return None
+    example = bundle.files["payload/examples/direct.env.example"].body
+    lines = example.splitlines(keepends=True)
+    previous = b"".join(
+        line for line in lines if not line.startswith(DIRECT_NETUID_ASSIGNMENT)
+    )
+    if previous == example:
+        return None
+    existing = _read_controlled_file(
+        path,
+        "direct validator configuration",
+        expected_owner=expected_owner,
+        maximum=4096,
+    )
+    if existing != previous:
+        return None
+    return path, example
+
+
 def _preflight_destinations(
     root: Path,
     bundle: VerifiedBundle,
@@ -1681,6 +1724,12 @@ def _install_verified_bundle_locked(
             expected_owner=expected_owner,
             mode=mode,
         )
+
+    # Before the new updater becomes current, because it reads the netuid
+    # from direct.env to find the writer's journal and cycle lock.
+    migration = _direct_env_migration(root, bundle, expected_owner=expected_owner)
+    if migration is not None:
+        _atomic_replace_file(migration[0], migration[1], 0o600)
 
     _activate_updater_link(
         fixed_link,

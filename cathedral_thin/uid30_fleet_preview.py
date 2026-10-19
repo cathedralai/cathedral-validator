@@ -515,6 +515,7 @@ def collect_preview(
         keypair=keypair,
         anchor_hash=evidence_state.block_hash,
         verifier_adapter=adapter,
+        netuid=NETUID,
     )
 
     fresh_state = read_uid30_chain_state(chain_endpoint=chain_endpoint)

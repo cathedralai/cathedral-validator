@@ -14,6 +14,7 @@ from cathedral_thin.independent.constants import (
     MAX_DESTS,
     MULTICOMPUTE_FLEET_CAP,
     MULTICOMPUTE_MACHINE_WORK_UNIT_CAP,
+    NETUID,
 )
 from cathedral_thin.independent.compute import machine_id_from_stable_platform_id
 from cathedral_thin.independent.compute import (
@@ -442,6 +443,7 @@ def test_runtime_attests_chain_axon_before_trusting_fleet_and_scores_two(monkeyp
         keypair=_runtime_keypair(),
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
+        netuid=NETUID,
     )
     assert events == [f"evidence:{root}", "fleet", f"evidence:{second}"]
     assert result.verified_units == {BOB: 40}
@@ -475,6 +477,7 @@ def test_bounded_round_zeros_a_slow_valid_miner_without_losing_the_healthy_one(
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
         cycle_deadline_monotonic=time.monotonic() + 0.15,
+        netuid=NETUID,
     )
 
     assert time.monotonic() - started < 0.07
@@ -504,6 +507,7 @@ def test_bounded_round_all_dead_returns_deterministic_zero_rows(monkeypatch):
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
         cycle_deadline_monotonic=time.monotonic() + 0.12,
+        netuid=NETUID,
     )
 
     assert result.verified_units == {}
@@ -543,6 +547,7 @@ def test_bounded_round_never_exceeds_the_reviewed_worker_cap(monkeypatch):
             anchor_hash="0x" + "0" * 64,
             verifier_adapter=_runtime_adapter(),
             cycle_deadline_monotonic=time.monotonic() + 0.3,
+            netuid=NETUID,
         )
     finally:
         release.set()
@@ -619,6 +624,7 @@ def test_discovery_and_sat_share_the_same_reviewed_worker_pool(monkeypatch):
                 anchor_hash="0x" + "0" * 64,
                 verifier_adapter=_runtime_adapter(),
                 cycle_deadline_monotonic=time.monotonic() + 2.2,
+                netuid=NETUID,
             )
         except BaseException as exc:
             completed["error"] = exc
@@ -676,6 +682,7 @@ def test_dead_set_scheduling_rotates_from_the_finalized_anchor(monkeypatch):
             anchor_hash="0x" + f"{anchor_value:064x}",
             verifier_adapter=_runtime_adapter(),
             cycle_deadline_monotonic=time.monotonic() + 0.1,
+            netuid=NETUID,
         )
         time.sleep(0.07)
         return started
@@ -708,6 +715,7 @@ def test_unverified_root_never_authorizes_its_fleet(monkeypatch):
         keypair=_runtime_keypair(),
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
+        netuid=NETUID,
     )
     assert called is False
     assert result.verified_units == {}
@@ -740,6 +748,7 @@ def test_missing_verifier_identity_capability_blocks_before_any_miner_request(
         keypair=_runtime_keypair(),
         anchor_hash=WINDOW,
         verifier_adapter=adapter,
+        netuid=NETUID,
     )
     assert result.feature_blocked is True
     assert result.verified_units == {}
@@ -779,6 +788,7 @@ def test_one_missing_identity_does_not_poison_another_verified_uid(monkeypatch):
         keypair=_runtime_keypair(),
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
+        netuid=NETUID,
     )
     assert result.verified_units == {BOB: 20}
     assert result.feature_blocked is False
@@ -858,6 +868,7 @@ def test_verified_root_with_failed_fleet_cannot_hide_global_duplicate(
         keypair=_runtime_keypair(),
         anchor_hash=WINDOW,
         verifier_adapter=_runtime_adapter(),
+        netuid=NETUID,
     )
 
     expected_reason = {
@@ -913,4 +924,5 @@ def test_runtime_input_caps_and_identity_fail_before_any_miner_request(
             keypair=_runtime_keypair(),
             anchor_hash=WINDOW,
             verifier_adapter=_runtime_adapter(),
+            netuid=NETUID,
         )
