@@ -1,0 +1,12 @@
+[Unit]
+Description=Export SN94 testnet 584 telemetry to Worker ingest every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=sn94-testnet-telemetry-worker.service
+
+[Install]
+WantedBy=timers.target

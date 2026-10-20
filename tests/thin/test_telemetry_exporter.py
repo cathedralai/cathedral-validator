@@ -189,6 +189,9 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
     root = Path(__file__).resolve().parents[2]
     deploy = root / "deploy" / "validator-telemetry"
     service = (deploy / "cathedral-validator-telemetry.service").read_text()
+    worker = (deploy / "sn94-testnet-telemetry-worker.service").read_text()
+    worker_timer = (deploy / "sn94-testnet-telemetry-worker.timer").read_text()
+    worker_env = (deploy / "sn94-testnet-telemetry-worker.env.example").read_text()
     sysusers = (deploy / "cathedral-validator-telemetry.sysusers").read_text()
     tmpfiles = (deploy / "cathedral-validator-telemetry.tmpfiles").read_text()
     environment = (deploy / "telemetry-export.env.example").read_text()
@@ -251,6 +254,15 @@ def test_deployment_files_share_one_isolated_identity_and_spool_contract() -> No
             root / "cathedral_thin" / "independent_runtime" / "telemetry_exporter.py"
         ).read_text()
     )
+    # Testnet 584 Worker collector path (cathedral.computer ingest; no Sites).
+    assert "Environment=CATHEDRAL_TESTNET=1" in worker
+    assert "--netuid 584" in worker
+    assert "Unit=sn94-testnet-telemetry-worker.service" in worker_timer
+    assert (
+        "CATHEDRAL_TELEMETRY_ENDPOINT=https://cathedral.computer/v1/leaderboard/ingest"
+        in worker_env
+    )
+    assert "/etc/sn94-testnet-telemetry/worker-export.env" in worker
 
 
 def test_running_the_module_runs_the_exporter() -> None:

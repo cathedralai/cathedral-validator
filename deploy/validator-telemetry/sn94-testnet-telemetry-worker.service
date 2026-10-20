@@ -1,0 +1,39 @@
+[Unit]
+Description=Export SN94 testnet 584 telemetry to Cathedral Worker ingest
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/opt/cathedral-validator/current/bin/cathedral-validator
+ConditionFileIsExecutable=/usr/bin/python3.12
+
+[Service]
+Type=oneshot
+User=cathedral-telemetry
+Group=cathedral-telemetry
+Environment=PEX_ROOT=/var/lib/cathedral-validator-telemetry-pex
+Environment=PEX_INTERPRETER=1
+Environment=CATHEDRAL_TESTNET=1
+EnvironmentFile=/etc/sn94-testnet-telemetry/worker-export.env
+StateDirectory=cathedral-validator-telemetry-pex
+StateDirectoryMode=0700
+# Worker ingest ignores credential headers but the exporter still requires two
+# distinct mode-0600 files. Contents may be dummy placeholders.
+ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator -m cathedral_thin.independent_runtime.telemetry_exporter --spool /var/lib/cathedral-validator-telemetry/events.jsonl --reader-group cathedral-telemetry --netuid 584 --endpoint ${CATHEDRAL_TELEMETRY_ENDPOINT} --ingest-token-file ${CATHEDRAL_TELEMETRY_TOKEN_FILE} --sites-authorization-file ${CATHEDRAL_TELEMETRY_SITES_AUTH_FILE}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/cathedral-validator/current /var/lib/cathedral-validator-telemetry /etc/sn94-testnet-telemetry
+InaccessiblePaths=/var/lib/cathedral-validator
+InaccessiblePaths=/etc/cathedral-validator
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=true
+PrivateDevices=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
