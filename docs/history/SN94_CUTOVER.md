@@ -1,5 +1,7 @@
 # SN39 to SN94: release and cutover gates
 
+> Archived 2026-10-26. The cutover is done and SN94 is live on mainnet. This page is kept as a record of the gates used, not as current instructions.
+
 This is a release checklist, not a claim that SN94 is operating. Keep one
 authorized production writer for the Cathedral hotkey. Never copy its private
 key into a website, collector, repository, or test fixture.
