@@ -1,27 +1,18 @@
 <p align="center"><img src="docs/assets/cathedral-mark.png" alt="Cathedral" width="112"></p>
-
 <h1 align="center">Cathedral Validator</h1>
-
-<p align="center"><em>Cathedral rewards verified compute, not self-reported capacity</em></p>
-
+<p align="center"><em>Cathedral&ensp;rewards&ensp;verified&ensp;compute,&ensp;not&ensp;self-reported&ensp;capacity</em></p>
 <p align="center"><sub>27 October 2026</sub></p>
 
 ## Contents
-
-<h6>Assessment and requirements</h6>
-
-1. [**What it does**](#what-it-does)
-2. [**What you need**](#what-you-need)
-
-<h6>Installation and operation</h6>
-
-3. [**Install**](#install)
-4. [**Operate**](#operate)
-
-<h6>Updates and trust</h6>
-
-5. [**Updates**](#updates)
-6. [**Trust**](#trust)
+<p><sub><strong>Assessment and requirements</strong></sub><br>
+<strong>1. <a href="#what-it-does">What it does</a></strong><br>
+<strong>2. <a href="#what-you-need">What you need</a></strong><br><br>
+<sub><strong>Installation and operation</strong></sub><br>
+<strong>3. <a href="#install">Install</a></strong><br>
+<strong>4. <a href="#operate">Operate</a></strong><br><br>
+<sub><strong>Updates and trust</strong></sub><br>
+<strong>5. <a href="#updates">Updates</a></strong><br>
+<strong>6. <a href="#trust">Trust</a></strong></p>
 
 Cathedral rewards verified compute, not self-reported capacity. Validators
 independently check miner machines, test their work, reject duplicate claims

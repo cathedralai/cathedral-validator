@@ -80,6 +80,12 @@ def test_readme_is_the_small_public_guide() -> None:
         '<p align="center"><img src="docs/assets/cathedral-mark.png"'
     )
     assert '<h1 align="center">Cathedral Validator</h1>' in guide
+    assert (
+        "<em>Cathedral&ensp;rewards&ensp;verified&ensp;compute,&ensp;"
+        "not&ensp;self-reported&ensp;capacity</em>"
+    ) in guide
+    assert "<sub><strong>Assessment and requirements</strong></sub>" in guide
+    assert "<h6>" not in guide
     assert (ROOT / "docs" / "assets" / "cathedral-mark.png").is_file()
     assert len(guide.splitlines()) <= 160
     assert "Cathedral rewards verified compute" in guide
