@@ -29,7 +29,12 @@ import bittensor as bt
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
-from cathedral_thin.independent.constants import INTEL_COLLATERAL, NETUID
+from cathedral_thin.independent.constants import (
+    CANARY_HOTKEY,
+    INTEL_COLLATERAL,
+    NETUID,
+    REFUSE_HOTKEYS,
+)
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from .capacity_shadow import (
     CAPACITY_POLICY_ENV,
@@ -55,6 +60,13 @@ from .direct_contract import (
     zero_burn_vector,
 )
 from .errors import IndependentLiveError
+from .escape_receipts import (
+    EscapeReceiptConfig,
+    EscapeReceiptError,
+    escape_config_from_environment,
+    load_receipt_feed,
+    score_escape_receipts,
+)
 from .fleet_score import (
     DISCOVERY_RESPONSE_DEADLINE_SECONDS,
     FULL_CYCLE_RESPONSE_DEADLINE_SECONDS,
@@ -381,11 +393,78 @@ def finalized_serving_miners_snapshot(
         miners=miners,
         skipped_axons=dict(scan.skipped),
         netuid=netuid,
+        registered_hotkeys=dict(view.hotkey_to_uid),
     )
 
 
 INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
 INFRA_HALT_SCOPED = "scoped"
+
+
+def apply_escape_receipts(
+    plan: DirectWeightPlan,
+    config: EscapeReceiptConfig,
+    *,
+    now: float | None = None,
+    load: Callable[[str], list[object]] = load_receipt_feed,
+) -> tuple[DirectWeightPlan, dict[str, object]]:
+    """Blend verified escape breaks into the machine plan.
+
+    A source that cannot be read leaves the machine-only plan unchanged and
+    says so: an escape feed outage must not stop the weights miners are owed.
+    A plan with escape units binds the receipt digests into its evidence
+    digest, so the journal names which receipts paid.
+    """
+
+    snapshot = plan.snapshot
+    summary: dict[str, object] = {
+        "fraction": str(config.fraction),
+        "window_seconds": config.window_seconds,
+    }
+    try:
+        receipts = load(config.source)
+    except Exception as exc:  # noqa: BLE001 - never fails the cycle
+        error = str(exc) if isinstance(exc, EscapeReceiptError) else type(exc).__name__
+        return plan, {**summary, "status": "SOURCE_UNAVAILABLE", "error": error[:200]}
+    registered = {
+        hotkey: uid
+        for hotkey, uid in (snapshot.registered_hotkeys or {}).items()
+        if hotkey not in REFUSE_HOTKEYS and hotkey != CANARY_HOTKEY
+    }
+    escape_round = score_escape_receipts(
+        receipts,
+        registered=registered,
+        validator_uid=snapshot.validator_uid,
+        now=time.time() if now is None else now,
+        window_seconds=config.window_seconds,
+    )
+    summary.update(escape_round.summary())
+    if not escape_round.units_by_uid:
+        return plan, {**summary, "status": "NO_BREAKS"}
+    evidence_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            canonical_document_bytes(
+                {
+                    "direct_evidence_digest": plan.evidence_digest,
+                    "escape": escape_round.evidence(),
+                }
+            )
+        ).hexdigest()
+    )
+    blended = dataclasses.replace(
+        plan,
+        evidence_digest=evidence_digest,
+        escape_units=escape_round.units_by_uid,
+        escape_uid_hotkeys=escape_round.uid_hotkeys,
+        escape_fraction=str(config.fraction),
+    )
+    wire_uids, wire_weights = blended.expected_vector()
+    blended = dataclasses.replace(
+        blended, wire_uids=wire_uids, wire_weights=wire_weights
+    )
+    blended.kwargs()
+    return blended, {**summary, "status": "APPLIED"}
 
 
 def _verifier_outage(result: MultiComputeRound) -> bool:
@@ -733,6 +812,7 @@ def _run_direct_cycle_unlocked(
     telemetry_sink: TelemetrySpool | None = None,
     pool_inventory: tuple[Path, str] | None = None,
     snp_roster: SnpRosterExport | None = None,
+    escape_config: EscapeReceiptConfig | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
@@ -803,6 +883,9 @@ def _run_direct_cycle_unlocked(
     evidence_summary = _evidence_cycle_summary(
         snapshot, result, plan, tdx_policy=tdx_policy
     )
+    escape_summary: dict[str, object] | None = None
+    if escape_config is not None:
+        plan, escape_summary = apply_escape_receipts(plan, escape_config)
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -882,6 +965,8 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    if escape_summary is not None:
+        event["escape_receipts"] = escape_summary
     if pool_inventory is not None:
         try:
             from .pool_inventory import publish_cycle_inventory
@@ -1064,6 +1149,7 @@ def run_direct_cycle(
     netuid: int = NETUID,
     pool_inventory: tuple[Path, str] | None = None,
     snp_roster: SnpRosterExport | None = None,
+    escape_config: EscapeReceiptConfig | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -1101,6 +1187,7 @@ def run_direct_cycle(
             telemetry_sink=telemetry_sink,
             pool_inventory=pool_inventory,
             snp_roster=snp_roster,
+            escape_config=escape_config,
         )
 
 
@@ -1392,6 +1479,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
+    # Off unless both CATHEDRAL_ESCAPE_RECEIPTS_SOURCE and a positive
+    # CATHEDRAL_ESCAPE_WEIGHT_FRACTION are set. A malformed setting refuses to
+    # start rather than silently paying nobody.
+    try:
+        escape_config = escape_config_from_environment()
+    except EscapeReceiptError as exc:
+        raise SystemExit(f"escape receipt source refused: {exc}") from exc
+    if escape_config is not None:
+        _print_event(
+            {
+                "escape_receipts": {
+                    "status": "ENABLED",
+                    "fraction": str(escape_config.fraction),
+                    "window_seconds": escape_config.window_seconds,
+                }
+            }
+        )
     snp_roster, snp_roster_event = snp_roster_from_environment()
     if snp_roster_event is not None:
         _print_event(snp_roster_event)
@@ -1564,6 +1668,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     netuid=netuid,
                     pool_inventory=pool_inventory,
                     snp_roster=snp_roster,
+                    escape_config=escape_config,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
                 shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)
