@@ -1,4 +1,27 @@
-# Cathedral Validator
+<p align="center"><img src="docs/assets/cathedral-mark.png" alt="Cathedral" width="112"></p>
+
+<h1 align="center">Cathedral Validator</h1>
+
+<p align="center"><em>Cathedral rewards verified compute, not self-reported capacity</em></p>
+
+<p align="center"><small>27 October 2026</small></p>
+
+## Contents
+
+<h6>Assessment and requirements</h6>
+
+1. [**What it does**](#what-it-does)
+2. [**What you need**](#what-you-need)
+
+<h6>Installation and operation</h6>
+
+3. [**Install**](#install)
+4. [**Operate**](#operate)
+
+<h6>Updates and trust</h6>
+
+5. [**Updates**](#updates)
+6. [**Trust**](#trust)
 
 Cathedral rewards verified compute, not self-reported capacity. Validators
 independently check miner machines, test their work, reject duplicate claims
@@ -32,7 +55,7 @@ See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-a
   verification collateral. No inbound ports or public address are needed.
 - Check the subnet's commit-reveal setting before you install. Plain weight
   writes need commit-reveal **disabled**. Live Finney SN94 currently has
-  commit-reveal **enabled** — operators on CR-on subnets must opt in to
+  commit-reveal **enabled**. Operators on CR-on subnets must opt in to
   timelocked commits (see
   [Commit-reveal subnets](docs/AUTO_UPDATE.md#commit-reveal-subnets)). Check all
   [chain rules](docs/OPERATOR_RUNBOOK.md#3-check-the-subnet-accepts-direct-writes) first.
