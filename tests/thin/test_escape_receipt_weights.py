@@ -113,8 +113,13 @@ def score(receipts, *, now: float = NOW, window: int = DEFAULT_REWARD_WINDOW_SEC
 
 def test_vendored_key_file_matches_the_pinned_constant_and_sha256() -> None:
     raw = (REPO / "config/escape/contest-signer.ed25519.pub").read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == escape_receipts.PINNED_CONTEST_PUBKEY_FILE_SHA256
-    assert raw.decode("ascii").splitlines()[0] == escape_receipts.PINNED_CONTEST_PUBKEY_B64
+    assert (
+        hashlib.sha256(raw).hexdigest()
+        == escape_receipts.PINNED_CONTEST_PUBKEY_FILE_SHA256
+    )
+    assert (
+        raw.decode("ascii").splitlines()[0] == escape_receipts.PINNED_CONTEST_PUBKEY_B64
+    )
 
 
 def test_wrong_key_fails_against_the_pinned_key() -> None:
@@ -165,7 +170,9 @@ def test_second_claim_for_the_same_room_and_window_is_counted_once(test_signer) 
 
 
 def test_distinct_rooms_each_count(test_signer) -> None:
-    result = score([receipt(room_id="a"), receipt(room_id="b"), receipt(window_id="w-2")])
+    result = score(
+        [receipt(room_id="a"), receipt(room_id="b"), receipt(window_id="w-2")]
+    )
     assert result.units_by_uid == ((BREAKER_UID, 3),)
 
 
@@ -225,7 +232,11 @@ def test_blend_splits_the_share_by_break_count(test_signer, monkeypatch) -> None
         registered_hotkeys={**planned.snapshot.registered_hotkeys, second: 31},
     )
     planned = replace(planned, snapshot=snap)
-    receipts = [receipt(room_id="a"), receipt(room_id="b"), receipt(room_id="c", hotkey=second)]
+    receipts = [
+        receipt(room_id="a"),
+        receipt(room_id="b"),
+        receipt(room_id="c", hotkey=second),
+    ]
     blended, _summary = runtime.apply_escape_receipts(
         planned, config("3/10"), now=NOW, load=lambda _source: receipts
     )
@@ -245,7 +256,9 @@ def test_no_breaks_or_unreadable_source_leave_the_plan_unchanged(test_signer) ->
     def broken(_source: str) -> list[object]:
         raise OSError("feed down")
 
-    same, summary = runtime.apply_escape_receipts(planned, config(), now=NOW, load=broken)
+    same, summary = runtime.apply_escape_receipts(
+        planned, config(), now=NOW, load=broken
+    )
     assert same is planned and summary["status"] == "SOURCE_UNAVAILABLE"
 
 
@@ -258,10 +271,16 @@ def test_off_by_default_changes_nothing(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     assert escape_config_from_environment() is None
     # A source without a fraction, or a zero fraction, is still off.
-    assert escape_config_from_environment({"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x"}) is None
+    assert (
+        escape_config_from_environment({"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x"})
+        is None
+    )
     assert (
         escape_config_from_environment(
-            {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x", "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0"}
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
+            }
         )
         is None
     )
@@ -277,7 +296,10 @@ def test_off_by_default_changes_nothing(monkeypatch) -> None:
 def test_malformed_config_refuses() -> None:
     with pytest.raises(EscapeReceiptError):
         escape_config_from_environment(
-            {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x", "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1"}
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1",
+            }
         )
     with pytest.raises(EscapeReceiptError):
         escape_config_from_environment(
@@ -336,7 +358,9 @@ def breaker_writer(tmp_path: Path, monkeypatch, planned):
     return instance, subtensor
 
 
-def test_writer_signs_and_confirms_a_blended_vector(tmp_path, monkeypatch, test_signer) -> None:
+def test_writer_signs_and_confirms_a_blended_vector(
+    tmp_path, monkeypatch, test_signer
+) -> None:
     blended, _summary = runtime.apply_escape_receipts(
         machine_plan(), config("1/10"), now=NOW, load=lambda _source: [receipt()]
     )
@@ -345,11 +369,15 @@ def test_writer_signs_and_confirms_a_blended_vector(tmp_path, monkeypatch, test_
     assert result.status == STATUS_CONFIRMED
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert state["last_attempt"]["intent"]["kwargs"]["dests"] == [19, BREAKER_UID]
-    assert state["last_attempt"]["identity"]["escape"]["units_by_uid"] == [[BREAKER_UID, 1]]
+    assert state["last_attempt"]["identity"]["escape"]["units_by_uid"] == [
+        [BREAKER_UID, 1]
+    ]
     assert subtensor.substrate.submit_calls == 1
 
 
-def test_writer_refuses_a_recycled_breaker_uid(tmp_path, monkeypatch, test_signer) -> None:
+def test_writer_refuses_a_recycled_breaker_uid(
+    tmp_path, monkeypatch, test_signer
+) -> None:
     blended, _summary = runtime.apply_escape_receipts(
         machine_plan(), config("1/10"), now=NOW, load=lambda _source: [receipt()]
     )

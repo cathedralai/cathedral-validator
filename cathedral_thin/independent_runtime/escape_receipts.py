@@ -120,7 +120,9 @@ def _nonempty_str(value: object, label: str) -> str:
     return value
 
 
-def _check_claim(claim: object, *, window_id: str, room_id: str, host_nonce: str) -> str:
+def _check_claim(
+    claim: object, *, window_id: str, room_id: str, host_nonce: str
+) -> str:
     """Upstream ``accept_claim`` plus the nonce match; returns the breaker."""
 
     if not isinstance(claim, dict):
@@ -179,7 +181,10 @@ def verify_escape_receipt(
     ):
         raise EscapeReceiptError("planted_at must be a positive number")
     hotkey = _check_claim(
-        receipt.get("claim"), window_id=window_id, room_id=room_id, host_nonce=host_nonce
+        receipt.get("claim"),
+        window_id=window_id,
+        room_id=room_id,
+        host_nonce=host_nonce,
     )
     sig_b64 = receipt.get("sig")
     if not isinstance(sig_b64, str) or not sig_b64:
@@ -213,7 +218,9 @@ def _parse_fraction(raw: str) -> Fraction:
     try:
         value = Fraction(raw)
     except (ValueError, ZeroDivisionError) as exc:
-        raise EscapeReceiptError(f"{ESCAPE_WEIGHT_FRACTION_ENV} is not a number") from exc
+        raise EscapeReceiptError(
+            f"{ESCAPE_WEIGHT_FRACTION_ENV} is not a number"
+        ) from exc
     if not 0 <= value < 1:
         raise EscapeReceiptError(f"{ESCAPE_WEIGHT_FRACTION_ENV} must be in [0, 1)")
     return value
@@ -239,7 +246,9 @@ def escape_config_from_environment(
         try:
             window = int(raw_window)
         except ValueError as exc:
-            raise EscapeReceiptError(f"{ESCAPE_REWARD_WINDOW_ENV} is not an integer") from exc
+            raise EscapeReceiptError(
+                f"{ESCAPE_REWARD_WINDOW_ENV} is not an integer"
+            ) from exc
         if not 0 < window <= MAX_REWARD_WINDOW_SECONDS:
             raise EscapeReceiptError(
                 f"{ESCAPE_REWARD_WINDOW_ENV} must be in (0, {MAX_REWARD_WINDOW_SECONDS}]"
@@ -251,13 +260,21 @@ def escape_config_from_environment(
 def _require_source(source: str) -> None:
     if source.startswith("https://"):
         parts = urllib.parse.urlsplit(source)
-        if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
+        if (
+            parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+            or not parts.hostname
+        ):
             raise EscapeReceiptError(
                 "escape receipt URL must be HTTPS with no userinfo, query or fragment"
             )
         return
     if "://" in source or not Path(source).is_absolute():
-        raise EscapeReceiptError("escape receipt source must be an https URL or an absolute path")
+        raise EscapeReceiptError(
+            "escape receipt source must be an https URL or an absolute path"
+        )
 
 
 def _fetch_https(url: str) -> bytes:
@@ -317,7 +334,9 @@ class EscapeRound:
             "accepted": len(self.accepted_digests),
             "units_by_uid": [list(row) for row in self.units_by_uid],
             "refused": dict(sorted(self.refused.items())),
-            "unregistered_hotkeys": list(self.unregistered_hotkeys[:MAX_REPORTED_HOTKEYS]),
+            "unregistered_hotkeys": list(
+                self.unregistered_hotkeys[:MAX_REPORTED_HOTKEYS]
+            ),
         }
 
 

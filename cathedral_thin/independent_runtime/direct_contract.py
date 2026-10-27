@@ -217,7 +217,9 @@ class DirectWeightPlan:
         hotkeys = dict(self.uid_hotkeys)
         for uid, hotkey in self.escape_uid_hotkeys:
             if hotkeys.setdefault(uid, hotkey) != hotkey:
-                raise DirectValidatorError("escape UID hotkey disagrees with the miner row")
+                raise DirectValidatorError(
+                    "escape UID hotkey disagrees with the miner row"
+                )
         return escape_blended_vector(
             base[0], base[1], self.escape_units, Fraction(self.escape_fraction), hotkeys
         )

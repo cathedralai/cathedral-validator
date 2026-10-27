@@ -245,7 +245,9 @@ def _validate_escape_rows(
 
     if not plan.escape_units and not plan.escape_uid_hotkeys:
         if plan.escape_fraction != "0":
-            raise DirectValidatorError("direct plan names an escape fraction without units")
+            raise DirectValidatorError(
+                "direct plan names an escape fraction without units"
+            )
         return {}
     escape_hotkeys = dict(plan.escape_uid_hotkeys)
     units = dict(plan.escape_units)
