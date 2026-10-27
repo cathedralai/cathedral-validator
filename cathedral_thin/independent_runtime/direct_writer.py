@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 from contextlib import ExitStack, contextmanager
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
@@ -77,7 +78,6 @@ from .direct_contract import (
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
     require_netuid,
-    zero_burn_vector,
 )
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST
@@ -232,6 +232,44 @@ def _presign_deadline(value: object) -> float:
             "pre-sign deadline must be a finite monotonic timestamp"
         )
     return float(value)
+
+
+def _validate_escape_rows(
+    plan: DirectWeightPlan, uid_hotkeys: Mapping[int, str]
+) -> dict[int, str]:
+    """Return the escape UID to hotkey map after checking its shape.
+
+    Empty for every plan without escape receipts, which keeps the original
+    machine-only checks exact.
+    """
+
+    if not plan.escape_units and not plan.escape_uid_hotkeys:
+        if plan.escape_fraction != "0":
+            raise DirectValidatorError("direct plan names an escape fraction without units")
+        return {}
+    escape_hotkeys = dict(plan.escape_uid_hotkeys)
+    units = dict(plan.escape_units)
+    try:
+        fraction = Fraction(plan.escape_fraction)
+    except (TypeError, ValueError, ZeroDivisionError) as exc:
+        raise DirectValidatorError("direct plan escape fraction is malformed") from exc
+    if (
+        not 0 < fraction < 1
+        or len(escape_hotkeys) != len(plan.escape_uid_hotkeys)
+        or len(units) != len(plan.escape_units)
+        or set(escape_hotkeys) != set(units)
+        or plan.snapshot.validator_uid in escape_hotkeys
+        or any(
+            uid in uid_hotkeys and uid_hotkeys[uid] != hotkey
+            for uid, hotkey in escape_hotkeys.items()
+        )
+        or any(
+            isinstance(count, bool) or not isinstance(count, int) or count <= 0
+            for count in units.values()
+        )
+    ):
+        raise DirectValidatorError("direct plan escape identities are inconsistent")
+    return escape_hotkeys
 
 
 def _require_presign_time(deadline: float, *, stage: str) -> None:
@@ -1057,7 +1095,9 @@ class DirectWeightWriter:
         raw_scores = dict(plan.raw_scores)
         machine_ids = dict(plan.machine_ids_by_uid)
         snapshot_hotkeys = {miner.uid: miner.hotkey for miner in plan.snapshot.miners}
-        expected_uids, expected_weights = zero_burn_vector(plan.raw_scores, uid_hotkeys)
+        escape_hotkeys = _validate_escape_rows(plan, uid_hotkeys)
+        expected_uids, expected_weights = plan.expected_vector()
+        positive_uids = {uid for uid, score in raw_scores.items() if score > 0}
         if (
             len(uid_hotkeys) != len(plan.uid_hotkeys)
             or len(raw_scores) != len(plan.raw_scores)
@@ -1076,9 +1116,15 @@ class DirectWeightWriter:
             != sum(len(ids) for ids in machine_ids.values())
             or plan.wire_uids != expected_uids
             or plan.wire_weights != expected_weights
-            or set(plan.wire_uids)
-            != {uid for uid, score in raw_scores.items() if score > 0}
-            or any(uid not in uid_hotkeys for uid in plan.wire_uids)
+            or (
+                set(plan.wire_uids) != positive_uids
+                if not escape_hotkeys
+                else not set(plan.wire_uids) <= positive_uids | set(escape_hotkeys)
+            )
+            or any(
+                uid not in uid_hotkeys and uid not in escape_hotkeys
+                for uid in plan.wire_uids
+            )
             or plan.snapshot.validator_uid in plan.wire_uids
             or sum(plan.wire_weights) != 0xFFFF
             or plan.qvl_digest != DIRECT_VALIDATOR_QVL_DIGEST
@@ -1268,6 +1314,14 @@ class DirectWeightWriter:
             raise DirectValidatorError(
                 "validator metagraph-info eligibility is inconsistent"
             )
+        # An escape UID was resolved from the anchor metagraph, not from a
+        # serving axon, so the miner-set freshness check does not cover it. A
+        # UID that was recycled since the anchor would pay its new holder.
+        for uid, hotkey in plan.escape_uid_hotkeys:
+            if not 0 <= uid < len(info_hotkeys) or info_hotkeys[uid] != hotkey:
+                raise DirectValidatorError(
+                    "an escape receipt UID changed hotkey before direct signing"
+                )
         validator_stake = _balance_rao(
             info_stakes[fresh.validator_uid], label="validator effective stake"
         )
@@ -1799,9 +1853,32 @@ class DirectWeightWriter:
             raise DirectSubmissionContradiction(
                 "confirmation weight vector is malformed"
             ) from exc
+        if uid_hotkeys != anchor_hotkeys:
+            raise DirectSubmissionContradiction(
+                "confirmation weight identities disagree"
+            )
+        escape = identity.get("escape")
+        if escape is not None:
+            rows = escape.get("uid_hotkeys") if isinstance(escape, Mapping) else None
+            if not isinstance(rows, list):
+                raise DirectSubmissionContradiction(
+                    "confirmation escape identity is malformed"
+                )
+            for row in rows:
+                if (
+                    not isinstance(row, list)
+                    or len(row) != 2
+                    or isinstance(row[0], bool)
+                    or not isinstance(row[0], int)
+                    or not isinstance(row[1], str)
+                    or not row[1]
+                    or uid_hotkeys.setdefault(row[0], row[1]) != row[1]
+                ):
+                    raise DirectSubmissionContradiction(
+                        "confirmation escape identity is malformed"
+                    )
         if (
-            uid_hotkeys != anchor_hotkeys
-            or not dests
+            not dests
             or len(dests) != len(weights)
             or set(dests) - set(uid_hotkeys)
             or validator_uid in dests
