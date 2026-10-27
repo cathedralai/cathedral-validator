@@ -4,7 +4,7 @@
 
 <p align="center"><em>Cathedral rewards verified compute, not self-reported capacity</em></p>
 
-<p align="center"><small>27 October 2026</small></p>
+<p align="center"><sub>27 October 2026</sub></p>
 
 ## Contents
 
