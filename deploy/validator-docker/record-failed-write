@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run the signed record-failed-write command as the validator account.
+# docker exec -u cathedral-validator -e HOME=/var/lib/cathedral-validator \
+#   cathedral-validator cathedral-validator-record-failed-write \
+#   --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+set -eu
+exec /opt/cathedral-validator/current/bin/cathedral-validator record-failed-write "$@"

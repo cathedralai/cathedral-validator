@@ -61,8 +61,8 @@ jobs:
 
       - name: Lint the thin subnet tree
         run: |
-          ruff check cathedral_thin tests/thin
-          ruff format --check cathedral_thin tests/thin
+          ruff check cathedral_thin tests/thin deploy/validator-docker
+          ruff format --check cathedral_thin tests/thin deploy/validator-docker
 
       # A skipped contract is a failure here, not a pass. Without this an
       # importorskip turns an uninstallable dependency into a green run
@@ -360,6 +360,7 @@ jobs:
           bash -n scripts/live_validator_update_e2e.sh
           ruff check \
             cathedral_thin/independent_runtime/updater.py \
+            deploy/validator-docker \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
             deploy/validator-update/cathedral-validator-setup \
@@ -375,6 +376,7 @@ jobs:
             tests/live/wait_updater_state.py
           ruff format --check \
             cathedral_thin/independent_runtime/updater.py \
+            deploy/validator-docker \
             deploy/validator-update/build_signed_release.py \
             deploy/validator-update/build_updater_bundle.py \
             deploy/validator-update/cathedral-validator-setup \

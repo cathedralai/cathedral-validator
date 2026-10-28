@@ -29,6 +29,8 @@ DIRECT_SCOPE = Path(
 )
 DIRECT_UNIT = "cathedral-validator-direct.service"
 STABLE_TIMER = "cathedral-validator-update.timer"
+SUPERVISOR_STATE = Path("/run/cathedral/supervisor.json")
+CONTAINER_ENV = "CATHEDRAL_VALIDATOR_CONTAINER"
 MAX_STATE_BYTES = 1024 * 1024
 MAX_CONFIRMED_AGE_SECONDS = 60 * 60
 MAX_RELEASE_METADATA_BYTES = 131_072
@@ -238,6 +240,20 @@ def _identity() -> str:
     if not _is_bittensor_ss58(identity):
         raise StatusUnavailable("identity is invalid")
     return identity
+
+
+def _container_mode() -> bool:
+    if os.environ.get(CONTAINER_ENV) == "1":
+        return True
+    return SUPERVISOR_STATE.is_file()
+
+
+def _supervisor_report() -> dict[str, Any] | None:
+    try:
+        document = json.loads(SUPERVISOR_STATE.read_text(encoding="ascii"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return document if isinstance(document, dict) else None
 
 
 def _systemd_state(runner: Runner, verb: str, unit: str) -> bool:
@@ -748,15 +764,34 @@ def _default_runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[st
 
 
 def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
-    report: dict[str, Any] = {
-        "schema": "cathedral_validator_local_status_v1",
-        "service_active": _systemd_state(runner, "is-active", DIRECT_UNIT),
-        "stable_timer_active": _systemd_state(runner, "is-active", STABLE_TIMER),
-        "stable_timer_enabled": _systemd_state(runner, "is-enabled", STABLE_TIMER),
-        "release": _current_release(),
-        "release_metadata": _release_metadata_summary(int(time.time())),
-        "evidence": "local process and durable state only. This does not prove current chain inclusion.",
-    }
+    if _container_mode():
+        supervisor = _supervisor_report() or {}
+        service_active = supervisor.get("validator_running") is True
+        update_loop = supervisor.get("update_loop") is True
+        report: dict[str, Any] = {
+            "schema": "cathedral_validator_local_status_v1",
+            "service_active": service_active,
+            "stable_timer_active": update_loop,
+            "stable_timer_enabled": update_loop,
+            "release": _current_release(),
+            "release_metadata": _release_metadata_summary(int(time.time())),
+            "evidence": (
+                "local process and durable state only. This does not prove "
+                "current chain inclusion."
+            ),
+        }
+        if supervisor.get("held_stop") in {2, 3}:
+            report["container_held_stop"] = supervisor["held_stop"]
+    else:
+        report = {
+            "schema": "cathedral_validator_local_status_v1",
+            "service_active": _systemd_state(runner, "is-active", DIRECT_UNIT),
+            "stable_timer_active": _systemd_state(runner, "is-active", STABLE_TIMER),
+            "stable_timer_enabled": _systemd_state(runner, "is-enabled", STABLE_TIMER),
+            "release": _current_release(),
+            "release_metadata": _release_metadata_summary(int(time.time())),
+            "evidence": "local process and durable state only. This does not prove current chain inclusion.",
+        }
     warning = _release_metadata_warning(report["release_metadata"])
     if warning is not None:
         report["warning"] = warning
@@ -808,9 +843,14 @@ def collect(*, runner: Runner = _default_runner) -> dict[str, Any]:
         report["action"] = _REVEAL_NOT_APPLIED_ACTION
     elif not report["service_active"]:
         report["result"] = "NEEDS_REVIEW"
-        report["action"] = (
-            "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
-        )
+        if _container_mode():
+            report["action"] = (
+                "Inspect docker logs for this container. Do not delete its journal."
+            )
+        else:
+            report["action"] = (
+                "Inspect cathedral-validator-direct.service logs. Do not delete its journal."
+            )
     elif (
         eligibility is not None
         and not updater["pending_recovery"]
@@ -849,7 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true")
     options = parser.parse_args(argv)
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and not _container_mode():
         parser.error("status must run as root")
     report = collect()
     if options.json:

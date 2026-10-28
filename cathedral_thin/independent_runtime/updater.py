@@ -25,6 +25,7 @@ import json
 import os
 import pwd
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -51,6 +52,12 @@ LEGACY_UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v2"
 UPDATER_STATE_SCHEMA = "cathedral_validator_updater_state_v3"
 VALIDATOR_SERVICE = "cathedral-validator-direct.service"
 SYSTEMCTL = "/usr/bin/systemctl"
+FIXED_VALIDATOR_SERVICE_COMMANDS = frozenset(
+    {
+        (SYSTEMCTL, "restart", VALIDATOR_SERVICE),
+        (SYSTEMCTL, "stop", VALIDATOR_SERVICE),
+    }
+)
 DEFAULT_CYCLE_WAIT_SECONDS = 300.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 1_200.0
 DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS = 300.0
@@ -974,6 +981,54 @@ def _remove_current_symlink(install_root: Path, *, expected_target: str) -> None
         ) from exc
 
 
+def require_fixed_validator_service_command(command: Sequence[str]) -> str:
+    """Return ``restart`` or ``stop`` for the one allowed validator unit."""
+
+    if tuple(command) not in FIXED_VALIDATOR_SERVICE_COMMANDS:
+        raise UpdateRefused("validator service command is not fixed")
+    return str(command[1])
+
+
+def container_service_restarter(
+    socket_path: Path,
+    *,
+    timeout_seconds: float = DEFAULT_SERVICE_CONTROL_TIMEOUT_SECONDS,
+) -> Callable[[Sequence[str]], None]:
+    """Talk to the container PID1 instead of systemctl.
+
+    The allowlist is the same pair of commands systemd already accepts. The
+    supervisor owns the socket and starts or stops the validator child.
+    """
+
+    if not socket_path.is_absolute():
+        raise UpdateRefused("container service control socket must be absolute")
+
+    def restarter(command: Sequence[str]) -> None:
+        action = require_fixed_validator_service_command(command)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(timeout_seconds)
+            client.connect(os.fspath(socket_path))
+            client.sendall(f"{action}\n".encode("ascii"))
+            reply = b""
+            while b"\n" not in reply:
+                chunk = client.recv(256)
+                if not chunk:
+                    raise UpdateRefused("container service control closed")
+                reply += chunk
+                if len(reply) > 256:
+                    raise UpdateRefused("container service control reply is too large")
+        except OSError as exc:
+            raise UpdateRefused("container service control failed") from exc
+        finally:
+            client.close()
+        text = reply.decode("ascii", errors="replace").split("\n", 1)[0]
+        if text != "ok":
+            raise UpdateRefused(f"container validator service {action} failed: {text}")
+
+    return restarter
+
+
 class SignedReleaseUpdater:
     """Performs one lock-held update attempt on the local machine."""
 
@@ -1003,10 +1058,7 @@ class SignedReleaseUpdater:
     def _control_validator_service(
         command: Sequence[str], *, timeout_seconds: float
     ) -> None:
-        if tuple(command) not in {
-            (SYSTEMCTL, "restart", VALIDATOR_SERVICE),
-            (SYSTEMCTL, "stop", VALIDATOR_SERVICE),
-        }:
+        if tuple(command) not in FIXED_VALIDATOR_SERVICE_COMMANDS:
             raise UpdateRefused("validator service command is not fixed")
         subprocess.run(
             list(command),
@@ -2222,15 +2274,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--pause-file", type=Path, default=Path("/etc/cathedral-validator/update.pause")
     )
+    parser.add_argument(
+        "--container-service-control",
+        type=Path,
+        help=(
+            "Unix socket owned by the container supervisor. When set, restart "
+            "and stop go through service_restarter instead of systemctl."
+        ),
+    )
     options = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("the updater must run as root")
     try:
         expected_hotkey = load_expected_hotkey_identity(options.identity_file)
+        service_restarter = None
+        if options.container_service_control is not None:
+            service_restarter = container_service_restarter(
+                options.container_service_control
+            )
         updater = SignedReleaseUpdater(
             install_root=options.install_root,
             state_root=options.state_root,
             expected_hotkey=expected_hotkey,
+            service_restarter=service_restarter,
         )
         if options.reconcile_boot:
             if any(
@@ -2308,16 +2374,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
+    "FIXED_VALIDATOR_SERVICE_COMMANDS",
     "MAX_ARCHIVE_BYTES",
     "METADATA_SCHEMA",
+    "SYSTEMCTL",
     "VALIDATOR_SERVICE",
     "Release",
     "SignedReleaseUpdater",
     "UpdateRefused",
+    "container_service_restarter",
     "enforce_monotonic_release",
     "extract_release_archive",
     "parse_release_metadata",
     "release_tree_sha256",
+    "require_fixed_validator_service_command",
     "require_idle_direct_writer_journal",
     "direct_writer_journal_path",
     "load_expected_hotkey_identity",

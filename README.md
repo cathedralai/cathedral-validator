@@ -22,23 +22,61 @@ See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-a
 ## What you need
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
-  Ubuntu 24.04 LTS is tested; 2 vCPU, 4 GB RAM and 20 GB disk are sufficient.
-  No GPU or confidential-computing hardware is required on the validator host.
+  Docker on Linux/amd64 is the other supported path. Ubuntu 24.04 LTS is
+  tested; 2 vCPU, 4 GB RAM and 20 GB disk are sufficient. No GPU or
+  confidential-computing hardware is required on the validator host.
 - An SN94-registered hotkey with a validator permit, its unencrypted keyfile
   and expected public SS58 address. Without registration/permit the service
   keeps checking but writes no weights.
 - A reviewed SNP policy; use the [policy template](docs/AUTO_UPDATE.md#before-installation).
 - Outbound access to Finney, GitHub, advertised miner endpoints and vendor
   verification collateral. No inbound ports or public address are needed.
-- Check the subnet's commit-reveal setting before you install. Plain weight
-  writes need commit-reveal **disabled**. Live Finney SN94 currently has
-  commit-reveal **enabled** — operators on CR-on subnets must opt in to
-  timelocked commits (see
+- Live Finney SN94 has commit-reveal **enabled**. The writer turns on
+  timelocked commits by default and reads `RevealPeriodEpochs` from chain.
+  Pin `CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-N` only
+  to refuse a mismatch (see
   [Commit-reveal subnets](docs/AUTO_UPDATE.md#commit-reveal-subnets)). Check all
   [chain rules](docs/OPERATOR_RUNBOOK.md#3-check-the-subnet-accepts-direct-writes) first.
 
 Never copy a coldkey, mnemonic, or coldkey password to this host. The
 service receives only the hotkey file and checks its expected public address.
+
+## Docker
+
+Pin the image by digest once CI publishes it. Until then the digest below is
+a placeholder, not a real pin.
+
+```bash
+docker run -d --name cathedral-validator --restart unless-stopped \
+  --stop-timeout 150 \
+  --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
+  --security-opt no-new-privileges \
+  --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
+  -v cathedral-state:/var/lib/cathedral \
+  -v ~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY:/run/secrets/hotkey:ro \
+  -v /absolute/reviewed/amd-sev-snp-policy.json:/etc/cathedral/snp-policy.json:ro \
+  -e CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=YOUR_PUBLIC_HOTKEY_SS58 \
+  ghcr.io/cathedralai/cathedral-validator@sha256:<pinned>
+```
+
+Mount only the hotkey file and your reviewed SNP policy. The image refuses to
+start without the policy; it does not ship a default. CHOWN, FOWNER, and
+DAC_OVERRIDE are required so the signed updater can create the validator-owned
+journal. DAC_READ_SEARCH lets PID1 copy the mounted hotkey. Never mount a
+coldkey.
+Never run this container and a systemd unit against the same hotkey.
+Never delete the `cathedral-state` volume. Status and recovery:
+
+```bash
+docker exec cathedral-validator cathedral-validator-status
+docker logs -f cathedral-validator
+docker exec -u cathedral-validator -e HOME=/var/lib/cathedral-validator \
+  cathedral-validator cathedral-validator-record-failed-write \
+  --network=finney --expected-hotkey=YOUR_PUBLIC_HOTKEY_SS58
+```
+
+Moving from a systemd host: [Docker migration](docs/AUTO_UPDATE.md#docker-migration).
 
 ## Install
 

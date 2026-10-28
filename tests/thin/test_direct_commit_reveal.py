@@ -409,17 +409,25 @@ def commit_once(tmp_path: Path, monkeypatch, **kwargs):
 
 
 @pytest.mark.parametrize(
-    ("value", "period"),
+    ("value", "enabled", "period"),
     (
-        (None, None),
-        ("", None),
-        ("timelocked-v4-reveal-period-1", 1),
-        ("timelocked-v4-reveal-period-100", 100),
+        (None, True, None),
+        ("", True, None),
+        ("timelocked-v4", True, None),
+        ("off", False, None),
+        ("disabled", False, None),
+        ("timelocked-v4-reveal-period-1", True, 1),
+        ("timelocked-v4-reveal-period-100", True, 100),
     ),
 )
-def test_opt_in_accepts_only_the_pinned_grammar(value, period) -> None:
+def test_opt_in_accepts_only_the_pinned_grammar(value, enabled, period) -> None:
     parsed = cr.parse_commit_reveal_opt_in(value)
-    assert (None if parsed is None else parsed.reveal_period_epochs) == period
+    if not enabled:
+        assert parsed is None
+        return
+    assert parsed is not None
+    assert parsed.reveal_period_epochs == period
+    assert parsed.version == cr.COMMIT_REVEAL_VERSION
 
 
 @pytest.mark.parametrize(
@@ -557,7 +565,9 @@ def test_opt_in_refuses_a_chain_with_commit_reveal_off(
     instance, subtensor, planned, encryptor = cr_writer(tmp_path, monkeypatch)
     subtensor.substrate.chain.enabled = False
 
-    with pytest.raises(DirectValidatorError, match="remove CATHEDRAL_VALIDATOR_COMMIT"):
+    with pytest.raises(
+        DirectValidatorError, match="set CATHEDRAL_VALIDATOR_COMMIT_REVEAL=off"
+    ):
         base.submit_before_deadline(instance, planned)
 
     assert subtensor.substrate.sign_calls == 0
@@ -1003,6 +1013,22 @@ def test_a_commit_gone_past_readable_history_closes_unproven_and_writes_on(
     fresh_subtensor.substrate.finalized_number = REVEAL_BLOCK - 1
     fresh_subtensor.substrate.chain.discarded = set(range(0, 200))
     assert fresh.recover().status == STATUS_AWAITING_REVEAL
+
+
+def test_default_on_uses_the_chain_reveal_period(tmp_path: Path, monkeypatch) -> None:
+    instance, subtensor, planned, encryptor = cr_writer(
+        tmp_path, monkeypatch, opt_in=cr.CommitRevealOptIn()
+    )
+
+    receipt = base.submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_COMMITTED
+    assert encryptor.calls[0]["subnet_reveal_period_epochs"] == 1
+    state = journal(instance)
+    attempt = state["pending"] or state["last_attempt"]
+    assert attempt["intent"]["commit_reveal"]["reveal_period_epochs"] == 1
+    assert instance.commit_reveal is not None
+    assert instance.commit_reveal.reveal_period_epochs is None
 
 
 def test_mismatched_reveal_period_is_refused_before_signing(

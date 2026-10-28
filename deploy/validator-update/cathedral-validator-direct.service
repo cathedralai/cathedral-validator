@@ -43,6 +43,9 @@ ExecStart=/opt/cathedral-validator/current/bin/cathedral-validator --network=fin
 Restart=on-failure
 RestartPreventExitStatus=2 3
 Environment=CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE=3
+# SN94 default: timelocked v4. The writer reads RevealPeriodEpochs from
+# chain at sign time. Pin a period only to refuse a mismatch.
+Environment=CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4
 RestartSec=15s
 TimeoutStartSec=120s
 TimeoutStopSec=150s
