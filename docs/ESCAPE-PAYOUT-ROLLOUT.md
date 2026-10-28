@@ -16,8 +16,8 @@ be set to turn the path on:
 
 | Variable | Mainnet value | Notes |
 |---|---|---|
-| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only, 10s timeout, no redirects, 4 MiB / 10_000 receipt caps. |
-| `CATHEDRAL_ESCAPE_WEIGHT_FRACTION` | `0.05` | Must be in `[0, 1/2]`. `0` is off. Values at or above `0.51` refuse to start. |
+| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only, 10s total wall-clock timeout (connect, reads, and parse), no redirects, 4 MiB / 10_000 receipt caps. |
+| `CATHEDRAL_ESCAPE_WEIGHT_FRACTION` | `0.05` | Must be in `[0, 1/10]`. `0` is off. Values at or above `0.11` refuse to start. |
 | `CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS` | `604800` (7 days) or omit | Optional. Must be in `(0, 7776000]` (90 days). Measured from signed `planted_at`. |
 
 The validator verifies every receipt against the vendored contest public key
