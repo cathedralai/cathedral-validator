@@ -61,6 +61,8 @@ from .direct_contract import (
 )
 from .errors import IndependentLiveError
 from .escape_receipts import (
+    FEED_DEADLINE_SLACK_SECONDS,
+    FEED_TIMEOUT_SECONDS,
     EscapeReceiptConfig,
     EscapeReceiptError,
     escape_config_from_environment,
@@ -406,65 +408,93 @@ def apply_escape_receipts(
     config: EscapeReceiptConfig,
     *,
     now: float | None = None,
-    load: Callable[[str], list[object]] = load_receipt_feed,
+    load: Callable[[str], list[object]] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[DirectWeightPlan, dict[str, object]]:
     """Blend verified escape breaks into the machine plan.
 
     A source that cannot be read leaves the machine-only plan unchanged and
     says so: an escape feed outage must not stop the weights miners are owed.
     A plan with escape units binds the receipt digests into its evidence
-    digest, so the journal names which receipts paid.
+    digest, so the journal names which receipts paid. Scoring or blend
+    failures do the same: miners keep the machine vector.
     """
 
     snapshot = plan.snapshot
     summary: dict[str, object] = {
         "fraction": str(config.fraction),
         "window_seconds": config.window_seconds,
+        "source_kind": "https" if config.source.startswith("https://") else "file",
     }
+    fetch_timeout = FEED_TIMEOUT_SECONDS
+    if deadline_monotonic is not None:
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= FEED_DEADLINE_SLACK_SECONDS:
+            return plan, {
+                **summary,
+                "status": "SOURCE_UNAVAILABLE",
+                "error": "cycle deadline",
+            }
+        fetch_timeout = min(
+            FEED_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
+        )
+    loader = load or (lambda source: load_receipt_feed(source, timeout=fetch_timeout))
     try:
-        receipts = load(config.source)
+        receipts = loader(config.source)
     except Exception as exc:  # noqa: BLE001 - never fails the cycle
         error = str(exc) if isinstance(exc, EscapeReceiptError) else type(exc).__name__
         return plan, {**summary, "status": "SOURCE_UNAVAILABLE", "error": error[:200]}
-    registered = {
-        hotkey: uid
-        for hotkey, uid in (snapshot.registered_hotkeys or {}).items()
-        if hotkey not in REFUSE_HOTKEYS and hotkey != CANARY_HOTKEY
-    }
-    escape_round = score_escape_receipts(
-        receipts,
-        registered=registered,
-        validator_uid=snapshot.validator_uid,
-        now=time.time() if now is None else now,
-        window_seconds=config.window_seconds,
-    )
-    summary.update(escape_round.summary())
-    if not escape_round.units_by_uid:
-        return plan, {**summary, "status": "NO_BREAKS"}
-    evidence_digest = (
-        "sha256:"
-        + hashlib.sha256(
-            canonical_document_bytes(
-                {
-                    "direct_evidence_digest": plan.evidence_digest,
-                    "escape": escape_round.evidence(),
-                }
-            )
-        ).hexdigest()
-    )
-    blended = dataclasses.replace(
-        plan,
-        evidence_digest=evidence_digest,
-        escape_units=escape_round.units_by_uid,
-        escape_uid_hotkeys=escape_round.uid_hotkeys,
-        escape_fraction=str(config.fraction),
-    )
-    wire_uids, wire_weights = blended.expected_vector()
-    blended = dataclasses.replace(
-        blended, wire_uids=wire_uids, wire_weights=wire_weights
-    )
-    blended.kwargs()
-    return blended, {**summary, "status": "APPLIED"}
+    try:
+        registered = {
+            hotkey: uid
+            for hotkey, uid in (snapshot.registered_hotkeys or {}).items()
+            if hotkey not in REFUSE_HOTKEYS and hotkey != CANARY_HOTKEY
+        }
+        escape_round = score_escape_receipts(
+            receipts,
+            registered=registered,
+            validator_uid=snapshot.validator_uid,
+            now=time.time() if now is None else now,
+            window_seconds=config.window_seconds,
+        )
+        summary.update(escape_round.summary())
+        if not escape_round.units_by_uid:
+            return plan, {**summary, "status": "NO_BREAKS"}
+        evidence_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                canonical_document_bytes(
+                    {
+                        "direct_evidence_digest": plan.evidence_digest,
+                        "escape": escape_round.evidence(),
+                    }
+                )
+            ).hexdigest()
+        )
+        blended = dataclasses.replace(
+            plan,
+            evidence_digest=evidence_digest,
+            escape_units=escape_round.units_by_uid,
+            escape_uid_hotkeys=escape_round.uid_hotkeys,
+            escape_fraction=str(config.fraction),
+        )
+        wire_uids, wire_weights = blended.expected_vector()
+        blended = dataclasses.replace(
+            blended, wire_uids=wire_uids, wire_weights=wire_weights
+        )
+        blended.kwargs()
+        return blended, {**summary, "status": "APPLIED"}
+    except Exception as exc:  # noqa: BLE001 - never fails the cycle
+        error = (
+            str(exc)
+            if isinstance(exc, (EscapeReceiptError, DirectValidatorError))
+            else type(exc).__name__
+        )
+        return plan, {
+            **summary,
+            "status": "SCORING_UNAVAILABLE",
+            "error": error[:200],
+        }
 
 
 def _verifier_outage(result: MultiComputeRound) -> bool:
@@ -885,7 +915,9 @@ def _run_direct_cycle_unlocked(
     )
     escape_summary: dict[str, object] | None = None
     if escape_config is not None:
-        plan, escape_summary = apply_escape_receipts(plan, escape_config)
+        plan, escape_summary = apply_escape_receipts(
+            plan, escape_config, deadline_monotonic=cycle_deadline
+        )
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -1491,6 +1523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "escape_receipts": {
                     "status": "ENABLED",
+                    "source": escape_config.source,
                     "fraction": str(escape_config.fraction),
                     "window_seconds": escape_config.window_seconds,
                 }
