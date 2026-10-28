@@ -286,17 +286,6 @@ def drop_validator_command(command: Sequence[str], *, uid: int, gid: int) -> lis
     ]
 
 
-def drop_updater_dac_command(command: Sequence[str]) -> list[str]:
-    return [
-        str(SETPRIV),
-        "--inh-caps=-dac_override,-dac_read_search",
-        "--ambient-caps=-dac_override,-dac_read_search",
-        "--bounding-set=-dac_override,-dac_read_search",
-        "--",
-        *command,
-    ]
-
-
 class Supervisor:
     """Own the validator and updater children inside one container."""
 
@@ -414,9 +403,7 @@ class Supervisor:
         return argv
 
     def _run_updater(self, *, first_install: bool, reconcile: bool) -> None:
-        command = drop_updater_dac_command(
-            self._updater_argv(first_install=first_install, reconcile=reconcile)
-        )
+        command = self._updater_argv(first_install=first_install, reconcile=reconcile)
         print(
             "CATHEDRAL_VALIDATOR_SUPERVISOR_UPDATER "
             f"first_install={str(first_install).lower()} "

@@ -52,7 +52,7 @@ docker run -d --name cathedral-validator --restart unless-stopped \
   --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
-  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
   -v cathedral-state:/var/lib/cathedral \
   -v ~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY:/run/secrets/hotkey:ro \
   -v /absolute/reviewed/amd-sev-snp-policy.json:/etc/cathedral/snp-policy.json:ro \
@@ -61,7 +61,10 @@ docker run -d --name cathedral-validator --restart unless-stopped \
 ```
 
 Mount only the hotkey file and your reviewed SNP policy. The image refuses to
-start without the policy; it does not ship a default. Never mount a coldkey.
+start without the policy; it does not ship a default. CHOWN, FOWNER, and
+DAC_OVERRIDE are required so the signed updater can create the validator-owned
+journal. DAC_READ_SEARCH lets PID1 copy the mounted hotkey. Never mount a
+coldkey.
 Never run this container and a systemd unit against the same hotkey.
 Never delete the `cathedral-state` volume. Status and recovery:
 

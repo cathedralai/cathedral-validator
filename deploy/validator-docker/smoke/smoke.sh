@@ -93,7 +93,7 @@ run_flags() {
     --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
     --security-opt no-new-privileges \
     --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
-    --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+    --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
     -v "$volume:/var/lib/cathedral" \
     -v "$HOTKEY:/run/secrets/hotkey:ro" \
     -v "$SMOKE_DIR/stub_update.py:/usr/local/lib/cathedral-container/container_update.py:ro" \
@@ -147,7 +147,7 @@ docker run --name "$name_missing" \
   --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
-  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
   -v "$missing:/var/lib/cathedral" \
   -v "$HOTKEY:/run/secrets/hotkey:ro" \
   -e "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$EXPECTED" \
@@ -175,7 +175,7 @@ docker run --name "$name_prove" \
   --read-only --tmpfs /tmp --tmpfs /run \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
-  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
   -v "$prove_volume:/var/lib/cathedral" \
   -v "$SMOKE_DIR/prove_updater_roots.py:/usr/local/lib/cathedral-container/prove_updater_roots.py:ro" \
   --entrypoint /usr/local/lib/cathedral-validator-updater/bin/python3.12 \
