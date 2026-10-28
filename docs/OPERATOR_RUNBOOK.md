@@ -70,14 +70,14 @@ and refuses to write, cycle after cycle, if any of these does not hold
 
 | Chain setting | Must be |
 |---|---|
-| Commit-reveal | **Disabled** for the default plain writer, **or** enabled with a matching timelocked-v4 drop-in (see [Commit-reveal subnets](AUTO_UPDATE.md#commit-reveal-subnets)). Live Finney SN94 is commit-reveal **on** — plain `set_weights` will refuse every cycle until you opt in. |
+| Commit-reveal | **Disabled** for the default plain writer, **or** enabled with a matching timelocked-v4 drop-in (see [Commit-reveal subnets](AUTO_UPDATE.md#commit-reveal-subnets)). Live Finney SN94 is commit-reveal **on**. Plain `set_weights` will refuse every cycle until you opt in. |
 | `weights_rate_limit` | At least 16 blocks, and the cooldown since your last write elapsed. |
 | `WeightsVersionKey` | At most the version the release signs with (`cathedral_thin/independent/constants.py`). |
 | Your stake | At least the subnet's weight stake threshold. |
 | Weight count | The vector must meet the chain's minimum allowed weights. |
 
 Read the subnet's hyperparameters with your Bittensor CLI before installing
-(Finney **mainnet netuid 94** vs testnet, e.g. 584 — label which you target).
+(Finney **mainnet netuid 94** vs testnet, e.g. 584; label which you target).
 Each refusal appears as `NOT_PROVEN` with its reason in the service log, and
 the validator retries the next cycle. On a commit-reveal subnet, success is
 `COMMITTED` → `REVEALED_CONFIRMED`, not a plain `CONFIRMED` write.

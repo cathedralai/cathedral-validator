@@ -66,6 +66,7 @@ def test_readme_is_the_small_public_guide() -> None:
     # Count real second-level headings. A substring count also matches "### ",
     # so it would forbid subsections rather than keep the guide short.
     assert [line for line in guide.splitlines() if line.startswith("## ")] == [
+        "## Contents",
         "## What it does",
         "## What you need",
         "## Install",
@@ -73,8 +74,20 @@ def test_readme_is_the_small_public_guide() -> None:
         "## Updates",
         "## Trust",
     ]
-    assert guide.startswith("# Cathedral Validator\n")
-    assert len(guide.splitlines()) <= 120
+    # Cover block: centered mark, HTML title, italic subtitle, date. The
+    # markdown H1 cannot be centered on GitHub, so the visible title is HTML.
+    assert guide.startswith(
+        '<p align="center"><img src="docs/assets/cathedral-mark.png"'
+    )
+    assert '<h1 align="center">Cathedral Validator</h1>' in guide
+    assert (
+        "<em>Cathedral&ensp;rewards&ensp;verified&ensp;compute,&ensp;"
+        "not&ensp;self-reported&ensp;capacity</em>"
+    ) in guide
+    assert "<sub><strong>Assessment and requirements</strong></sub>" in guide
+    assert "<h6>" not in guide
+    assert (ROOT / "docs" / "assets" / "cathedral-mark.png").is_file()
+    assert len(guide.splitlines()) <= 160
     assert "Cathedral rewards verified compute" in guide
     assert "This repository is for validator operators" in guide
     assert "commit-reveal" in guide
