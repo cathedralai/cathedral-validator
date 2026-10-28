@@ -23,6 +23,7 @@ from cathedral_thin.independent_runtime import escape_receipts
 from cathedral_thin.independent_runtime.direct_contract import DirectValidatorError
 from cathedral_thin.independent_runtime.direct_writer import STATUS_CONFIRMED
 from cathedral_thin.independent_runtime.escape_receipts import (
+    CONTEST_SIGNER_SET_SCHEMA,
     DEFAULT_REWARD_WINDOW_SECONDS,
     MAX_FEED_BYTES,
     MAX_FEED_RECEIPTS,
@@ -32,6 +33,7 @@ from cathedral_thin.independent_runtime.escape_receipts import (
     authorizing_body,
     canonical_bytes,
     escape_config_from_environment,
+    parse_contest_signers,
     score_escape_receipts,
     verify_escape_receipt,
 )
@@ -51,6 +53,7 @@ def receipt(
     hotkey: str | None = BREAKER,
     planted_at: float = NOW - 3600,
     commands: int = 1,
+    key_id: str | None = None,
 ) -> dict[str, object]:
     nonce = hashlib.sha256(window_id.encode()).hexdigest()[:32]
     claim: dict[str, object] = {
@@ -75,14 +78,33 @@ def receipt(
     signed = dict(body)
     signed["sig"] = base64.b64encode(key.sign(canonical_bytes(body))).decode("ascii")
     signed["signer"] = "control_plane"
+    if key_id is not None:
+        signed["key_id"] = key_id
     return signed
+
+
+def _signer_set_for_key(
+    key: Ed25519PrivateKey, *, key_id: str = "test"
+) -> escape_receipts.ContestSignerSet:
+    pubkey = key.public_key()
+    b64 = base64.b64encode(pubkey.public_bytes_raw()).decode("ascii")
+    return parse_contest_signers(
+        {
+            "schema": CONTEST_SIGNER_SET_SCHEMA,
+            "keys": [{"id": key_id, "not_before": 0, "pubkey_b64": b64}],
+        }
+    )
 
 
 @pytest.fixture
 def test_signer(monkeypatch) -> None:
     """Stand the test key in for the pinned key (we do not hold its seed)."""
 
-    monkeypatch.setattr(escape_receipts, "PINNED_CONTEST_PUBKEY", TEST_KEY.public_key())
+    pubkey = TEST_KEY.public_key()
+    monkeypatch.setattr(escape_receipts, "PINNED_CONTEST_PUBKEY", pubkey)
+    monkeypatch.setattr(
+        escape_receipts, "PINNED_CONTEST_SIGNERS", _signer_set_for_key(TEST_KEY)
+    )
 
 
 def registered_snapshot(**kwargs):
@@ -125,6 +147,14 @@ def test_vendored_key_file_matches_the_pinned_constant_and_sha256() -> None:
     )
     assert (
         raw.decode("ascii").splitlines()[0] == escape_receipts.PINNED_CONTEST_PUBKEY_B64
+    )
+    set_raw = (REPO / "config/escape/contest-signers.json").read_bytes()
+    assert (
+        hashlib.sha256(set_raw).hexdigest()
+        == escape_receipts.PINNED_CONTEST_SIGNERS_SHA256
+    )
+    assert escape_receipts.PINNED_CONTEST_SIGNERS.keys[0].pubkey_b64 == (
+        escape_receipts.PINNED_CONTEST_PUBKEY_B64
     )
 
 
