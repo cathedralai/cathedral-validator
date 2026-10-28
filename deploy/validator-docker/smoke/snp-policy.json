@@ -1,0 +1,11 @@
+{
+  "schema": "cathedral_amd_sev_snp_policy_v1",
+  "generations": {
+    "genoa": {
+      "allowed_measurements": [
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "minimum_tcb": "0x0000000000000000"
+    }
+  }
+}

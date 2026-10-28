@@ -60,6 +60,10 @@ status = _module(
     "cathedral_test_container_status",
     "deploy/validator-update/cathedral-validator-status",
 )
+smoke_update = _module(
+    "cathedral_test_smoke_update",
+    "deploy/validator-docker/smoke/stub_update.py",
+)
 
 
 def test_image_bootstrap_can_import_the_signed_installer() -> None:
@@ -467,6 +471,54 @@ def test_updater_argv_uses_real_volume_directories(
         and not item.startswith("--state-root=/var/lib/cathedral-validator-update")
         for item in argv
     )
+
+
+def test_smoke_updater_refuses_symlink_roots_and_channel_urls(tmp_path: Path) -> None:
+    install = tmp_path / "releases"
+    state = tmp_path / "update"
+    install.mkdir()
+    state.mkdir()
+    identity = tmp_path / "identity.env"
+    identity.write_text(
+        "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=5Smoke\n", encoding="ascii"
+    )
+    socket_path = tmp_path / "service.sock"
+    socket_path.write_bytes(b"")
+    argv = [
+        f"--identity-file={identity}",
+        f"--install-root={install}",
+        f"--state-root={state}",
+        f"--container-service-control={socket_path}",
+        "--reconcile-boot",
+    ]
+    assert smoke_update.main(argv) == 0
+    record = json.loads((state / "smoke-updater.json").read_text(encoding="ascii"))
+    assert record["reconcile_boot"] is True
+    assert record["install_root_is_symlink"] is False
+    linked = tmp_path / "linked"
+    linked.symlink_to(install)
+    argv[1] = f"--install-root={linked}"
+    assert smoke_update.main(argv) == 2
+    argv[1] = f"--install-root={install}"
+    argv[-1] = "--metadata-url=https://example.test/stable.json"
+    assert smoke_update.main(argv) == 2
+
+
+def test_smoke_script_stays_offline_and_uses_documented_caps() -> None:
+    path = ROOT / "deploy" / "validator-docker" / "smoke" / "smoke.sh"
+    script = path.read_text(encoding="utf-8")
+    assert "--network none" in script
+    assert "--cap-drop ALL" in script
+    assert "--cap-add CHOWN" in script
+    assert "--read-only" in script
+    assert "--security-opt no-new-privileges" in script
+    assert "never talks to mainnet" in script
+    assert "Watchtower" not in script
+    assert "docker.sock" not in script
+    assert "SN39" not in script
+    assert "\u2014" not in script
+    assert "\u2013" not in script
+    subprocess.run(["bash", "-n", str(path)], check=True)
 
 
 def test_readme_docker_command_matches_the_supervisor_mounts() -> None:
