@@ -264,15 +264,17 @@ def validator_command(*, expected_hotkey: str, interval_seconds: str) -> list[st
 
 
 def drop_validator_command(command: Sequence[str], *, uid: int, gid: int) -> list[str]:
+    # setpriv treats --init-groups, --clear-groups, --keep-groups, and
+    # --groups as alternatives. --clear-groups drops every supplementary
+    # group after the uid/gid change.
     return [
         str(SETPRIV),
         f"--reuid={uid}",
         f"--regid={gid}",
-        "--init-groups",
+        "--clear-groups",
         "--inh-caps=-all",
         "--ambient-caps=-all",
         "--bounding-set=-all",
-        "--clear-groups",
         "--",
         *command,
     ]
@@ -381,8 +383,8 @@ class Supervisor:
             str(UPDATER_PYTHON),
             str(CONTAINER_UPDATE),
             f"--identity-file={IDENTITY_FILE}",
-            f"--install-root={INSTALL_ROOT}",
-            f"--state-root={STATE_ROOT}",
+            f"--install-root={VOLUME_ROOT / 'releases'}",
+            f"--state-root={VOLUME_ROOT / 'update'}",
             f"--container-service-control={CONTROL_SOCKET}",
         ]
         if reconcile:

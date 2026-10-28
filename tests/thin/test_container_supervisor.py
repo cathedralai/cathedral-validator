@@ -430,10 +430,50 @@ def test_dockerfile_is_ubuntu_2404_python312_and_has_no_validator_pex() -> None:
     assert "ghcr.io/cathedralai/cathedral-validator" in workflow
 
 
+def test_drop_validator_command_uses_one_group_option() -> None:
+    argv = supervisor.drop_validator_command(["/bin/true"], uid=910, gid=65534)
+    group_opts = {
+        "--init-groups",
+        "--clear-groups",
+        "--keep-groups",
+        "--groups",
+    }
+    chosen = [
+        item for item in argv if item in group_opts or item.startswith("--groups")
+    ]
+    assert chosen == ["--clear-groups"]
+
+
+def test_updater_argv_uses_real_volume_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    volume = tmp_path / "cathedral"
+    monkeypatch.setattr(supervisor, "VOLUME_ROOT", volume)
+    monkeypatch.setattr(
+        supervisor,
+        "load_image_bootstrap",
+        lambda _path=None: {
+            "stable_metadata_url": "https://example.test/stable.json",
+            "stable_minimum_sequence": 1,
+            "stable_metadata_sha256": "ab" * 32,
+        },
+    )
+    instance = supervisor.Supervisor(expected_hotkey="5Expected")
+    argv = instance._updater_argv(first_install=True, reconcile=False)
+    assert f"--install-root={volume / 'releases'}" in argv
+    assert f"--state-root={volume / 'update'}" in argv
+    assert all(
+        not item.startswith("--install-root=/opt/")
+        and not item.startswith("--state-root=/var/lib/cathedral-validator-update")
+        for item in argv
+    )
+
+
 def test_readme_docker_command_matches_the_supervisor_mounts() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "--restart unless-stopped" in guide
     assert "--stop-timeout 150" in guide
+    assert "--cap-add CHOWN" in guide
     assert "/run/secrets/hotkey:ro" in guide
     assert "/etc/cathedral/snp-policy.json:ro" in guide
     assert "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY" in guide
