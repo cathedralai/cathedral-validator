@@ -163,6 +163,25 @@ printf '%s\n' "$missing_logs" | grep -F -q "snp-policy.json"
 printf '%s\n' "$missing_logs" | grep -F -q "does not ship a default policy"
 echo "ok missing SNP policy refused"
 
+# Real SignedReleaseUpdater: dests are compatibility symlinks, so bootstrap,
+# update, and --reconcile-boot must use the volume directories.
+prove_volume="$WORK/prove-roots"
+mkdir -p "$prove_volume/releases" "$prove_volume/update" "$prove_volume/validator"
+as_root chown -R root:root "$prove_volume"
+name_prove="cathedral-smoke-updater-roots"
+NAMES+=("$name_prove")
+docker run --name "$name_prove" \
+  --network none \
+  --read-only --tmpfs /tmp --tmpfs /run \
+  --security-opt no-new-privileges \
+  --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  -v "$prove_volume:/var/lib/cathedral" \
+  -v "$SMOKE_DIR/prove_updater_roots.py:/usr/local/lib/cathedral-container/prove_updater_roots.py:ro" \
+  --entrypoint /usr/local/lib/cathedral-validator-updater/bin/python3.12 \
+  "$IMAGE" /usr/local/lib/cathedral-container/prove_updater_roots.py
+echo "ok signed updater bootstrap, update, and reconcile used volume roots"
+
 # Happy path: reconcile, exec, uid split, SIGTERM.
 volume="$WORK/state"
 seed_volume "$volume"

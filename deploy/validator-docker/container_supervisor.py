@@ -344,7 +344,7 @@ class Supervisor:
         if TDX_SOURCE.is_file():
             copy_owned_file(TDX_SOURCE, TDX_DEST, uid=0, gid=0, mode=0o644)
         baked = load_image_bootstrap()
-        first_install = is_first_install(STATE_ROOT)
+        first_install = is_first_install(VOLUME_ROOT / "update")
         check_bootstrap_expiry(
             expires_unix=int(baked["expires_unix"]),
             now_unix=int(self.now()),

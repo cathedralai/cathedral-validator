@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -16,15 +17,18 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import cathedral_thin.independent_runtime.updater as updater_module
 from cathedral_thin.independent_runtime.updater import (
     SYSTEMCTL,
     VALIDATOR_SERVICE,
+    SignedReleaseUpdater,
     UpdateRefused,
     container_service_restarter,
     require_fixed_validator_service_command,
 )
+from tests.thin import test_updater as updater_fixture
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -448,6 +452,14 @@ def test_drop_validator_command_uses_one_group_option() -> None:
     assert chosen == ["--clear-groups"]
 
 
+def test_first_install_reads_the_volume_state_directory() -> None:
+    source = (
+        ROOT / "deploy" / "validator-docker" / "container_supervisor.py"
+    ).read_text(encoding="utf-8")
+    assert 'is_first_install(VOLUME_ROOT / "update")' in source
+    assert "is_first_install(STATE_ROOT)" not in source
+
+
 def test_updater_argv_uses_real_volume_directories(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -463,14 +475,133 @@ def test_updater_argv_uses_real_volume_directories(
         },
     )
     instance = supervisor.Supervisor(expected_hotkey="5Expected")
-    argv = instance._updater_argv(first_install=True, reconcile=False)
-    assert f"--install-root={volume / 'releases'}" in argv
-    assert f"--state-root={volume / 'update'}" in argv
-    assert all(
-        not item.startswith("--install-root=/opt/")
-        and not item.startswith("--state-root=/var/lib/cathedral-validator-update")
-        for item in argv
+    for first_install, reconcile in (
+        (True, False),
+        (False, True),
+        (False, False),
+    ):
+        argv = instance._updater_argv(first_install=first_install, reconcile=reconcile)
+        assert f"--install-root={volume / 'releases'}" in argv
+        assert f"--state-root={volume / 'update'}" in argv
+        assert all(
+            not item.startswith("--install-root=/opt/")
+            and not item.startswith("--state-root=/var/lib/cathedral-validator-update")
+            for item in argv
+        )
+
+
+def test_signed_updater_bootstraps_updates_and_reconciles_on_volume_dirs(
+    tmp_path: Path,
+) -> None:
+    """Image dests are symlinks; the signed updater only accepts the volume dirs."""
+
+    volume = tmp_path / "var" / "lib" / "cathedral"
+    install = volume / "releases"
+    state = volume / "update"
+    install.mkdir(parents=True)
+    state.mkdir(parents=True)
+    os.chmod(install, 0o755)
+    os.chmod(state, 0o700)
+    image_install = tmp_path / "opt" / "cathedral-validator"
+    image_state = tmp_path / "var" / "lib" / "cathedral-validator-update"
+    image_install.parent.mkdir(parents=True, exist_ok=True)
+    image_state.parent.mkdir(parents=True, exist_ok=True)
+    image_install.symlink_to(install)
+    image_state.symlink_to(state)
+
+    private = Ed25519PrivateKey.generate()
+    first_archive = updater_fixture._archive()
+    first_metadata = updater_fixture._stable_metadata(
+        private,
+        sequence=1,
+        archive=first_archive,
+        tree=updater_fixture._tree_digest(tmp_path, first_archive, name="tree-1"),
     )
+    second_archive = updater_fixture._archive(marker_path=tmp_path / "second")
+    second_metadata = updater_fixture._stable_metadata(
+        private,
+        sequence=2,
+        archive=second_archive,
+        tree=updater_fixture._tree_digest(tmp_path, second_archive, name="tree-2"),
+        version="1.2.4",
+    )
+    uid = os.geteuid()
+    gid = os.getegid()
+    journal_scope = tmp_path / "journal-scope"
+    payloads = {
+        "metadata": first_metadata,
+        "archive": first_archive,
+    }
+
+    def fetcher(url: str, _maximum: int) -> bytes:
+        return payloads["metadata"] if url.endswith(".json") else payloads["archive"]
+
+    def restarter(_command: object) -> None:
+        return None
+
+    previous_umask = os.umask(0o077)
+    try:
+        linked = SignedReleaseUpdater(
+            install_root=image_install,
+            state_root=image_state,
+            expected_hotkey="5SmokeVolumeRoots",
+            journal_scope_root=journal_scope,
+            expected_uid=uid,
+            fetcher=fetcher,
+            service_restarter=restarter,
+        )
+        arguments = {
+            "metadata_url": "https://releases.example/stable.json",
+            "channel": "stable",
+            "public_key": private.public_key(),
+            "pause_file": state / "pause",
+            "minimum_sequence": 1,
+            "cycle_wait_seconds": 0.1,
+            "operation_timeout_seconds": 30,
+        }
+        with pytest.raises(UpdateRefused, match="not root-controlled"):
+            linked.bootstrap(
+                **arguments,
+                validator_uid=uid,
+                validator_gid=gid,
+                first_install_metadata_sha256=hashlib.sha256(
+                    first_metadata
+                ).hexdigest(),
+            )
+        with pytest.raises(UpdateRefused, match="not root-controlled"):
+            linked.update(**arguments)
+        with pytest.raises(UpdateRefused, match="not root-controlled"):
+            linked.reconcile_boot(cycle_wait_seconds=0.1, operation_timeout_seconds=5)
+
+        real = SignedReleaseUpdater(
+            install_root=install,
+            state_root=state,
+            expected_hotkey="5SmokeVolumeRoots",
+            journal_scope_root=journal_scope,
+            expected_uid=uid,
+            fetcher=fetcher,
+            service_restarter=restarter,
+        )
+        assert (
+            real.bootstrap(
+                **arguments,
+                validator_uid=uid,
+                validator_gid=gid,
+                first_install_metadata_sha256=hashlib.sha256(
+                    first_metadata
+                ).hexdigest(),
+            )
+            == "ACTIVATED"
+        )
+        payloads["metadata"] = second_metadata
+        payloads["archive"] = second_archive
+        assert real.update(**arguments) == "ACTIVATED"
+        assert (
+            real.reconcile_boot(cycle_wait_seconds=0.1, operation_timeout_seconds=5)
+            == "RECONCILED"
+        )
+    finally:
+        os.umask(previous_umask)
 
 
 def test_smoke_updater_refuses_symlink_roots_and_channel_urls(tmp_path: Path) -> None:
@@ -511,6 +642,7 @@ def test_smoke_script_stays_offline_and_uses_documented_caps() -> None:
     assert "--cap-drop ALL" in script
     assert "--cap-add SETPCAP" in script
     assert "--cap-add CHOWN" in script
+    assert "prove_updater_roots.py" in script
     assert "--read-only" in script
     assert "--security-opt no-new-privileges" in script
     assert "never talks to mainnet" in script
