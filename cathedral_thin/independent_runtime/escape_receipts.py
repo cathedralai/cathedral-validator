@@ -27,6 +27,8 @@ import hashlib
 import json
 import math
 import os
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -50,8 +52,18 @@ MAX_REWARD_WINDOW_SECONDS = 90 * 24 * 3600
 MAX_FUTURE_SKEW_SECONDS = 300
 MAX_FEED_BYTES = 4 * 1024 * 1024
 MAX_FEED_RECEIPTS = 10_000
+# Total wall-clock budget for connect, every read, and JSON parse. urllib's
+# socket timeout is per recv, so a feed that drips slower than this value
+# per byte would otherwise outlive FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
 FEED_TIMEOUT_SECONDS = 10.0
+FEED_READ_CHUNK_BYTES = 64 * 1024
+# Leave time after the feed fetch for scoring, presign RPCs, and the write.
+# A hung feed must not spend the rest of FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
+FEED_DEADLINE_SLACK_SECONDS = 5.0
 MAX_REPORTED_HOTKEYS = 32
+# Hard cap so a mistyped 0.9 cannot give breakers almost the whole vector.
+# The intended mainnet share is 5 percent (1/20), well under this.
+MAX_WEIGHT_FRACTION = Fraction(1, 10)
 
 RECEIPT_SCHEMA = "escape_stage_c_receipt_v0"
 CLAIM_SCHEMA = "escape_practice_claim_v0"
@@ -173,12 +185,15 @@ def verify_escape_receipt(
     if receipt.get("nonce_origin") != NONCE_ORIGIN:
         raise EscapeReceiptError("nonce_origin must be control_plane")
     planted_at = receipt.get("planted_at")
-    if (
-        isinstance(planted_at, bool)
-        or not isinstance(planted_at, (int, float))
-        or not math.isfinite(planted_at)
-        or planted_at <= 0
-    ):
+    if isinstance(planted_at, bool) or not isinstance(planted_at, (int, float)):
+        raise EscapeReceiptError("planted_at must be a positive number")
+    # json.loads keeps integers of any size. math.isfinite() OverflowError on
+    # those would abort the whole weight cycle, so convert first.
+    try:
+        planted = float(planted_at)
+    except OverflowError as exc:
+        raise EscapeReceiptError("planted_at must be a positive number") from exc
+    if not math.isfinite(planted) or planted <= 0:
         raise EscapeReceiptError("planted_at must be a positive number")
     hotkey = _check_claim(
         receipt.get("claim"),
@@ -203,7 +218,7 @@ def verify_escape_receipt(
         window_id=window_id,
         room_id=room_id,
         breaker_hotkey=hotkey,
-        planted_at=float(planted_at),
+        planted_at=planted,
     )
 
 
@@ -221,8 +236,10 @@ def _parse_fraction(raw: str) -> Fraction:
         raise EscapeReceiptError(
             f"{ESCAPE_WEIGHT_FRACTION_ENV} is not a number"
         ) from exc
-    if not 0 <= value < 1:
-        raise EscapeReceiptError(f"{ESCAPE_WEIGHT_FRACTION_ENV} must be in [0, 1)")
+    if not 0 <= value <= MAX_WEIGHT_FRACTION:
+        raise EscapeReceiptError(
+            f"{ESCAPE_WEIGHT_FRACTION_ENV} must be in [0, {MAX_WEIGHT_FRACTION}]"
+        )
     return value
 
 
@@ -259,13 +276,18 @@ def escape_config_from_environment(
 
 def _require_source(source: str) -> None:
     if source.startswith("https://"):
-        parts = urllib.parse.urlsplit(source)
+        try:
+            parts = urllib.parse.urlsplit(source)
+            port = parts.port
+        except ValueError as exc:
+            raise EscapeReceiptError("escape receipt URL is invalid") from exc
         if (
             parts.username
             or parts.password
             or parts.query
             or parts.fragment
             or not parts.hostname
+            or (port is not None and not (1 <= port <= 65535))
         ):
             raise EscapeReceiptError(
                 "escape receipt URL must be HTTPS with no userinfo, query or fragment"
@@ -277,30 +299,135 @@ def _require_source(source: str) -> None:
         )
 
 
-def _fetch_https(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=FEED_TIMEOUT_SECONDS) as response:  # noqa: S310
-        body = response.read(MAX_FEED_BYTES + 1)
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+def _feed_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise EscapeReceiptError("escape receipt feed is unavailable")
+    return remaining
+
+
+def _set_response_timeout(response: Any, timeout: float) -> None:
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None) if fp is not None else None
+    sock = getattr(raw, "_sock", None) if raw is not None else None
+    setter = getattr(sock, "settimeout", None)
+    if callable(setter):
+        setter(timeout)
+
+
+def _read_feed_body(response: Any, *, deadline: float) -> bytes:
+    """Read the body under one wall-clock deadline, one recv at a time."""
+
+    body = bytearray()
+    read1 = getattr(response, "read1", None)
+    reader = read1 if callable(read1) else response.read
+    while len(body) <= MAX_FEED_BYTES:
+        remaining = _feed_remaining(deadline)
+        _set_response_timeout(response, remaining)
+        chunk = reader(min(FEED_READ_CHUNK_BYTES, MAX_FEED_BYTES + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _fetch_https(
+    url: str,
+    *,
+    timeout: float = FEED_TIMEOUT_SECONDS,
+    opener: Callable[..., Any] | None = None,
+) -> bytes:
+    """GET one HTTPS feed. Redirects are not followed.
+
+    ``timeout`` is a total wall-clock budget for connect and every read, not
+    a per-recv socket timeout.
+    """
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise EscapeReceiptError("escape receipt feed timeout is invalid")
+    deadline = time.monotonic() + timeout
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "cathedral-validator-escape/1",
+        },
+        method="GET",
+    )
+    open_request = opener or urllib.request.build_opener(_NoRedirect()).open
+    try:
+        with open_request(request, timeout=_feed_remaining(deadline)) as response:
+            _feed_remaining(deadline)
+            status = int(response.getcode())
+            final_url = str(response.geturl())
+            body = _read_feed_body(response, deadline=deadline)
+            _feed_remaining(deadline)
+    except urllib.error.HTTPError as exc:
+        raise EscapeReceiptError(f"escape receipt feed HTTP {exc.code}") from exc
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        raise EscapeReceiptError("escape receipt feed is unavailable") from exc
+    if status != 200:
+        raise EscapeReceiptError(f"escape receipt feed HTTP {status}")
+    try:
+        final = urllib.parse.urlsplit(final_url)
+    except ValueError as exc:
+        raise EscapeReceiptError("escape receipt feed redirected off HTTPS") from exc
+    if final.scheme != "https" or not final.hostname:
+        raise EscapeReceiptError("escape receipt feed redirected off HTTPS")
     return body
 
 
 def load_receipt_feed(
-    source: str, *, fetch: Callable[[str], bytes] = _fetch_https
+    source: str,
+    *,
+    fetch: Callable[[str], bytes] | None = None,
+    timeout: float = FEED_TIMEOUT_SECONDS,
 ) -> list[object]:
-    """Read a JSON list of receipts, or ``{"receipts": [...]}``."""
+    """Read a JSON list of receipts, or ``{"receipts": [...]}``.
 
+    ``timeout`` is a total wall-clock budget for connect, reads, and parse.
+    """
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise EscapeReceiptError("escape receipt feed timeout is invalid")
+    deadline = time.monotonic() + timeout
     _require_source(source)
+    getter = (
+        fetch
+        if fetch is not None
+        else (lambda url: _fetch_https(url, timeout=_feed_remaining(deadline)))
+    )
+    _feed_remaining(deadline)
     if source.startswith("https://"):
-        raw = fetch(source)
+        raw = getter(source)
     else:
-        with open(source, "rb") as handle:
+        path = Path(source)
+        if not path.is_file():
+            raise EscapeReceiptError("escape receipt source is not a regular file")
+        _feed_remaining(deadline)
+        with path.open("rb") as handle:
             raw = handle.read(MAX_FEED_BYTES + 1)
+    _feed_remaining(deadline)
     if len(raw) > MAX_FEED_BYTES:
         raise EscapeReceiptError("escape receipt feed is too large")
     try:
         document = json.loads(raw)
     except ValueError as exc:
         raise EscapeReceiptError("escape receipt feed is not JSON") from exc
+    _feed_remaining(deadline)
     if isinstance(document, dict):
         document = document.get("receipts")
     if not isinstance(document, list):
@@ -368,6 +495,9 @@ def score_escape_receipts(
             verified.append(verify_escape_receipt(receipt, pubkey=pubkey))
         except EscapeReceiptError as exc:
             refuse("no_breaker_hotkey" if "breaker hotkey" in str(exc) else "invalid")
+        except (OverflowError, ValueError, TypeError, UnicodeError):
+            # One malformed feed entry must not abort miner weights.
+            refuse("invalid")
     verified.sort(key=lambda item: (item.planted_at, item.digest))
 
     seen_digests: set[str] = set()
@@ -391,7 +521,6 @@ def score_escape_receipts(
         if room in seen_rooms:
             refuse("duplicate_room")
             continue
-        seen_rooms.add(room)
         uid = registered.get(item.breaker_hotkey)
         if isinstance(uid, bool) or not isinstance(uid, int):
             refuse("unregistered")
@@ -401,6 +530,9 @@ def score_escape_receipts(
         if uid == validator_uid:
             refuse("validator_self")
             continue
+        # Only an awarded unit consumes the room. An unregistered or
+        # validator-self receipt must not block a registered breaker.
+        seen_rooms.add(room)
         units[uid] = units.get(uid, 0) + 1
         hotkeys[uid] = item.breaker_hotkey
         accepted.append(item.digest)
@@ -419,6 +551,11 @@ __all__ = [
     "ESCAPE_RECEIPTS_SOURCE_ENV",
     "ESCAPE_REWARD_WINDOW_ENV",
     "ESCAPE_WEIGHT_FRACTION_ENV",
+    "FEED_DEADLINE_SLACK_SECONDS",
+    "FEED_TIMEOUT_SECONDS",
+    "MAX_FEED_BYTES",
+    "MAX_FEED_RECEIPTS",
+    "MAX_WEIGHT_FRACTION",
     "EscapeReceiptConfig",
     "EscapeReceiptError",
     "EscapeRound",

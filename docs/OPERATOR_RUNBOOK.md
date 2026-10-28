@@ -312,6 +312,17 @@ changes.
   the machines that passed. A round with no PASS of an INFRA kind still halts.
 
 
+## Escape room payouts
+
+Off by default. The signed vector is unchanged until both
+`CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` and a positive
+`CATHEDRAL_ESCAPE_WEIGHT_FRACTION` are set. The enable sequence, testnet 584
+staged-break check, mainnet 5 percent switch, weight verification, and
+one-step rollback (set the fraction back to 0) are in
+[Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md). Do not set a positive
+fraction on mainnet until that testnet check has passed.
+
+
 ## Never
 
 - Never copy a coldkey, mnemonic, or coldkey password to the host.

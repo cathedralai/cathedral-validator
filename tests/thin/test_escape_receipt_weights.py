@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.server
 import json
+import threading
+import time
+import urllib.error
+import urllib.request
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
@@ -21,6 +26,9 @@ from cathedral_thin.independent_runtime.direct_contract import DirectValidatorEr
 from cathedral_thin.independent_runtime.direct_writer import STATUS_CONFIRMED
 from cathedral_thin.independent_runtime.escape_receipts import (
     DEFAULT_REWARD_WINDOW_SECONDS,
+    MAX_FEED_BYTES,
+    MAX_FEED_RECEIPTS,
+    MAX_WEIGHT_FRACTION,
     EscapeReceiptConfig,
     EscapeReceiptError,
     authorizing_body,
@@ -200,6 +208,80 @@ def test_validator_cannot_pay_itself(test_signer) -> None:
     assert score([receipt(hotkey=base.VALIDATOR)]).refused == {"validator_self": 1}
 
 
+def test_unregistered_receipt_does_not_consume_the_room(test_signer) -> None:
+    result = score(
+        [
+            receipt(hotkey="5Nobody", planted_at=NOW - 10),
+            receipt(hotkey=BREAKER, planted_at=NOW - 9),
+        ]
+    )
+    assert result.units_by_uid == ((BREAKER_UID, 1),)
+    assert result.refused == {"unregistered": 1}
+
+
+def test_unregistered_receipt_does_not_hold_the_room_for_a_later_breaker(
+    test_signer,
+) -> None:
+    """Pin current behavior: an unregistered claim does not reserve the room.
+
+    Reviewer open question on PR #313: a later registered breaker for the
+    same (window_id, room_id) is paid. This is unchanged; the test exists so
+    a product decision to hold the room would fail here first.
+    """
+
+    later = "5LaterBreaker"
+    later_uid = 31
+    result = score_escape_receipts(
+        [
+            receipt(hotkey="5Nobody", planted_at=NOW - 10),
+            receipt(hotkey=later, planted_at=NOW - 9),
+        ],
+        registered={BREAKER: BREAKER_UID, later: later_uid, base.VALIDATOR: 7},
+        validator_uid=7,
+        now=NOW,
+        window_seconds=DEFAULT_REWARD_WINDOW_SECONDS,
+    )
+    assert result.units_by_uid == ((later_uid, 1),)
+    assert result.refused == {"unregistered": 1}
+    assert "duplicate_room" not in result.refused
+
+
+def test_validator_self_receipt_does_not_consume_the_room(test_signer) -> None:
+    result = score(
+        [
+            receipt(hotkey=base.VALIDATOR, planted_at=NOW - 10),
+            receipt(hotkey=BREAKER, planted_at=NOW - 9),
+        ]
+    )
+    assert result.units_by_uid == ((BREAKER_UID, 1),)
+    assert result.refused == {"validator_self": 1}
+
+
+def test_oversized_planted_at_is_refused_without_aborting(test_signer) -> None:
+    bad = receipt()
+    bad["planted_at"] = 10**400
+    with pytest.raises(EscapeReceiptError, match="planted_at"):
+        verify_escape_receipt(bad)
+    result = score([bad, receipt(room_id="ok")])
+    assert result.units_by_uid == ((BREAKER_UID, 1),)
+    assert result.refused == {"invalid": 1}
+    planned = machine_plan()
+    blended, summary = runtime.apply_escape_receipts(
+        planned, config(), now=NOW, load=lambda _source: [bad, receipt()]
+    )
+    assert summary["status"] == "APPLIED"
+    assert summary["refused"] == {"invalid": 1}
+    assert blended is not planned
+
+
+def test_non_finite_planted_at_is_refused(test_signer) -> None:
+    for value in (float("nan"), float("inf"), float("-inf"), 0, -1, True):
+        bad = receipt()
+        bad["planted_at"] = value
+        with pytest.raises(EscapeReceiptError, match="planted_at"):
+            verify_escape_receipt(bad)
+
+
 # --- blending into the plan ------------------------------------------------
 
 
@@ -308,6 +390,20 @@ def test_malformed_config_refuses() -> None:
                 "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.1",
             }
         )
+    with pytest.raises(EscapeReceiptError):
+        escape_config_from_environment(
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts?x=1",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.05",
+            }
+        )
+    with pytest.raises(EscapeReceiptError):
+        escape_config_from_environment(
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example:999999/escape/receipts",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.05",
+            }
+        )
     loaded = escape_config_from_environment(
         {
             "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
@@ -322,12 +418,277 @@ def test_malformed_config_refuses() -> None:
     )
 
 
+def test_weight_fraction_is_capped_at_one_tenth() -> None:
+    with pytest.raises(EscapeReceiptError, match=r"\[0, 1/10\]"):
+        escape_config_from_environment(
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.11",
+            }
+        )
+    with pytest.raises(EscapeReceiptError, match=r"\[0, 1/10\]"):
+        escape_config_from_environment(
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1/2",
+            }
+        )
+    loaded = escape_config_from_environment(
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1/10",
+        }
+    )
+    assert loaded is not None
+    assert loaded.fraction == MAX_WEIGHT_FRACTION == Fraction(1, 10)
+    five_percent = escape_config_from_environment(
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.05",
+        }
+    )
+    assert five_percent is not None
+    assert five_percent.fraction == Fraction(1, 20)
+
+
+def test_five_percent_share_matches_the_mainnet_proposal(test_signer) -> None:
+    planned = machine_plan()
+    blended, summary = runtime.apply_escape_receipts(
+        planned, config("1/20"), now=NOW, load=lambda _source: [receipt()]
+    )
+    assert summary["status"] == "APPLIED"
+    weights = dict(zip(blended.wire_uids, blended.wire_weights, strict=True))
+    assert sum(weights.values()) == W
+    assert weights[BREAKER_UID] in (3276, 3277)
+
+
+def test_http_404_leaves_the_plan_unchanged(test_signer) -> None:
+    planned = machine_plan()
+
+    def missing(_source: str) -> list[object]:
+        raise EscapeReceiptError("escape receipt feed HTTP 404")
+
+    same, summary = runtime.apply_escape_receipts(
+        planned, config(), now=NOW, load=missing
+    )
+    assert same is planned
+    assert summary["status"] == "SOURCE_UNAVAILABLE"
+    assert summary["error"] == "escape receipt feed HTTP 404"
+
+
+def test_cycle_deadline_skips_the_feed(test_signer) -> None:
+    planned = machine_plan()
+    called = {"n": 0}
+
+    def load(_source: str) -> list[object]:
+        called["n"] += 1
+        return [receipt()]
+
+    same, summary = runtime.apply_escape_receipts(
+        planned,
+        config(),
+        now=NOW,
+        load=load,
+        deadline_monotonic=time.monotonic() - 1,
+    )
+    assert called["n"] == 0
+    assert same is planned
+    assert summary["status"] == "SOURCE_UNAVAILABLE"
+    assert summary["error"] == "cycle deadline"
+
+
+def test_scoring_failure_leaves_the_plan_unchanged(test_signer, monkeypatch) -> None:
+    planned = machine_plan()
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runtime, "score_escape_receipts", boom)
+    same, summary = runtime.apply_escape_receipts(
+        planned, config(), now=NOW, load=lambda _source: [receipt()]
+    )
+    assert same is planned
+    assert summary["status"] == "SCORING_UNAVAILABLE"
+    assert summary["error"] == "RuntimeError"
+
+
 def test_feed_file_accepts_list_or_object(tmp_path: Path, test_signer) -> None:
     path = tmp_path / "feed.json"
     path.write_text(json.dumps({"receipts": [receipt()]}))
     assert len(escape_receipts.load_receipt_feed(str(path))) == 1
     path.write_text(json.dumps([receipt(), receipt(room_id="b")]))
     assert len(escape_receipts.load_receipt_feed(str(path))) == 2
+
+
+def test_feed_directory_and_oversize_and_count_are_refused(
+    tmp_path: Path, test_signer
+) -> None:
+    with pytest.raises(EscapeReceiptError, match="regular file"):
+        escape_receipts.load_receipt_feed(str(tmp_path))
+    huge = tmp_path / "huge.json"
+    huge.write_bytes(b"x" * (MAX_FEED_BYTES + 2))
+    with pytest.raises(EscapeReceiptError, match="too large"):
+        escape_receipts.load_receipt_feed(str(huge))
+    many = tmp_path / "many.json"
+    many.write_text(json.dumps([{"n": i} for i in range(MAX_FEED_RECEIPTS + 1)]))
+    with pytest.raises(EscapeReceiptError, match="too many receipts"):
+        escape_receipts.load_receipt_feed(str(many))
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("not-json")
+    with pytest.raises(EscapeReceiptError, match="not JSON"):
+        escape_receipts.load_receipt_feed(str(garbage))
+
+
+class _FeedResponse:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        status: int = 200,
+        url: str = "https://api.example/escape/receipts",
+    ) -> None:
+        self._body = body
+        self._offset = 0
+        self._status = status
+        self._url = url
+
+    def getcode(self) -> int:
+        return self._status
+
+    def geturl(self) -> str:
+        return self._url
+
+    def read(self, size: int) -> bytes:
+        chunk = self._body[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+    def read1(self, size: int) -> bytes:
+        return self.read(size)
+
+    def __enter__(self) -> _FeedResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+def test_https_fetch_maps_http_errors_and_rejects_non_https_final_url() -> None:
+    def not_found(_request: object, *, timeout: float) -> None:
+        raise urllib.error.HTTPError(
+            "https://api.example/escape/receipts", 404, "Not Found", {}, None
+        )
+
+    with pytest.raises(EscapeReceiptError, match="HTTP 404"):
+        escape_receipts._fetch_https(
+            "https://api.example/escape/receipts", opener=not_found
+        )
+
+    def redirect(_request: object, *, timeout: float) -> None:
+        raise urllib.error.HTTPError(
+            "https://api.example/escape/receipts", 302, "Found", {}, None
+        )
+
+    with pytest.raises(EscapeReceiptError, match="HTTP 302"):
+        escape_receipts._fetch_https(
+            "https://api.example/escape/receipts", opener=redirect
+        )
+
+    def unexpected(_request: object, *, timeout: float) -> _FeedResponse:
+        return _FeedResponse(b"[]", status=204)
+
+    with pytest.raises(EscapeReceiptError, match="HTTP 204"):
+        escape_receipts._fetch_https(
+            "https://api.example/escape/receipts", opener=unexpected
+        )
+
+    def downgrade(_request: object, *, timeout: float) -> _FeedResponse:
+        return _FeedResponse(b"[]", url="http://api.example/escape/receipts")
+
+    with pytest.raises(EscapeReceiptError, match="off HTTPS"):
+        escape_receipts._fetch_https(
+            "https://api.example/escape/receipts", opener=downgrade
+        )
+
+
+def test_slow_drip_feed_aborts_within_the_total_timeout_and_keeps_machine_weights(
+    test_signer,
+) -> None:
+    """A feed dripping 1 byte / 0.5s must abort inside the 1s total budget.
+
+    urllib's timeout is per recv. On the previous branch this ran until the
+    whole body arrived (~6s for a 12-byte payload). Abort is feed-down:
+    SOURCE_UNAVAILABLE, machine plan unchanged.
+    """
+
+    payload = b"[" + b"0," * 20 + b"0]"
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                for index in range(len(payload)):
+                    self.wfile.write(payload[index : index + 1])
+                    self.wfile.flush()
+                    time.sleep(0.5)
+            except OSError:
+                return
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.timeout = 0.5
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/feed"
+        planned = machine_plan()
+        started = time.monotonic()
+
+        def load(_source: str) -> list[object]:
+            return escape_receipts.load_receipt_feed(
+                "https://api.example/escape/receipts",
+                fetch=lambda _ignored: escape_receipts._fetch_https(url, timeout=1.0),
+                timeout=1.0,
+            )
+
+        same, summary = runtime.apply_escape_receipts(
+            planned, config(), now=NOW, load=load
+        )
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert same is planned
+        assert summary["status"] == "SOURCE_UNAVAILABLE"
+        assert summary["error"] == "escape receipt feed is unavailable"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_https_fetch_installs_no_redirect_handler(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class DummyOpener:
+        def open(self, request: object, timeout: float | None = None) -> None:
+            raise urllib.error.HTTPError(
+                getattr(request, "full_url", ""), 302, "Found", {}, None
+            )
+
+    def build_opener(*handlers: object) -> DummyOpener:
+        seen["handlers"] = handlers
+        return DummyOpener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    with pytest.raises(EscapeReceiptError, match="HTTP 302"):
+        escape_receipts._fetch_https("https://api.example/escape/receipts")
+    handlers = seen["handlers"]
+    assert isinstance(handlers, tuple)
+    assert any(isinstance(handler, escape_receipts._NoRedirect) for handler in handlers)
 
 
 # --- writer ----------------------------------------------------------------
