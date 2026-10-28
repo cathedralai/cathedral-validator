@@ -62,6 +62,13 @@ status = _module(
 )
 
 
+def test_image_bootstrap_can_import_the_signed_installer() -> None:
+    installer = image_bootstrap._load_installer()
+    assert callable(installer.verify_bundle)
+    assert callable(installer.install_verified_bundle)
+    assert "host_activation" in installer.install_verified_bundle.__code__.co_varnames
+
+
 def test_install_script_and_image_bootstrap_share_the_same_pins() -> None:
     install = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
     assert image_bootstrap.BOOTSTRAP_BASE in install

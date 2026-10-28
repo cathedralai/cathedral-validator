@@ -54,18 +54,20 @@ class ImageBootstrapRefused(RuntimeError):
 
 def _load_installer():
     import importlib.util
+    import sys
     from importlib.machinery import SourceFileLoader
 
+    name = "cathedral_image_install_updater_bundle"
     spec = importlib.util.spec_from_file_location(
-        "cathedral_image_install_updater_bundle",
+        name,
         INSTALLER_PATH,
-        loader=SourceFileLoader(
-            "cathedral_image_install_updater_bundle", str(INSTALLER_PATH)
-        ),
+        loader=SourceFileLoader(name, str(INSTALLER_PATH)),
     )
     if spec is None or spec.loader is None:
         raise ImageBootstrapRefused("updater installer is missing")
     module = importlib.util.module_from_spec(spec)
+    # Dataclass looks the module up in sys.modules while the class body runs.
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
