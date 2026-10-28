@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -47,6 +48,26 @@ BOOTSTRAP_KEY_FINGERPRINT = (
 MINIMUM_BOOTSTRAP_SEQUENCE = 4
 STABLE_METADATA_URL_PREFIX = "CATHEDRAL_VALIDATOR_STABLE_METADATA_URL="
 
+# The signed installer refuses group-writable ancestors. Official Ubuntu
+# rootfs often leaves /usr/local as 2775.
+IMAGE_DESTINATION_ANCESTORS = (
+    "usr/local",
+    "usr/local/lib",
+    "usr/local/sbin",
+    "usr/local/share",
+    "var/lib",
+    "etc",
+    "opt",
+)
+
+# Mutable state lives on the named volume. Bake absolute dest symlinks so a
+# --read-only root can start without creating them at runtime.
+VOLUME_LINKS = (
+    ("var/lib/cathedral/releases", "opt/cathedral-validator"),
+    ("var/lib/cathedral/update", "var/lib/cathedral-validator-update"),
+    ("var/lib/cathedral/validator", "var/lib/cathedral-validator"),
+)
+
 
 class ImageBootstrapRefused(RuntimeError):
     """The published bootstrap cannot be installed into this image."""
@@ -70,6 +91,39 @@ def _load_installer():
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def prepare_image_destination_ancestors(root: Path) -> None:
+    """Clear group/other write on ancestors the signed installer requires."""
+
+    for relative in IMAGE_DESTINATION_ANCESTORS:
+        path = root / relative
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            continue
+        if metadata.st_uid != os.geteuid():
+            continue
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            os.chmod(path, 0o755)
+
+
+def install_volume_layout(root: Path) -> None:
+    """Point host paths at the named volume so PID1 need not write the root FS."""
+
+    for volume_relative, dest_relative in VOLUME_LINKS:
+        volume_path = root / volume_relative
+        dest = root / dest_relative
+        volume_path.mkdir(parents=True, exist_ok=True)
+        os.chmod(volume_path, 0o755)
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.symlink_to(volume_path)
 
 
 def download_bootstrap(dest: Path, *, base: str = BOOTSTRAP_BASE) -> dict[str, Path]:
@@ -128,6 +182,7 @@ def install_published_bootstrap(
     expected_owner: int,
 ) -> str:
     installer = _load_installer()
+    prepare_image_destination_ancestors(root)
     paths = download_bootstrap(staging)
     bundle = installer.verify_bundle(
         bundle_path=paths["updater-bootstrap.tar.gz"],
@@ -154,6 +209,7 @@ def install_published_bootstrap(
     write_image_bootstrap_metadata(
         bundle, share / "image-bootstrap.json", runtime_key=runtime_key
     )
+    install_volume_layout(root)
     return digest
 
 

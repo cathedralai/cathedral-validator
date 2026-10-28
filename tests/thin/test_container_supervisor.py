@@ -69,6 +69,43 @@ def test_image_bootstrap_can_import_the_signed_installer() -> None:
     assert "host_activation" in installer.install_verified_bundle.__code__.co_varnames
 
 
+def test_prepare_image_destination_ancestors_clears_group_write(tmp_path: Path) -> None:
+    local = tmp_path / "usr" / "local"
+    local.mkdir(parents=True)
+    os.chmod(local, 0o2775)
+    image_bootstrap.prepare_image_destination_ancestors(tmp_path)
+    assert stat.S_IMODE(local.stat().st_mode) & 0o022 == 0
+
+
+def test_volume_layout_replaces_installer_state_and_survives_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leftover = tmp_path / "var" / "lib" / "cathedral-validator-update"
+    leftover.mkdir(parents=True)
+    (leftover / "bootstrap-state.json").write_text("{}\n", encoding="ascii")
+    image_bootstrap.install_volume_layout(tmp_path)
+    volume = tmp_path / "var" / "lib" / "cathedral"
+    state = tmp_path / "var" / "lib" / "cathedral-validator-update"
+    install = tmp_path / "opt" / "cathedral-validator"
+    home = tmp_path / "var" / "lib" / "cathedral-validator"
+    assert state.is_symlink()
+    assert state.resolve() == (volume / "update").resolve()
+    assert not (state / "bootstrap-state.json").exists()
+    monkeypatch.setattr(supervisor, "VOLUME_ROOT", volume)
+    monkeypatch.setattr(supervisor, "INSTALL_ROOT", install)
+    monkeypatch.setattr(supervisor, "STATE_ROOT", state)
+    monkeypatch.setattr(supervisor, "VALIDATOR_HOME", home)
+    os.chmod(tmp_path / "opt", 0o555)
+    os.chmod(tmp_path / "var" / "lib", 0o555)
+    try:
+        supervisor.bind_volume_paths(volume_root=volume)
+    finally:
+        os.chmod(tmp_path / "opt", 0o755)
+        os.chmod(tmp_path / "var" / "lib", 0o755)
+    assert install.resolve() == (volume / "releases").resolve()
+    assert home.resolve() == (volume / "validator").resolve()
+
+
 def test_install_script_and_image_bootstrap_share_the_same_pins() -> None:
     install = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
     assert image_bootstrap.BOOTSTRAP_BASE in install

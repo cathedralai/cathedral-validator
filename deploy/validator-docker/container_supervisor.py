@@ -216,9 +216,16 @@ def read_supervisor_state(path: Path = SUPERVISOR_STATE) -> dict[str, Any] | Non
     return document if isinstance(document, dict) else None
 
 
-def bind_volume_paths(*, volume_root: Path = VOLUME_ROOT) -> None:
-    """Put journal, releases, and updater state on the one named volume."""
+def bind_volume_paths(*, volume_root: Path | None = None) -> None:
+    """Put journal, releases, and updater state on the one named volume.
 
+    The image bakes dest as a symlink so a --read-only root can start. This
+    only creates missing dests when the parent is writable (tests, or a
+    writable root).
+    """
+
+    if volume_root is None:
+        volume_root = VOLUME_ROOT
     mapping = (
         (volume_root / "releases", INSTALL_ROOT),
         (volume_root / "update", STATE_ROOT),

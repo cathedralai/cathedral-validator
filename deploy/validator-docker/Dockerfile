@@ -17,7 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/bin/python3.12 \
-    && test -x /usr/bin/setpriv
+    && test -x /usr/bin/setpriv \
+    && useradd --system --uid 910 --gid nogroup \
+        --home-dir /var/lib/cathedral-validator \
+        --shell /usr/sbin/nologin \
+        cathedral-validator \
+    && mkdir -p /var/lib/cathedral /run/cathedral
 
 # Build context is the repository root. The installer module is loaded as a
 # library so the image can skip systemd host activation.
@@ -45,12 +50,7 @@ RUN chmod 0755 \
         /usr/local/sbin/cathedral-validator-supervisor \
         /usr/local/sbin/cathedral-validator-status \
         /usr/local/sbin/cathedral-validator-record-failed-write \
-        /usr/local/lib/cathedral-container/container_update.py \
-    && useradd --system --uid 910 --gid nogroup \
-        --home-dir /var/lib/cathedral-validator \
-        --shell /usr/sbin/nologin \
-        cathedral-validator \
-    && mkdir -p /var/lib/cathedral /run/cathedral
+        /usr/local/lib/cathedral-container/container_update.py
 
 VOLUME ["/var/lib/cathedral"]
 
