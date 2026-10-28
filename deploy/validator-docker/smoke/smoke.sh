@@ -31,6 +31,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
 WORK="$(mktemp -d /tmp/cathedral-smoke.XXXXXX)"
 NAMES=()
 cleanup() {
@@ -39,7 +47,7 @@ cleanup() {
     for name in "${NAMES[@]+"${NAMES[@]}"}"; do
       docker rm -f "$name" >/dev/null 2>&1 || true
     done
-    rm -rf "$WORK"
+    as_root rm -rf "$WORK"
   else
     echo "keeping $WORK" >&2
   fi
@@ -69,6 +77,9 @@ seed_volume() {
   printf '%s\n' '{"schema":"cathedral_validator_updater_state_v3","selected_channel":"stable","channels":{},"pending":null}' \
     >"$volume/update/state.json"
   chmod 0600 "$volume/update/state.json"
+  # Named volumes are root-owned. A host bind owned by the runner cannot be
+  # chmod'd inside --cap-drop ALL (needs FOWNER).
+  as_root chown -R root:root "$volume"
 }
 
 run_flags() {
@@ -81,8 +92,8 @@ run_flags() {
     --stop-timeout 150 \
     --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
     --security-opt no-new-privileges \
-    --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add CHOWN \
-    --cap-add DAC_READ_SEARCH \
+    --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+    --cap-add CHOWN --cap-add DAC_READ_SEARCH \
     -v "$volume:/var/lib/cathedral" \
     -v "$HOTKEY:/run/secrets/hotkey:ro" \
     -v "$SMOKE_DIR/stub_update.py:/usr/local/lib/cathedral-container/container_update.py:ro" \
@@ -135,8 +146,8 @@ docker run --name "$name_missing" \
   --stop-timeout 150 \
   --read-only --tmpfs /tmp --tmpfs /run --tmpfs /etc/cathedral-validator \
   --security-opt no-new-privileges \
-  --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add CHOWN \
-  --cap-add DAC_READ_SEARCH \
+  --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
   -v "$missing:/var/lib/cathedral" \
   -v "$HOTKEY:/run/secrets/hotkey:ro" \
   -e "CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=$EXPECTED" \
@@ -182,7 +193,7 @@ if docker exec "$name" /usr/bin/setpriv \
   exit 1
 fi
 
-record="$(cat "$volume/update/smoke-updater.json")"
+record="$(docker exec "$name" cat /var/lib/cathedral/update/smoke-updater.json)"
 printf '%s\n' "$record" | grep -F -q '"install_root":"/var/lib/cathedral/releases"'
 printf '%s\n' "$record" | grep -F -q '"state_root":"/var/lib/cathedral/update"'
 printf '%s\n' "$record" | grep -F -q '"reconcile_boot":true'

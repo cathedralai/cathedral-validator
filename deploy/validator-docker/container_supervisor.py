@@ -233,7 +233,13 @@ def bind_volume_paths(*, volume_root: Path | None = None) -> None:
     )
     for source, dest in mapping:
         source.mkdir(parents=True, exist_ok=True)
-        os.chmod(source, 0o755 if dest == INSTALL_ROOT else 0o700)
+        wanted = 0o755 if dest == INSTALL_ROOT else 0o700
+        try:
+            os.chmod(source, wanted)
+        except PermissionError as exc:
+            raise SupervisorRefused(
+                f"{source} must be root-owned so PID1 can set mode {wanted:o}"
+            ) from exc
         if dest.exists() or dest.is_symlink():
             if dest.is_symlink() and dest.resolve() == source.resolve():
                 continue
@@ -355,12 +361,12 @@ class Supervisor:
         if key_source != RUNTIME_KEY:
             copy_owned_file(key_source, RUNTIME_KEY, uid=0, gid=0, mode=0o644)
         VALIDATOR_HOME.mkdir(parents=True, exist_ok=True)
-        os.chown(VALIDATOR_HOME, uid, gid)
-        os.chmod(VALIDATOR_HOME, 0o700)
         pex = VALIDATOR_HOME / "pex"
         pex.mkdir(parents=True, exist_ok=True)
-        os.chown(pex, uid, gid)
+        os.chmod(VALIDATOR_HOME, 0o700)
         os.chmod(pex, 0o700)
+        os.chown(pex, uid, gid)
+        os.chown(VALIDATOR_HOME, uid, gid)
         self._listen()
         self._run_updater(first_install=first_install, reconcile=not first_install)
         self.update_due = next_update_due(now=self.now(), first=True)

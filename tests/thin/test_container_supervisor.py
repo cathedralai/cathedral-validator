@@ -509,6 +509,7 @@ def test_smoke_script_stays_offline_and_uses_documented_caps() -> None:
     script = path.read_text(encoding="utf-8")
     assert "--network none" in script
     assert "--cap-drop ALL" in script
+    assert "--cap-add SETPCAP" in script
     assert "--cap-add CHOWN" in script
     assert "--read-only" in script
     assert "--security-opt no-new-privileges" in script
@@ -525,6 +526,7 @@ def test_readme_docker_command_matches_the_supervisor_mounts() -> None:
     guide = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "--restart unless-stopped" in guide
     assert "--stop-timeout 150" in guide
+    assert "--cap-add SETPCAP" in guide
     assert "--cap-add CHOWN" in guide
     assert "/run/secrets/hotkey:ro" in guide
     assert "/etc/cathedral/snp-policy.json:ro" in guide
