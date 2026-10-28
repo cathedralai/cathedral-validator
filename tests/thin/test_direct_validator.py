@@ -3410,7 +3410,7 @@ def test_cli_bounds_rpc_waits_on_the_constructed_client_before_recovery(
     monkeypatch.setattr(runtime, "make_subtensor", lambda *_args, **_kwargs: client)
     seen: list[tuple[float, int]] = []
 
-    def build_writer(*, subtensor, keypair, netuid):
+    def build_writer(*, subtensor, keypair, netuid, **_kwargs):
         assert subtensor is client
         assert netuid == NETUID
         return SimpleNamespace(
