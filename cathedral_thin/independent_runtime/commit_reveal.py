@@ -1,11 +1,11 @@
-"""Timelocked commit-reveal support for the direct writer, off unless opted in.
+"""Timelocked commit-reveal support for the SN94 direct writer.
 
-On a subnet with commit-reveal enabled the chain refuses a plain
-``set_mechanism_weights`` (``CommitRevealEnabled``). A validator instead
-submits ``commit_timelocked_mechanism_weights`` carrying its weight vector
-encrypted to a future drand round, and the chain itself decrypts and applies
-it; there is no reveal extrinsic. Everything here is pinned to sources read at
-the runtime Finney runs (spec 470, subtensor tag ``v470`` = 923fd1fa):
+Live Finney SN94 has commit-reveal enabled, so the default writer submits
+``commit_timelocked_mechanism_weights`` carrying its weight vector encrypted
+to a future drand round, and the chain itself decrypts and applies it; there
+is no reveal extrinsic. An explicit ``off`` value restores the old plain
+writer. Everything here is pinned to sources read at the runtime Finney runs
+(spec 470, subtensor tag ``v470`` = 923fd1fa):
 
 * The commit call and its checks: ``pallets/subtensor/src/macros/
   dispatches.rs:2024-2042`` and ``subnets/weights.rs:321-420``. The call needs
@@ -41,8 +41,12 @@ from typing import Any, Callable
 
 from .direct_contract import DirectValidatorError
 
-# Operator opt-in. Absent or empty keeps the writer exactly as before.
+# SN94 default is timelocked v4. Absent or empty uses the chain's
+# RevealPeriodEpochs. An explicit period still has to match that storage.
+# ``off`` / ``disabled`` restores the plain writer.
 COMMIT_REVEAL_OPT_IN_ENV = "CATHEDRAL_VALIDATOR_COMMIT_REVEAL"
+COMMIT_REVEAL_DEFAULT_ON = "timelocked-v4"
+COMMIT_REVEAL_OFF_VALUES = frozenset({"off", "disabled"})
 _OPT_IN = re.compile(r"timelocked-v4-reveal-period-([1-9][0-9]{0,2})")
 # The chain's bounds on RevealPeriodEpochs (pallets/subtensor/src/lib.rs:281-283).
 MIN_REVEAL_PERIOD_EPOCHS = 1
@@ -78,12 +82,19 @@ _DRAND_MAX_TEMPO = 50_400
 
 @dataclass(frozen=True)
 class CommitRevealOptIn:
-    """The chain policy an operator expects: timelocked v4 with this period."""
+    """The chain policy an operator expects: timelocked v4.
 
-    reveal_period_epochs: int
+    ``reveal_period_epochs`` is the period the operator named. ``None`` means
+    use ``SubtensorModule.RevealPeriodEpochs`` at the sign head, which is the
+    same storage the writer already reads to refuse a mismatch.
+    """
+
+    reveal_period_epochs: int | None = None
 
     def __post_init__(self) -> None:
         value = self.reveal_period_epochs
+        if value is None:
+            return
         if (
             isinstance(value, bool)
             or not isinstance(value, int)
@@ -97,24 +108,32 @@ class CommitRevealOptIn:
 
 
 def parse_commit_reveal_opt_in(value: object) -> CommitRevealOptIn | None:
-    """Read the operator's opt-in, or refuse anything but the one grammar.
+    """Read the SN94 commit-reveal setting, or refuse an unknown grammar.
 
-    ``None`` or an empty value is no opt-in. The only accepted value is
-    ``timelocked-v4-reveal-period-<N>``: it names the payload version and the
-    reveal period the operator expects the chain to run, and the writer
-    refuses to sign unless the chain matches both.
+    ``None`` or an empty value is the SN94 default: timelocked v4, with the
+    reveal period taken from chain storage at sign time. ``timelocked-v4`` is
+    the same default written out. ``timelocked-v4-reveal-period-<N>`` names
+    the period the operator expects; the writer still refuses unless
+    ``RevealPeriodEpochs`` matches. ``off`` or ``disabled`` is the plain
+    writer.
     """
 
     if value is None or value == "":
-        return None
+        return CommitRevealOptIn()
     if not isinstance(value, str) or not value.isascii():
         raise DirectValidatorError(
-            f"{COMMIT_REVEAL_OPT_IN_ENV} must be timelocked-v4-reveal-period-<N>"
+            f"{COMMIT_REVEAL_OPT_IN_ENV} must be {COMMIT_REVEAL_DEFAULT_ON}, "
+            "timelocked-v4-reveal-period-<N>, or off"
         )
+    if value in COMMIT_REVEAL_OFF_VALUES:
+        return None
+    if value == COMMIT_REVEAL_DEFAULT_ON:
+        return CommitRevealOptIn()
     match = _OPT_IN.fullmatch(value)
     if match is None:
         raise DirectValidatorError(
-            f"{COMMIT_REVEAL_OPT_IN_ENV} must be timelocked-v4-reveal-period-<N>"
+            f"{COMMIT_REVEAL_OPT_IN_ENV} must be {COMMIT_REVEAL_DEFAULT_ON}, "
+            "timelocked-v4-reveal-period-<N>, or off"
         )
     return CommitRevealOptIn(reveal_period_epochs=int(match.group(1)))
 
@@ -321,6 +340,8 @@ __all__ = [
     "BLOCK_TIME_SECONDS",
     "COMMIT_REVEAL_CALL",
     "COMMIT_REVEAL_CALL_FUNCTION",
+    "COMMIT_REVEAL_DEFAULT_ON",
+    "COMMIT_REVEAL_OFF_VALUES",
     "COMMIT_REVEAL_OPT_IN_ENV",
     "COMMIT_REVEAL_VERSION",
     "CommitRevealOptIn",

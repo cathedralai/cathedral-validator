@@ -70,7 +70,7 @@ and refuses to write, cycle after cycle, if any of these does not hold
 
 | Chain setting | Must be |
 |---|---|
-| Commit-reveal | **Disabled** for the default plain writer, **or** enabled with a matching timelocked-v4 drop-in (see [Commit-reveal subnets](AUTO_UPDATE.md#commit-reveal-subnets)). Live Finney SN94 is commit-reveal **on** — plain `set_weights` will refuse every cycle until you opt in. |
+| Commit-reveal | **Enabled** with timelocked v4 by default on SN94. The writer reads `RevealPeriodEpochs` from chain. Pin `timelocked-v4-reveal-period-N` only to refuse a mismatch (see [Commit-reveal subnets](AUTO_UPDATE.md#commit-reveal-subnets)). Set `off` for the plain writer. |
 | `weights_rate_limit` | At least 16 blocks, and the cooldown since your last write elapsed. |
 | `WeightsVersionKey` | At most the version the release signs with (`cathedral_thin/independent/constants.py`). |
 | Your stake | At least the subnet's weight stake threshold. |

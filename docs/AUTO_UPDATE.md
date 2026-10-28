@@ -422,36 +422,41 @@ redundant and harmless (the same file is read twice); remove it at leisure.
 
 ## Commit-reveal subnets
 
-On a subnet with commit-reveal enabled the chain refuses plain weight writes,
-and so does the validator: every cycle ends with an error that names
-`commit_reveal_weights_enabled` and the subnet owner's command to turn it off:
+Live Finney SN94 has commit-reveal enabled. The writer defaults to timelocked
+commits. It reads `SubtensorModule.RevealPeriodEpochs` at the sign head (the
+same storage it already used to refuse a mismatch) and does not guess a
+number. No systemd drop-in is required for SN94.
 
-```bash
-btcli sudo set --netuid 94 --param commit_reveal_weights_enabled --value false
-```
-
-An operator can opt in to timelocked commits instead. Name the reveal period
-the subnet runs (`commit_reveal_period` in its hyperparameters) in a drop-in,
-not in `/etc/cathedral-validator/direct.env`, which setup compares byte for
-byte. Then reload and restart:
+To pin a period, set `CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-N`
+and keep the chain check. A mismatch refuses the sign. On a systemd host put
+that value in a drop-in, not in `/etc/cathedral-validator/direct.env`, which
+setup compares byte for byte:
 
 ```bash
 sudo install -d -o root -g root -m 0755 \
   /etc/systemd/system/cathedral-validator-direct.service.d
-printf '[Service]\nEnvironment=CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-1\n' |
+printf '[Service]\nEnvironment=CATHEDRAL_VALIDATOR_COMMIT_REVEAL=timelocked-v4-reveal-period-N\n' |
   sudo tee /etc/systemd/system/cathedral-validator-direct.service.d/commit-reveal.conf \
   >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl restart cathedral-validator-direct.service
 ```
 
-The validator then signs `commit_timelocked_mechanism_weights` carrying the
-same zero-burn vector, encrypted to a drand round, with the same journal and
+Set `CATHEDRAL_VALIDATOR_COMMIT_REVEAL=off` only to restore the plain writer.
+On a subnet that still has commit-reveal on, that setting refuses every cycle
+and names the subnet owner's command:
+
+```bash
+btcli sudo set --netuid 94 --param commit_reveal_weights_enabled --value false
+```
+
+The validator signs `commit_timelocked_mechanism_weights` carrying the same
+zero-burn vector, encrypted to a drand round, with the same journal and
 recovery rules as a plain write. The chain decrypts and applies it about one
 epoch later by itself; there is no reveal transaction. The validator refuses
-to sign unless commit-reveal is on, the reveal period matches the drop-in,
-the payload version is 4, and the host clock agrees with the chain's drand
-round.
+to sign unless commit-reveal is on, an explicit period matches chain storage
+when one was set, the payload version is 4, and the host clock agrees with
+the chain's drand round.
 
 A cycle reports `COMMITTED` once the commit is proven stored, then
 `COMMITTED_AWAITING_REVEAL` until the reveal, then `REVEALED_CONFIRMED` once
@@ -507,9 +512,45 @@ proven after the drop-in is removed.
 - A `REVEAL_NOT_APPLIED` stop is cleared only by `record-failed-write`
   ([Commit-reveal subnets](#commit-reveal-subnets)).
 
+## Docker migration
+
+Do not run the Docker container and a systemd validator against the same
+hotkey. Two writers on one key fork the journal and can contradict chain
+state.
+
+1. On the systemd host, stop the writer and the update timer:
+   `sudo systemctl stop cathedral-validator-direct.service cathedral-validator-update.timer`
+2. Copy the journal, updater state, and current release tree into the Docker
+   named volume at `/var/lib/cathedral/validator`, `/var/lib/cathedral/update`,
+   and `/var/lib/cathedral/releases`. Keep ownership and mode.
+3. Start the container with the same hotkey file and the same SNP policy.
+4. Confirm with `docker exec cathedral-validator cathedral-validator-status`.
+
+Never delete the `cathedral-state` volume. That volume holds the journal,
+the last healthy release, and the anti-rollback floor. Deleting it is the
+same class of mistake as deleting the systemd journal.
+
+The image is the bootstrap, pinned by digest in the README. Runtime releases
+keep using the signed `stable` channel. There is no Watchtower path and no
+Docker-socket access.
+
+## Docker notes
+
+- Bootstrap expiry is checked only on first install, when the state volume
+  has no updater `state.json`. The current published bootstrap expires
+  2026-11-15T01:51:09Z. A later restart of an installed volume does not
+  re-check that expiry.
+- Exit codes 2 and 3 keep the validator stopped inside a running container.
+  The container itself stays up so `docker exec` still works. After
+  `record-failed-write`, `docker restart cathedral-validator`.
+- `docker exec cathedral-validator cathedral-validator-status` reads local
+  state only. `docker exec -u cathedral-validator -e HOME=/var/lib/cathedral-validator`
+  is the record-failed-write path.
+
 The updater has no access to the hotkey. The root updater verifies and switches
 files. The unprivileged validator service alone receives the hotkey through a
-systemd credential and signs its own weights.
+systemd credential, or through the container supervisor's 0400 tmpfs copy, and
+signs its own weights.
 
 The root-owned updater environment contains only the updater and its exact
 cryptographic dependency closure. It does not install Bittensor, NumPy, or the

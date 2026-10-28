@@ -68,13 +68,14 @@ def test_readme_is_the_small_public_guide() -> None:
     assert [line for line in guide.splitlines() if line.startswith("## ")] == [
         "## What it does",
         "## What you need",
+        "## Docker",
         "## Install",
         "## Operate",
         "## Updates",
         "## Trust",
     ]
     assert guide.startswith("# Cathedral Validator\n")
-    assert len(guide.splitlines()) <= 120
+    assert len(guide.splitlines()) <= 180
     assert "Cathedral rewards verified compute" in guide
     assert "This repository is for validator operators" in guide
     assert "commit-reveal" in guide
@@ -102,6 +103,12 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "sudo cathedral-validator-setup" in guide
     assert "--confirm-direct-write" in guide
     assert "sudo cathedral-validator-status" in guide
+    assert "ghcr.io/cathedralai/cathedral-validator@sha256:<pinned>" in guide
+    assert "cathedral-state:/var/lib/cathedral" in guide
+    assert "/etc/cathedral/snp-policy.json" in guide
+    assert "docker exec cathedral-validator cathedral-validator-status" in guide
+    assert "Never delete the `cathedral-state` volume" in guide
+    assert "SN39" not in guide
     assert "deploy/sn94/install-validator" not in guide
     assert "does not download a weight vector" in words
     assert "scored every serving miner" not in guide
@@ -366,6 +373,13 @@ def test_auto_update_doc_covers_bootstrap_and_release_boundaries() -> None:
     assert "OnFailure=YOUR-ALERT.service" in guide
     assert "cathedral-validator-boot-reconcile.service" in guide
     assert "Never delete or replace the journal" in guide
+    assert "\n## Docker migration\n" in guide
+    assert (
+        "Do not run the Docker container and a systemd validator against the same"
+        in guide
+    )
+    assert "Never delete the `cathedral-state` volume" in guide
+    assert "Bootstrap expiry is checked only on first install" in guide
     assert "--archive-out-dir" not in guide
     assert "--runtime-lock" not in guide
     assert "two offline encrypted backups" in maintainer

@@ -1513,8 +1513,13 @@ def _install_verified_bundle_locked(
     expected_owner: int,
     python_executable: Path,
     runner: Runner = _default_runner,
+    host_activation: bool = True,
 ) -> str:
-    """Install one authenticated bundle while holding the shared updater lock."""
+    """Install one authenticated bundle while holding the shared updater lock.
+
+    ``host_activation`` is the systemd host path: sysusers and daemon-reload.
+    The container image build sets it false and never talks to systemd.
+    """
 
     committed_path = state_root / "bootstrap-state.json"
     pending_path = state_root / "bootstrap-pending.json"
@@ -1688,19 +1693,20 @@ def _install_verified_bundle_locked(
         expected_owner=expected_owner,
     )
 
-    sysusers = _relative(root, "etc/sysusers.d/cathedral-validator.conf")
-    runner(
-        ["/usr/bin/systemd-sysusers", str(sysusers)],
-        check=True,
-        text=True,
-        timeout=60,
-    )
-    runner(
-        ["/usr/bin/systemctl", "daemon-reload"],
-        check=True,
-        text=True,
-        timeout=60,
-    )
+    if host_activation:
+        sysusers = _relative(root, "etc/sysusers.d/cathedral-validator.conf")
+        runner(
+            ["/usr/bin/systemd-sysusers", str(sysusers)],
+            check=True,
+            text=True,
+            timeout=60,
+        )
+        runner(
+            ["/usr/bin/systemctl", "daemon-reload"],
+            check=True,
+            text=True,
+            timeout=60,
+        )
     _install_managed_file(
         root,
         committed_path,
@@ -1720,6 +1726,7 @@ def install_verified_bundle(
     expected_owner: int,
     python_executable: Path,
     runner: Runner = _default_runner,
+    host_activation: bool = True,
 ) -> str:
     """Install or recover one authenticated monotonic bootstrap release."""
 
@@ -1737,6 +1744,7 @@ def install_verified_bundle(
             expected_owner=expected_owner,
             python_executable=python_executable,
             runner=runner,
+            host_activation=host_activation,
         )
 
 

@@ -9,9 +9,8 @@ A write that is included in a finalized block and fails its dispatch stops the
 validator. Only ``record_finalized_failure`` clears it, after proving that
 failure from finalized chain state; it also never signs or resubmits.
 
-On a subnet with commit-reveal enabled the writer refuses, exactly as before,
-unless the operator opted in to timelocked commits (``commit_reveal.py``).
-Then the same journaled, era-pinned, hash-recovered extrinsic carries the
+On SN94 the writer defaults to timelocked commits (``commit_reveal.py``).
+The same journaled, era-pinned, hash-recovered extrinsic carries the
 vector encrypted to a drand round instead of in plain text. Its stored commit
 is proven at inclusion and the attempt is recorded ``COMMITTED``; later cycles
 prove from finalized state that the chain's own automatic reveal applied the
@@ -861,10 +860,10 @@ class DirectWeightWriter:
             _read_fresh_snapshot, netuid=self.netuid
         )
         self.call_builder = call_builder or self._build_call
-        # Timelocked commit-reveal is off unless the operator opted in. With it
-        # absent every path below is the one earlier releases ran. Recovery of
-        # a journaled commit never depends on it: a commit signed under the
-        # opt-in is still recovered and proven after the opt-in is removed.
+        # The constructor default is the plain writer. The SN94 CLI default
+        # (empty CATHEDRAL_VALIDATOR_COMMIT_REVEAL) is timelocked v4. Recovery
+        # of a journaled commit never depends on the current setting: a commit
+        # signed under the opt-in is still recovered after it is removed.
         if commit_reveal is not None and not isinstance(
             commit_reveal, CommitRevealOptIn
         ):
@@ -1388,7 +1387,7 @@ class DirectWeightWriter:
             # text by a process configured for commits.
             raise DirectValidatorError(
                 "chain commit-reveal is disabled but the operator opted in to "
-                f"timelocked commits; remove {COMMIT_REVEAL_OPT_IN_ENV} to write "
+                f"timelocked commits; set {COMMIT_REVEAL_OPT_IN_ENV}=off to write "
                 "plain weights"
             )
         if mechanism_count <= MECID:
@@ -1543,7 +1542,10 @@ class DirectWeightWriter:
             raise DirectValidatorError(
                 "finalized commit-reveal state is unavailable"
             ) from exc
-        if reveal_period != opt_in.reveal_period_epochs:
+        if (
+            opt_in.reveal_period_epochs is not None
+            and reveal_period != opt_in.reveal_period_epochs
+        ):
             raise DirectValidatorError(
                 f"chain reveal period is {reveal_period} epochs but the opt-in "
                 f"expects {opt_in.reveal_period_epochs}"
