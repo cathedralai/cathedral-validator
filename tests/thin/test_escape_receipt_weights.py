@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.server
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -247,6 +249,33 @@ def test_unregistered_receipt_does_not_consume_the_room(test_signer) -> None:
     assert result.refused == {"unregistered": 1}
 
 
+def test_unregistered_receipt_does_not_hold_the_room_for_a_later_breaker(
+    test_signer,
+) -> None:
+    """Pin current behavior: an unregistered claim does not reserve the room.
+
+    Reviewer open question on PR #313: a later registered breaker for the
+    same (window_id, room_id) is paid. This is unchanged; the test exists so
+    a product decision to hold the room would fail here first.
+    """
+
+    later = "5LaterBreaker"
+    later_uid = 31
+    result = score_escape_receipts(
+        [
+            receipt(hotkey="5Nobody", planted_at=NOW - 10),
+            receipt(hotkey=later, planted_at=NOW - 9),
+        ],
+        registered={BREAKER: BREAKER_UID, later: later_uid, base.VALIDATOR: 7},
+        validator_uid=7,
+        now=NOW,
+        window_seconds=DEFAULT_REWARD_WINDOW_SECONDS,
+    )
+    assert result.units_by_uid == ((later_uid, 1),)
+    assert result.refused == {"unregistered": 1}
+    assert "duplicate_room" not in result.refused
+
+
 def test_validator_self_receipt_does_not_consume_the_room(test_signer) -> None:
     result = score(
         [
@@ -419,22 +448,29 @@ def test_malformed_config_refuses() -> None:
     )
 
 
-def test_weight_fraction_is_capped_at_one_half() -> None:
-    with pytest.raises(EscapeReceiptError, match=r"\[0, 1/2\]"):
+def test_weight_fraction_is_capped_at_one_tenth() -> None:
+    with pytest.raises(EscapeReceiptError, match=r"\[0, 1/10\]"):
         escape_config_from_environment(
             {
                 "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
-                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.51",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.11",
+            }
+        )
+    with pytest.raises(EscapeReceiptError, match=r"\[0, 1/10\]"):
+        escape_config_from_environment(
+            {
+                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
+                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1/2",
             }
         )
     loaded = escape_config_from_environment(
         {
             "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
-            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1/2",
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1/10",
         }
     )
     assert loaded is not None
-    assert loaded.fraction == MAX_WEIGHT_FRACTION == Fraction(1, 2)
+    assert loaded.fraction == MAX_WEIGHT_FRACTION == Fraction(1, 10)
     five_percent = escape_config_from_environment(
         {
             "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://api.example/escape/receipts",
@@ -542,6 +578,7 @@ class _FeedResponse:
         url: str = "https://api.example/escape/receipts",
     ) -> None:
         self._body = body
+        self._offset = 0
         self._status = status
         self._url = url
 
@@ -552,7 +589,12 @@ class _FeedResponse:
         return self._url
 
     def read(self, size: int) -> bytes:
-        return self._body[:size]
+        chunk = self._body[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+    def read1(self, size: int) -> bytes:
+        return self.read(size)
 
     def __enter__(self) -> _FeedResponse:
         return self
@@ -597,6 +639,65 @@ def test_https_fetch_maps_http_errors_and_rejects_non_https_final_url() -> None:
         escape_receipts._fetch_https(
             "https://api.example/escape/receipts", opener=downgrade
         )
+
+
+def test_slow_drip_feed_aborts_within_the_total_timeout_and_keeps_machine_weights(
+    test_signer,
+) -> None:
+    """A feed dripping 1 byte / 0.5s must abort inside the 1s total budget.
+
+    urllib's timeout is per recv. On the previous branch this ran until the
+    whole body arrived (~6s for a 12-byte payload). Abort is feed-down:
+    SOURCE_UNAVAILABLE, machine plan unchanged.
+    """
+
+    payload = b"[" + b"0," * 20 + b"0]"
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                for index in range(len(payload)):
+                    self.wfile.write(payload[index : index + 1])
+                    self.wfile.flush()
+                    time.sleep(0.5)
+            except OSError:
+                return
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.timeout = 0.5
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/feed"
+        planned = machine_plan()
+        started = time.monotonic()
+
+        def load(_source: str) -> list[object]:
+            return escape_receipts.load_receipt_feed(
+                "https://api.example/escape/receipts",
+                fetch=lambda _ignored: escape_receipts._fetch_https(url, timeout=1.0),
+                timeout=1.0,
+            )
+
+        same, summary = runtime.apply_escape_receipts(
+            planned, config(), now=NOW, load=load
+        )
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert same is planned
+        assert summary["status"] == "SOURCE_UNAVAILABLE"
+        assert summary["error"] == "escape receipt feed is unavailable"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_https_fetch_installs_no_redirect_handler(monkeypatch) -> None:

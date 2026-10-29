@@ -30,6 +30,7 @@ import hashlib
 import json
 import math
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,14 +55,18 @@ MAX_REWARD_WINDOW_SECONDS = 90 * 24 * 3600
 MAX_FUTURE_SKEW_SECONDS = 300
 MAX_FEED_BYTES = 4 * 1024 * 1024
 MAX_FEED_RECEIPTS = 10_000
+# Total wall-clock budget for connect, every read, and JSON parse. urllib's
+# socket timeout is per recv, so a feed that drips slower than this value
+# per byte would otherwise outlive FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
 FEED_TIMEOUT_SECONDS = 10.0
+FEED_READ_CHUNK_BYTES = 64 * 1024
 # Leave time after the feed fetch for scoring, presign RPCs, and the write.
 # A hung feed must not spend the rest of FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
 FEED_DEADLINE_SLACK_SECONDS = 5.0
 MAX_REPORTED_HOTKEYS = 32
 # Hard cap so a mistyped 0.9 cannot give breakers almost the whole vector.
 # The intended mainnet share is 5 percent (1/20), well under this.
-MAX_WEIGHT_FRACTION = Fraction(1, 2)
+MAX_WEIGHT_FRACTION = Fraction(1, 10)
 
 RECEIPT_SCHEMA = "escape_stage_c_receipt_v0"
 CLAIM_SCHEMA = "escape_practice_claim_v0"
@@ -591,16 +596,53 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _feed_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise EscapeReceiptError("escape receipt feed is unavailable")
+    return remaining
+
+
+def _set_response_timeout(response: Any, timeout: float) -> None:
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None) if fp is not None else None
+    sock = getattr(raw, "_sock", None) if raw is not None else None
+    setter = getattr(sock, "settimeout", None)
+    if callable(setter):
+        setter(timeout)
+
+
+def _read_feed_body(response: Any, *, deadline: float) -> bytes:
+    """Read the body under one wall-clock deadline, one recv at a time."""
+
+    body = bytearray()
+    read1 = getattr(response, "read1", None)
+    reader = read1 if callable(read1) else response.read
+    while len(body) <= MAX_FEED_BYTES:
+        remaining = _feed_remaining(deadline)
+        _set_response_timeout(response, remaining)
+        chunk = reader(min(FEED_READ_CHUNK_BYTES, MAX_FEED_BYTES + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+    return bytes(body)
+
+
 def _fetch_https(
     url: str,
     *,
     timeout: float = FEED_TIMEOUT_SECONDS,
     opener: Callable[..., Any] | None = None,
 ) -> bytes:
-    """GET one HTTPS feed. Redirects are not followed."""
+    """GET one HTTPS feed. Redirects are not followed.
+
+    ``timeout`` is a total wall-clock budget for connect and every read, not
+    a per-recv socket timeout.
+    """
 
     if not math.isfinite(timeout) or timeout <= 0:
         raise EscapeReceiptError("escape receipt feed timeout is invalid")
+    deadline = time.monotonic() + timeout
     request = urllib.request.Request(
         url,
         headers={
@@ -611,10 +653,12 @@ def _fetch_https(
     )
     open_request = opener or urllib.request.build_opener(_NoRedirect()).open
     try:
-        with open_request(request, timeout=timeout) as response:
+        with open_request(request, timeout=_feed_remaining(deadline)) as response:
+            _feed_remaining(deadline)
             status = int(response.getcode())
             final_url = str(response.geturl())
-            body = response.read(MAX_FEED_BYTES + 1)
+            body = _read_feed_body(response, deadline=deadline)
+            _feed_remaining(deadline)
     except urllib.error.HTTPError as exc:
         raise EscapeReceiptError(f"escape receipt feed HTTP {exc.code}") from exc
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
@@ -636,26 +680,38 @@ def load_receipt_feed(
     fetch: Callable[[str], bytes] | None = None,
     timeout: float = FEED_TIMEOUT_SECONDS,
 ) -> list[object]:
-    """Read a JSON list of receipts, or ``{"receipts": [...]}``."""
+    """Read a JSON list of receipts, or ``{"receipts": [...]}``.
 
+    ``timeout`` is a total wall-clock budget for connect, reads, and parse.
+    """
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise EscapeReceiptError("escape receipt feed timeout is invalid")
+    deadline = time.monotonic() + timeout
     _require_source(source)
     getter = (
-        fetch if fetch is not None else (lambda url: _fetch_https(url, timeout=timeout))
+        fetch
+        if fetch is not None
+        else (lambda url: _fetch_https(url, timeout=_feed_remaining(deadline)))
     )
+    _feed_remaining(deadline)
     if source.startswith("https://"):
         raw = getter(source)
     else:
         path = Path(source)
         if not path.is_file():
             raise EscapeReceiptError("escape receipt source is not a regular file")
+        _feed_remaining(deadline)
         with path.open("rb") as handle:
             raw = handle.read(MAX_FEED_BYTES + 1)
+    _feed_remaining(deadline)
     if len(raw) > MAX_FEED_BYTES:
         raise EscapeReceiptError("escape receipt feed is too large")
     try:
         document = json.loads(raw)
     except ValueError as exc:
         raise EscapeReceiptError("escape receipt feed is not JSON") from exc
+    _feed_remaining(deadline)
     if isinstance(document, dict):
         document = document.get("receipts")
     if not isinstance(document, list):
