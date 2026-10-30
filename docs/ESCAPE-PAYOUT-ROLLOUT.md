@@ -48,7 +48,7 @@ This validator does not publish the feed. The control plane must:
 1. Require and sign `claim.breaker_hotkey` on every receipt. Receipts without
    that field are refused here.
 2. Set `key_id` on every new receipt to the id of the key that produced `sig`
-   (today `contest-2026-10`). `key_id` is a selector, not part of the signed
+   (today `contest-2026-11`). `key_id` is a selector, not part of the signed
    canonical body, so existing receipts without it still verify against every
    non-revoked key that covers `planted_at`. An unknown `key_id` is refused.
 3. Turn on the public read-only feed flag. While the flag is off the URL
@@ -137,7 +137,7 @@ vendored in the release and pinned by sha256. Editing a file under `/etc` does
 nothing. Rotation is a validator software update that changes the pinned set,
 plus a matching change on the control plane that signs receipts.
 
-The current key id is `contest-2026-10`. Its public key is
+The current key id is `contest-2026-11`. Its public key is
 `config/escape/contest-signer.ed25519.pub`. The set is
 `config/escape/contest-signers.json`. The pin is `PINNED_CONTEST_SIGNERS_SHA256`
 in `escape_receipts.py`. The pin and the file must change together or the

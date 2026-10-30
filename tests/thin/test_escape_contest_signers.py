@@ -145,7 +145,7 @@ def test_tampered_key_set_fails_the_pin() -> None:
     raw = (REPO / "config/escape/contest-signers.json").read_bytes()
     assert hashlib.sha256(raw).hexdigest() == PINNED_CONTEST_SIGNERS_SHA256
     load_contest_signers(raw, expected_sha256=PINNED_CONTEST_SIGNERS_SHA256)
-    tampered = raw.replace(b"contest-2026-10", b"contest-2099-01", 1)
+    tampered = raw.replace(b"contest-2026-11", b"contest-2099-01", 1)
     assert tampered != raw
     with pytest.raises(EscapeReceiptError, match="does not match its sha256 pin"):
         load_contest_signers(tampered, expected_sha256=PINNED_CONTEST_SIGNERS_SHA256)
@@ -173,7 +173,7 @@ def test_legacy_single_key_config_is_still_accepted() -> None:
 def test_pinned_set_is_the_current_contest_key() -> None:
     assert len(PINNED_CONTEST_SIGNERS.keys) == 1
     key = PINNED_CONTEST_SIGNERS.keys[0]
-    assert key.key_id == "contest-2026-10"
+    assert key.key_id == "contest-2026-11"
     assert key.pubkey_b64 == PINNED_CONTEST_PUBKEY_B64
     assert key.not_before == 0
     assert key.not_after is None
