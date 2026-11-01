@@ -171,7 +171,12 @@ def test_legacy_single_key_config_is_still_accepted() -> None:
 
 
 def test_pinned_set_is_the_current_contest_key() -> None:
-    assert len(PINNED_CONTEST_SIGNERS.keys) == 1
+    # TESTNET 584 ONLY (AB#70): the second key is the staging signer, time boxed.
+    assert len(PINNED_CONTEST_SIGNERS.keys) == 2
+    staging = PINNED_CONTEST_SIGNERS.keys[1]
+    assert staging.key_id == "contest-staging-584"
+    assert staging.not_after is not None
+    assert staging.not_after - staging.not_before == 1209600
     key = PINNED_CONTEST_SIGNERS.keys[0]
     assert key.key_id == "contest-2026-11"
     assert key.pubkey_b64 == PINNED_CONTEST_PUBKEY_B64

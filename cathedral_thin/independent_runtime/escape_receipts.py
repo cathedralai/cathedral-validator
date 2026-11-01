@@ -100,12 +100,19 @@ PINNED_CONTEST_SIGNERS_DOCUMENT: dict[str, object] = {
             "id": "contest-2026-11",
             "not_before": 0,
             "pubkey_b64": PINNED_CONTEST_PUBKEY_B64,
-        }
+        },
+        # TESTNET 584 ONLY (AB#70 staged break). Never merge, never publish.
+        {
+            "id": "contest-staging-584",
+            "not_after": 1794727920,
+            "not_before": 1793518320,
+            "pubkey_b64": "vaMfJg9sOl5Hg2tpFnux8SFbhQ2CmrYVb/yT0gdMisI=",
+        },
     ],
     "schema": CONTEST_SIGNER_SET_SCHEMA,
 }
 PINNED_CONTEST_SIGNERS_SHA256 = (
-    "629bf99accee74f13b48698d4dd1505a19bb7595d5f7dc73cd806c7e4e4db466"
+    "f838ab8ef8508e07dba92118b757c5cd5c03552f7d523e96890f55f10c7c3a62"
 )
 
 
