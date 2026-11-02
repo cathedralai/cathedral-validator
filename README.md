@@ -1,4 +1,19 @@
-# Cathedral Validator
+<p align="center"><img src="docs/assets/cathedral-mark.png" alt="Cathedral" width="112"></p>
+<h1 align="center">Cathedral Validator</h1>
+<p align="center"><em>Cathedral&ensp;rewards&ensp;verified&ensp;compute,&ensp;not&ensp;self-reported&ensp;capacity</em></p>
+<p align="center"><sub>2 November 2026</sub></p>
+
+## Contents
+<p><sub><strong>Assessment and requirements</strong></sub><br>
+<strong>1. <a href="#what-it-does">What it does</a></strong><br>
+<strong>2. <a href="#what-you-need">What you need</a></strong><br><br>
+<sub><strong>Installation and operation</strong></sub><br>
+<strong>3. <a href="#docker">Docker</a></strong><br>
+<strong>4. <a href="#install">Install</a></strong><br>
+<strong>5. <a href="#operate">Operate</a></strong><br><br>
+<sub><strong>Updates and trust</strong></sub><br>
+<strong>6. <a href="#updates">Updates</a></strong><br>
+<strong>7. <a href="#trust">Trust</a></strong></p>
 
 Cathedral rewards verified compute, not self-reported capacity. Validators
 independently check miner machines, test their work, reject duplicate claims
