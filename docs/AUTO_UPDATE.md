@@ -73,13 +73,16 @@ Prepare these operator-owned inputs:
    hotkey is refused because the unattended service has no password to decrypt
    it. A public-only file is refused because it cannot sign weights.
 2. The public SS58 address belonging to that hotkey.
-3. An owner-controlled AMD SEV-SNP policy file containing only measurements
-   and TCB floors you reviewed.
+3. Optional: your own AMD SEV-SNP policy file. Without one, setup uses the
+   reviewed SN94 policy shipped in the signed bootstrap
+   (`deploy/validator-update/sn94-snp-policy.json`).
 
 Do not place the coldkey file, mnemonic, or coldkey password on this host.
 
-The SNP policy admits only hardware you have reviewed. There is no wildcard or
-shared default policy. Its shape is:
+The SNP policy admits only the measurements and TCB floors it lists. The
+shipped SN94 policy lists the measurements of the SN94 miner image. A policy
+you supply instead must hold only values you reviewed; there is no wildcard.
+Its shape is:
 
 ```json
 {
@@ -149,9 +152,11 @@ After installing the authenticated bootstrap, run its guided command:
 sudo cathedral-validator-setup \
   --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
   --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
-  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
   --confirm-direct-write
 ```
+
+Add `--snp-policy /path/to/your-policy.json` only to replace the shipped SN94
+policy.
 
 The command verifies the inputs, checks that the hotkey file is an unencrypted
 owner-only keyfile naming the public address you supplied, installs the signed

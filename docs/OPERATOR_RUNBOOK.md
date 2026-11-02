@@ -110,7 +110,8 @@ admitted through setup yet.
 ## 6. Run setup
 
 Run `sudo cathedral-validator-setup` with `--hotkey-file`, `--expected-hotkey`
-(the hotkey's SS58 address), `--snp-policy`, and `--confirm-direct-write`, as
+(the hotkey's SS58 address), and `--confirm-direct-write` (plus `--snp-policy`
+only to replace the shipped SN94 policy), as
 shown in [Install](../README.md#install). Setup:
 
 - validates the hotkey file and the policy;

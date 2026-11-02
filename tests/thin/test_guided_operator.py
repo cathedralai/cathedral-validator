@@ -543,6 +543,37 @@ def test_setup_refuses_bad_hotkey_or_policy_before_config_mutation(
     _assert_no_configuration_written()
 
 
+def test_setup_uses_the_shipped_sn94_policy_when_no_policy_is_given(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, _policy_path = _setup_paths(monkeypatch, tmp_path)
+    shipped = _write(
+        setup.EXAMPLES / setup.SHIPPED_SNP_POLICY_NAME, _policy(), 0o644
+    )
+    setup.configure(
+        hotkey_file=hotkey,
+        expected_hotkey=HOTKEY,
+        runner=_setup_runner([]),
+    )
+    assert (setup.ETC / "snp-policy.json").read_bytes() == shipped.read_bytes()
+
+
+def test_setup_names_a_missing_policy_path_and_the_shipped_default(
+    monkeypatch, tmp_path: Path
+) -> None:
+    hotkey, _policy_path = _setup_paths(monkeypatch, tmp_path)
+    missing = tmp_path / "absolute" / "reviewed" / "amd-sev-snp-policy.json"
+    with pytest.raises(setup.SetupRefused, match="no SNP policy file at .*omit --snp-policy"):
+        _configure(hotkey, missing, _setup_runner([]))
+    _assert_no_configuration_written()
+
+
+def test_the_shipped_sn94_policy_is_a_valid_production_policy() -> None:
+    body = (ROOT / "deploy" / "validator-update" / setup.SHIPPED_SNP_POLICY_NAME).read_bytes()
+    setup._validate_policy(body)
+    assert b"REPLACE_WITH" not in body
+
+
 def _policy_with(**extra: object) -> bytes:
     document = json.loads(_policy())
     document.update(extra)

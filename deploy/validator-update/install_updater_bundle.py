@@ -89,6 +89,7 @@ EXAMPLE_ASSETS = frozenset(
         "direct-telemetry.env.example",
         "direct.env.example",
         "identity.env.example",
+        "sn94-snp-policy.json",
         "update.env.example",
     }
 )

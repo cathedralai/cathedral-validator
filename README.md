@@ -15,7 +15,8 @@ TDX or AMD SEV-SNP evidence and SAT work, rejects duplicate hardware/endpoints/
 TLS keys, and weights the distinct verified machines with zero burn.
 It signs the vector and checks the exact result against finalized chain state.
 
-SNP requires your reviewed measurement and TCB policy. By default TDX accepts
+SNP checks miners against the reviewed SN94 measurement and TCB policy that
+ships in the signed bootstrap. By default TDX accepts
 any guest image with a genuine, fresh quote: a quote is not an image allowlist.
 See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist).
 
@@ -28,7 +29,9 @@ See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-a
 - An SN94-registered hotkey with a validator permit, its unencrypted keyfile
   and expected public SS58 address. Without registration/permit the service
   keeps checking but writes no weights.
-- A reviewed SNP policy; use the [policy template](docs/AUTO_UPDATE.md#before-installation).
+- Nothing for SNP: setup uses the reviewed SN94 policy shipped in the signed
+  bootstrap. Pass `--snp-policy` only to use your own (see the
+  [policy template](docs/AUTO_UPDATE.md#before-installation)).
 - Outbound access to Finney, GitHub, advertised miner endpoints and vendor
   verification collateral. No inbound ports or public address are needed.
 - Live Finney SN94 has commit-reveal **enabled**. The writer turns on
@@ -96,13 +99,12 @@ If the digest line prints `FAILED`, nothing runs. Retry after five minutes;
 if it still fails, stop and [open an issue](https://github.com/cathedralai/cathedral-validator/issues).
 An expired bootstrap needs a newly signed publication, not a bypass.
 
-Then configure the hotkey and reviewed SNP policy:
+Then configure the hotkey:
 
 ```bash
 sudo cathedral-validator-setup \
   --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
   --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
-  --snp-policy /absolute/reviewed/amd-sev-snp-policy.json \
   --confirm-direct-write
 sudo cathedral-validator-status
 ```
