@@ -76,6 +76,16 @@ def test_readme_is_the_small_public_guide() -> None:
         "## More",
     ]
     assert "[Operator guide](docs/OPERATOR_GUIDE.md)" in both
+    # Requirements read in one scan: one per line, longest first.
+    section = guide[guide.index("## System Requirements") : guide.index("## Run it")]
+    items = [
+        line[2:].replace("`", "")
+        for line in section.splitlines()
+        if line.startswith("- ")
+    ]
+    assert len(items) >= 4 and [len(i) for i in items] == sorted(
+        (len(i) for i in items), reverse=True
+    )
     # Cover block: centered mark, HTML title, italic subtitle, date. A markdown
     # H1 cannot be centered on GitHub, so the visible title is HTML.
     assert guide.startswith(
@@ -93,7 +103,7 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "Commit-reveal subnets" in both
     assert (
         "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
-        in guide
+        in both
     )
     assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
     assert "service receives only the hotkey file" in both_words
