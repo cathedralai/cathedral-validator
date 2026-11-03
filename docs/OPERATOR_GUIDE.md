@@ -2,9 +2,7 @@
 
 The [README](../README.md) has the three commands. This page has the detail: what each check does, Docker, status codes, updates and trust.
 
-Cathedral rewards verified compute, not self-reported capacity. Validators
-independently check miner machines, test their work, reject duplicate claims
-and submit the resulting weights to Bittensor SN94.
+Validators independently check miner machines, test their work, reject duplicate claims and submit the resulting weights to Bittensor SN94.
 
 This repository is for validator operators. The service writes directly with
 your hotkey; it does not download a weight vector, use a relay or send your key
