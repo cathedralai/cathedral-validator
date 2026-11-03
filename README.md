@@ -30,8 +30,8 @@ TDX or AMD SEV-SNP evidence and SAT work, rejects duplicate hardware/endpoints/
 TLS keys, and weights the distinct verified machines with zero burn.
 It signs the vector and checks the exact result against finalized chain state.
 
-SNP checks miners against the reviewed SN94 measurement and TCB policy that
-ships in the signed bootstrap. By default TDX accepts
+SNP checks miners against the reviewed SN94 measurement and TCB policy
+published in this repository. By default TDX accepts
 any guest image with a genuine, fresh quote: a quote is not an image allowlist.
 See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist).
 
@@ -44,9 +44,9 @@ See [TDX measurement policy](docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-a
 - An SN94-registered hotkey with a validator permit, its unencrypted keyfile
   and expected public SS58 address. Without registration/permit the service
   keeps checking but writes no weights.
-- Nothing for SNP: setup uses the reviewed SN94 policy shipped in the signed
-  bootstrap. Pass `--snp-policy` only to use your own (see the
-  [policy template](docs/AUTO_UPDATE.md#before-installation)).
+- The reviewed SN94 SNP policy. Setup below downloads it from this repository
+  ([`sn94-snp-policy.json`](deploy/validator-update/sn94-snp-policy.json)); it
+  holds only public miner measurements.
 - Outbound access to Finney, GitHub, advertised miner endpoints and vendor
   verification collateral. No inbound ports or public address are needed.
 - Live Finney SN94 has commit-reveal **enabled**. The writer turns on
@@ -73,13 +73,13 @@ docker run -d --name cathedral-validator --restart unless-stopped \
   --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH \
   -v cathedral-state:/var/lib/cathedral \
   -v ~/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY:/run/secrets/hotkey:ro \
-  -v /absolute/reviewed/amd-sev-snp-policy.json:/etc/cathedral/snp-policy.json:ro \
+  -v /root/sn94-snp-policy.json:/etc/cathedral/snp-policy.json:ro \
   -e CATHEDRAL_VALIDATOR_EXPECTED_HOTKEY=YOUR_PUBLIC_HOTKEY_SS58 \
   ghcr.io/cathedralai/cathedral-validator@sha256:<pinned>
 ```
 
-Mount only the hotkey file and your reviewed SNP policy. The image refuses to
-start without the policy; it does not ship a default. CHOWN, FOWNER, and
+Mount only the hotkey file and the SN94 policy (download it as shown in
+[Install](#install)). The image refuses to start without the policy. CHOWN, FOWNER, and
 DAC_OVERRIDE are required so the signed updater can create the validator-owned
 journal. DAC_READ_SEARCH lets PID1 copy the mounted hotkey. Never mount a
 coldkey.
@@ -114,12 +114,15 @@ If the digest line prints `FAILED`, nothing runs. Retry after five minutes;
 if it still fails, stop and [open an issue](https://github.com/cathedralai/cathedral-validator/issues).
 An expired bootstrap needs a newly signed publication, not a bypass.
 
-Then configure the hotkey:
+Then download the reviewed SN94 policy and configure the hotkey:
 
 ```bash
+sudo curl -fsSL --proto '=https' --tlsv1.2 -o /root/sn94-snp-policy.json \
+  https://raw.githubusercontent.com/cathedralai/cathedral-validator/main/deploy/validator-update/sn94-snp-policy.json
 sudo cathedral-validator-setup \
   --hotkey-file "$HOME/.bittensor/wallets/YOUR_WALLET/hotkeys/YOUR_HOTKEY" \
   --expected-hotkey YOUR_PUBLIC_HOTKEY_SS58 \
+  --snp-policy /root/sn94-snp-policy.json \
   --confirm-direct-write
 sudo cathedral-validator-status
 ```
