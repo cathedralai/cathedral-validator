@@ -77,7 +77,7 @@ and refuses to write, cycle after cycle, if any of these does not hold
 | Weight count | The vector must meet the chain's minimum allowed weights. |
 
 Read the subnet's hyperparameters with your Bittensor CLI before installing
-(Finney **mainnet netuid 94** vs testnet, e.g. 584 — label which you target).
+(Finney **mainnet netuid 94** vs testnet, e.g. 584; label which you target).
 Each refusal appears as `NOT_PROVEN` with its reason in the service log, and
 the validator retries the next cycle. On a commit-reveal subnet, success is
 `COMMITTED` → `REVEALED_CONFIRMED`, not a plain `CONFIRMED` write.
