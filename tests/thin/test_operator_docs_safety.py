@@ -105,7 +105,9 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "[Failed weight write](AUTO_UPDATE.md#failed-weight-write)" in both
     assert "Never delete or replace the journal" in both
     assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in both
-    assert "Do not install or enable updater services from a source checkout" in both_words
+    assert (
+        "Do not install or enable updater services from a source checkout" in both_words
+    )
     assert "Publication pending" not in both
     assert "REPLACE_WITH" not in both
     assert "sudo cathedral-validator-setup" in guide
@@ -462,7 +464,11 @@ def test_advanced_operator_policies_remain_linked_and_honest() -> None:
     assert "A round with no PASS of an INFRA kind still halts" in runbook
 
 
-OPERATOR_LINK_DOCUMENTS = ["README.md", "docs/OPERATOR_GUIDE.md", "docs/OPERATOR_RUNBOOK.md"]
+OPERATOR_LINK_DOCUMENTS = [
+    "README.md",
+    "docs/OPERATOR_GUIDE.md",
+    "docs/OPERATOR_RUNBOOK.md",
+]
 LINK_ROOT = ROOT
 
 
