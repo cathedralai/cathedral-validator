@@ -9,7 +9,7 @@
 # See docs/RELEASE_MAINTAINER.md.
 set -euo pipefail
 sudo apt-get update && sudo apt-get install -y ca-certificates curl openssl python3.12 python3.12-venv
-BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s4-649e3a887d37bc220f16a80e58721c81188b30572d6319ebd9ba4dfa27f589e8
+BASE=https://github.com/cathedralai/cathedral-validator/releases/download/validator-bootstrap-production-s5-1432c33f10ee296762482bd57079018f921d8ebd60225f66b582492cc50b01c8
 BOOTSTRAP_DIR=$(sudo /usr/bin/mktemp -d /var/tmp/cathedral-bootstrap.XXXXXXXXXX)
 cleanup() {
   if [[ ! "$BOOTSTRAP_DIR" =~ ^/var/tmp/cathedral-bootstrap\.[[:alnum:]]{10}$ ]]; then
@@ -24,9 +24,9 @@ for f in updater-bootstrap.tar.gz updater-bootstrap.manifest.json updater-bootst
     --output "$BOOTSTRAP_DIR/$f" "$BASE/$f"
 done
 printf '%s  %s\n' \
-  '06635e7eb448acb037a505db5daccb702f7dd998d9c65d32c9ef20766b0b7f90' "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
-  '649e3a887d37bc220f16a80e58721c81188b30572d6319ebd9ba4dfa27f589e8' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
-  '262872ffc0273e69459763e2f8afc839f976a7e18cea0e1208232744d57aa46a' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
+  'eda66405f1b0e9bf77be7d5d918c8f7277caba9ba807c19446148e1c15cb4705' "$BOOTSTRAP_DIR/updater-bootstrap.tar.gz" \
+  '1432c33f10ee296762482bd57079018f921d8ebd60225f66b582492cc50b01c8' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.json" \
+  'fc4457d906ba2b628cf0b2cc0b8fe13193dd04b2c06a50cd14303836d4871e9c' "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
   '390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e' "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   | sudo sha256sum --check --strict
 test "sha256:$(sudo openssl pkey -pubin -in "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" -outform DER | sha256sum | cut -d' ' -f1)" = sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013
@@ -72,6 +72,6 @@ sudo /usr/bin/python3.12 "$BOOTSTRAP_DIR/install_updater_bundle.py" \
   --signature "$BOOTSTRAP_DIR/updater-bootstrap.manifest.sig" \
   --bootstrap-public-key "$BOOTSTRAP_DIR/bootstrap-signing-public-key.pem" \
   --expected-bootstrap-key-fingerprint sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013 \
-  --minimum-bootstrap-sequence 4
+  --minimum-bootstrap-sequence 5
 cleanup
 trap - ERR
