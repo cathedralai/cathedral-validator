@@ -411,7 +411,10 @@ def test_live_controller_isolates_the_unselected_timer_without_masking_units():
     assert "SubState=dead" in configure_host
     assert "! sudo systemctl is-active --quiet '$other_timer'" in configure_host
     assert "ConditionResult=no" not in configure_host
-    assert "CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex" in configure_host
+    assert (
+        "CATHEDRAL_LIVE_TEST_PEX_ROOT=/var/lib/cathedral-validator/pex"
+        in configure_host
+    )
 
 
 def test_live_controller_configures_the_stable_host_through_the_operator_cli():
@@ -474,7 +477,7 @@ def test_live_controller_configures_the_stable_host_through_the_operator_cli():
     # signed example and an idempotent setup rerun can match it.
     assert "sudo tee -a /etc/cathedral-validator/direct.env" not in script
     assert (
-        "'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/run/cathedral-validator-pex'"
+        "'Environment=CATHEDRAL_LIVE_TEST_PEX_ROOT=/var/lib/cathedral-validator/pex'"
         in configure_host
     )
 
@@ -2099,3 +2102,19 @@ def test_live_readiness_refuses_missing_or_outside_preserved_pex_root(
 
     with pytest.raises(SystemExit, match="did not load from the preserved live-test"):
         require_pex_origin(module)
+
+
+def test_live_readiness_pex_root_matches_the_direct_unit() -> None:
+    # 1d2206d moved the unit's PEX_ROOT; the live readiness shim must expect the
+    # same root, or every live run refuses at first install.
+    root = Path(__file__).resolve().parents[2]
+    unit = (
+        root / "deploy" / "validator-update" / "cathedral-validator-direct.service"
+    ).read_text()
+    pex_root = next(
+        line.split("=", 2)[2]
+        for line in unit.splitlines()
+        if line.startswith("Environment=PEX_ROOT=")
+    )
+    controller = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    assert f"CATHEDRAL_LIVE_TEST_PEX_ROOT={pex_root}" in controller
