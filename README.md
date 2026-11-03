@@ -9,11 +9,14 @@ Your validator checks escape claims and miner machines (AMD SEV-SNP or Intel TDX
 
 ## System Requirements
 
-- A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
-  Ubuntu 24.04 LTS, 2 vCPU, 4 GB RAM, 20 GB disk. No GPU, no inbound ports.
-- An SN94 hotkey with a validator permit: its unencrypted hotkey file and its
-  public SS58 address. Never copy a coldkey, mnemonic, or coldkey password to
-  this host.
+- An SN94 hotkey with a validator permit: its hotkey file and SS58 address
+- Linux/amd64 with systemd, Ubuntu 24.04 LTS
+- CPython 3.12, `python3.12-venv`, OpenSSL 3
+- 2 vCPU, 4 GB RAM, 20 GB disk
+- No inbound ports
+- No GPU
+
+Never copy a coldkey, mnemonic, or coldkey password to this host.
 
 ## Run it
 
