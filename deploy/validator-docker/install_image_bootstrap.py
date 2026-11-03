@@ -26,17 +26,17 @@ INSTALLER_PATH = ROOT / "deploy" / "validator-update" / "install_updater_bundle.
 # refuses a drift.
 BOOTSTRAP_BASE = (
     "https://github.com/cathedralai/cathedral-validator/releases/download/"
-    "validator-bootstrap-production-s4-649e3a887d37bc220f16a80e58721c81188b30572d6319ebd9ba4dfa27f589e8"
+    "validator-bootstrap-production-s5-1432c33f10ee296762482bd57079018f921d8ebd60225f66b582492cc50b01c8"
 )
 BOOTSTRAP_FILES = {
     "updater-bootstrap.tar.gz": (
-        "06635e7eb448acb037a505db5daccb702f7dd998d9c65d32c9ef20766b0b7f90"
+        "eda66405f1b0e9bf77be7d5d918c8f7277caba9ba807c19446148e1c15cb4705"
     ),
     "updater-bootstrap.manifest.json": (
-        "649e3a887d37bc220f16a80e58721c81188b30572d6319ebd9ba4dfa27f589e8"
+        "1432c33f10ee296762482bd57079018f921d8ebd60225f66b582492cc50b01c8"
     ),
     "updater-bootstrap.manifest.sig": (
-        "262872ffc0273e69459763e2f8afc839f976a7e18cea0e1208232744d57aa46a"
+        "fc4457d906ba2b628cf0b2cc0b8fe13193dd04b2c06a50cd14303836d4871e9c"
     ),
     "bootstrap-signing-public-key.pem": (
         "390a10b2e18f1d9eeffd5146e166cc518cc13bb03c6f2784c101456d8042809e"
@@ -45,7 +45,7 @@ BOOTSTRAP_FILES = {
 BOOTSTRAP_KEY_FINGERPRINT = (
     "sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06ba996013"
 )
-MINIMUM_BOOTSTRAP_SEQUENCE = 4
+MINIMUM_BOOTSTRAP_SEQUENCE = 5
 STABLE_METADATA_URL_PREFIX = "CATHEDRAL_VALIDATOR_STABLE_METADATA_URL="
 
 # The signed installer refuses group-writable ancestors. Official Ubuntu
