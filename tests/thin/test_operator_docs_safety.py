@@ -71,7 +71,7 @@ def test_readme_is_the_small_public_guide() -> None:
     # Count real second-level headings. A substring count also matches "### ",
     # so it would forbid subsections rather than keep the guide short.
     assert [line for line in guide.splitlines() if line.startswith("## ")] == [
-        "## What you need",
+        "## System Requirements",
         "## Run it",
         "## More",
     ]
@@ -84,7 +84,9 @@ def test_readme_is_the_small_public_guide() -> None:
     assert '<h1 align="center">Cathedral Validator</h1>' in guide
     assert (ROOT / "docs" / "assets" / "cathedral-mark.png").is_file()
     assert len(guide.splitlines()) <= 70
-    assert "Cathedral rewards verified compute" in guide
+    assert "Run a validator for Bittensor SN94" in guide
+    assert "rewards verified compute" not in guide
+    assert "&ensp;" not in guide
     assert "This repository is for validator operators" in both
     assert "commit-reveal" in both
     assert "timelocked commits" in both

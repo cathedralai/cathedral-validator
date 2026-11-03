@@ -1,15 +1,11 @@
 <p align="center"><img src="docs/assets/cathedral-mark.png" alt="Cathedral" width="112"></p>
 <h1 align="center">Cathedral Validator</h1>
-<p align="center"><em>Cathedral&ensp;rewards&ensp;verified&ensp;compute,&ensp;not&ensp;self-reported&ensp;capacity</em></p>
+<p align="center"><em>Run a validator for Bittensor SN94</em></p>
 <p align="center"><sub>2 November 2026</sub></p>
 
-Cathedral rewards verified compute, not self-reported capacity. Your validator
-checks miner machines (AMD SEV-SNP or Intel TDX evidence plus a test task),
-rejects duplicate claims and writes the weights to Bittensor SN94 with your
-hotkey. It does not download a weight vector, use a relay or send your key to
-Cathedral. Signed updates install themselves.
+Your validator checks each SN94 miner machine (AMD SEV-SNP or Intel TDX evidence plus a test task), rejects duplicate claims and writes the weights to Bittensor SN94 with your hotkey. It does not download a weight vector, use a relay or send your key to Cathedral. Signed updates install themselves.
 
-## What you need
+## System Requirements
 
 - A Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3.
   Ubuntu 24.04 LTS, 2 vCPU, 4 GB RAM, 20 GB disk. No GPU, no inbound ports.
