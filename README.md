@@ -1,7 +1,7 @@
 <p align="center"><img src="docs/assets/cathedral-mark.png" alt="Cathedral" width="112"></p>
 <h1 align="center">Cathedral Validator</h1>
 <p align="center"><em>Run a validator for Bittensor SN94</em></p>
-<p align="center"><sub>2 November 2026</sub></p>
+<p align="center"><sub>3 November 2026</sub></p>
 
 Cathedral rewards people who break out of its sealed sandboxes. A verified escape earns SN94 weight, and each one makes the Cathedral runtime harder to break. Cathedral also rewards miners for sealed compute, gated by demand.
 
