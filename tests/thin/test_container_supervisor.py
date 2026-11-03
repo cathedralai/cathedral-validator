@@ -657,7 +657,8 @@ def test_smoke_script_stays_offline_and_uses_documented_caps() -> None:
 
 
 def test_readme_docker_command_matches_the_supervisor_mounts() -> None:
-    guide = (ROOT / "README.md").read_text(encoding="utf-8")
+    # The Docker command moved from the README to the operator guide.
+    guide = (ROOT / "docs" / "OPERATOR_GUIDE.md").read_text(encoding="utf-8")
     assert "--restart unless-stopped" in guide
     assert "--stop-timeout 150" in guide
     assert "--cap-add SETPCAP" in guide

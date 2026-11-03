@@ -88,7 +88,7 @@ deliberate: a round is written only when every step is proven.
 
 ## 4. Install the signed bootstrap
 
-Follow [Install](../README.md#install) exactly: download `install.sh`, check
+Follow [Install](../README.md#run-it) exactly: download `install.sh`, check
 its digest, and run it with `sudo bash install.sh`. It verifies the bootstrap
 signature, digests, and expiry before running anything, installs the updater,
 units, and tools, and enables nothing. A `FAILED` digest line means nothing
@@ -112,7 +112,7 @@ admitted through setup yet.
 Run `sudo cathedral-validator-setup` with `--hotkey-file`, `--expected-hotkey`
 (the hotkey's SS58 address), and `--confirm-direct-write` (plus `--snp-policy`
 only to replace the shipped SN94 policy), as
-shown in [Install](../README.md#install). Setup:
+shown in [Install](../README.md#run-it). Setup:
 
 - validates the hotkey file and the policy;
 - writes `/etc/cathedral-validator/` (mode `0700`): `validator-hotkey`,

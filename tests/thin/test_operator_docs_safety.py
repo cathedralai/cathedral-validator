@@ -63,18 +63,19 @@ def test_false_launch_design_page_is_not_active() -> None:
 def test_readme_is_the_small_public_guide() -> None:
     guide = _readme()
     words = " ".join(guide.split())
+    # The README is one page: what it does, what you need, the commands, links.
+    # Operating detail moved to docs/OPERATOR_GUIDE.md and is pinned there.
+    detail = (ROOT / "docs" / "OPERATOR_GUIDE.md").read_text(encoding="utf-8")
+    both = guide + "\n" + detail
+    both_words = " ".join(both.split())
     # Count real second-level headings. A substring count also matches "### ",
     # so it would forbid subsections rather than keep the guide short.
     assert [line for line in guide.splitlines() if line.startswith("## ")] == [
-        "## Contents",
-        "## What it does",
         "## What you need",
-        "## Docker",
-        "## Install",
-        "## Operate",
-        "## Updates",
-        "## Trust",
+        "## Run it",
+        "## More",
     ]
+    assert "[Operator guide](docs/OPERATOR_GUIDE.md)" in both
     # Cover block: centered mark, HTML title, italic subtitle, date. A markdown
     # H1 cannot be centered on GitHub, so the visible title is HTML.
     assert guide.startswith(
@@ -82,69 +83,69 @@ def test_readme_is_the_small_public_guide() -> None:
     )
     assert '<h1 align="center">Cathedral Validator</h1>' in guide
     assert (ROOT / "docs" / "assets" / "cathedral-mark.png").is_file()
-    assert len(guide.splitlines()) <= 200
+    assert len(guide.splitlines()) <= 70
     assert "Cathedral rewards verified compute" in guide
-    assert "This repository is for validator operators" in guide
-    assert "commit-reveal" in guide
-    assert "timelocked commits" in guide
-    assert "Commit-reveal subnets" in guide
+    assert "This repository is for validator operators" in both
+    assert "commit-reveal" in both
+    assert "timelocked commits" in both
+    assert "Commit-reveal subnets" in both
     assert (
         "Linux/amd64 systemd host with CPython 3.12, `python3.12-venv`, and OpenSSL 3"
         in guide
     )
     assert "Never copy a coldkey, mnemonic, or coldkey password" in guide
-    assert "service receives only the hotkey file" in words
-    assert "There is no alternate scoring mode and no non-writing mode" in words
-    assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in words
-    assert "`NOT_PROVEN` means success is unresolved" in guide
-    assert "`EXPIRED_WITHOUT_INCLUSION` means" in guide
-    assert "`CONTRADICTION_STOPPED`" in guide
-    assert "`FINALIZED_FAILED_STOPPED` means" in guide
-    assert "`cathedral-validator record-failed-write`" in guide
-    assert "[Failed weight write](docs/AUTO_UPDATE.md#failed-weight-write)" in guide
-    assert "Never delete or replace the journal" in guide
-    assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in guide
-    assert "Do not install or enable updater services from a source checkout" in words
-    assert "Publication pending" not in guide
-    assert "REPLACE_WITH" not in guide
+    assert "service receives only the hotkey file" in both_words
+    assert "There is no alternate scoring mode and no non-writing mode" in both_words
+    assert "`CONFIRMED` or `RECOVERED_CONFIRMED`" in both_words
+    assert "`NOT_PROVEN` means success is unresolved" in both
+    assert "`EXPIRED_WITHOUT_INCLUSION` means" in both
+    assert "`CONTRADICTION_STOPPED`" in both
+    assert "`FINALIZED_FAILED_STOPPED` means" in both
+    assert "`cathedral-validator record-failed-write`" in both
+    assert "[Failed weight write](AUTO_UPDATE.md#failed-weight-write)" in both
+    assert "Never delete or replace the journal" in both
+    assert "[Validator auto-update](docs/AUTO_UPDATE.md)" in both
+    assert "Do not install or enable updater services from a source checkout" in both_words
+    assert "Publication pending" not in both
+    assert "REPLACE_WITH" not in both
     assert "sudo cathedral-validator-setup" in guide
     assert "--confirm-direct-write" in guide
     assert "sudo cathedral-validator-status" in guide
-    assert "ghcr.io/cathedralai/cathedral-validator@sha256:<pinned>" in guide
-    assert "cathedral-state:/var/lib/cathedral" in guide
-    assert "/etc/cathedral/snp-policy.json" in guide
-    assert "docker exec cathedral-validator cathedral-validator-status" in guide
-    assert "Never delete the `cathedral-state` volume" in guide
-    assert "SN39" not in guide
-    assert "deploy/sn94/install-validator" not in guide
+    assert "ghcr.io/cathedralai/cathedral-validator@sha256:<pinned>" in both
+    assert "cathedral-state:/var/lib/cathedral" in both
+    assert "/etc/cathedral/snp-policy.json" in both
+    assert "docker exec cathedral-validator cathedral-validator-status" in both
+    assert "Never delete the `cathedral-state` volume" in both
+    assert "SN39" not in both
+    assert "deploy/sn94/install-validator" not in both
     assert "does not download a weight vector" in words
-    assert "scored every serving miner" not in guide
-    assert "finds serving miners" in guide
-    assert "zero burn" in guide
-    assert "pinned TDX verifier, and pinned SNP verifier together" in words
-    assert "bootstrap updater, systemd units, host Python" in words
-    assert "Public setup follows `stable` only" in guide
+    assert "scored every serving miner" not in both
+    assert "finds serving miners" in both
+    assert "zero burn" in both
+    assert "pinned TDX verifier, and pinned SNP verifier together" in both_words
+    assert "bootstrap updater, systemd units, host Python" in both_words
+    assert "Public setup follows `stable` only" in both
     assert BOOTSTRAP_KEY_FINGERPRINT in guide
     # A first-time operator sees exactly two 64-hex values, once each: the
     # install script digest and the bootstrap signing key fingerprint. Every
     # other digest belongs in the script or in docs/AUTO_UPDATE.md.
     assert len(_HEX64.findall(guide)) == 2
     assert len(set(_HEX64.findall(guide))) == 2
-    assert "git clone" not in guide
-    assert "python3.12 -m venv" not in guide
-    assert "install_updater_bundle.py" not in guide
-    assert "BEGIN GENERATED" not in guide
-    assert "cathedral-tdx-verifier-v1.0.0" not in guide
-    assert "snpguest 0.10.0" not in guide
-    assert "issue #185" not in guide
-    assert "not self-service" not in guide
-    assert "authorized Cathedral operator" not in guide
-    assert "Where to get help" not in guide
-    assert "--dry-run" not in guide
-    assert "--broadcast" not in guide
-    assert "--offline" not in guide
-    assert "cathedral-sandbox/blob/main/MINING.md" not in guide
-    assert "cathedral-validator/blob/main/VALIDATOR.md" not in guide
+    assert "git clone" not in both
+    assert "python3.12 -m venv" not in both
+    assert "install_updater_bundle.py" not in both
+    assert "BEGIN GENERATED" not in both
+    assert "cathedral-tdx-verifier-v1.0.0" not in both
+    assert "snpguest 0.10.0" not in both
+    assert "issue #185" not in both
+    assert "not self-service" not in both
+    assert "authorized Cathedral operator" not in both
+    assert "Where to get help" not in both
+    assert "--dry-run" not in both
+    assert "--broadcast" not in both
+    assert "--offline" not in both
+    assert "cathedral-sandbox/blob/main/MINING.md" not in both
+    assert "cathedral-validator/blob/main/VALIDATOR.md" not in both
 
 
 def test_readme_pins_the_install_script_by_digest() -> None:
@@ -449,10 +450,10 @@ def test_tracked_documentation_has_no_removed_onboarding_anchors() -> None:
 
 
 def test_advanced_operator_policies_remain_linked_and_honest() -> None:
-    guide = _readme()
+    guide = (ROOT / "docs" / "OPERATOR_GUIDE.md").read_text(encoding="utf-8")
     runbook = (ROOT / "docs" / "OPERATOR_RUNBOOK.md").read_text()
-    assert "docs/OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist" in guide
-    assert "docs/OPERATOR_RUNBOOK.md#optional-scoped-infra-handling" in guide
+    assert "OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist" in guide
+    assert "OPERATOR_RUNBOOK.md#optional-scoped-infra-handling" in guide
     assert "by default any" in runbook and "guest image passes" in runbook
     assert 'In `"mode": "shadow"` the machines are paid as before' in runbook
     assert "does not emit the image" in runbook
@@ -461,7 +462,7 @@ def test_advanced_operator_policies_remain_linked_and_honest() -> None:
     assert "A round with no PASS of an INFRA kind still halts" in runbook
 
 
-OPERATOR_LINK_DOCUMENTS = ["README.md", "docs/OPERATOR_RUNBOOK.md"]
+OPERATOR_LINK_DOCUMENTS = ["README.md", "docs/OPERATOR_GUIDE.md", "docs/OPERATOR_RUNBOOK.md"]
 LINK_ROOT = ROOT
 
 
