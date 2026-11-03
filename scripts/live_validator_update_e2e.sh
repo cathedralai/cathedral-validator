@@ -3099,7 +3099,7 @@ sudo jq -e --arg target \"\$expected\" '.pending.stage == \"may_have_run\" and .
 printf 'TRANSIENT_UPDATER_KILL_CONFIRMED unit=%s pid=%s\\n' '${transient_unit}.service' \"\$main_pid\"
 sudo systemctl stop cathedral-validator-direct.service
 sudo rm -f /etc/cathedral-validator-live-test/delay-before-ready.${target}
-printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${target} >/dev/null" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
+printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-ready.${target} >/dev/null && sudo sync" 2>&1 | tee "$EVIDENCE_DIR/${label}-command.log"; then
     return 0
   else
     failure_status=$?
@@ -3110,7 +3110,7 @@ printf '%s\\n' fail | sudo tee /etc/cathedral-validator-live-test/fail-before-re
 
 record_step "reset at durable may_have_run and reconcile exact A on boot"
 reset_url="$(pin_fault_pointer stable "$STABLE_A3" "stable reset target A sequence 3")"
-remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} >/dev/null"
+remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_A_SHA} >/dev/null && sudo sync"
 reset_boot_id="$(require_host_value stable-reset-boot-id-before "$STABLE_VM" \
   read_boot_id "$STABLE_VM")"
 reset_started_at=$SECONDS
@@ -3138,7 +3138,7 @@ capture_host_with_retries stable-after-reset "$STABLE_VM"
 
 record_step "leave B crash-uncertain, then rescue with higher signed A sequence"
 uncertain_url="$(pin_fault_pointer stable "$STABLE_B4" "stable uncertain target B sequence 4")"
-remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_B_SHA} >/dev/null"
+remote "$STABLE_VM" "printf '%s\n' '$READINESS_DELAY_MAX_SECONDS' | sudo tee /etc/cathedral-validator-live-test/delay-before-ready.${ARCHIVE_B_SHA} >/dev/null && sudo sync"
 rescue_started_at=$SECONDS
 launch_background_update "$STABLE_VM" "cathedral-live-rescue-${RUN_ID}" stable "$uncertain_url"
 wait_pending stable-rescue "$STABLE_VM" "$ARCHIVE_B_SHA" \

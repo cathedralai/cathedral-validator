@@ -2118,3 +2118,19 @@ def test_live_readiness_pex_root_matches_the_direct_unit() -> None:
     )
     controller = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
     assert f"CATHEDRAL_LIVE_TEST_PEX_ROOT={pex_root}" in controller
+
+
+def test_live_test_markers_reach_disk_before_a_host_reset() -> None:
+    # valupd-1103b: an unsynced delay marker read back empty after the forced
+    # reset, and the readiness shim refused on int(""). Every marker the
+    # controller writes before a reset is flushed with sync.
+    root = Path(__file__).resolve().parents[2]
+    controller = (root / "scripts" / "live_validator_update_e2e.sh").read_text()
+    writes = [
+        line
+        for line in controller.splitlines()
+        if "sudo tee /etc/cathedral-validator-live-test/" in line
+        and ("delay-before-ready" in line or "fail-before-ready.${target}" in line)
+    ]
+    assert len(writes) == 3
+    assert all("&& sudo sync" in line for line in writes)
