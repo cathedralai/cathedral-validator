@@ -89,6 +89,7 @@ EXAMPLE_ASSETS = frozenset(
         "direct-telemetry.env.example",
         "direct.env.example",
         "identity.env.example",
+        "sn94-snp-policy.json",
         "update.env.example",
     }
 )
@@ -98,17 +99,28 @@ OPERATOR_ASSETS = frozenset(
         "cathedral-validator-status",
     }
 )
-EXPECTED_NON_WHEEL_PATHS = (
-    {f"payload/systemd/{name}" for name in SYSTEMD_ASSETS}
-    | {f"payload/examples/{name}" for name in EXAMPLE_ASSETS}
-    | {f"payload/operator/{name}" for name in OPERATOR_ASSETS}
-    | {
-        RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
-        REQUIREMENTS_ARCHIVE_PATH,
-        INSTALLER_ARCHIVE_PATH,
-        "payload/sysusers/cathedral-validator.conf",
-    }
-)
+# Bootstraps up to sequence 4 were signed before the shipped SN94 policy
+# existed. Each set below is exact: a bundle must carry one of them whole.
+SHIPPED_POLICY_ASSET = "sn94-snp-policy.json"
+LEGACY_EXAMPLE_ASSETS = EXAMPLE_ASSETS - {SHIPPED_POLICY_ASSET}
+
+
+def _expected_non_wheel_paths(examples: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        {f"payload/systemd/{name}" for name in SYSTEMD_ASSETS}
+        | {f"payload/examples/{name}" for name in examples}
+        | {f"payload/operator/{name}" for name in OPERATOR_ASSETS}
+        | {
+            RUNTIME_RELEASE_PUBLIC_KEY_ARCHIVE_PATH,
+            REQUIREMENTS_ARCHIVE_PATH,
+            INSTALLER_ARCHIVE_PATH,
+            "payload/sysusers/cathedral-validator.conf",
+        }
+    )
+
+
+EXPECTED_NON_WHEEL_PATHS = _expected_non_wheel_paths(EXAMPLE_ASSETS)
+LEGACY_NON_WHEEL_PATHS = _expected_non_wheel_paths(LEGACY_EXAMPLE_ASSETS)
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 SignatureVerifier = Callable[[bytes, bytes, bytes], None]
@@ -448,7 +460,10 @@ def _manifest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         parsed[path] = record
     non_wheels = {path for path in parsed if not path.startswith("payload/wheelhouse/")}
     wheels = {path for path in parsed if path.startswith("payload/wheelhouse/")}
-    if non_wheels != EXPECTED_NON_WHEEL_PATHS or not wheels:
+    if (
+        non_wheels not in (EXPECTED_NON_WHEEL_PATHS, LEGACY_NON_WHEEL_PATHS)
+        or not wheels
+    ):
         raise InstallRefused("manifest does not contain the fixed bootstrap asset set")
     if any(
         PurePosixPath(path).parent != PurePosixPath("payload/wheelhouse")
@@ -1404,6 +1419,10 @@ def _destinations(root: Path, bundle: VerifiedBundle) -> dict[Path, tuple[bytes,
             0o644,
         )
     for name in EXAMPLE_ASSETS:
+        if f"payload/examples/{name}" not in bundle.files:
+            # Only the shipped policy may be absent, in a legacy bootstrap;
+            # the manifest check above already pinned the exact set.
+            continue
         result[
             _relative(
                 root, f"usr/local/share/cathedral-validator-updater/examples/{name}"

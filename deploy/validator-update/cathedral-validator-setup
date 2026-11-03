@@ -26,6 +26,10 @@ from typing import Any, Callable, Sequence
 
 ETC = Path("/etc/cathedral-validator")
 EXAMPLES = Path("/usr/local/share/cathedral-validator-updater/examples")
+# The reviewed SN94 miner policy ships in the signed bootstrap, so an operator
+# needs no --snp-policy. It is trusted exactly as far as the signed setup and
+# validator code that read it.
+SHIPPED_SNP_POLICY_NAME = "sn94-snp-policy.json"
 UPDATER = Path(
     "/usr/local/lib/cathedral-validator-updater/bin/cathedral-validator-update"
 )
@@ -662,7 +666,7 @@ def configure(
     *,
     hotkey_file: Path,
     expected_hotkey: str,
-    snp_policy: Path,
+    snp_policy: Path | None = None,
     runner: Runner = _default_runner,
 ) -> None:
     if not _is_bittensor_ss58(expected_hotkey):
@@ -680,9 +684,22 @@ def configure(
         pin_parent=True,
         owner_only=True,
     )
-    policy = _read_regular(
-        snp_policy, maximum=MAX_POLICY_BYTES, owners=owners, label="SNP policy"
-    )
+    if snp_policy is None:
+        policy = _read_regular(
+            EXAMPLES / SHIPPED_SNP_POLICY_NAME,
+            maximum=MAX_POLICY_BYTES,
+            owners={BOOTSTRAP_OWNER},
+            label="shipped SN94 SNP policy",
+        )
+    else:
+        if not os.path.lexists(snp_policy):
+            raise SetupRefused(
+                f"no SNP policy file at {snp_policy}; omit --snp-policy to use "
+                "the reviewed SN94 policy shipped with this release"
+            )
+        policy = _read_regular(
+            snp_policy, maximum=MAX_POLICY_BYTES, owners=owners, label="SNP policy"
+        )
     _parse_hotkey(hotkey, expected_hotkey)
     _validate_policy(policy)
     direct_example = _read_regular(
@@ -817,7 +834,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--hotkey-file", type=Path, required=True)
     parser.add_argument("--expected-hotkey", required=True)
-    parser.add_argument("--snp-policy", type=Path, required=True)
+    parser.add_argument(
+        "--snp-policy",
+        type=Path,
+        default=None,
+        help="your own reviewed policy; omit it to use the shipped SN94 policy",
+    )
     parser.add_argument("--confirm-direct-write", action="store_true")
     options = parser.parse_args(argv)
     if os.geteuid() != 0:
