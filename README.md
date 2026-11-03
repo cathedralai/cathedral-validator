@@ -3,7 +3,9 @@
 <p align="center"><em>Run a validator for Bittensor SN94</em></p>
 <p align="center"><sub>2 November 2026</sub></p>
 
-Your validator checks each SN94 miner machine (AMD SEV-SNP or Intel TDX evidence plus a test task), rejects duplicate claims and writes the weights to Bittensor SN94 with your hotkey. It does not download a weight vector, use a relay or send your key to Cathedral. Signed updates install themselves.
+Cathedral rewards people who break out of its sealed sandboxes. A verified escape earns SN94 weight, and each one makes the Cathedral runtime harder to break. Cathedral also rewards miners for sealed compute, gated by demand.
+
+Your validator checks escape claims and miner machines (AMD SEV-SNP or Intel TDX evidence plus a test task), rejects duplicate claims and writes the weights to Bittensor SN94 with your hotkey. It does not download a weight vector, use a relay or send your key to Cathedral. Signed updates install themselves.
 
 ## System Requirements
 
