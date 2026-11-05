@@ -77,9 +77,9 @@ BREAKER_HOTKEY_FIELD = "breaker_hotkey"
 # (also at config/escape/contest-signer.ed25519.pub). The sha256 pins the file
 # bytes (the base64 key plus one newline), so a key edit here without the pin,
 # or the reverse, fails at import.
-PINNED_CONTEST_PUBKEY_B64 = "T/ul7fUMNONGXmH9hRCWolnF/Gerw79B5VyoTk8dIXo="
+PINNED_CONTEST_PUBKEY_B64 = "dua5t8FGLC1G6Osz/1CLcbI692EWxZBFn3ttFfGnbgE="
 PINNED_CONTEST_PUBKEY_FILE_SHA256 = (
-    "078254e43a6b0c43742c788a7ac0035e61d8e2dbe9b99e7d95a8af856b61a182"
+    "982ac46e4d87a14086c20e7a9ccecc471fd5405a26311111ffc8e8fa70e430d2"
 )
 CONTEST_SIGNER_SET_SCHEMA = "cathedral_escape_contest_signers_v1"
 LEGACY_SINGLE_KEY_ID = "legacy"
@@ -97,7 +97,7 @@ _SIGNER_KEY_FIELDS = frozenset(
 PINNED_CONTEST_SIGNERS_DOCUMENT: dict[str, object] = {
     "keys": [
         {
-            "id": "contest-2026-11",
+            "id": "contest-2026-11b",
             "not_before": 0,
             "pubkey_b64": PINNED_CONTEST_PUBKEY_B64,
         }
@@ -105,7 +105,7 @@ PINNED_CONTEST_SIGNERS_DOCUMENT: dict[str, object] = {
     "schema": CONTEST_SIGNER_SET_SCHEMA,
 }
 PINNED_CONTEST_SIGNERS_SHA256 = (
-    "629bf99accee74f13b48698d4dd1505a19bb7595d5f7dc73cd806c7e4e4db466"
+    "930a76a6123e5d8f2740281240cf2a6ee914288d4c022b4ab1ed23d20ecf98dd"
 )
 
 
