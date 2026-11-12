@@ -38,17 +38,17 @@ PINNED_APPROVED_MINERS_DOCUMENT: dict[str, object] = {
     "miners": [
         {
             "hotkey": "5Ci4hDP6Fc7CDMy5uxZUnjQF2QgdK2HYpLt1MrWmV2vi9ujw",  # pragma: allowlist secret
-            "label": "sn94_mainnet_cherry48",
+            "label": "owner-miner-3",
             "note": _BUILD_NOTE,
         },
         {
             "hotkey": "5FTS68kHHrG7c9XYDyiCzfVnuqNJBk1uWV1D9vN4YwkQ3Ztq",  # pragma: allowlist secret
-            "label": "sn94_mainnet_cherry46",
+            "label": "owner-miner-2",
             "note": _BUILD_NOTE,
         },
         {
             "hotkey": "5GejPbqLvfrLGdrjLzHN59TQ5c7KuWWDVajFAz8r7pSG2TKq",  # pragma: allowlist secret
-            "label": "sn94_mainnet_contabo",
+            "label": "owner-miner-1",
             "note": _BUILD_NOTE,
         },
     ],
@@ -56,7 +56,7 @@ PINNED_APPROVED_MINERS_DOCUMENT: dict[str, object] = {
     "schema": APPROVED_MINERS_SCHEMA,
 }
 PINNED_APPROVED_MINERS_SHA256 = (
-    "ff79e492216f740fc96606517e273790a66af5020ed57b8165dd15361572ce4e"
+    "1e2e9b7a77c7b2963ec51332fa1b5e9cda7d8232efcf48d2f22cc1fb1a0faa76"
 )
 
 

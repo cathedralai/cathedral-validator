@@ -133,9 +133,9 @@ def test_the_release_list_is_the_reviewed_file_with_the_three_owner_hotkeys() ->
     assert not any(hotkey.startswith("5FF6FtDU") for hotkey in listed)
     document = json.loads(raw)
     assert [miner["label"] for miner in document["miners"]] == [
-        "sn94_mainnet_cherry48",
-        "sn94_mainnet_cherry46",
-        "sn94_mainnet_contabo",
+        "owner-miner-3",
+        "owner-miner-2",
+        "owner-miner-1",
     ]
     assert all(
         miner["note"].startswith("owner's own miner hotkey; not registered")

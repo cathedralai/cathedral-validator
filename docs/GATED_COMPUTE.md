@@ -61,11 +61,14 @@ registered on the subnet, or has no verified machine, receives nothing and
 changes nothing in the vector.
 
 On 12 November 2026 the list was seeded with the owner's three compute-miner
-hotkeys (`sn94_mainnet_cherry46`, `sn94_mainnet_cherry48`,
-`sn94_mainnet_contabo`). None was registered on netuid 94 at that time (Finney
-block 9489224): their earlier UIDs had been recycled. Until one of them is
-registered again and has a verified machine, the compute lane is burned every
-cycle. The owner can register them without a new release.
+hotkeys (`owner-miner-1`, `owner-miner-2`, `owner-miner-3`). None was
+registered on netuid 94 when the list was built (Finney block 9489224): their
+earlier UIDs had been recycled. The owner can register them without a new
+release, and has started to: by Finney block 9489294 `owner-miner-1` was
+registered as UID 19 (block 9489265) and `owner-miner-3` as UID 20 (block
+9489293), while `owner-miner-2` was still unregistered. A registered hotkey is
+paid from the compute lane only in cycles where it has a verified machine;
+otherwise the compute lane is burned.
 
 ## How a miner gets onto the list
 
