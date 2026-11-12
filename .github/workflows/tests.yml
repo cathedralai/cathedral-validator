@@ -12,7 +12,7 @@ permissions:
 jobs:
   private-key-custody:
     name: Reject tracked private PEM keys
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -32,7 +32,7 @@ jobs:
 
   tests:
     name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -110,7 +110,7 @@ jobs:
 
   snp-production:
     name: AMD SEV-SNP production contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -238,7 +238,7 @@ jobs:
     # required publisher file. Only test_validator_lifecycle.py caught them, and
     # it could not fail the build. It is required now, for the same reason.
     name: Publisher suite
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -290,7 +290,7 @@ jobs:
     # correctness, all of it. Under `continue-on-error` a genuine regression there
     # reported green. They gate now.
     name: Integration lane
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
