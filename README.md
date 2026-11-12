@@ -61,3 +61,8 @@ key fingerprint `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06
   status code, updates and trust.
 - [Operator runbook](docs/OPERATOR_RUNBOOK.md): step by step, with the chain rules.
 - [Validator auto-update](docs/AUTO_UPDATE.md): updates, recovery and pause.
+
+**The Cathedral map.** Three public repositories, each linked to the other two:
+- **cathedral-validator** (this one): how SN94 weights are set and paid.
+- [cathedral-escape](https://github.com/cathedralai/cathedral-escape): break out of a sealed sandbox, prove it, earn. Open to any SN94 hotkey.
+- [cathedral-sandbox](https://github.com/cathedralai/cathedral-sandbox): the sandbox and compute mining. Compute is gated: only owner-approved miners earn.
