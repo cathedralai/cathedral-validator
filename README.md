@@ -57,6 +57,9 @@ key fingerprint `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06
 
 ## More
 
+- [Cathedral Escape Room](https://github.com/cathedralai/cathedral-escape-room): the contest whose
+  receipts this validator scores, with rules and a practice harness.
+- [Cathedral Sandbox](https://github.com/cathedralai/cathedral-sandbox): the sandbox and compute mining.
 - [Operator guide](docs/OPERATOR_GUIDE.md): what it checks, Docker, every
   status code, updates and trust.
 - [Operator runbook](docs/OPERATOR_RUNBOOK.md): step by step, with the chain rules.
