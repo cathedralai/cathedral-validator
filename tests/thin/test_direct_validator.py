@@ -340,32 +340,51 @@ def test_finalized_snapshot_skips_private_miner_without_losing_healthy_miner() -
     assert observed.skipped_axons["unroutable"] == 1
 
 
-def test_cycle_with_only_unroutable_miners_refuses_without_writer_submit() -> None:
+def test_cycle_with_only_unroutable_miners_writes_the_burn(monkeypatch) -> None:
+    # Nobody serves a usable axon. The cycle used to refuse here, which left
+    # whatever row was on chain in force; it now writes the burn.
     private = ServingAxon(21, "5PrivateMiner", "10.0.0.1", 8081)
+    submitted: list[DirectWeightPlan] = []
+    receipt = SimpleNamespace(
+        status=STATUS_CONFIRMED, as_document=lambda: {"status": STATUS_CONFIRMED}
+    )
     writer_object = SimpleNamespace(
         recover=lambda: None,
-        submit=lambda *_args, **_kwargs: pytest.fail("unroutable miner reached writer"),
+        submit=lambda plan, **_kwargs: submitted.append(plan) or receipt,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: pytest.fail("an empty serving set was challenged"),
     )
 
-    with pytest.raises(DirectValidatorError, match="no serving miner"):
-        run_direct_cycle(
-            subtensor=SnapshotSubtensor(Metagraph(miners=(private,))),
-            keypair=FakeKeypair(),
-            verifier_adapter=SimpleNamespace(
-                qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
-            ),
-            writer=writer_object,
-            report_recovery=no_expired_recovery,
-        )
+    event = run_direct_cycle(
+        subtensor=SnapshotSubtensor(Metagraph(miners=(private,))),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=writer_object,
+        report_recovery=no_expired_recovery,
+    )
+
+    assert event["status"] == STATUS_CONFIRMED
+    assert (event["wire_uids"], event["wire_weights"]) == ([BURN_UID], [W])
+    assert submitted[0].raw_scores == () and submitted[0].burn_uid == BURN_UID
 
 
-def test_finalized_snapshot_refuses_no_serving_miners_or_missing_permit() -> None:
+def test_finalized_snapshot_allows_no_serving_miner_and_refuses_a_missing_permit() -> (
+    None
+):
     no_miner = Metagraph(miners=())
     no_permit = Metagraph()
     no_permit.validator_permit[0] = False
 
-    with pytest.raises(DirectValidatorError, match="no serving miner"):
-        finalized_serving_miners_snapshot(SnapshotSubtensor(no_miner), FakeKeypair())
+    empty = finalized_serving_miners_snapshot(
+        SnapshotSubtensor(no_miner), FakeKeypair()
+    )
+    assert empty.miners == ()
+    assert empty.registered_hotkeys[BURN_HOTKEY] == BURN_UID
     with pytest.raises(DirectValidatorError, match="lacks a finalized permit"):
         finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
 
@@ -590,11 +609,16 @@ def test_legacy_singleton_fleet_earns_zero_without_blocking_other_miners() -> No
     assert planned.wire_weights == (58982, 6553)
 
 
-def test_qvl_infrastructure_failure_halts_instead_of_redistributing() -> None:
+def test_qvl_infrastructure_failure_burns_the_lane_instead_of_redistributing() -> None:
+    # An INFRA count no row accounts for cannot be tied to an unlisted hotkey,
+    # so the compute lane is burned. The write itself is never refused.
     result = replace(round_result(machine_row("1")), qvl_infra_count=1)
 
-    with pytest.raises(DirectValidatorError, match="not fully proven"):
-        build_direct_plan(snapshot(), result)
+    planned = build_direct_plan(snapshot(), result)
+
+    assert "not fully proven" in runtime.compute_lane_unproven(result)
+    assert planned.raw_scores == ((19, 0),)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 def _infra_row(marker: str, *, uid: int, hotkey: str, kind: str) -> dict[str, object]:
@@ -638,7 +662,9 @@ def test_one_miners_infra_verdict_zeroes_only_that_machine_when_the_verifier_wor
 
 
 @pytest.mark.parametrize("value", [None, "", "any", "SCOPED", "scoped-ish"])
-def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) -> None:
+def test_without_the_opt_in_an_approved_infra_verdict_burns_the_lane(
+    value, monkeypatch
+) -> None:
     if value is None:
         monkeypatch.delenv(runtime.INFRA_HALT_ENV, raising=False)
     else:
@@ -649,8 +675,12 @@ def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) ->
         qvl=1,
     )
 
-    with pytest.raises(DirectValidatorError, match="=scoped would write it"):
-        build_direct_plan(snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result)
+    planned = build_direct_plan(
+        snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result
+    )
+
+    assert "=scoped would pay it" in runtime.compute_lane_unproven(result)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 @pytest.mark.parametrize(
@@ -674,7 +704,7 @@ def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) ->
         ),
     ],
 )
-def test_infra_without_a_pass_of_the_same_kind_still_halts(
+def test_approved_infra_without_a_pass_of_the_same_kind_burns_the_lane(
     rows, qvl, snp, monkeypatch
 ) -> None:
     monkeypatch.setenv(runtime.INFRA_HALT_ENV, "scoped")
@@ -688,11 +718,13 @@ def test_infra_without_a_pass_of_the_same_kind_still_halts(
         else:
             built.append(_infra_row(marker, uid=uid, hotkey=hotkey, kind=kind))
 
-    with pytest.raises(DirectValidatorError, match="not fully proven"):
-        build_direct_plan(
-            snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)),
-            _tee_round(*built, qvl=qvl, snp=snp),
-        )
+    result = _tee_round(*built, qvl=qvl, snp=snp)
+    planned = build_direct_plan(
+        snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result
+    )
+
+    assert "not fully proven" in runtime.compute_lane_unproven(result)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 class Extrinsic:

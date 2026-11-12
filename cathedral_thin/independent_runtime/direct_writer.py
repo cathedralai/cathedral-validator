@@ -1402,7 +1402,10 @@ class DirectWeightWriter:
         # MinAllowedWeights above SubnetworkN the chain demands every
         # registered UID, which a writer that excludes itself cannot meet.
         required_weights = min(subnet_n, min_allowed)
-        if len(plan.wire_uids) < required_weights:
+        # The chain's lone self-weight exception, which only the subnet
+        # owner's validator reaches: its burn-only vector is its own UID.
+        lone_self_weight = plan.wire_uids == (fresh.validator_uid,)
+        if len(plan.wire_uids) < required_weights and not lone_self_weight:
             raise DirectValidatorError(
                 f"direct vector has {len(plan.wire_uids)} weights but the chain "
                 f"requires at least {required_weights} "

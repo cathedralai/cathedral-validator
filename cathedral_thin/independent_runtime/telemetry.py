@@ -265,7 +265,7 @@ def _build_telemetry_snapshot_base(
                 "weight_u16": weight_by_uid.get(uid, 0),
                 "verified_at": observed if rows else None,
                 # A verified machine on a hotkey that is not on the approved
-                # list earns nothing; say so instead of "not_verified".
+                # list earns no compute weight; say so, not "not_verified".
                 "status": "weighted"
                 if weight_by_uid.get(uid, 0) > 0
                 else ("not_approved" if rows else "not_verified"),

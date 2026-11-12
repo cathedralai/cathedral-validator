@@ -20,6 +20,7 @@ import test_direct_commit_reveal as commit_reveal
 import test_direct_validator as base
 from cathedral_thin.independent.constants import NETUID, VERSION_KEY, W
 from cathedral_thin.independent_runtime import approved_miners
+from cathedral_thin.independent_runtime import direct_validator as runtime
 from cathedral_thin.independent_runtime import direct_writer as writer_runtime
 from cathedral_thin.independent_runtime.approved_miners import (
     PINNED_APPROVED_MINERS_SHA256,
@@ -340,6 +341,160 @@ def test_the_outside_operator_earns_nothing_and_the_vector_burns() -> None:
     assert weights[240] + weights[241] + weights[242] == LANE
 
 
+# A round that is not fully proven never stops the write ------------------------
+
+
+def _infra(marker: str, miner: base.ServingAxon, kind: str = "tdx") -> dict:
+    return base._infra_row(marker, uid=miner.uid, hotkey=miner.hotkey, kind=kind)
+
+
+def _round_with_infra(*rows: dict, miners) -> base.MultiComputeRound:
+    infra = sum(row["verdict"] == "INFRA" for row in rows)
+    return replace(base.round_result(*rows, miners=miners), qvl_infra_count=infra)
+
+
+@pytest.mark.parametrize("halt", (None, "scoped"), ids=("default", "scoped"))
+def test_an_unlisted_miners_infra_verdict_never_stops_the_write(
+    monkeypatch, approved_compute_hotkeys, halt
+) -> None:
+    # Review finding: any miner could return evidence that ends in INFRA and
+    # make the validator refuse, leaving the pre-upgrade row in force.
+    if halt is None:
+        monkeypatch.delenv(runtime.INFRA_HALT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(runtime.INFRA_HALT_ENV, halt)
+    miners = (base.MINER_ONE_AXON, base.MINER_TWO_AXON)
+    approved_compute_hotkeys(base.MINER_ONE)
+
+    # Only the unlisted miner answered, with INFRA: burn only.
+    alone = _round_with_infra(_infra("9", base.MINER_TWO_AXON), miners=miners)
+    assert runtime.compute_lane_unproven(alone) is None
+    planned = build_direct_plan(base.snapshot(miners=miners), alone)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
+
+    # With a passing approved machine beside it: the approved share is paid.
+    beside = _round_with_infra(
+        dict(base.machine_row("1"), tee_kind="sev_snp"),
+        _infra("9", base.MINER_TWO_AXON),
+        miners=miners,
+    )
+    assert runtime.compute_lane_unproven(beside) is None
+    planned = build_direct_plan(base.snapshot(miners=miners), beside)
+    assert (planned.wire_uids, planned.wire_weights) == (
+        (BURN_UID, 19),
+        (W - LANE, LANE),
+    )
+
+
+def test_an_approved_miners_infra_verdict_burns_the_compute_lane_and_still_writes(
+    tmp_path: Path, monkeypatch, approved_compute_hotkeys
+) -> None:
+    # This validator's verifier may be down. Nobody is paid another approved
+    # miner's share for that; the lane is burned and the cycle still writes.
+    monkeypatch.delenv(runtime.INFRA_HALT_ENV, raising=False)
+    miners = (base.MINER_ONE_AXON, base.MINER_TWO_AXON)
+    approved_compute_hotkeys(base.MINER_ONE, base.MINER_TWO)
+    result = _round_with_infra(
+        dict(base.machine_row("1"), tee_kind="tdx"),
+        _infra("9", base.MINER_TWO_AXON),
+        miners=miners,
+    )
+
+    planned = build_direct_plan(base.snapshot(miners=miners), result)
+
+    assert "not fully proven" in runtime.compute_lane_unproven(result)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
+    instance, _subtensor, _planned = base.writer(tmp_path, monkeypatch, planned=planned)
+    assert base.submit_before_deadline(instance, planned).status == STATUS_CONFIRMED
+
+    # The existing opt-in still pays the proven machines when the verifier
+    # passed another machine of the same kind this round.
+    monkeypatch.setenv(runtime.INFRA_HALT_ENV, "scoped")
+    assert runtime.compute_lane_unproven(result) is None
+    scoped = build_direct_plan(base.snapshot(miners=miners), result)
+    assert (scoped.wire_uids, scoped.wire_weights) == ((BURN_UID, 19), (W - LANE, LANE))
+
+
+def test_a_blocked_round_burns_the_compute_lane_and_still_pays_escape() -> None:
+    blocked = replace(
+        base.round_result(base.machine_row("1")),
+        feature_blocked=True,
+        blockers=("verifier has no stable platform identity",),
+    )
+
+    planned = build_direct_plan(base.snapshot(), blocked)
+
+    assert runtime.compute_lane_unproven(blocked) is not None
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
+    paid = replace(
+        planned,
+        escape_units=((30, 1),),
+        escape_uid_hotkeys=((30, "5Breaker"),),
+        escape_fraction="1/10",
+    )
+    assert paid.expected_vector() == ((BURN_UID, 30), (W - LANE, LANE))
+
+
+# No serving miner ---------------------------------------------------------------
+
+
+def test_with_no_serving_miner_the_plan_is_the_burn_and_the_writer_signs_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    empty = base.MultiComputeRound(
+        rows=(),
+        fleet=(),
+        verified_units={},
+        pass_count=0,
+        qvl_infra_count=0,
+        feature_blocked=False,
+        exclusions=(),
+        blockers=(),
+    )
+
+    planned = build_direct_plan(base.snapshot(miners=()), empty)
+
+    assert planned.raw_scores == () and planned.uid_hotkeys == ()
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
+    instance, subtensor, _planned = base.writer(tmp_path, monkeypatch, planned=planned)
+    assert base.submit_before_deadline(instance, planned).status == STATUS_CONFIRMED
+    assert subtensor.substrate.submit_calls == 1
+
+
+def test_with_no_serving_miner_verified_breaks_are_still_paid(monkeypatch) -> None:
+    import test_escape_receipt_weights as escape
+
+    escape_signers = escape._signer_set_for_key(escape.TEST_KEY)
+    monkeypatch.setattr(
+        escape.escape_receipts, "PINNED_CONTEST_PUBKEY", escape.TEST_KEY.public_key()
+    )
+    monkeypatch.setattr(
+        escape.escape_receipts, "PINNED_CONTEST_SIGNERS", escape_signers
+    )
+    snapshot = replace(
+        base.snapshot(miners=()),
+        registered_hotkeys={
+            base.BURN_HOTKEY: BURN_UID,
+            base.VALIDATOR: 7,
+            escape.BREAKER: escape.BREAKER_UID,
+        },
+    )
+    planned = build_direct_plan(snapshot, base.round_result(miners=()))
+
+    paid, summary = runtime.apply_escape_receipts(
+        planned,
+        escape.config(),
+        now=escape.NOW,
+        load=lambda _source: [escape.receipt()],
+    )
+
+    assert summary["status"] == "APPLIED"
+    assert dict(zip(paid.wire_uids, paid.wire_weights, strict=True)) == {
+        BURN_UID: W - LANE,
+        escape.BREAKER_UID: LANE,
+    }
+
+
 # The writer -----------------------------------------------------------------
 
 
@@ -506,6 +661,33 @@ def test_the_owner_hotkey_validator_submits_the_same_vector_with_empty_lanes(
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert state["last_attempt"]["intent"]["kwargs"]["dests"] == [7]
     assert state["last_attempt"]["identity"]["burn_uid"] == 7
+
+
+def test_the_owner_validators_lone_self_burn_passes_a_raised_min_allowed_weights(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The chain accepts a lone self weight whatever MinAllowedWeights is
+    # (check_length), so the local length check must not refuse it either.
+    planned = _owner_validator_plan(monkeypatch)
+    assert planned.wire_uids == (7,)
+    instance, subtensor = _owner_validator_writer(tmp_path, monkeypatch, planned)
+    subtensor.min_allowed = 3
+
+    assert base.submit_before_deadline(instance, planned).status == STATUS_CONFIRMED
+
+
+def test_any_other_burn_only_vector_still_honours_min_allowed_weights(
+    tmp_path: Path, monkeypatch
+) -> None:
+    planned = verified_plan((base.MINER_ONE_AXON, 1))
+    assert planned.wire_uids == (BURN_UID,)
+
+    def raised(subtensor) -> None:
+        subtensor.min_allowed = 2
+
+    assert "has 1 weights but the chain requires at least 2" in _refused(
+        tmp_path, monkeypatch, planned, subtensor_setup=raised
+    )
 
 
 def test_the_owner_hotkey_validator_pays_the_lanes_and_burns_on_its_own_uid(

@@ -43,6 +43,7 @@ from .capacity_shadow import (
     CapacityShadow,
     load_capacity_policy,
 )
+from . import approved_miners
 from .axon import (
     AXON_SKIP_REASONS,
     ServingAxon,
@@ -382,8 +383,9 @@ def finalized_serving_miners_snapshot(
             key=lambda axon: (axon.uid, axon.hotkey),
         )
     )
-    if not miners:
-        raise DirectValidatorError("direct validator found no serving miner")
+    # No serving miner is not a refusal: the cycle still writes the burn (and
+    # any escape share), so weights set before the gated split never stay in
+    # force just because nobody serves.
     for miner in miners:
         if view.uid_to_hotkey.get(miner.uid) != miner.hotkey:
             raise DirectValidatorError(
@@ -538,21 +540,51 @@ def _verifier_outage(result: MultiComputeRound) -> bool:
     return False
 
 
+def compute_lane_unproven(result: MultiComputeRound) -> str | None:
+    """Why this round cannot pay the compute lane, or None when it can.
+
+    Before the gated split an unproven round refused the whole write. That
+    would now leave the previous on-chain row in force, and any miner could
+    cause it by returning evidence that ends in INFRA. So an unproven round
+    never stops the write: it burns the compute lane for this cycle instead.
+
+    An INFRA verdict on a hotkey that is not on the approved list is ignored
+    altogether. That hotkey earns no compute weight whatever its verdict, so
+    its evidence must not decide what approved miners are paid. Only an INFRA
+    verdict on an approved hotkey, or one that cannot be tied to a hotkey, is
+    judged by the existing halt rule, and where that rule used to refuse, the
+    lane is burned. Nobody is paid another approved miner's share because of
+    this validator's own verifier outage.
+    """
+
+    if result.feature_blocked or result.blockers:
+        return "machine verification round is not fully proven"
+    infra_rows = [
+        row for row in result.rows if row.get("verdict") == QuoteVerdict.INFRA.value
+    ]
+    approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+    if len(infra_rows) == result.qvl_infra_count + result.snp_infra_count and not any(
+        row.get("hotkey") in approved for row in infra_rows
+    ):
+        return None
+    if _verifier_outage(result):
+        return "machine verification round is not fully proven"
+    if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
+        return (
+            "machine verification round is not fully proven (the verifiers "
+            "passed other machines of each INFRA kind this round, so "
+            f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would pay it)"
+        )
+    return None
+
+
 def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if result.feature_blocked or result.blockers:
-        raise DirectValidatorError("machine verification round is not fully proven")
-    if result.qvl_infra_count or result.snp_infra_count:
-        if _verifier_outage(result):
-            raise DirectValidatorError("machine verification round is not fully proven")
-        if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
-            raise DirectValidatorError(
-                "machine verification round is not fully proven (the verifiers "
-                "passed other machines of each INFRA kind this round, so "
-                f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would write it)"
-            )
+    if compute_lane_unproven(result) is not None:
+        # No machine is counted, so the compute lane is burned this cycle.
+        return ()
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
     for uid, hotkey in identities.items():
@@ -640,8 +672,6 @@ def build_direct_plan(
     """
 
     miners = tuple(snapshot.miners if scored_miners is None else scored_miners)
-    if not miners:
-        raise DirectValidatorError("direct plan has no scored miner")
     miner_by_uid = {miner.uid: miner for miner in miners}
     if len(miner_by_uid) != len(miners) or any(
         snapshot.miner_by_uid().get(uid) != miner for uid, miner in miner_by_uid.items()
@@ -924,17 +954,32 @@ def _run_direct_cycle_unlocked(
         raise DirectValidatorError("full evidence cycle expired during discovery")
     # Miners are challenged for the subnet whose metagraph named them, which
     # the checks above have tied to this cycle and to its writer.
-    result = score_multicompute_round(
-        axons=snapshot.miners,
-        keypair=keypair,
-        anchor_hash=snapshot.block_hash,
-        verifier_adapter=verifier_adapter,
-        snp_verifier=snp_verifier,
-        tdx_policy=tdx_policy,
-        cycle_deadline_monotonic=cycle_deadline,
-        netuid=snapshot.netuid,
-    )
+    if snapshot.miners:
+        result = score_multicompute_round(
+            axons=snapshot.miners,
+            keypair=keypair,
+            anchor_hash=snapshot.block_hash,
+            verifier_adapter=verifier_adapter,
+            snp_verifier=snp_verifier,
+            tdx_policy=tdx_policy,
+            cycle_deadline_monotonic=cycle_deadline,
+            netuid=snapshot.netuid,
+        )
+    else:
+        # Nobody serves, so there is nothing to challenge. The plan below is
+        # the burn, plus the escape share when there are verified breaks.
+        result = MultiComputeRound(
+            rows=(),
+            fleet=(),
+            verified_units={},
+            pass_count=0,
+            qvl_infra_count=0,
+            feature_blocked=False,
+            exclusions=(),
+            blockers=(),
+        )
     plan = build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
+    compute_unproven = compute_lane_unproven(result)
     evidence_summary = _evidence_cycle_summary(
         snapshot, result, plan, tdx_policy=tdx_policy
     )
@@ -1024,6 +1069,11 @@ def _run_direct_cycle_unlocked(
     }
     if escape_summary is not None:
         event["escape_receipts"] = escape_summary
+    if compute_unproven is not None:
+        event["compute_lane"] = {
+            "status": "BURNED_UNPROVEN",
+            "reason": compute_unproven,
+        }
     if pool_inventory is not None:
         try:
             from .pool_inventory import publish_cycle_inventory

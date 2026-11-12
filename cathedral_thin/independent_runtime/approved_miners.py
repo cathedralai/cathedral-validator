@@ -25,7 +25,7 @@ _SS58_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvw
 # Canonical compact JSON of this document plus one newline is the content of
 # config/compute/approved-miners.json. Entries are sorted by hotkey and unique.
 # A listed hotkey that is not registered, or has no verified machine, simply
-# receives nothing, so the owner can register these later without a release.
+# receives no compute weight, so the owner can register these later without a release.
 # Seeded 12 Nov 2026 with the owner's three compute-miner hotkeys, read from
 # the public address files of the owner's wallet. None was registered on
 # netuid 94 at Finney block 9489224; the chain named the owner's coldkey as

@@ -20,7 +20,10 @@ then builds one weight vector with a fixed split:
 - the rest to the subnet owner hotkey, which the chain burns.
 
 A verified machine on a hotkey that is not on the approved list earns no
-compute weight. A lane with no recipient in a cycle is burned too. The list
+compute weight. The list gates the compute lane only: escape weight goes to
+verified breakers whether or not they are on it. A lane with no recipient in a
+cycle is burned too. A cycle with no serving miner, or whose machine
+verification is not fully proven, still writes: it burns the compute lane. The list
 ships inside the signed release and nothing on this host can change it. See
 [Gated compute](GATED_COMPUTE.md).
 It signs the vector and checks the exact result against finalized chain state.

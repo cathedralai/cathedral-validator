@@ -20,6 +20,10 @@ Rules:
 - A verified machine on a hotkey that is not on the approved list gets zero
   compute weight. Verification is still required: an approved hotkey with no
   verified machine gets nothing either.
+- The list gates the compute lane only. Unlisted hotkeys get zero compute
+  weight; escape weight goes to verified breakers and is not gated by the
+  list. A breaker is paid on the hotkey its signed receipt names, listed or
+  not.
 - If a lane has no recipient in a cycle, its share is burned. It is never moved
   to the other lane or to an unlisted miner. With no approved machine and no
   break the whole vector is burned.
@@ -30,6 +34,27 @@ Rules:
   variable or host file changes them. The escape lane is switched on per host
   as before ([Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md)); while it is
   off its 10 percent is burned.
+
+## A cycle always writes
+
+Machine verification never stops the write. Before the split, a round with a
+verifier `INFRA` verdict, a blocked round, or no serving miner refused the
+whole cycle. That would now leave the previous on-chain row in force, and any
+miner could cause it. So:
+
+- No serving miner, or no verified machine: the vector is the burn, plus the
+  escape share when there are verified breaks.
+- An `INFRA` verdict on a hotkey that is not on the approved list is ignored.
+  That hotkey earns no compute weight whatever its verdict.
+- An `INFRA` verdict on an approved hotkey, or a blocked round, burns the
+  compute lane for that cycle (the cycle event carries
+  `compute_lane.status = BURNED_UNPROVEN`). No approved miner is paid another
+  approved miner's share because of this validator's own verifier outage. With
+  `CATHEDRAL_INFRA_HALT=scoped`, and a verifier that passed another machine of
+  the same kind in the round, the proven machines are paid as before.
+
+Chain rules still refuse a write (cooldown, permit, stake, commit-reveal
+state, a changed subnet owner hotkey), as does a chain read that fails.
 
 ## The burn destination
 
@@ -57,8 +82,8 @@ an edit to one without the others fails at import. Nothing on a validator host
 can add or remove a hotkey.
 
 Each entry has the hotkey, a label and a note. A listed hotkey that is not
-registered on the subnet, or has no verified machine, receives nothing and
-changes nothing in the vector.
+registered on the subnet, or has no verified machine, receives no compute
+weight and changes nothing in the vector.
 
 On 12 November 2026 the list was seeded with the owner's three compute-miner
 hotkeys (`owner-miner-1`, `owner-miner-2`, `owner-miner-3`). None was
@@ -89,6 +114,25 @@ admission.
    cycle.
 
 Removing a hotkey is the same change in reverse.
+
+## Known limits
+
+- **Recipients are checked at one finalized block.** The validator checks
+  every recipient's UID and hotkey at the anchor and again at the sign head.
+  The signed call, and the timelocked commit the chain reveals about one epoch
+  later, carry UIDs, not hotkeys. A hotkey swap keeps the UID, so if the owner
+  of an approved hotkey swaps it after that read, the weight stays on the UID
+  under the new hotkey; reveal recovery records the change and does not undo
+  it. Only the owner of an approved hotkey can do this, and today every
+  approved hotkey is the subnet owner's own, so it is accepted for this
+  release. It must be closed before any outside hotkey is put on the list.
+- **The escape lane is per host.** A validator without the escape source
+  configured burns the escape share, so validators can disagree on that lane.
+- **Telemetry is not a payout ledger.** It lists serving miners only, so an
+  escape breaker that serves no axon is not shown, and no event is published
+  for a cycle with no serving miner or with a burned unproven compute lane.
+- **Unlisted miners are still challenged.** Their evidence cannot change the
+  vector, but they are verified every cycle and take cycle time.
 
 ## Locking out validators on older releases
 
