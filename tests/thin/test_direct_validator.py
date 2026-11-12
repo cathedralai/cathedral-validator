@@ -35,10 +35,12 @@ from cathedral_thin.independent_runtime import failed_write_recovery as record_c
 from cathedral_thin.independent_runtime import qvl as qvl_runtime
 from cathedral_thin.independent_runtime.axon import ServingAxon
 from cathedral_thin.independent_runtime.direct_contract import (
+    DIRECT_VERSION_KEY,
     DirectSubmissionReceipt,
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
+    SUBNET_OWNER_BURN_HOTKEYS,
 )
 from cathedral_thin.independent_runtime.direct_validator import (
     build_direct_plan,
@@ -82,6 +84,9 @@ INCLUSION_HASH = "0x" + "d" * 64
 SECOND_EXTRINSIC_HASH = "0x" + "e" * 64
 ORPHAN_HASH = "0x" + "f" * 64
 REPORTED_HASH = "0x" + "9" * 64
+# The pinned SN94 subnet owner hotkey: the burn destination, at UID 0 here.
+BURN_HOTKEY = SUBNET_OWNER_BURN_HOTKEYS[NETUID]
+BURN_UID = 9
 MINER_ONE_AXON = ServingAxon(19, MINER_ONE, "1.1.1.1", 8081)
 MINER_TWO_AXON = ServingAxon(20, MINER_TWO, "8.8.8.8", 8081)
 _Q32 = 1 << 32
@@ -147,6 +152,13 @@ class Metagraph:
             self.axons.append(Axon(miner.ip, miner.port, serving=True))
             self.last_update.append(0)
             self.total_stake.append(SimpleNamespace(rao=0))
+        # The subnet owner hotkey is registered and serves no axon.
+        self.uids.append(BURN_UID)
+        self.hotkeys.append(BURN_HOTKEY)
+        self.validator_permit.append(False)
+        self.axons.append(Axon("0.0.0.0", 0, serving=False))
+        self.last_update.append(0)
+        self.total_stake.append(SimpleNamespace(rao=0))
 
 
 class SnapshotSubstrate:
@@ -196,6 +208,11 @@ def snapshot(
             "unusable_ip": 0,
         },
         netuid=NETUID,
+        registered_hotkeys={
+            BURN_HOTKEY: BURN_UID,
+            VALIDATOR: 7,
+            **{miner.hotkey: miner.uid for miner in miners},
+        },
     )
 
 
@@ -323,32 +340,51 @@ def test_finalized_snapshot_skips_private_miner_without_losing_healthy_miner() -
     assert observed.skipped_axons["unroutable"] == 1
 
 
-def test_cycle_with_only_unroutable_miners_refuses_without_writer_submit() -> None:
+def test_cycle_with_only_unroutable_miners_writes_the_burn(monkeypatch) -> None:
+    # Nobody serves a usable axon. The cycle used to refuse here, which left
+    # whatever row was on chain in force; it now writes the burn.
     private = ServingAxon(21, "5PrivateMiner", "10.0.0.1", 8081)
+    submitted: list[DirectWeightPlan] = []
+    receipt = SimpleNamespace(
+        status=STATUS_CONFIRMED, as_document=lambda: {"status": STATUS_CONFIRMED}
+    )
     writer_object = SimpleNamespace(
         recover=lambda: None,
-        submit=lambda *_args, **_kwargs: pytest.fail("unroutable miner reached writer"),
+        submit=lambda plan, **_kwargs: submitted.append(plan) or receipt,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "score_multicompute_round",
+        lambda **_kwargs: pytest.fail("an empty serving set was challenged"),
     )
 
-    with pytest.raises(DirectValidatorError, match="no serving miner"):
-        run_direct_cycle(
-            subtensor=SnapshotSubtensor(Metagraph(miners=(private,))),
-            keypair=FakeKeypair(),
-            verifier_adapter=SimpleNamespace(
-                qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
-            ),
-            writer=writer_object,
-            report_recovery=no_expired_recovery,
-        )
+    event = run_direct_cycle(
+        subtensor=SnapshotSubtensor(Metagraph(miners=(private,))),
+        keypair=FakeKeypair(),
+        verifier_adapter=SimpleNamespace(
+            qvl_digest=qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
+        ),
+        writer=writer_object,
+        report_recovery=no_expired_recovery,
+    )
+
+    assert event["status"] == STATUS_CONFIRMED
+    assert (event["wire_uids"], event["wire_weights"]) == ([BURN_UID], [W])
+    assert submitted[0].raw_scores == () and submitted[0].burn_uid == BURN_UID
 
 
-def test_finalized_snapshot_refuses_no_serving_miners_or_missing_permit() -> None:
+def test_finalized_snapshot_allows_no_serving_miner_and_refuses_a_missing_permit() -> (
+    None
+):
     no_miner = Metagraph(miners=())
     no_permit = Metagraph()
     no_permit.validator_permit[0] = False
 
-    with pytest.raises(DirectValidatorError, match="no serving miner"):
-        finalized_serving_miners_snapshot(SnapshotSubtensor(no_miner), FakeKeypair())
+    empty = finalized_serving_miners_snapshot(
+        SnapshotSubtensor(no_miner), FakeKeypair()
+    )
+    assert empty.miners == ()
+    assert empty.registered_hotkeys[BURN_HOTKEY] == BURN_UID
     with pytest.raises(DirectValidatorError, match="lacks a finalized permit"):
         finalized_serving_miners_snapshot(SnapshotSubtensor(no_permit), FakeKeypair())
 
@@ -411,9 +447,7 @@ def test_finalized_snapshot_refuses_a_truthy_non_boolean_permit() -> None:
         finalized_serving_miners_snapshot(SnapshotSubtensor(graph), FakeKeypair())
 
 
-def test_plan_counts_unique_verified_machines_per_uid_and_normalizes_zero_burn() -> (
-    None
-):
+def test_plan_counts_unique_verified_machines_per_uid_and_burns_the_rest() -> None:
     miners = (MINER_ONE_AXON, MINER_TWO_AXON)
     result = round_result(
         machine_row("1"),
@@ -429,11 +463,13 @@ def test_plan_counts_unique_verified_machines_per_uid_and_normalizes_zero_burn()
         (19, ("machine-19-1", "machine-19-2")),
         (20, ("machine-20-3",)),
     )
-    assert planned.wire_uids == (19, 20)
-    assert planned.wire_weights == (43690, 21845)
+    # The compute lane is 6553 of 65535, split 2:1; the rest is burned.
+    assert planned.wire_uids == (BURN_UID, 19, 20)
+    assert planned.wire_weights == (58982, 4369, 2184)
     assert sum(planned.wire_weights) == W
-    assert planned.identity()["burn_uid"] is None
-    assert planned.identity()["burn_weight"] == 0
+    assert planned.identity()["burn_uid"] == BURN_UID
+    assert planned.identity()["burn_hotkey"] == BURN_HOTKEY
+    assert planned.identity()["burn_weight"] == 58982
     assert planned.qvl_digest == qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
     assert planned.identity()["qvl_digest"] == qvl_runtime.DIRECT_VALIDATOR_QVL_DIGEST
 
@@ -450,8 +486,8 @@ def test_plan_tie_break_and_duplicate_zeroing_are_deterministic() -> None:
     planned = build_direct_plan(snapshot(miners=miners), result)
 
     assert planned.raw_scores == ((19, 1), (20, 1))
-    assert planned.wire_uids == (19, 20)
-    assert planned.wire_weights == (32768, 32767)
+    assert planned.wire_uids == (BURN_UID, 19, 20)
+    assert planned.wire_weights == (58982, 3277, 3276)
 
 
 def test_phase_latency_is_evidence_only_and_never_changes_score() -> None:
@@ -472,8 +508,8 @@ def test_phase_latency_is_evidence_only_and_never_changes_score() -> None:
     slow_plan = build_direct_plan(snapshot(), slow)
 
     assert slow_plan.raw_scores == fast_plan.raw_scores == ((19, 1),)
-    assert slow_plan.wire_uids == fast_plan.wire_uids == (19,)
-    assert slow_plan.wire_weights == fast_plan.wire_weights == (W,)
+    assert slow_plan.wire_uids == fast_plan.wire_uids == (BURN_UID, 19)
+    assert slow_plan.wire_weights == fast_plan.wire_weights == (58982, 6553)
 
 
 def test_evidence_summary_is_fixed_shape_deterministic_and_bounded() -> None:
@@ -569,15 +605,20 @@ def test_legacy_singleton_fleet_earns_zero_without_blocking_other_miners() -> No
     planned = build_direct_plan(snapshot(miners=miners), result)
 
     assert planned.raw_scores == ((19, 0), (20, 1))
-    assert planned.wire_uids == (20,)
-    assert planned.wire_weights == (W,)
+    assert planned.wire_uids == (BURN_UID, 20)
+    assert planned.wire_weights == (58982, 6553)
 
 
-def test_qvl_infrastructure_failure_halts_instead_of_redistributing() -> None:
+def test_qvl_infrastructure_failure_burns_the_lane_instead_of_redistributing() -> None:
+    # An INFRA count no row accounts for cannot be tied to an unlisted hotkey,
+    # so the compute lane is burned. The write itself is never refused.
     result = replace(round_result(machine_row("1")), qvl_infra_count=1)
 
-    with pytest.raises(DirectValidatorError, match="not fully proven"):
-        build_direct_plan(snapshot(), result)
+    planned = build_direct_plan(snapshot(), result)
+
+    assert "not fully proven" in runtime.compute_lane_unproven(result)
+    assert planned.raw_scores == ((19, 0),)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 def _infra_row(marker: str, *, uid: int, hotkey: str, kind: str) -> dict[str, object]:
@@ -617,11 +658,13 @@ def test_one_miners_infra_verdict_zeroes_only_that_machine_when_the_verifier_wor
     )
 
     assert planned.raw_scores == ((19, 1), (20, 0))
-    assert planned.wire_uids == (19,)
+    assert planned.wire_uids == (BURN_UID, 19)
 
 
 @pytest.mark.parametrize("value", [None, "", "any", "SCOPED", "scoped-ish"])
-def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) -> None:
+def test_without_the_opt_in_an_approved_infra_verdict_burns_the_lane(
+    value, monkeypatch
+) -> None:
     if value is None:
         monkeypatch.delenv(runtime.INFRA_HALT_ENV, raising=False)
     else:
@@ -632,8 +675,12 @@ def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) ->
         qvl=1,
     )
 
-    with pytest.raises(DirectValidatorError, match="=scoped would write it"):
-        build_direct_plan(snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result)
+    planned = build_direct_plan(
+        snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result
+    )
+
+    assert "=scoped would pay it" in runtime.compute_lane_unproven(result)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 @pytest.mark.parametrize(
@@ -657,7 +704,7 @@ def test_without_the_opt_in_any_infra_verdict_still_halts(value, monkeypatch) ->
         ),
     ],
 )
-def test_infra_without_a_pass_of_the_same_kind_still_halts(
+def test_approved_infra_without_a_pass_of_the_same_kind_burns_the_lane(
     rows, qvl, snp, monkeypatch
 ) -> None:
     monkeypatch.setenv(runtime.INFRA_HALT_ENV, "scoped")
@@ -671,11 +718,13 @@ def test_infra_without_a_pass_of_the_same_kind_still_halts(
         else:
             built.append(_infra_row(marker, uid=uid, hotkey=hotkey, kind=kind))
 
-    with pytest.raises(DirectValidatorError, match="not fully proven"):
-        build_direct_plan(
-            snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)),
-            _tee_round(*built, qvl=qvl, snp=snp),
-        )
+    result = _tee_round(*built, qvl=qvl, snp=snp)
+    planned = build_direct_plan(
+        snapshot(miners=(MINER_ONE_AXON, MINER_TWO_AXON)), result
+    )
+
+    assert "not fully proven" in runtime.compute_lane_unproven(result)
+    assert (planned.wire_uids, planned.wire_weights) == ((BURN_UID,), (W,))
 
 
 class Extrinsic:
@@ -712,6 +761,9 @@ class WriterSubstrate:
         self.submission_flags: list[tuple[bool, bool]] = []
         self.expected_uids = [19]
         self.expected_weights = [W]
+        self.subnet_owner_hotkey = BURN_HOTKEY
+        # The version key the included call carries.
+        self.call_version_key = DIRECT_VERSION_KEY
         # The finalized head the writer signs at, the account's next index,
         # and the hash the next signature gets.
         self.sign_head = ANCHOR_NUMBER + 1
@@ -847,7 +899,7 @@ class WriterSubstrate:
                                 {"name": "mecid", "value": 0},
                                 {"name": "dests", "value": self.expected_uids},
                                 {"name": "weights", "value": weights},
-                                {"name": "version_key", "value": 10005000},
+                                {"name": "version_key", "value": self.call_version_key},
                             ],
                         },
                     },
@@ -873,6 +925,10 @@ class WriterSubstrate:
             assert params == [94]
             assert block_hash == self.block_hash(self.sign_head)
             return 0
+        if storage_function == "SubnetOwnerHotkey":
+            assert params == [94]
+            assert block_hash == self.block_hash(self.sign_head)
+            return self.subnet_owner_hotkey
         assert storage_function == "Weights"
         assert params[1] == 7
         self.get_block_number(block_hash)
@@ -1079,8 +1135,10 @@ def test_multi_uid_writer_persists_exact_intent_and_confirms_three_heads(
     assert state["schema"] == STATE_SCHEMA
     assert state["pending"] is None
     assert state["last_attempt"]["identity"]["raw_scores"] == [[19, 2], [20, 1]]
-    assert state["last_attempt"]["intent"]["kwargs"]["dests"] == [19, 20]
-    assert state["last_attempt"]["intent"]["kwargs"]["weights"] == [43690, 21845]
+    assert state["last_attempt"]["intent"]["kwargs"]["dests"] == [BURN_UID, 19, 20]
+    assert state["last_attempt"]["intent"]["kwargs"]["weights"] == [58982, 4369, 2184]
+    assert state["last_attempt"]["identity"]["burn_uid"] == BURN_UID
+    assert state["last_attempt"]["identity"]["burn_weight"] == 58982
     assert state["last_attempt"]["intent"]["eligibility"]["weights_rate_limit"] == 20
     assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
 
@@ -1096,18 +1154,19 @@ def test_writer_confirms_subtensor_max_upscaled_tied_weights(
             machine_row("2", uid=20, hotkey=MINER_TWO),
         ),
     )
-    assert planned.wire_weights == (32_768, 32_767)
-    assert pallet_storage_weights(planned.wire_weights) == [65_535, 65_533]
+    assert planned.wire_weights == (58_982, 3_277, 3_276)
+    assert pallet_storage_weights(planned.wire_weights) == [65_535, 3_641, 3_640]
     instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
 
     receipt = submit_before_deadline(instance, planned)
 
     assert receipt.status == STATUS_CONFIRMED
-    assert subtensor.substrate.expected_weights == [32_768, 32_767]
+    assert subtensor.substrate.expected_weights == [58_982, 3_277, 3_276]
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     assert state["last_attempt"]["intent"]["kwargs"]["weights"] == [
-        32_768,
-        32_767,
+        58_982,
+        3_277,
+        3_276,
     ]
 
 
@@ -1183,9 +1242,10 @@ def paying_plan(miners: tuple[ServingAxon, ...]) -> DirectWeightPlan:
     )
 
 
-# The fake metagraph places the validator at UID 7 and each miner at its own
-# UID, and reports SubnetworkN as the highest UID plus one. The last case is a
-# fully registered subnet of nine UIDs whose every non-validator UID is paid.
+# The fake metagraph places the validator at UID 7, the burn destination at
+# UID 9 and each miner at its own UID, and reports SubnetworkN as the highest
+# UID plus one. The last case is a fully registered subnet of ten UIDs whose
+# every non-validator UID is weighted.
 @pytest.mark.parametrize(
     ("miner_uids", "min_allowed"),
     (
@@ -1213,23 +1273,24 @@ def test_raised_min_allowed_weights_signs_a_vector_the_chain_accepts(
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
     eligibility = state["last_attempt"]["intent"]["eligibility"]
     assert eligibility["min_allowed_weights"] == min_allowed
-    assert eligibility["subnetwork_n"] == max(miner_uids) + 1
+    assert eligibility["subnetwork_n"] == max(*miner_uids, BURN_UID) + 1
 
 
 def test_min_allowed_weights_refuses_a_vector_the_chain_fails_at_dispatch(
     tmp_path: Path, monkeypatch
 ) -> None:
-    # SubnetworkN is 21 here, so the chain requires min(21, 3) = 3 weights. A
-    # two-weight vector passes the pool and fails at dispatch, which would halt
-    # the writer; it must be refused before anything is signed or journaled.
+    # SubnetworkN is 21 here, so the chain requires min(21, 4) = 4 weights. A
+    # three-weight vector (two miners and the burn) passes the pool and fails
+    # at dispatch, which would halt the writer; it must be refused before
+    # anything is signed or journaled.
     planned = paying_plan((MINER_ONE_AXON, MINER_TWO_AXON))
     instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
-    subtensor.min_allowed = 3
+    subtensor.min_allowed = 4
 
     with pytest.raises(
         DirectValidatorError,
-        match=r"has 2 weights but the chain requires at least 3 "
-        r"\(MinAllowedWeights 3, SubnetworkN 21\)",
+        match=r"has 3 weights but the chain requires at least 4 "
+        r"\(MinAllowedWeights 4, SubnetworkN 21\)",
     ):
         submit_before_deadline(instance, planned)
 
@@ -1242,8 +1303,9 @@ def test_min_allowed_weights_counts_signed_weights_not_scored_miners(
     tmp_path: Path, monkeypatch
 ) -> None:
     # Three miners are scored but only two have a verified machine, so only two
-    # reach the signed vector. The chain counts the weights it is sent, not the
-    # miners the validator looked at, so MinAllowedWeights 3 must refuse.
+    # and the burn reach the signed vector. The chain counts the weights it is
+    # sent, not the miners the validator looked at, so MinAllowedWeights 4 must
+    # refuse.
     miners = serving_miners(19, 20, 21)
     planned = plan(
         miners=miners,
@@ -1252,14 +1314,14 @@ def test_min_allowed_weights_counts_signed_weights_not_scored_miners(
         ),
     )
     assert len(planned.uid_hotkeys) == 3
-    assert planned.wire_uids == (19, 20)
+    assert planned.wire_uids == (BURN_UID, 19, 20)
     instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
-    subtensor.min_allowed = 3
+    subtensor.min_allowed = 4
 
     with pytest.raises(
         DirectValidatorError,
-        match=r"has 2 weights but the chain requires at least 3 "
-        r"\(MinAllowedWeights 3, SubnetworkN 22\)",
+        match=r"has 3 weights but the chain requires at least 4 "
+        r"\(MinAllowedWeights 4, SubnetworkN 22\)",
     ):
         submit_before_deadline(instance, planned)
 
@@ -1273,17 +1335,17 @@ def test_min_allowed_weights_above_subnet_size_demands_every_uid(
 ) -> None:
     # With MinAllowedWeights above SubnetworkN the chain requires SubnetworkN
     # weights, i.e. every registered UID. The writer never weights itself, so
-    # even a plan paying all eight non-validator UIDs of a nine-UID subnet is
+    # even a plan weighting all nine non-validator UIDs of a ten-UID subnet is
     # one short and fails at dispatch. The refusal names the capped
-    # requirement, 9, not the raw 64: it is the chain's rule, not a stricter one.
+    # requirement, 10, not the raw 64: it is the chain's rule, not a stricter one.
     planned = paying_plan(serving_miners(0, 1, 2, 3, 4, 5, 6, 8))
     instance, subtensor, _planned = writer(tmp_path, monkeypatch, planned=planned)
     subtensor.min_allowed = 64
 
     with pytest.raises(
         DirectValidatorError,
-        match=r"has 8 weights but the chain requires at least 9 "
-        r"\(MinAllowedWeights 64, SubnetworkN 9\)",
+        match=r"has 9 weights but the chain requires at least 10 "
+        r"\(MinAllowedWeights 64, SubnetworkN 10\)",
     ):
         submit_before_deadline(instance, planned)
 
@@ -1298,10 +1360,10 @@ def test_legacy_max_weights_limit_storage_does_not_refuse(
     # The writer used to refuse unless the SDK's `max_weight_limit()` read
     # exactly 1.0 and the largest weight fitted under it. That reads the
     # `MaxWeightsLimit` storage, which the chain ignores in favour of a constant
-    # u16::MAX, so a legacy stored value must neither refuse this single
-    # full-weight vector nor even be read.
+    # u16::MAX, so a legacy stored value must neither refuse this burn-heavy
+    # vector nor even be read.
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
-    assert planned.wire_weights == (W,)
+    assert planned.wire_weights == (58982, 6553)
     subtensor.stored_max_weight_limit = 1_000 / W
 
     receipt = submit_before_deadline(instance, planned)
@@ -2484,8 +2546,8 @@ def test_cycle_scores_every_discovered_serving_miner(monkeypatch) -> None:
     assert writer_deadlines == seen_deadlines
     assert result["status"] == STATUS_CONFIRMED
     assert result["raw_scores"] == [[19, 1], [20, 1]]
-    assert result["wire_uids"] == [19, 20]
-    assert result["wire_weights"] == [32768, 32767]
+    assert result["wire_uids"] == [BURN_UID, 19, 20]
+    assert result["wire_weights"] == [58982, 3277, 3276]
     assert set(result["evidence_summary"]) == {"phase_timings_ms", "exclusions"}
     assert submitted[0].raw_scores == ((19, 1), (20, 1))
 

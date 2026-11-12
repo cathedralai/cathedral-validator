@@ -74,6 +74,7 @@ def build_mechanism_weights_kwargs(
     mecid: int = MECID,
     version_key: int = VERSION_KEY,
     expected_netuid: int = NETUID,
+    expected_version_key: int = VERSION_KEY,
 ) -> dict[str, Any]:
     """The keyword arguments for one ``set_mechanism_weights`` call.
 
@@ -82,7 +83,9 @@ def build_mechanism_weights_kwargs(
     netuid a plan was read at next to its own, and a plan read on another
     subnet is refused here instead of being signed. Both default to the
     compiled netuid, so the composer and canary lineages, which pass neither,
-    stay pinned exactly as before.
+    stay pinned exactly as before. ``version_key`` and
+    ``expected_version_key`` follow the same rule: the direct writer passes
+    its own key as both, and every other caller keeps the launch pin.
     """
     _validate_vector(dests, weights)
     if not _is_netuid(expected_netuid):
@@ -93,8 +96,12 @@ def build_mechanism_weights_kwargs(
         )
     if mecid != MECID:
         raise BroadcastDisabled(f"this lineage composes for mecid {MECID} only")
-    if version_key != VERSION_KEY:
-        raise BroadcastDisabled(f"this lineage pins version_key {VERSION_KEY}")
+    if (
+        isinstance(version_key, bool)
+        or not isinstance(version_key, int)
+        or version_key != expected_version_key
+    ):
+        raise BroadcastDisabled(f"this lineage pins version_key {expected_version_key}")
     return {
         "netuid": netuid,
         "mecid": mecid,

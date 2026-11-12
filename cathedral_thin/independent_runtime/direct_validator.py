@@ -3,8 +3,9 @@
 One cycle reads one finalized metagraph, sends a signed validator request to
 every serving miner for its fleet, verifies every machine, runs the existing
 SAT challenge, applies the existing order-independent duplicate rules, and
-builds one zero-burn mechanism-weight vector. The vector is derived locally
-from raw machine counts.
+builds one mechanism-weight vector. The vector is derived locally: a fixed
+share for the verified machines of owner-approved hotkeys, a fixed share for
+escape breaks, and the rest to the subnet owner hotkey, which the chain burns.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from .capacity_shadow import (
     CapacityShadow,
     load_capacity_policy,
 )
+from . import approved_miners
 from .axon import (
     AXON_SKIP_REASONS,
     ServingAxon,
@@ -53,11 +55,12 @@ from .axon import (
 from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
+    ESCAPE_LANE_SHARE,
+    SUBNET_OWNER_BURN_HOTKEYS,
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
     require_netuid,
-    zero_burn_vector,
 )
 from .errors import IndependentLiveError
 from .escape_receipts import (
@@ -380,8 +383,9 @@ def finalized_serving_miners_snapshot(
             key=lambda axon: (axon.uid, axon.hotkey),
         )
     )
-    if not miners:
-        raise DirectValidatorError("direct validator found no serving miner")
+    # No serving miner is not a refusal: the cycle still writes the burn (and
+    # any escape share), so weights set before the gated split never stay in
+    # force just because nobody serves.
     for miner in miners:
         if view.uid_to_hotkey.get(miner.uid) != miner.hotkey:
             raise DirectValidatorError(
@@ -411,18 +415,19 @@ def apply_escape_receipts(
     load: Callable[[str], list[object]] | None = None,
     deadline_monotonic: float | None = None,
 ) -> tuple[DirectWeightPlan, dict[str, object]]:
-    """Blend verified escape breaks into the machine plan.
+    """Pay verified escape breaks the escape lane share of the plan.
 
-    A source that cannot be read leaves the machine-only plan unchanged and
-    says so: an escape feed outage must not stop the weights miners are owed.
-    A plan with escape units binds the receipt digests into its evidence
-    digest, so the journal names which receipts paid. Scoring or blend
-    failures do the same: miners keep the machine vector.
+    The share is the owner-set ``ESCAPE_LANE_SHARE``; the configured fraction
+    only switches the lane on. A source that cannot be read leaves the plan
+    unchanged and says so: the escape share is then burned and the cycle still
+    writes. A plan with escape units binds the receipt digests into its
+    evidence digest, so the journal names which receipts paid. Scoring
+    failures do the same: the escape share is burned.
     """
 
     snapshot = plan.snapshot
     summary: dict[str, object] = {
-        "fraction": str(config.fraction),
+        "fraction": str(ESCAPE_LANE_SHARE),
         "window_seconds": config.window_seconds,
         "source_kind": "https" if config.source.startswith("https://") else "file",
     }
@@ -448,7 +453,10 @@ def apply_escape_receipts(
         registered = {
             hotkey: uid
             for hotkey, uid in (snapshot.registered_hotkeys or {}).items()
-            if hotkey not in REFUSE_HOTKEYS and hotkey != CANARY_HOTKEY
+            if hotkey not in REFUSE_HOTKEYS
+            and hotkey != CANARY_HOTKEY
+            # The burn destination is never a lane recipient.
+            and hotkey != plan.burn_hotkey
         }
         escape_round = score_escape_receipts(
             receipts,
@@ -476,7 +484,7 @@ def apply_escape_receipts(
             evidence_digest=evidence_digest,
             escape_units=escape_round.units_by_uid,
             escape_uid_hotkeys=escape_round.uid_hotkeys,
-            escape_fraction=str(config.fraction),
+            escape_fraction=str(ESCAPE_LANE_SHARE),
         )
         wire_uids, wire_weights = blended.expected_vector()
         blended = dataclasses.replace(
@@ -532,21 +540,51 @@ def _verifier_outage(result: MultiComputeRound) -> bool:
     return False
 
 
+def compute_lane_unproven(result: MultiComputeRound) -> str | None:
+    """Why this round cannot pay the compute lane, or None when it can.
+
+    Before the gated split an unproven round refused the whole write. That
+    would now leave the previous on-chain row in force, and any miner could
+    cause it by returning evidence that ends in INFRA. So an unproven round
+    never stops the write: it burns the compute lane for this cycle instead.
+
+    An INFRA verdict on a hotkey that is not on the approved list is ignored
+    altogether. That hotkey earns no compute weight whatever its verdict, so
+    its evidence must not decide what approved miners are paid. Only an INFRA
+    verdict on an approved hotkey, or one that cannot be tied to a hotkey, is
+    judged by the existing halt rule, and where that rule used to refuse, the
+    lane is burned. Nobody is paid another approved miner's share because of
+    this validator's own verifier outage.
+    """
+
+    if result.feature_blocked or result.blockers:
+        return "machine verification round is not fully proven"
+    infra_rows = [
+        row for row in result.rows if row.get("verdict") == QuoteVerdict.INFRA.value
+    ]
+    approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+    if len(infra_rows) == result.qvl_infra_count + result.snp_infra_count and not any(
+        row.get("hotkey") in approved for row in infra_rows
+    ):
+        return None
+    if _verifier_outage(result):
+        return "machine verification round is not fully proven"
+    if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
+        return (
+            "machine verification round is not fully proven (the verifiers "
+            "passed other machines of each INFRA kind this round, so "
+            f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would pay it)"
+        )
+    return None
+
+
 def _positive_machine_rows(
     result: MultiComputeRound,
     miners: Sequence[ServingAxon],
 ) -> tuple[dict[str, Any], ...]:
-    if result.feature_blocked or result.blockers:
-        raise DirectValidatorError("machine verification round is not fully proven")
-    if result.qvl_infra_count or result.snp_infra_count:
-        if _verifier_outage(result):
-            raise DirectValidatorError("machine verification round is not fully proven")
-        if os.environ.get(INFRA_HALT_ENV, "").strip() != INFRA_HALT_SCOPED:
-            raise DirectValidatorError(
-                "machine verification round is not fully proven (the verifiers "
-                "passed other machines of each INFRA kind this round, so "
-                f"{INFRA_HALT_ENV}={INFRA_HALT_SCOPED} would write it)"
-            )
+    if compute_lane_unproven(result) is not None:
+        # No machine is counted, so the compute lane is burned this cycle.
+        return ()
     identities = {miner.uid: miner.hotkey for miner in miners}
     fleet_ok: set[int] = set()
     for uid, hotkey in identities.items():
@@ -620,7 +658,12 @@ def build_direct_plan(
     scored_miners: Sequence[ServingAxon] | None = None,
     tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> DirectWeightPlan:
-    """Count unique verified machines per UID and normalize with zero burn.
+    """Count unique verified machines per UID and build the gated vector.
+
+    Only hotkeys on the release's approved list earn compute weight; the rest
+    of the vector goes to the subnet owner hotkey, resolved here from the
+    anchor metagraph. With no approved machine verified the compute share is
+    burned and the vector is still built.
 
     With a TDX measurement policy the evidence document names its mode and
     digest, so the evidence digest binds which policy produced the vector
@@ -629,8 +672,6 @@ def build_direct_plan(
     """
 
     miners = tuple(snapshot.miners if scored_miners is None else scored_miners)
-    if not miners:
-        raise DirectValidatorError("direct plan has no scored miner")
     miner_by_uid = {miner.uid: miner for miner in miners}
     if len(miner_by_uid) != len(miners) or any(
         snapshot.miner_by_uid().get(uid) != miner for uid, miner in miner_by_uid.items()
@@ -642,7 +683,17 @@ def build_direct_plan(
         grouped[int(row["uid"])].append(str(row["machine_id"]))
     raw_scores = tuple((uid, len(grouped[uid])) for uid in sorted(grouped))
     uid_hotkeys = {uid: miner_by_uid[uid].hotkey for uid in sorted(miner_by_uid)}
-    wire_uids, wire_weights = zero_burn_vector(raw_scores, uid_hotkeys)
+    burn_hotkey = SUBNET_OWNER_BURN_HOTKEYS.get(snapshot.netuid)
+    burn_uid = (snapshot.registered_hotkeys or {}).get(burn_hotkey or "")
+    if (
+        burn_hotkey is None
+        or isinstance(burn_uid, bool)
+        or not isinstance(burn_uid, int)
+    ):
+        # There is no fallback destination for the burn share.
+        raise DirectValidatorError(
+            "the pinned subnet owner burn hotkey is not registered at the anchor"
+        )
     evidence = {
         "schema": "cathedral_direct_validator_evidence_v1",
         "anchor": snapshot.identity(),
@@ -676,9 +727,13 @@ def build_direct_plan(
         ),
         raw_scores=raw_scores,
         uid_hotkeys=tuple(sorted(uid_hotkeys.items())),
-        wire_uids=wire_uids,
-        wire_weights=wire_weights,
+        wire_uids=(),
+        wire_weights=(),
+        burn_uid=burn_uid,
+        burn_hotkey=burn_hotkey,
     )
+    wire_uids, wire_weights = plan.expected_vector()
+    plan = dataclasses.replace(plan, wire_uids=wire_uids, wire_weights=wire_weights)
     plan.kwargs()
     return plan
 
@@ -899,17 +954,32 @@ def _run_direct_cycle_unlocked(
         raise DirectValidatorError("full evidence cycle expired during discovery")
     # Miners are challenged for the subnet whose metagraph named them, which
     # the checks above have tied to this cycle and to its writer.
-    result = score_multicompute_round(
-        axons=snapshot.miners,
-        keypair=keypair,
-        anchor_hash=snapshot.block_hash,
-        verifier_adapter=verifier_adapter,
-        snp_verifier=snp_verifier,
-        tdx_policy=tdx_policy,
-        cycle_deadline_monotonic=cycle_deadline,
-        netuid=snapshot.netuid,
-    )
+    if snapshot.miners:
+        result = score_multicompute_round(
+            axons=snapshot.miners,
+            keypair=keypair,
+            anchor_hash=snapshot.block_hash,
+            verifier_adapter=verifier_adapter,
+            snp_verifier=snp_verifier,
+            tdx_policy=tdx_policy,
+            cycle_deadline_monotonic=cycle_deadline,
+            netuid=snapshot.netuid,
+        )
+    else:
+        # Nobody serves, so there is nothing to challenge. The plan below is
+        # the burn, plus the escape share when there are verified breaks.
+        result = MultiComputeRound(
+            rows=(),
+            fleet=(),
+            verified_units={},
+            pass_count=0,
+            qvl_infra_count=0,
+            feature_blocked=False,
+            exclusions=(),
+            blockers=(),
+        )
     plan = build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
+    compute_unproven = compute_lane_unproven(result)
     evidence_summary = _evidence_cycle_summary(
         snapshot, result, plan, tdx_policy=tdx_policy
     )
@@ -999,6 +1069,11 @@ def _run_direct_cycle_unlocked(
     }
     if escape_summary is not None:
         event["escape_receipts"] = escape_summary
+    if compute_unproven is not None:
+        event["compute_lane"] = {
+            "status": "BURNED_UNPROVEN",
+            "reason": compute_unproven,
+        }
     if pool_inventory is not None:
         try:
             from .pool_inventory import publish_cycle_inventory
@@ -1524,7 +1599,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "escape_receipts": {
                     "status": "ENABLED",
                     "source": escape_config.source,
-                    "fraction": str(escape_config.fraction),
+                    # The configured fraction only switches the lane on; the
+                    # share paid is the owner-set constant.
+                    "fraction": str(ESCAPE_LANE_SHARE),
                     "window_seconds": escape_config.window_seconds,
                 }
             }

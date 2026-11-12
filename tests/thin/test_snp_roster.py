@@ -26,6 +26,7 @@ import pytest
 from bittensor_wallet import Keypair
 
 import cathedral_thin.independent_runtime.direct_validator as runtime
+from cathedral_thin.independent_runtime.direct_contract import SUBNET_OWNER_BURN_HOTKEYS
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime import snp_roster as roster
 from cathedral_thin.independent_runtime.axon import ServingAxon
@@ -301,6 +302,8 @@ def _snapshot() -> FinalizedMetagraphSnapshot:
         miners=AXONS,
         skipped_axons={"refuse_or_canary": 0, "port_zero": 0, "unusable_ip": 0},
         netuid=NETUID,
+        # The burn destination: the subnet owner hotkey, at UID 9 here.
+        registered_hotkeys={SUBNET_OWNER_BURN_HOTKEYS[NETUID]: 9},
     )
 
 
@@ -659,7 +662,7 @@ def test_off_by_default_the_cycle_makes_no_roster_call(monkeypatch):
     event = _cycle(monkeypatch)
     assert event["status"] == "CONFIRMED"
     assert "snp_roster" not in event
-    assert event["wire_uids"] == [3, 5]
+    assert event["wire_uids"] == [3, 5, 9]
 
 
 def _capture(monkeypatch):
@@ -713,7 +716,7 @@ def test_a_roster_failure_never_changes_the_cycle(monkeypatch, tmp_path: Path):
         "status": "FAILED",
         "error": "roster API is unavailable",
     }
-    assert event["wire_uids"] == [3, 5]
+    assert event["wire_uids"] == [3, 5, 9]
 
 
 def test_a_token_file_that_is_not_owner_only_is_never_sent(monkeypatch, tmp_path: Path):

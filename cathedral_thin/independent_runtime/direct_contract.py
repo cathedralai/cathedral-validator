@@ -6,13 +6,45 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
-from cathedral_thin.independent.constants import MAX_NETUID, W
+from cathedral_thin.independent.constants import MAX_NETUID, NETUID, VERSION_KEY, W
 from cathedral_thin.independent.submit import build_mechanism_weights_kwargs
 
+from . import approved_miners
 from .axon import ServingAxon
 from .errors import IndependentLiveError
+from .testnet import TESTNET_NETUID
 
 DIRECT_PLAN_SCHEMA = "cathedral_direct_validator_plan_v1"
+
+# The owner set both shares on 12 Nov 2026: about 10 percent of the weight
+# vector to the approved-miner compute lane, about 10 percent to the escape
+# room lane, and the rest burned. A lane with no eligible recipient in a cycle
+# is burned too; its share never moves to the other lane or to an unlisted
+# miner.
+COMPUTE_LANE_SHARE = Fraction(1, 10)
+ESCAPE_LANE_SHARE = Fraction(1, 10)
+
+# The version key the direct writer stamps on every weight call. Raised 12 Nov
+# 2026 with the gated compute split, so the owner can set the subnet's
+# weights_version to this value and refuse weights from validators on older
+# releases.
+DIRECT_VERSION_KEY = 10005001
+# The key every earlier direct release signed with (the shared launch pin).
+# Only the writer's recovery reads this, so a call or commit journalled before
+# an upgrade is still confirmed exactly as it was signed.
+PRIOR_DIRECT_VERSION_KEYS = frozenset({VERSION_KEY})
+
+# Burn destination per subnet: the chain's SubnetOwnerHotkey, whose miner
+# emission the chain burns or recycles. A hotkey, never a UID; the UID is
+# resolved at the anchor and the writer refuses to sign unless the chain still
+# names this hotkey as the subnet owner at the sign head. Read on 12 Nov 2026
+# (Finney block 9489091: netuid 94 UID 0; public testnet netuid 584 UID 0).
+# independent.constants.BURN_HOTKEY is the older SN39 owner hotkey, which is
+# not registered on netuid 94, so the direct path does not use it.
+SUBNET_OWNER_BURN_HOTKEYS: Mapping[int, str] = {
+    NETUID: "5FQsFkui1UvS7S7Sf3JAqN9FPCR7RmufSEZTGuVPPN5EDmsN",  # pragma: allowlist secret
+    TESTNET_NETUID: "5DtRy5F5QBHQ8XAWueVSnUqXH8cfHTv2cGWFhCcUB4tH5Nu3",  # pragma: allowlist secret
+}
 
 
 class DirectValidatorError(IndependentLiveError):
@@ -80,6 +112,107 @@ def zero_burn_vector(
     values = tuple(weights[uid] for uid in uids)
     if not uids or sum(values) != W:
         raise DirectValidatorError("zero-burn machine counts did not normalize to u16")
+    return uids, values
+
+
+def _lane_weights(
+    rows: Sequence[tuple[int, int]],
+    budget: int,
+    uid_hotkeys: Mapping[int, str],
+) -> dict[int, int]:
+    """Split ``budget`` over ``rows`` by units, largest remainder first.
+
+    Ties break by hotkey, then UID, the order ``zero_burn_vector`` uses. The
+    result sums to ``budget`` exactly, or is empty when there is no row.
+    """
+
+    seen: set[int] = set()
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) != 2:
+            raise DirectValidatorError("lane row is malformed")
+        uid, units = row
+        if (
+            isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or not 0 <= uid <= W
+            or uid in seen
+            or isinstance(units, bool)
+            or not isinstance(units, int)
+            or units <= 0
+            or not isinstance(uid_hotkeys.get(uid), str)
+            or not uid_hotkeys[uid]
+        ):
+            raise DirectValidatorError("lane row identity is invalid")
+        seen.add(uid)
+    total = sum(units for _uid, units in rows)
+    if total <= 0:
+        return {}
+    weights = {uid: units * budget // total for uid, units in rows}
+    remainder = {uid: units * budget % total for uid, units in rows}
+    ordered = sorted(weights, key=lambda uid: (-remainder[uid], uid_hotkeys[uid], uid))
+    for uid in ordered[: budget - sum(weights.values())]:
+        weights[uid] += 1
+    return weights
+
+
+def gated_split_vector(
+    raw_scores: Sequence[tuple[int, int]],
+    uid_hotkeys: Mapping[int, str],
+    *,
+    approved_hotkeys: frozenset[str],
+    escape_units: Sequence[tuple[int, int]],
+    escape_uid_hotkeys: Mapping[int, str],
+    burn_uid: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """The only vector the direct path signs: two gated lanes and the burn.
+
+    The compute lane splits ``COMPUTE_LANE_SHARE`` of W over the verified
+    machine counts of approved hotkeys only. The escape lane splits
+    ``ESCAPE_LANE_SHARE`` of W over the verified breaks. Each lane is an
+    integer budget apportioned on its own, so rounding never reaches a UID
+    outside the lane, and everything not paid goes to ``burn_uid``.
+    """
+
+    if isinstance(burn_uid, bool) or not isinstance(burn_uid, int) or burn_uid < 0:
+        raise DirectValidatorError("burn UID is invalid")
+    if isinstance(raw_scores, (str, bytes)) or not isinstance(raw_scores, Sequence):
+        raise DirectValidatorError("raw machine scores are not a sequence")
+    seen: set[int] = set()
+    compute_rows: list[tuple[int, int]] = []
+    for row in raw_scores:
+        if not isinstance(row, tuple) or len(row) != 2:
+            raise DirectValidatorError("raw machine score row is malformed")
+        uid, count = row
+        if (
+            isinstance(uid, bool)
+            or not isinstance(uid, int)
+            or not 0 <= uid <= W
+            or uid in seen
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or not isinstance(uid_hotkeys.get(uid), str)
+            or not uid_hotkeys[uid]
+        ):
+            raise DirectValidatorError("raw machine score identity is invalid")
+        seen.add(uid)
+        # The gate: a verified machine earns compute weight only when its
+        # hotkey is on the approved list.
+        if count > 0 and uid_hotkeys[uid] in approved_hotkeys:
+            compute_rows.append((uid, count))
+    if any(uid == burn_uid for uid, _units in (*compute_rows, *escape_units)):
+        raise DirectValidatorError("the burn UID cannot be paid by a lane")
+    weights = _lane_weights(compute_rows, int(COMPUTE_LANE_SHARE * W), uid_hotkeys)
+    escape = _lane_weights(
+        tuple(escape_units), int(ESCAPE_LANE_SHARE * W), escape_uid_hotkeys
+    )
+    for uid, weight in escape.items():
+        weights[uid] = weights.get(uid, 0) + weight
+    weights[burn_uid] = W - sum(weights.values())
+    uids = tuple(sorted(uid for uid, weight in weights.items() if weight > 0))
+    values = tuple(weights[uid] for uid in uids)
+    if burn_uid not in uids or sum(values) != W:
+        raise DirectValidatorError("gated split did not normalize to u16")
     return uids, values
 
 
@@ -203,25 +336,46 @@ class DirectWeightPlan:
     escape_units: tuple[tuple[int, int], ...] = ()
     escape_uid_hotkeys: tuple[tuple[int, str], ...] = ()
     escape_fraction: str = "0"
+    # Burn destination resolved at the anchor: the pinned subnet owner hotkey
+    # and the UID it held there. A plan without one is never signed.
+    burn_uid: int | None = None
+    burn_hotkey: str = ""
 
     @property
     def escape_active(self) -> bool:
         return bool(self.escape_units)
 
+    def approved_uids(self) -> tuple[int, ...]:
+        """Scored UIDs whose hotkey is on the release's approved list."""
+
+        approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+        return tuple(uid for uid, hotkey in self.uid_hotkeys if hotkey in approved)
+
     def expected_vector(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         """The only vector this plan may sign, recomputed from its inputs."""
 
-        base = zero_burn_vector(self.raw_scores, dict(self.uid_hotkeys))
-        if not self.escape_active:
-            return base
-        hotkeys = dict(self.uid_hotkeys)
+        if self.burn_uid is None:
+            raise DirectValidatorError("direct plan names no burn destination")
+        miner_hotkeys = dict(self.uid_hotkeys)
         for uid, hotkey in self.escape_uid_hotkeys:
-            if hotkeys.setdefault(uid, hotkey) != hotkey:
+            if miner_hotkeys.get(uid, hotkey) != hotkey:
                 raise DirectValidatorError(
                     "escape UID hotkey disagrees with the miner row"
                 )
-        return escape_blended_vector(
-            base[0], base[1], self.escape_units, Fraction(self.escape_fraction), hotkeys
+        return gated_split_vector(
+            self.raw_scores,
+            miner_hotkeys,
+            approved_hotkeys=approved_miners.APPROVED_COMPUTE_HOTKEYS,
+            escape_units=self.escape_units,
+            escape_uid_hotkeys=dict(self.escape_uid_hotkeys),
+            burn_uid=self.burn_uid,
+        )
+
+    def burn_weight(self) -> int:
+        """The u16 weight this plan's vector gives the burn destination."""
+
+        return dict(zip(self.wire_uids, self.wire_weights, strict=True)).get(
+            self.burn_uid, 0
         )
 
     @property
@@ -236,6 +390,8 @@ class DirectWeightPlan:
             weights=self.wire_weights,
             netuid=self.netuid,
             expected_netuid=self.netuid,
+            version_key=DIRECT_VERSION_KEY,
+            expected_version_key=DIRECT_VERSION_KEY,
         )
 
     def identity(self) -> dict[str, object]:
@@ -259,8 +415,13 @@ class DirectWeightPlan:
             ],
             "raw_scores": [list(row) for row in self.raw_scores],
             "uid_hotkeys": [list(row) for row in self.uid_hotkeys],
-            "burn_uid": None,
-            "burn_weight": 0,
+            "burn_uid": self.burn_uid,
+            "burn_hotkey": self.burn_hotkey,
+            "burn_weight": self.burn_weight(),
+            "compute_lane": {
+                "share": str(COMPUTE_LANE_SHARE),
+                "approved_uids": list(self.approved_uids()),
+            },
             "call": "SubtensorModule.set_mechanism_weights",
             "kwargs": self.kwargs(),
         }
@@ -289,12 +450,18 @@ class DirectSubmissionReceipt:
 
 
 __all__ = [
+    "COMPUTE_LANE_SHARE",
     "DIRECT_PLAN_SCHEMA",
+    "DIRECT_VERSION_KEY",
     "DirectSubmissionReceipt",
     "DirectValidatorError",
     "DirectWeightPlan",
+    "ESCAPE_LANE_SHARE",
     "FinalizedMetagraphSnapshot",
+    "PRIOR_DIRECT_VERSION_KEYS",
+    "SUBNET_OWNER_BURN_HOTKEYS",
     "escape_blended_vector",
+    "gated_split_vector",
     "require_netuid",
     "zero_burn_vector",
 ]

@@ -45,11 +45,11 @@ from cathedral_thin.independent.constants import (
     MECID,
     MORTAL_PERIOD_BLOCKS,
     NETUID,
-    VERSION_KEY,
     W,
 )
 from cathedral_thin.independent.submit import build_mechanism_weights_kwargs
 
+from . import approved_miners
 from .axon import finalized_head, observed_genesis_hash
 from .commit_reveal import (
     BLOCK_TIME_SECONDS,
@@ -72,6 +72,10 @@ from .commit_reveal import (
 )
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
+    DIRECT_VERSION_KEY,
+    ESCAPE_LANE_SHARE,
+    PRIOR_DIRECT_VERSION_KEYS,
+    SUBNET_OWNER_BURN_HOTKEYS,
     DirectSubmissionReceipt,
     DirectValidatorError,
     DirectWeightPlan,
@@ -255,7 +259,8 @@ def _validate_escape_rows(
     except (TypeError, ValueError, ZeroDivisionError) as exc:
         raise DirectValidatorError("direct plan escape fraction is malformed") from exc
     if (
-        not 0 < fraction < 1
+        # The escape share is the owner-set constant, never a plan's choice.
+        fraction != ESCAPE_LANE_SHARE
         or len(escape_hotkeys) != len(plan.escape_uid_hotkeys)
         or len(units) != len(plan.escape_units)
         or set(escape_hotkeys) != set(units)
@@ -1083,22 +1088,53 @@ class DirectWeightWriter:
             weights=list(plan.wire_weights),
             netuid=plan.netuid,
             expected_netuid=self.netuid,
+            version_key=DIRECT_VERSION_KEY,
+            expected_version_key=DIRECT_VERSION_KEY,
         )
         if kwargs != expected or kwargs != {
             "netuid": self.netuid,
             "mecid": MECID,
             "dests": list(plan.wire_uids),
             "weights": list(plan.wire_weights),
-            "version_key": VERSION_KEY,
+            "version_key": DIRECT_VERSION_KEY,
         }:
-            raise DirectValidatorError("direct plan is not an exact zero-burn vector")
+            raise DirectValidatorError(
+                "direct plan is not the exact pinned weight call"
+            )
         uid_hotkeys = dict(plan.uid_hotkeys)
         raw_scores = dict(plan.raw_scores)
         machine_ids = dict(plan.machine_ids_by_uid)
         snapshot_hotkeys = {miner.uid: miner.hotkey for miner in plan.snapshot.miners}
         escape_hotkeys = _validate_escape_rows(plan, uid_hotkeys)
+        # The burn destination is the pinned subnet owner hotkey at the UID it
+        # held at the anchor. It is never a lane recipient, and it is this
+        # validator's own UID only when this validator signs as that hotkey:
+        # the chain keeps the subnet owner's weight on its own UID.
+        burn_hotkey = SUBNET_OWNER_BURN_HOTKEYS.get(self.netuid)
+        burn_uid = plan.burn_uid
+        if (
+            burn_hotkey is None
+            or plan.burn_hotkey != burn_hotkey
+            or isinstance(burn_uid, bool)
+            or not isinstance(burn_uid, int)
+            or (plan.snapshot.registered_hotkeys or {}).get(burn_hotkey) != burn_uid
+            or uid_hotkeys.get(burn_uid, burn_hotkey) != burn_hotkey
+            or burn_uid in escape_hotkeys
+            or (burn_uid == plan.snapshot.validator_uid)
+            != (burn_hotkey == plan.snapshot.validator_hotkey)
+        ):
+            raise DirectValidatorError(
+                "direct plan burn destination is not the pinned subnet owner hotkey"
+            )
         expected_uids, expected_weights = plan.expected_vector()
-        positive_uids = {uid for uid, score in raw_scores.items() if score > 0}
+        approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+        # Exactly who may be weighted: approved hotkeys with a verified
+        # machine, verified escape breakers, and the burn destination.
+        payable_uids = {
+            uid
+            for uid, score in raw_scores.items()
+            if score > 0 and uid_hotkeys.get(uid) in approved
+        } | set(escape_hotkeys)
         if (
             len(uid_hotkeys) != len(plan.uid_hotkeys)
             or len(raw_scores) != len(plan.raw_scores)
@@ -1117,16 +1153,12 @@ class DirectWeightWriter:
             != sum(len(ids) for ids in machine_ids.values())
             or plan.wire_uids != expected_uids
             or plan.wire_weights != expected_weights
-            or (
-                set(plan.wire_uids) != positive_uids
-                if not escape_hotkeys
-                else not set(plan.wire_uids) <= positive_uids | set(escape_hotkeys)
-            )
-            or any(
-                uid not in uid_hotkeys and uid not in escape_hotkeys
-                for uid in plan.wire_uids
-            )
-            or plan.snapshot.validator_uid in plan.wire_uids
+            or burn_uid in payable_uids
+            # A paid UID whose share rounds to zero is left out of the
+            # vector; the exact vector is already pinned two lines up.
+            or burn_uid not in plan.wire_uids
+            or not set(plan.wire_uids) <= payable_uids | {burn_uid}
+            or plan.snapshot.validator_uid in set(plan.wire_uids) - {burn_uid}
             or sum(plan.wire_weights) != 0xFFFF
             or plan.qvl_digest != DIRECT_VALIDATOR_QVL_DIGEST
             or not isinstance(plan.evidence_digest, str)
@@ -1279,6 +1311,15 @@ class DirectWeightWriter:
                 label="SN94 weight version",
             )
             _require_presign_time(presign_deadline, stage="weight-version RPC")
+            owner_hotkey = _raw_value(
+                self.subtensor.substrate.query(
+                    module="SubtensorModule",
+                    storage_function="SubnetOwnerHotkey",
+                    params=[self.netuid],
+                    block_hash=fresh.block_hash,
+                )
+            )
+            _require_presign_time(presign_deadline, stage="subnet-owner RPC")
         except DirectValidatorError:
             raise
         except Exception as exc:
@@ -1323,6 +1364,17 @@ class DirectWeightWriter:
                 raise DirectValidatorError(
                     "an escape receipt UID changed hotkey before direct signing"
                 )
+        # The burn share is safe only on the hotkey the chain itself names as
+        # the subnet owner, at the UID it still holds at the sign head.
+        if (
+            not isinstance(plan.burn_uid, int)
+            or not 0 <= plan.burn_uid < len(info_hotkeys)
+            or info_hotkeys[plan.burn_uid] != plan.burn_hotkey
+            or owner_hotkey != plan.burn_hotkey
+        ):
+            raise DirectValidatorError(
+                "the burn destination is not the subnet owner hotkey at the sign head"
+            )
         validator_stake = _balance_rao(
             info_stakes[fresh.validator_uid], label="validator effective stake"
         )
@@ -1353,7 +1405,10 @@ class DirectWeightWriter:
         # MinAllowedWeights above SubnetworkN the chain demands every
         # registered UID, which a writer that excludes itself cannot meet.
         required_weights = min(subnet_n, min_allowed)
-        if len(plan.wire_uids) < required_weights:
+        # The chain's lone self-weight exception, which only the subnet
+        # owner's validator reaches: its burn-only vector is its own UID.
+        lone_self_weight = plan.wire_uids == (fresh.validator_uid,)
+        if len(plan.wire_uids) < required_weights and not lone_self_weight:
             raise DirectValidatorError(
                 f"direct vector has {len(plan.wire_uids)} weights but the chain "
                 f"requires at least {required_weights} "
@@ -1392,7 +1447,7 @@ class DirectWeightWriter:
             )
         if mechanism_count <= MECID:
             raise DirectValidatorError("SN94 mechanism 0 is unavailable")
-        if version_key != 0 and VERSION_KEY < version_key:
+        if version_key != 0 and DIRECT_VERSION_KEY < version_key:
             raise DirectValidatorError(
                 "direct weight version is below the chain minimum"
             )
@@ -1780,6 +1835,31 @@ class DirectWeightWriter:
             and _chain_call_arg(call, "weights") == kwargs.get("weights")
         )
 
+    def _journaled_weights_kwargs(self, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Rebuild journalled call kwargs for this writer's netuid.
+
+        A new plan always carries ``DIRECT_VERSION_KEY``. A write journalled
+        by an earlier release carries that release's key, and recovery must
+        confirm the call exactly as it was signed, so a key in
+        ``PRIOR_DIRECT_VERSION_KEYS`` is accepted. Any other key is refused.
+        """
+
+        journalled = kwargs.get("version_key")
+        accepted = (
+            journalled
+            if not isinstance(journalled, bool)
+            and journalled in PRIOR_DIRECT_VERSION_KEYS
+            else DIRECT_VERSION_KEY
+        )
+        return build_mechanism_weights_kwargs(
+            dests=list(kwargs.get("dests", ())),
+            weights=list(kwargs.get("weights", ())),
+            netuid=self.netuid,
+            expected_netuid=self.netuid,
+            version_key=accepted,
+            expected_version_key=accepted,
+        )
+
     def _confirmation_contract(
         self, pending: Mapping[str, Any]
     ) -> tuple[int, str, dict[int, str], tuple[int, ...], tuple[int, ...]]:
@@ -1792,11 +1872,28 @@ class DirectWeightWriter:
         miners = anchor.get("miners") if isinstance(anchor, Mapping) else None
         uid_rows = identity.get("uid_hotkeys")
         kwargs = intent.get("kwargs")
+        burn_uid = identity.get("burn_uid")
+        burn_hotkey = identity.get("burn_hotkey")
+        burn_weight = identity.get("burn_weight")
+        # A journal written before the gated split names no burn destination
+        # and a zero burn weight. It is still confirmed as it was signed, so an
+        # upgrade with a pending write recovers instead of stopping.
+        legacy_zero_burn = (
+            burn_uid is None and "burn_hotkey" not in identity and burn_weight == 0
+        )
+        gated_burn = (
+            not isinstance(burn_uid, bool)
+            and isinstance(burn_uid, int)
+            and isinstance(burn_hotkey, str)
+            and bool(burn_hotkey)
+            and not isinstance(burn_weight, bool)
+            and isinstance(burn_weight, int)
+            and burn_weight > 0
+        )
         if (
             identity.get("schema") != DIRECT_PLAN_SCHEMA
             or identity.get("qvl_digest") != DIRECT_VALIDATOR_QVL_DIGEST
-            or identity.get("burn_uid") is not None
-            or identity.get("burn_weight") != 0
+            or not (legacy_zero_burn or gated_burn)
             or identity.get("kwargs") != kwargs
             or not isinstance(validator, Mapping)
             or not isinstance(miners, list)
@@ -1881,22 +1978,27 @@ class DirectWeightWriter:
                     raise DirectSubmissionContradiction(
                         "confirmation escape identity is malformed"
                     )
+        if gated_burn and (
+            uid_hotkeys.setdefault(burn_uid, burn_hotkey) != burn_hotkey
+            or len(dests) != len(weights)
+            or dict(zip(dests, weights)).get(burn_uid) != burn_weight
+            or (burn_uid == validator_uid) != (burn_hotkey == validator_hotkey)
+        ):
+            raise DirectSubmissionContradiction(
+                "confirmation burn identity is malformed"
+            )
         if (
             not dests
             or len(dests) != len(weights)
             or set(dests) - set(uid_hotkeys)
-            or validator_uid in dests
+            # Only the subnet owner's validator weights its own UID: the burn.
+            or validator_uid in set(dests) - ({burn_uid} if gated_burn else set())
         ):
             raise DirectSubmissionContradiction(
                 "confirmation weight identities disagree"
             )
         try:
-            expected_kwargs = build_mechanism_weights_kwargs(
-                dests=dests,
-                weights=weights,
-                netuid=self.netuid,
-                expected_netuid=self.netuid,
-            )
+            expected_kwargs = self._journaled_weights_kwargs(kwargs)
         except Exception as exc:
             raise DirectSubmissionContradiction(
                 "confirmation weight vector is invalid"
@@ -2635,12 +2737,7 @@ class DirectWeightWriter:
         try:
             # Rebuilt for this writer's netuid, so an intent signed for any
             # other subnet is a contradiction here, never a call to look for.
-            expected_kwargs = build_mechanism_weights_kwargs(
-                dests=list(kwargs.get("dests", ())),
-                weights=list(kwargs.get("weights", ())),
-                netuid=self.netuid,
-                expected_netuid=self.netuid,
-            )
+            expected_kwargs = self._journaled_weights_kwargs(kwargs)
         except Exception as exc:
             raise DirectSubmissionContradiction(
                 "pending signed weight vector is invalid"

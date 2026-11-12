@@ -135,7 +135,11 @@ def test_readme_is_the_small_public_guide() -> None:
     assert "does not download a weight vector" in words
     assert "scored every serving miner" not in both
     assert "finds serving miners" in both
-    assert "zero burn" in both
+    # The gated split of 12 Nov 2026 replaced the old "zero burn" wording.
+    assert "zero burn" not in both
+    assert "owner-approved miner" in both_words
+    assert "which the chain burns" in both_words
+    assert "[Gated compute](GATED_COMPUTE.md)" in detail
     assert "pinned TDX verifier, and pinned SNP verifier together" in both_words
     assert "bootstrap updater, systemd units, host Python" in both_words
     assert "Public setup follows `stable` only" in both

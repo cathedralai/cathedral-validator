@@ -10,14 +10,28 @@ to Cathedral. Miners use [Cathedral Sandbox](https://github.com/cathedralai/cath
 
 ## What it does
 
-Each cycle finds serving miners without validator permits, verifies fresh Intel
-TDX or AMD SEV-SNP evidence and SAT work, rejects duplicate hardware/endpoints/
-TLS keys, and weights the distinct verified machines with zero burn.
+Each cycle finds serving miners, verifies fresh Intel TDX or AMD SEV-SNP
+evidence and SAT work, and rejects duplicate hardware/endpoints/TLS keys. It
+then builds one weight vector with a fixed split:
+
+- about 10 percent to the distinct verified machines of owner-approved miner
+  hotkeys (the compute lane);
+- about 10 percent to verified escape room breaks (the escape lane);
+- the rest to the subnet owner hotkey, which the chain burns.
+
+A verified machine on a hotkey that is not on the approved list earns no
+compute weight. The list gates the compute lane only: escape weight goes to
+verified breakers whether or not they are on it. A lane with no recipient in a
+cycle is burned too. A cycle with no serving miner, or whose machine
+verification is not fully proven, still writes: it burns the compute lane. The list
+ships inside the signed release and nothing on this host can change it. See
+[Gated compute](GATED_COMPUTE.md).
 It signs the vector and checks the exact result against finalized chain state.
 
 SNP checks miners against the reviewed SN94 measurement and TCB policy that
-ships in the signed bootstrap. By default TDX accepts
+ships in the signed bootstrap. By default TDX verification accepts
 any guest image with a genuine, fresh quote: a quote is not an image allowlist.
+Verification alone no longer earns weight: the hotkey must also be approved.
 See [TDX measurement policy](OPERATOR_RUNBOOK.md#optional-tdx-measurement-allowlist).
 
 ## What you need
