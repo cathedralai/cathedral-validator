@@ -175,7 +175,12 @@ class CommitRevealSubstrate(base.WriterSubstrate):
         if function == "Keys":
             netuid, uid = params
             assert netuid == 94
-            owners = {7: VALIDATOR, 19: base.MINER_ONE, 20: base.MINER_TWO}
+            owners = {
+                7: VALIDATOR,
+                19: base.MINER_ONE,
+                20: base.MINER_TWO,
+                base.BURN_UID: base.BURN_HOTKEY,
+            }
             if (
                 self.owner.remap_after is not None
                 and block >= self.owner.remap_after
@@ -605,9 +610,9 @@ def test_commit_journals_the_exact_commit_before_broadcast_and_proves_it_stored(
     # schedule read at the finalized sign head.
     [call] = encryptor.calls
     assert call == {
-        "uids": [19, 20],
-        "weights": [43690, 21845],
-        "version_key": 10005000,
+        "uids": [base.BURN_UID, 19, 20],
+        "weights": [58982, 4369, 2184],
+        "version_key": 10005001,
         "last_epoch_block": LAST_EPOCH_BLOCK,
         "pending_epoch_at": 0,
         "subnet_epoch_index": EPOCH,
@@ -636,7 +641,7 @@ def test_commit_journals_the_exact_commit_before_broadcast_and_proves_it_stored(
     assert document["first_reveal_block"] == NEXT_FIRE
     assert document["next_epoch_block"] == NEXT_FIRE
     assert document["expected_reveal_round"] == expected_round()
-    assert pending["intent"]["kwargs"]["weights"] == [43690, 21845]
+    assert pending["intent"]["kwargs"]["weights"] == [58982, 4369, 2184]
     state = journal(instance)
     assert state["pending"] is None
     last = state["last_attempt"]
@@ -1640,7 +1645,8 @@ def test_a_commit_keeps_its_round_and_the_proven_reveal_publishes_it(
     assert event["observed_at"] == round_observed_at
     assert event["anchor"]["block_number"] == observed.block_number
     assert [miner["uid"] for miner in event["miners"]] == [base.MINER_ONE_AXON.uid]
-    assert event["miners"][0]["weight_u16"] == W
+    assert event["miners"][0]["weight_u16"] == 6553
+    assert event["burn_weight"] == 58982
     assert not pending.path.exists()
     assert len(spool.path.read_text().splitlines()) == 1
 

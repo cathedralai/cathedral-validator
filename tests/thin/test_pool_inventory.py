@@ -15,6 +15,7 @@ import pytest
 from bittensor_wallet import Keypair
 
 import cathedral_thin.independent_runtime.direct_validator as runtime
+from cathedral_thin.independent_runtime.direct_contract import SUBNET_OWNER_BURN_HOTKEYS
 from cathedral_thin.independent.sat import SAT_WORK_UNIT_RULE
 from cathedral_thin.independent_runtime import pool_inventory as inventory
 from cathedral_thin.independent_runtime.axon import ServingAxon
@@ -90,6 +91,8 @@ def _snapshot() -> FinalizedMetagraphSnapshot:
         miners=(AXON,),
         skipped_axons={"refuse_or_canary": 0, "port_zero": 0, "unusable_ip": 0},
         netuid=NETUID,
+        # The burn destination: the subnet owner hotkey, at UID 9 here.
+        registered_hotkeys={SUBNET_OWNER_BURN_HOTKEYS[94]: 9},
     )
 
 
@@ -253,6 +256,11 @@ def test_the_verify_command_reports_valid_and_invalid_files(tmp_path: Path, caps
 
 
 def _cycle(monkeypatch, tmp_path: Path, inventory_path: Path):
+    # This file runs on a random netuid, which the release pins no burn
+    # hotkey for.
+    monkeypatch.setitem(
+        SUBNET_OWNER_BURN_HOTKEYS, NETUID, SUBNET_OWNER_BURN_HOTKEYS[94]
+    )
     receipt = SimpleNamespace(
         status="CONFIRMED", as_document=lambda: {"status": "CONFIRMED"}
     )
@@ -290,7 +298,7 @@ def test_a_cycle_publishes_the_signed_inventory_after_its_write(
         "inventory_id": published["inventory_id"],
     }
     assert published["totals"]["healthy"] == 1
-    assert event["wire_uids"] == [19]
+    assert event["wire_uids"] == [9, 19]
 
 
 def test_an_inventory_failure_never_changes_the_cycle(monkeypatch, tmp_path: Path):
@@ -299,7 +307,7 @@ def test_an_inventory_failure_never_changes_the_cycle(monkeypatch, tmp_path: Pat
     )
     assert event["status"] == "CONFIRMED"
     assert event["pool_inventory"] == {"status": "FAILED"}
-    assert event["wire_uids"] == [19]
+    assert event["wire_uids"] == [9, 19]
 
 
 def _hashes(count: int) -> list[bytes]:

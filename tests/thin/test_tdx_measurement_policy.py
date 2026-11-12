@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import test_fleet_deadline as fd
+from cathedral_thin.independent_runtime.direct_contract import SUBNET_OWNER_BURN_HOTKEYS
 from cathedral_thin.independent.compute import (
     ComputeAdapter,
     QuoteIdentityVerdict,
@@ -32,7 +33,6 @@ from cathedral_thin.independent_runtime import (
     snp_production,
     tdx_measurement,
 )
-from cathedral_thin.independent_runtime.direct_contract import DirectValidatorError
 from cathedral_thin.independent_runtime.direct_writer import STATUS_CONFIRMED
 from cathedral_thin.independent_runtime.qvl import (
     DIRECT_VALIDATOR_QVL_DIGEST,
@@ -311,6 +311,8 @@ def _round(monkeypatch, tdx_policy, markers=(1, 2)):
         miners=(fd.BOB_AXON,),
         skipped_axons={},
         netuid=fd.NETUID,
+        # The burn destination: the subnet owner hotkey, at UID 9 here.
+        registered_hotkeys={SUBNET_OWNER_BURN_HOTKEYS[94]: 9},
     )
     plan = direct_validator.build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
     return fd._rows_by_endpoint(result), plan, result
@@ -401,9 +403,13 @@ def test_enforce_excludes_the_fleet_an_unlisted_primary_vouches_for(
     monkeypatch, tmp_path
 ):
     # The primary serves the fleet list; an unadmitted image does not vouch for others.
-    # With nobody verified the direct plan refuses, so this cycle writes nothing.
-    with pytest.raises(DirectValidatorError, match="no miner has a verified machine"):
-        _round(monkeypatch, _policy(tmp_path, "enforce"), markers=(2, 1))
+    # With nobody verified the compute lane has no recipient, so the whole
+    # vector is burned.
+    _rows, plan, _result = _round(
+        monkeypatch, _policy(tmp_path, "enforce"), markers=(2, 1)
+    )
+    assert plan.raw_scores == ((fd.BOB_AXON.uid, 0),)
+    assert (plan.wire_uids, plan.wire_weights) == ((9,), (65535,))
     fd._install_miners(
         monkeypatch,
         fleets={fd.BOB: FLEET},
@@ -738,6 +744,8 @@ def test_the_cycle_event_lists_what_the_policy_saw(monkeypatch, tmp_path):
         miners=(fd.BOB_AXON,),
         skipped_axons={},
         netuid=fd.NETUID,
+        # The burn destination: the subnet owner hotkey, at UID 9 here.
+        registered_hotkeys={SUBNET_OWNER_BURN_HOTKEYS[94]: 9},
     )
     fd._install_miners(
         monkeypatch,

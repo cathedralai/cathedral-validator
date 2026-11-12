@@ -6,7 +6,8 @@ It owns:
 
 - finalized miner discovery and signed fleet verification;
 - local Intel TDX and SAT verification;
-- miner hotkey to UID resolution and zero-burn machine-count scoring;
+- miner hotkey to UID resolution, machine-count scoring for approved miner
+  hotkeys, the escape lane share and the burn of everything else;
 - exact-intent recovery and single-writer protection; and
 - the authorized Bittensor weight transaction.
 

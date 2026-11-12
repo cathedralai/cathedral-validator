@@ -210,6 +210,8 @@ def _build_telemetry_snapshot_base(
         uid: frozenset(machine_ids) for uid, machine_ids in plan.machine_ids_by_uid
     }
     weight_by_uid = dict(zip(plan.wire_uids, plan.wire_weights, strict=True))
+    # The burn share is reported once, as burn_weight, never as a miner's.
+    burn_weight = weight_by_uid.pop(plan.burn_uid, 0)
     rows_by_uid: dict[int, list[Mapping[str, Any]]] = {uid: [] for uid in uid_hotkeys}
     for row in _positive_rows(result_rows):
         uid = row.get("uid")
@@ -262,9 +264,11 @@ def _build_telemetry_snapshot_base(
                 },
                 "weight_u16": weight_by_uid.get(uid, 0),
                 "verified_at": observed if rows else None,
+                # A verified machine on a hotkey that is not on the approved
+                # list earns nothing; say so instead of "not_verified".
                 "status": "weighted"
                 if weight_by_uid.get(uid, 0) > 0
-                else "not_verified",
+                else ("not_approved" if rows else "not_verified"),
             }
         )
 
@@ -289,7 +293,7 @@ def _build_telemetry_snapshot_base(
             "recovered": receipt.recovered,
         },
         "evidence_digest": plan.evidence_digest,
-        "burn_weight": 0,
+        "burn_weight": burn_weight,
         "miners": miners,
     }
     return base
@@ -428,7 +432,8 @@ def validate_public_telemetry_event(
         or isinstance(observed_netuid, bool)
         or not isinstance(observed_netuid, int)
         or observed_netuid != netuid
-        or document.get("burn_weight") != 0
+        or _nonnegative_int(document.get("burn_weight")) is None
+        or document["burn_weight"] > W
         or document.get("event_id") != _expected_event_id(document)
     ):
         raise TelemetryError("telemetry event identity is invalid")
@@ -534,13 +539,17 @@ def validate_public_telemetry_event(
             or samples != distinct_compute
             or weight is None
             or weight > W
-            or status not in {"weighted", "not_verified"}
+            or status not in {"weighted", "not_approved", "not_verified"}
+            or status != "weighted"
+            and weight != 0
         ):
             raise TelemetryError("telemetry miner values are invalid")
         if distinct_compute == 0:
             valid_timing = average is None and maximum is None
+            # Weight without a verified machine is an escape break.
             valid_status = (
-                status == "not_verified" and weight == 0 and verified_at is None
+                status == ("weighted" if weight > 0 else "not_verified")
+                and verified_at is None
             )
         else:
             valid_timing = (
@@ -549,15 +558,21 @@ def validate_public_telemetry_event(
                 and average <= maximum
             )
             valid_status = (
-                status == "weighted"
-                and weight > 0
+                status == ("weighted" if weight > 0 else "not_approved")
                 and verified_at == document["observed_at"]
             )
         if not valid_timing or not valid_status:
             raise TelemetryError("telemetry miner values are invalid")
         seen_uids.add(uid)
         total_weight += weight
-    if not miners or total_weight != W:
+    # An event prepared before the gated split has no burn and its miners hold
+    # the whole vector. Since the split the burn is always positive, and an
+    # escape breaker that serves no axon is not listed, so the listed weights
+    # may sum to less than W but never to more.
+    burn_weight = document["burn_weight"]
+    if not miners or (
+        total_weight != W if burn_weight == 0 else total_weight + burn_weight > W
+    ):
         raise TelemetryError("telemetry weights do not match a finalized vector")
     _verify_telemetry_signature(document)
     return dict(document)

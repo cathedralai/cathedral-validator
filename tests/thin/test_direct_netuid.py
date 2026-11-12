@@ -58,6 +58,7 @@ from cathedral_thin.independent_runtime.direct_contract import (
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
+    SUBNET_OWNER_BURN_HOTKEYS,
     require_netuid,
 )
 from cathedral_thin.independent_runtime.direct_validator import (
@@ -88,6 +89,7 @@ from cathedral_thin.independent_runtime.validator_request import (
     SignedValidatorTransport,
     build_validator_request_header,
 )
+from test_direct_validator import pallet_storage_weights
 from test_independent_multicompute import (
     BOB,
     WINDOW,
@@ -116,6 +118,12 @@ NETUIDS = pytest.mark.parametrize(
 VALIDATOR = Keypair.create_from_uri("//Alice")
 VALIDATOR_UID = 7
 MINER = ServingAxon(19, Keypair.create_from_uri("//Bob").ss58_address, "1.1.1.1", 8081)
+# The subnet owner hotkey every vector burns to, at UID 9 on these chains. One
+# verified miner gets the whole compute lane and the rest is burned.
+BURN_HOTKEY = SUBNET_OWNER_BURN_HOTKEYS[NETUID]
+BURN_UID = 9
+WIRE_UIDS = [BURN_UID, MINER.uid]
+WIRE_WEIGHTS = [58982, 6553]
 ANCHOR = 100
 FRESH = ANCHOR + 1
 INCLUSION = ANCHOR + 2
@@ -136,6 +144,14 @@ CLI_ARGS = (
 
 def block_hash(number: int) -> str:
     return FINNEY_GENESIS_HASH if number == 0 else "0x" + f"{number:064x}"
+
+
+@pytest.fixture(autouse=True)
+def _burn_hotkey_for_every_test_netuid(monkeypatch) -> None:
+    # The release pins a burn hotkey for the netuids it supports. These tests
+    # also run the direct path on neighbouring netuids, which need one too.
+    for netuid in (OTHER_NETUID, OTHER_NETUID + 1):
+        monkeypatch.setitem(SUBNET_OWNER_BURN_HOTKEYS, netuid, BURN_HOTKEY)
 
 
 def _module(name: str, relative: str) -> ModuleType:
@@ -201,6 +217,11 @@ def _snapshot(netuid: int) -> FinalizedMetagraphSnapshot:
         miners=(MINER,),
         skipped_axons={reason: 0 for reason in AXON_SKIP_REASONS},
         netuid=netuid,
+        registered_hotkeys={
+            VALIDATOR.ss58_address: VALIDATOR_UID,
+            MINER.hotkey: MINER.uid,
+            BURN_HOTKEY: BURN_UID,
+        },
     )
 
 
@@ -233,15 +254,20 @@ class _Axon:
 class _Metagraph:
     def __init__(self, block: int) -> None:
         self.block = block
-        self.uids = [VALIDATOR_UID, MINER.uid]
-        self.hotkeys = [VALIDATOR.ss58_address, MINER.hotkey]
-        self.validator_permit = [True, False]
+        self.uids = [VALIDATOR_UID, MINER.uid, BURN_UID]
+        self.hotkeys = [VALIDATOR.ss58_address, MINER.hotkey, BURN_HOTKEY]
+        self.validator_permit = [True, False, False]
         self.axons = [
             _Axon("0.0.0.0", 0, serving=False),
             _Axon(MINER.ip, MINER.port, serving=True),
+            _Axon("0.0.0.0", 0, serving=False),
         ]
-        self.last_update = [block - BLOCKS_SINCE_UPDATE, 0]
-        self.total_stake = [SimpleNamespace(rao=10_000), SimpleNamespace(rao=0)]
+        self.last_update = [block - BLOCKS_SINCE_UPDATE, 0, 0]
+        self.total_stake = [
+            SimpleNamespace(rao=10_000),
+            SimpleNamespace(rao=0),
+            SimpleNamespace(rao=0),
+        ]
 
 
 class _Substrate:
@@ -280,12 +306,18 @@ class _Substrate:
             (netuid,) = params
             self.chain.read(netuid)
             return 0
+        if storage_function == "SubnetOwnerHotkey":
+            (netuid,) = params
+            self.chain.read(netuid)
+            return BURN_HOTKEY
         assert storage_function == "Weights"
         index, uid = params
         if index != get_mechid_storage_index(self.chain.netuid, MECID):
             raise WrongSubnet(f"weights storage index {index} is another subnet")
         assert uid == VALIDATOR_UID
-        return [[MINER.uid, W]] if self.included else []
+        # The chain stores the max-upscaled vector.
+        stored = pallet_storage_weights(WIRE_WEIGHTS)
+        return [list(row) for row in zip(WIRE_UIDS, stored)] if self.included else []
 
     def get_account_next_index(self, hotkey: str) -> int:
         assert hotkey == VALIDATOR.ss58_address
@@ -1063,7 +1095,7 @@ def test_cycle_reads_challenges_and_writes_on_one_netuid(
     )
 
     assert event["status"] == STATUS_CONFIRMED
-    assert event["wire_uids"] == [MINER.uid]
+    assert event["wire_uids"] == WIRE_UIDS
     assert requests == [("evidence", netuid), ("fleet", netuid), ("sat", netuid)]
     assert chain.reads and set(chain.reads) == {netuid}
     assert chain.signed_kwargs["netuid"] == netuid

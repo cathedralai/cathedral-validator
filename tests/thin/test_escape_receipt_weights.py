@@ -111,8 +111,7 @@ def test_signer(monkeypatch) -> None:
 
 def registered_snapshot(**kwargs):
     snap = base.snapshot(**kwargs)
-    registered = {base.VALIDATOR: 7, BREAKER: BREAKER_UID}
-    registered.update({miner.hotkey: miner.uid for miner in snap.miners})
+    registered = {**snap.registered_hotkeys, BREAKER: BREAKER_UID}
     return replace(snap, registered_hotkeys=registered)
 
 
@@ -323,10 +322,9 @@ def test_valid_receipt_weights_the_breaker_uid(test_signer) -> None:
     assert summary["status"] == "APPLIED"
     assert summary["accepted"] == 1
     weights = dict(zip(blended.wire_uids, blended.wire_weights, strict=True))
-    assert set(weights) == {19, BREAKER_UID}
+    # Each lane is 6553 of 65535 (10 percent, floored); the rest is burned.
+    assert weights == {base.BURN_UID: 52429, 19: 6553, BREAKER_UID: 6553}
     assert sum(weights.values()) == W
-    # 10% of 65535 is 6553.5; the remainder goes to the larger fractional part.
-    assert weights[BREAKER_UID] in (6553, 6554)
     assert blended.identity()["escape"] == {
         "fraction": "1/10",
         "units_by_uid": [[BREAKER_UID, 1]],
@@ -349,13 +347,14 @@ def test_blend_splits_the_share_by_break_count(test_signer, monkeypatch) -> None
         receipt(room_id="b"),
         receipt(room_id="c", hotkey=second),
     ]
-    blended, _summary = runtime.apply_escape_receipts(
-        planned, config("3/10"), now=NOW, load=lambda _source: receipts
+    # The configured fraction only switches the lane on: the share paid is the
+    # owner-set 10 percent, split 2:1 by break count.
+    blended, summary = runtime.apply_escape_receipts(
+        planned, config("1/20"), now=NOW, load=lambda _source: receipts
     )
+    assert summary["fraction"] == "1/10"
     weights = dict(zip(blended.wire_uids, blended.wire_weights, strict=True))
-    assert sum(weights.values()) == W
-    assert abs(weights[BREAKER_UID] - 2 * weights[31]) <= 1
-    assert abs(weights[19] - round(W * 0.7)) <= 1
+    assert weights == {base.BURN_UID: 52429, 19: 6553, BREAKER_UID: 4369, 31: 2184}
 
 
 def test_no_breaks_or_unreadable_source_leave_the_plan_unchanged(test_signer) -> None:
@@ -481,15 +480,18 @@ def test_weight_fraction_is_capped_at_one_tenth() -> None:
     assert five_percent.fraction == Fraction(1, 20)
 
 
-def test_five_percent_share_matches_the_mainnet_proposal(test_signer) -> None:
+def test_a_five_percent_setting_still_pays_the_owner_set_share(test_signer) -> None:
+    # Hosts that followed the earlier rollout have 0.05 in direct.env. It
+    # still starts and turns the lane on, and the lane pays 10 percent.
     planned = machine_plan()
     blended, summary = runtime.apply_escape_receipts(
         planned, config("1/20"), now=NOW, load=lambda _source: [receipt()]
     )
     assert summary["status"] == "APPLIED"
+    assert blended.escape_fraction == "1/10"
     weights = dict(zip(blended.wire_uids, blended.wire_weights, strict=True))
     assert sum(weights.values()) == W
-    assert weights[BREAKER_UID] in (3276, 3277)
+    assert weights[BREAKER_UID] == 6553
 
 
 def test_http_404_leaves_the_plan_unchanged(test_signer) -> None:
@@ -759,7 +761,9 @@ def test_writer_signs_and_confirms_a_blended_vector(
     result = base.submit_before_deadline(instance, blended)
     assert result.status == STATUS_CONFIRMED
     state = json.loads(instance.state_path.read_text(encoding="ascii"))
-    assert state["last_attempt"]["intent"]["kwargs"]["dests"] == [19, BREAKER_UID]
+    assert state["last_attempt"]["intent"]["kwargs"]["dests"] == sorted(
+        [base.BURN_UID, 19, BREAKER_UID]
+    )
     assert state["last_attempt"]["identity"]["escape"]["units_by_uid"] == [
         [BREAKER_UID, 1]
     ]

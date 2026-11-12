@@ -456,7 +456,7 @@ btcli sudo set --netuid 94 --param commit_reveal_weights_enabled --value false
 ```
 
 The validator signs `commit_timelocked_mechanism_weights` carrying the same
-zero-burn vector, encrypted to a drand round, with the same journal and
+vector, encrypted to a drand round, with the same journal and
 recovery rules as a plain write. The chain decrypts and applies it about one
 epoch later by itself; there is no reveal transaction. The validator refuses
 to sign unless commit-reveal is on, an explicit period matches chain storage

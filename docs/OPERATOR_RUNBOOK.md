@@ -315,10 +315,11 @@ changes.
 
 ## Escape room payouts
 
-Off by default. The signed vector is unchanged until both
-`CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` and a positive
-`CATHEDRAL_ESCAPE_WEIGHT_FRACTION` are set. The enable sequence, testnet 584
-staged-break check, mainnet 5 percent switch, weight verification, and
+Off by default: until both `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` and a positive
+`CATHEDRAL_ESCAPE_WEIGHT_FRACTION` are set, the escape lane's 10 percent is
+burned. Any positive fraction turns the lane on; the share paid is the fixed
+10 percent ([Gated compute](GATED_COMPUTE.md)). The enable sequence, testnet 584
+staged-break check, mainnet switch, weight verification, and
 one-step rollback (set the fraction back to 0) are in
 [Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md). That page also covers
 contest signer key rotation (add a key, overlap, retire, emergency revoke,

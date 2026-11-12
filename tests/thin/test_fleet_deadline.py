@@ -23,6 +23,7 @@ from typing import Any, Callable
 import pytest
 
 from _independent_fixtures import BOB, CHARLIE
+from cathedral_thin.independent_runtime.direct_contract import SUBNET_OWNER_BURN_HOTKEYS
 from cathedral_thin.independent.collect import (
     EVIDENCE_KIND_SEV_SNP,
     EVIDENCE_KIND_TDX,
@@ -363,6 +364,8 @@ def test_truncated_uid_is_paid_for_its_eight_machines_in_the_direct_plan(
         miners=(BOB_AXON,),
         skipped_axons={},
         netuid=NETUID,
+        # The burn destination: the subnet owner hotkey, at UID 9 here.
+        registered_hotkeys={SUBNET_OWNER_BURN_HOTKEYS[94]: 9},
     )
 
     plan = direct_validator.build_direct_plan(snapshot, result)
@@ -374,8 +377,9 @@ def test_truncated_uid_is_paid_for_its_eight_machines_in_the_direct_plan(
     assert len(set(paid_machine_ids)) == 8
     assert plan.raw_scores == ((BOB_AXON.uid, 8),)
     assert plan.machine_ids_by_uid == ((BOB_AXON.uid, tuple(paid_machine_ids)),)
-    assert plan.wire_uids == (BOB_AXON.uid,)
-    assert plan.wire_weights == (65535,)
+    # The compute lane is 6553 of 65535; the rest goes to the burn UID.
+    assert plan.wire_uids == (BOB_AXON.uid, 9)
+    assert plan.wire_weights == (6553, 58982)
     # Telemetry which dashboards read: the truncated fleet is no longer a
     # failed fleet, and its 24 unpaid rows are excluded machine rows.
     summary = direct_validator._evidence_cycle_summary(snapshot, result, plan)

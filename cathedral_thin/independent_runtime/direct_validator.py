@@ -3,8 +3,9 @@
 One cycle reads one finalized metagraph, sends a signed validator request to
 every serving miner for its fleet, verifies every machine, runs the existing
 SAT challenge, applies the existing order-independent duplicate rules, and
-builds one zero-burn mechanism-weight vector. The vector is derived locally
-from raw machine counts.
+builds one mechanism-weight vector. The vector is derived locally: a fixed
+share for the verified machines of owner-approved hotkeys, a fixed share for
+escape breaks, and the rest to the subnet owner hotkey, which the chain burns.
 """
 
 from __future__ import annotations
@@ -53,11 +54,12 @@ from .axon import (
 from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
+    ESCAPE_LANE_SHARE,
+    SUBNET_OWNER_BURN_HOTKEYS,
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
     require_netuid,
-    zero_burn_vector,
 )
 from .errors import IndependentLiveError
 from .escape_receipts import (
@@ -411,18 +413,19 @@ def apply_escape_receipts(
     load: Callable[[str], list[object]] | None = None,
     deadline_monotonic: float | None = None,
 ) -> tuple[DirectWeightPlan, dict[str, object]]:
-    """Blend verified escape breaks into the machine plan.
+    """Pay verified escape breaks the escape lane share of the plan.
 
-    A source that cannot be read leaves the machine-only plan unchanged and
-    says so: an escape feed outage must not stop the weights miners are owed.
-    A plan with escape units binds the receipt digests into its evidence
-    digest, so the journal names which receipts paid. Scoring or blend
-    failures do the same: miners keep the machine vector.
+    The share is the owner-set ``ESCAPE_LANE_SHARE``; the configured fraction
+    only switches the lane on. A source that cannot be read leaves the plan
+    unchanged and says so: the escape share is then burned and the cycle still
+    writes. A plan with escape units binds the receipt digests into its
+    evidence digest, so the journal names which receipts paid. Scoring
+    failures do the same: the escape share is burned.
     """
 
     snapshot = plan.snapshot
     summary: dict[str, object] = {
-        "fraction": str(config.fraction),
+        "fraction": str(ESCAPE_LANE_SHARE),
         "window_seconds": config.window_seconds,
         "source_kind": "https" if config.source.startswith("https://") else "file",
     }
@@ -448,7 +451,10 @@ def apply_escape_receipts(
         registered = {
             hotkey: uid
             for hotkey, uid in (snapshot.registered_hotkeys or {}).items()
-            if hotkey not in REFUSE_HOTKEYS and hotkey != CANARY_HOTKEY
+            if hotkey not in REFUSE_HOTKEYS
+            and hotkey != CANARY_HOTKEY
+            # The burn destination is never a lane recipient.
+            and hotkey != plan.burn_hotkey
         }
         escape_round = score_escape_receipts(
             receipts,
@@ -476,7 +482,7 @@ def apply_escape_receipts(
             evidence_digest=evidence_digest,
             escape_units=escape_round.units_by_uid,
             escape_uid_hotkeys=escape_round.uid_hotkeys,
-            escape_fraction=str(config.fraction),
+            escape_fraction=str(ESCAPE_LANE_SHARE),
         )
         wire_uids, wire_weights = blended.expected_vector()
         blended = dataclasses.replace(
@@ -620,7 +626,12 @@ def build_direct_plan(
     scored_miners: Sequence[ServingAxon] | None = None,
     tdx_policy: TdxMeasurementPolicy | None = None,
 ) -> DirectWeightPlan:
-    """Count unique verified machines per UID and normalize with zero burn.
+    """Count unique verified machines per UID and build the gated vector.
+
+    Only hotkeys on the release's approved list earn compute weight; the rest
+    of the vector goes to the subnet owner hotkey, resolved here from the
+    anchor metagraph. With no approved machine verified the compute share is
+    burned and the vector is still built.
 
     With a TDX measurement policy the evidence document names its mode and
     digest, so the evidence digest binds which policy produced the vector
@@ -642,7 +653,17 @@ def build_direct_plan(
         grouped[int(row["uid"])].append(str(row["machine_id"]))
     raw_scores = tuple((uid, len(grouped[uid])) for uid in sorted(grouped))
     uid_hotkeys = {uid: miner_by_uid[uid].hotkey for uid in sorted(miner_by_uid)}
-    wire_uids, wire_weights = zero_burn_vector(raw_scores, uid_hotkeys)
+    burn_hotkey = SUBNET_OWNER_BURN_HOTKEYS.get(snapshot.netuid)
+    burn_uid = (snapshot.registered_hotkeys or {}).get(burn_hotkey or "")
+    if (
+        burn_hotkey is None
+        or isinstance(burn_uid, bool)
+        or not isinstance(burn_uid, int)
+    ):
+        # There is no fallback destination for the burn share.
+        raise DirectValidatorError(
+            "the pinned subnet owner burn hotkey is not registered at the anchor"
+        )
     evidence = {
         "schema": "cathedral_direct_validator_evidence_v1",
         "anchor": snapshot.identity(),
@@ -676,9 +697,13 @@ def build_direct_plan(
         ),
         raw_scores=raw_scores,
         uid_hotkeys=tuple(sorted(uid_hotkeys.items())),
-        wire_uids=wire_uids,
-        wire_weights=wire_weights,
+        wire_uids=(),
+        wire_weights=(),
+        burn_uid=burn_uid,
+        burn_hotkey=burn_hotkey,
     )
+    wire_uids, wire_weights = plan.expected_vector()
+    plan = dataclasses.replace(plan, wire_uids=wire_uids, wire_weights=wire_weights)
     plan.kwargs()
     return plan
 
@@ -1524,7 +1549,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "escape_receipts": {
                     "status": "ENABLED",
                     "source": escape_config.source,
-                    "fraction": str(escape_config.fraction),
+                    # The configured fraction only switches the lane on; the
+                    # share paid is the owner-set constant.
+                    "fraction": str(ESCAPE_LANE_SHARE),
                     "window_seconds": escape_config.window_seconds,
                 }
             }
