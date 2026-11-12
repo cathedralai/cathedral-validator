@@ -131,6 +131,16 @@ Removing a hotkey is the same change in reverse.
 - **Telemetry is not a payout ledger.** It lists serving miners only, so an
   escape breaker that serves no axon is not shown, and no event is published
   for a cycle with no serving miner or with a burned unproven compute lane.
+- **Any serving miner can cost one cycle.** Before it signs, the writer
+  requires the serving set to equal the set at the anchor. A finalized axon
+  change by any miner, listed or not, inside that window makes the validator
+  skip that cycle; it writes on the next one. This rule is older than the
+  gated split. A miner would have to land a change inside every cycle's
+  window, on every validator, to keep an older row in force.
+- **`CATHEDRAL_INFRA_HALT=scoped` keeps its meaning.** With that opt-in, an
+  approved miner whose machine ends in INFRA while the verifiers passed other
+  machines of that kind does not burn the lane: the approved miners that
+  passed share it. Without the opt-in the lane is burned.
 - **Unlisted miners are still challenged.** Their evidence cannot change the
   vector, but they are verified every cycle and take cycle time.
 

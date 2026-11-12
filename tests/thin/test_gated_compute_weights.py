@@ -537,6 +537,21 @@ def _refused(tmp_path, monkeypatch, tampered, *, subtensor_setup=None) -> str:
     return str(raised.value)
 
 
+def test_the_writer_signs_when_a_paid_share_rounds_to_zero(
+    tmp_path: Path, monkeypatch, approved_compute_hotkeys
+) -> None:
+    approved_compute_hotkeys(base.MINER_ONE, base.MINER_TWO)
+    planned = verified_plan((base.MINER_ONE_AXON, 20000), (base.MINER_TWO_AXON, 1))
+    # The second approved miner's share is below one unit, so it is not on the wire.
+    assert planned.wire_uids == (BURN_UID, base.MINER_ONE_AXON.uid)
+    assert planned.wire_weights == (W - LANE, LANE)
+    instance, _subtensor, _planned = base.writer(tmp_path, monkeypatch, planned=planned)
+
+    receipt = base.submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+
+
 def test_the_writer_refuses_a_vector_that_pays_an_unlisted_miner(
     tmp_path: Path, monkeypatch
 ) -> None:

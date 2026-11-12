@@ -1154,7 +1154,10 @@ class DirectWeightWriter:
             or plan.wire_uids != expected_uids
             or plan.wire_weights != expected_weights
             or burn_uid in payable_uids
-            or set(plan.wire_uids) != payable_uids | {burn_uid}
+            # A paid UID whose share rounds to zero is left out of the
+            # vector; the exact vector is already pinned two lines up.
+            or burn_uid not in plan.wire_uids
+            or not set(plan.wire_uids) <= payable_uids | {burn_uid}
             or plan.snapshot.validator_uid in set(plan.wire_uids) - {burn_uid}
             or sum(plan.wire_weights) != 0xFFFF
             or plan.qvl_digest != DIRECT_VALIDATOR_QVL_DIGEST
