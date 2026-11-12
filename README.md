@@ -7,6 +7,22 @@ Cathedral rewards people who break out of its sealed sandboxes. A verified escap
 
 Your validator checks escape claims and miner machines (AMD SEV-SNP or Intel TDX evidence plus a test task), rejects duplicate claims and writes the weights to Bittensor SN94 with your hotkey. It does not download a weight vector, use a relay or send your key to Cathedral. Signed updates install themselves.
 
+## The Cathedral map
+
+Cathedral on Bittensor SN94 is three public repositories. Each one links to
+the other two.
+
+| Repository | What it is | Read it when |
+|---|---|---|
+| **cathedral-validator** (this one) | The SN94 validator: how weights are set, with signed updates | You want to validate, or check how miners and breaks are paid |
+| [cathedral-escape-room](https://github.com/cathedralai/cathedral-escape-room) | The contest: break out of a sealed sandbox, prove it, earn | You want to attack the sandbox for a reward |
+| [cathedral-sandbox](https://github.com/cathedralai/cathedral-sandbox) | The sandbox, the sealed host code, and compute mining | You want to mine with a machine, or study the target |
+
+How they fit: the sandbox repository builds the wall, the escape room pays
+people to break it, and this validator pays both lanes. Compute mining is
+gated: only owner-approved miners earn. The escape lane is open to any hotkey
+registered on SN94.
+
 ## System Requirements
 
 - An SN94 hotkey with a validator permit: its hotkey file and SS58 address
@@ -57,9 +73,6 @@ key fingerprint `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06
 
 ## More
 
-- [Cathedral Escape Room](https://github.com/cathedralai/cathedral-escape-room): the contest whose
-  receipts this validator scores, with rules and a practice harness.
-- [Cathedral Sandbox](https://github.com/cathedralai/cathedral-sandbox): the sandbox and compute mining.
 - [Operator guide](docs/OPERATOR_GUIDE.md): what it checks, Docker, every
   status code, updates and trust.
 - [Operator runbook](docs/OPERATOR_RUNBOOK.md): step by step, with the chain rules.
