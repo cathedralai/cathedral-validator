@@ -9,6 +9,7 @@ import json
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import replace
 from fractions import Fraction
@@ -794,3 +795,214 @@ def test_writer_refuses_a_vector_that_does_not_match_its_escape_inputs(
     with pytest.raises(DirectValidatorError):
         base.submit_before_deadline(instance, inflated)
     assert subtensor.substrate.submit_calls == 0
+
+
+# AB#691: an HTTPS feed is read page by page, so one large receipt cannot push
+# the whole feed over the per-document cap.
+
+FEED_URL = "https://api.example/v1/escape/receipts/published"
+
+
+def _query(url: str) -> dict[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == FEED_URL
+    return dict(urllib.parse.parse_qsl(parts.query))
+
+
+class _PagedFeed:
+    """Serves ``pages`` keyed by the cursor the request carries."""
+
+    def __init__(self, pages: dict[int | None, object]) -> None:
+        self.pages = pages
+        self.urls: list[str] = []
+
+    def __call__(self, url: str) -> bytes:
+        self.urls.append(url)
+        cursor = _query(url).get("cursor")
+        page = self.pages[None if cursor is None else int(cursor)]
+        return page if isinstance(page, bytes) else json.dumps(page).encode()
+
+
+def _page(receipts: list[object], next_cursor: object) -> dict[str, object]:
+    return {
+        "schema": "escape_published_receipts_v0",
+        "receipts": receipts,
+        "count": len(receipts),
+        "next_cursor": next_cursor,
+    }
+
+
+def test_https_feed_follows_next_cursor_and_scores_every_page(test_signer) -> None:
+    first, second, third = (
+        receipt(window_id="w-1", room_id="room-1"),
+        receipt(window_id="w-2", room_id="room-2"),
+        receipt(window_id="w-3", room_id="room-3"),
+    )
+    feed = _PagedFeed(
+        {
+            None: _page([first], 11),
+            11: _page([second], 42),
+            42: _page([third], None),
+        }
+    )
+    loaded = escape_receipts.load_receipt_feed(
+        FEED_URL, fetch=feed, window_seconds=DEFAULT_REWARD_WINDOW_SECONDS, now=NOW
+    )
+    assert loaded == [first, second, third]
+    since = str(
+        int(
+            NOW
+            - DEFAULT_REWARD_WINDOW_SECONDS
+            - escape_receipts.MAX_FUTURE_SKEW_SECONDS
+        )
+    )
+    limit = str(escape_receipts.FEED_PAGE_RECEIPTS)
+    assert [_query(url) for url in feed.urls] == [
+        {"limit": limit, "since": since},
+        {"limit": limit, "since": since, "cursor": "11"},
+        {"limit": limit, "since": since, "cursor": "42"},
+    ]
+    assert len(score(loaded).accepted_digests) == 3
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [{"n": 1}, {"n": 2}],
+        {"receipts": [{"n": 1}, {"n": 2}]},
+        {"receipts": [{"n": 1}, {"n": 2}], "next_cursor": None},
+    ],
+)
+def test_server_that_does_not_page_is_read_in_one_request(body: object) -> None:
+    feed = _PagedFeed({None: body})
+    loaded = escape_receipts.load_receipt_feed(FEED_URL, fetch=feed)
+    assert loaded == [{"n": 1}, {"n": 2}]
+    assert len(feed.urls) == 1
+    assert "since" not in _query(feed.urls[0])
+
+
+@pytest.mark.parametrize("bad", [7, 3, True, "8", -1, 1.5])
+def test_cursor_that_does_not_advance_is_refused(bad: object) -> None:
+    feed = _PagedFeed({None: _page([{"n": 1}], 7), 7: _page([{"n": 2}], bad)})
+    with pytest.raises(EscapeReceiptError, match="cursor did not advance"):
+        escape_receipts.load_receipt_feed(FEED_URL, fetch=feed)
+
+
+def test_first_page_cursor_must_be_a_non_negative_int() -> None:
+    for bad in (-1, True, "0"):
+        feed = _PagedFeed({None: _page([{"n": 1}], bad)})
+        with pytest.raises(EscapeReceiptError, match="cursor did not advance"):
+            escape_receipts.load_receipt_feed(FEED_URL, fetch=feed)
+
+
+def test_empty_page_with_a_cursor_is_refused() -> None:
+    feed = _PagedFeed({None: _page([], 5)})
+    with pytest.raises(EscapeReceiptError, match="empty mid-feed"):
+        escape_receipts.load_receipt_feed(FEED_URL, fetch=feed)
+
+
+def test_oversized_page_fails_the_whole_read_and_keeps_the_plan(test_signer) -> None:
+    feed = _PagedFeed(
+        {None: _page([receipt()], 1), 1: b"[" + b" " * MAX_FEED_BYTES + b"]"}
+    )
+    planned = machine_plan()
+    same, summary = runtime.apply_escape_receipts(
+        planned,
+        config(),
+        now=NOW,
+        load=lambda _source: escape_receipts.load_receipt_feed(FEED_URL, fetch=feed),
+    )
+    assert same is planned
+    assert summary["status"] == "SOURCE_UNAVAILABLE"
+    assert summary["error"] == "escape receipt feed is too large"
+
+
+def test_failed_later_page_fails_the_whole_read(test_signer) -> None:
+    def fetch(url: str) -> bytes:
+        if "cursor" in _query(url):
+            raise EscapeReceiptError("escape receipt feed HTTP 429")
+        return json.dumps(_page([receipt()], 1)).encode()
+
+    planned = machine_plan()
+    same, summary = runtime.apply_escape_receipts(
+        planned,
+        config(),
+        now=NOW,
+        load=lambda source: escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch),
+    )
+    assert same is planned
+    assert summary["status"] == "SOURCE_UNAVAILABLE"
+    assert summary["error"] == "escape receipt feed HTTP 429"
+
+
+def test_a_full_page_at_the_largest_published_receipt_fits() -> None:
+    # The control plane caps the published claim at 16 KiB; a receipt adds
+    # about 1 KiB of envelope around it.
+    big = {"claim": {"pad": "x" * (16 * 1024)}, "envelope": "y" * 1024}
+    body = json.dumps(_page([big] * escape_receipts.FEED_PAGE_RECEIPTS, None))
+    assert len(body.encode()) <= MAX_FEED_BYTES
+    feed = _PagedFeed({None: body.encode()})
+    loaded = escape_receipts.load_receipt_feed(FEED_URL, fetch=feed)
+    assert len(loaded) == escape_receipts.FEED_PAGE_RECEIPTS
+
+
+def test_paging_stops_at_the_page_ceiling_and_keeps_the_oldest() -> None:
+    def fetch(url: str) -> bytes:
+        cursor = int(_query(url).get("cursor", "0"))
+        rows = [{"n": cursor * 10 + i} for i in range(10)]
+        return json.dumps(_page(rows, cursor + 1)).encode()
+
+    loaded = escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch)
+    assert len(loaded) == escape_receipts.MAX_FEED_PAGES * 10
+    assert loaded[0] == {"n": 0}
+
+
+def test_paging_stops_at_the_receipt_ceiling() -> None:
+    def fetch(url: str) -> bytes:
+        cursor = int(_query(url).get("cursor", "0"))
+        rows = [{"n": cursor * 6000 + i} for i in range(6000)]
+        return json.dumps(_page(rows, cursor + 1)).encode()
+
+    loaded = escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch)
+    assert len(loaded) == MAX_FEED_RECEIPTS
+    assert loaded[-1] == {"n": MAX_FEED_RECEIPTS - 1}
+
+
+def test_since_is_clamped_at_zero() -> None:
+    feed = _PagedFeed({None: []})
+    escape_receipts.load_receipt_feed(FEED_URL, fetch=feed, window_seconds=600, now=10)
+    assert _query(feed.urls[0])["since"] == "0"
+
+
+def test_total_budget_spans_pages() -> None:
+    def fetch(url: str) -> bytes:
+        time.sleep(0.3)
+        cursor = int(_query(url).get("cursor", "0"))
+        return json.dumps(_page([{"n": cursor}], cursor + 1)).encode()
+
+    started = time.monotonic()
+    with pytest.raises(EscapeReceiptError, match="unavailable"):
+        escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch, timeout=1.0)
+    assert time.monotonic() - started < 2.0
+
+
+def test_direct_validator_reads_the_window_from_its_own_clock(
+    test_signer, monkeypatch
+) -> None:
+    seen: list[tuple[str, float]] = []
+
+    def fake_fetch(url: str, *, timeout: float, opener: object = None) -> bytes:
+        seen.append((url, timeout))
+        return json.dumps(_page([receipt()], None)).encode()
+
+    monkeypatch.setattr(escape_receipts, "_fetch_https", fake_fetch)
+    window = 3 * 24 * 3600
+    https = replace(config(window=window), source=FEED_URL)
+    planned = machine_plan()
+    _same, summary = runtime.apply_escape_receipts(planned, https, now=NOW)
+    assert summary["status"] == "APPLIED", summary
+    [(url, timeout)] = seen
+    assert _query(url)["since"] == str(
+        int(NOW - window - escape_receipts.MAX_FUTURE_SKEW_SECONDS)
+    )
+    assert 0 < timeout <= escape_receipts.FEED_TIMEOUT_SECONDS
