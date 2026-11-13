@@ -126,6 +126,7 @@ FAILED_WRITE_EXIT_CODE_ENV = "CATHEDRAL_VALIDATOR_FAILED_WRITE_EXIT_CODE"
 STATUS_FINALIZED_FAILED_STOPPED = "FINALIZED_FAILED_STOPPED"
 RECORD_FAILED_WRITE_COMMAND = "record-failed-write"
 POOL_INVENTORY_COMMAND = "pool-inventory"
+WEEKLY_REPORT_COMMAND = "weekly-report"
 # The operator event names at most this many distinct TDX measurements per
 # cycle (the most common first); the rest are counted in observed_omitted.
 MAX_REPORTED_TDX_MEASUREMENTS = 32
@@ -1535,6 +1536,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .pool_inventory import main as pool_inventory_main
 
         return pool_inventory_main(arguments[1:])
+    if arguments[:1] == [WEEKLY_REPORT_COMMAND]:
+        # Read-only: telemetry and, on request, chain storage; loads no key.
+        from .weekly_report import main as weekly_report_main
+
+        return weekly_report_main(arguments[1:])
     if arguments[:1] == [RECORD_FAILED_WRITE_COMMAND]:
         # The operator's recovery command ships in the same signed release
         # entrypoint. It loads no key and never signs or broadcasts.
@@ -1828,6 +1834,7 @@ __all__ = [
     "EXIT_FINALIZED_FAILED_STOPPED",
     "FAILED_WRITE_EXIT_CODE_ENV",
     "RECORD_FAILED_WRITE_COMMAND",
+    "WEEKLY_REPORT_COMMAND",
     "STATUS_FINALIZED_FAILED_STOPPED",
     "DirectValidatorError",
     "DirectWeightPlan",

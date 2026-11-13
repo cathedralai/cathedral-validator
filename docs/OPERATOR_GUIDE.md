@@ -149,6 +149,20 @@ sudo journalctl -u cathedral-validator-direct.service -f
   [scoped INFRA policy](OPERATOR_RUNBOOK.md#optional-scoped-infra-handling)
   can zero honest machines during a partial outage; do not enable it blindly.
 
+Weekly report: a seven day per-hotkey readback of the weight this validator
+applied, its verification pass rate, and, with `--chain-readback`, the stored
+row at the block the last write applied and at the finalized head. It reads the
+[telemetry spool](PRIVATE_TELEMETRY.md), so that spool must be enabled. It
+loads no key and never signs. Delivered room-hours and uptime print `NO_FEED`
+until `--delivered-hours-json` and `--uptime-json` are given; the report never
+estimates them. The open-season fraction prints as 0 and `NOT_WIRED`.
+
+```bash
+sudo /opt/cathedral-validator/current/bin/cathedral-validator weekly-report \
+  --expected-hotkey <validator SS58> \
+  --telemetry /var/lib/cathedral-validator-telemetry/events.jsonl --chain-readback
+```
+
 Never delete or replace the journal to clear an error.
 Recovery, pause/resume and diagnostics: [Validator auto-update](AUTO_UPDATE.md).
 
