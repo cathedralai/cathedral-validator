@@ -115,6 +115,39 @@ admission.
 
 Removing a hotkey is the same change in reverse.
 
+## Uptime rule (AB#327)
+
+An approved miner's compute weight is multiplied by its uptime factor. The
+cut goes to the burn, never to another miner. Code:
+`cathedral_thin/independent_runtime/uptime_weight.py`.
+
+- Source: the validator's own telemetry spool (`--telemetry-spool`), the same
+  finalized rounds as the rolling availability (AB#326). A hotkey is up in a
+  round when it had at least one verified machine.
+- Window: one UTC day. Uptime is up rounds over counted rounds, in basis
+  points.
+- Factor: the latest settled window, which is the previous UTC day from
+  01:00 UTC on (a commit-reveal round is spooled only after its reveal). At
+  or above 9500 the factor is the uptime (97 percent keeps 97 percent of the
+  weight). Below 9500 it is zero.
+- Probation: three failing windows in the last seven settled windows pay
+  zero until enough of them age out of the seven.
+- Not held against a miner: rounds the validator did not finalize, rounds in
+  which no hotkey verified a machine (this validator's verifier outage burns
+  the compute lane and spools every miner at zero), rounds before the hotkey
+  was first up, and windows with fewer than 12 counted rounds.
+- Fails open: with no spool, or a spool that cannot be read or scored, the
+  plan is unchanged. The cycle event's `uptime.status` says which:
+  `APPLIED`, `FULL`, `NO_HISTORY` or `UNAVAILABLE`.
+- A plan with a factor below full lists it in its identity (`uptime`) and
+  binds it into the evidence digest; the writer refuses a factor that is not
+  below full, names a UID outside the compute lane, or repeats a UID.
+
+Known limits: a validator without a telemetry spool pays full factors, so two
+validators can sign different vectors. The public telemetry status of an
+approved miner cut to zero reads `not_approved`. The spool keeps 720 events
+and 16 MiB; with many serving miners the byte cap shortens the lookback.
+
 ## Known limits
 
 - **Recipients are checked at one finalized block.** The validator checks

@@ -639,6 +639,14 @@ def _availability_round(document: Mapping[str, Any]) -> AvailabilityRound:
     )
 
 
+def history_rounds(
+    history: Sequence[Mapping[str, Any]],
+) -> list[AvailabilityRound]:
+    """Spooled events as rounds: when each was observed and who verified."""
+
+    return [_availability_round(event) for event in history]
+
+
 def candidate_with_availability(
     candidate: Mapping[str, Any],
     history: Sequence[Mapping[str, Any]],
@@ -1268,6 +1276,7 @@ __all__ = [
     "build_telemetry_snapshot",
     "build_telemetry_candidate",
     "candidate_with_availability",
+    "history_rounds",
     "canonical_telemetry_path",
     "latest_telemetry_event",
     "finalize_telemetry_candidate",
