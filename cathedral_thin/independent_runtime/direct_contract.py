@@ -23,6 +23,8 @@ DIRECT_PLAN_SCHEMA = "cathedral_direct_validator_plan_v1"
 # miner.
 COMPUTE_LANE_SHARE = Fraction(1, 10)
 ESCAPE_LANE_SHARE = Fraction(1, 10)
+# Uptime factors (AB#327) are basis points; a full factor is never listed.
+UPTIME_BPS = 10_000
 
 # The version key the direct writer stamps on every weight call. Raised 12 Nov
 # 2026 with the gated compute split, so the owner can set the subnet's
@@ -163,6 +165,7 @@ def gated_split_vector(
     escape_units: Sequence[tuple[int, int]],
     escape_uid_hotkeys: Mapping[int, str],
     burn_uid: int,
+    uptime_bps: Mapping[int, int] | None = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """The only vector the direct path signs: two gated lanes and the burn.
 
@@ -171,6 +174,10 @@ def gated_split_vector(
     ``ESCAPE_LANE_SHARE`` of W over the verified breaks. Each lane is an
     integer budget apportioned on its own, so rounding never reaches a UID
     outside the lane, and everything not paid goes to ``burn_uid``.
+
+    ``uptime_bps`` (AB#327) scales a compute-lane UID's weight by its uptime
+    factor in basis points after the split. What it cuts goes to the burn,
+    never to another miner, so one miner's downtime cannot raise another's pay.
     """
 
     if isinstance(burn_uid, bool) or not isinstance(burn_uid, int) or burn_uid < 0:
@@ -203,6 +210,16 @@ def gated_split_vector(
     if any(uid == burn_uid for uid, _units in (*compute_rows, *escape_units)):
         raise DirectValidatorError("the burn UID cannot be paid by a lane")
     weights = _lane_weights(compute_rows, int(COMPUTE_LANE_SHARE * W), uid_hotkeys)
+    for uid, bps in (uptime_bps or {}).items():
+        if (
+            isinstance(bps, bool)
+            or not isinstance(bps, int)
+            or not 0 <= bps < UPTIME_BPS
+            or not isinstance(uid_hotkeys.get(uid), str)
+        ):
+            raise DirectValidatorError("uptime factor row is invalid")
+        if uid in weights:
+            weights[uid] = weights[uid] * bps // UPTIME_BPS
     escape = _lane_weights(
         tuple(escape_units), int(ESCAPE_LANE_SHARE * W), escape_uid_hotkeys
     )
@@ -340,6 +357,11 @@ class DirectWeightPlan:
     # and the UID it held there. A plan without one is never signed.
     burn_uid: int | None = None
     burn_hotkey: str = ""
+    # Uptime factors below full, per compute-lane UID (AB#327). Empty when
+    # every approved miner is at full uptime or the rule could not run, and
+    # then identity() and the vector are exactly the plan without it.
+    uptime_bps_by_uid: tuple[tuple[int, int], ...] = ()
+    uptime_rule: str = ""
 
     @property
     def escape_active(self) -> bool:
@@ -369,6 +391,7 @@ class DirectWeightPlan:
             escape_units=self.escape_units,
             escape_uid_hotkeys=dict(self.escape_uid_hotkeys),
             burn_uid=self.burn_uid,
+            uptime_bps=dict(self.uptime_bps_by_uid),
         )
 
     def burn_weight(self) -> int:
@@ -401,6 +424,11 @@ class DirectWeightPlan:
                 "fraction": self.escape_fraction,
                 "units_by_uid": [list(row) for row in self.escape_units],
                 "uid_hotkeys": [list(row) for row in self.escape_uid_hotkeys],
+            }
+        if self.uptime_bps_by_uid:
+            document["uptime"] = {
+                "rule": self.uptime_rule,
+                "bps_by_uid": [list(row) for row in self.uptime_bps_by_uid],
             }
         return document
 
@@ -460,6 +488,7 @@ __all__ = [
     "FinalizedMetagraphSnapshot",
     "PRIOR_DIRECT_VERSION_KEYS",
     "SUBNET_OWNER_BURN_HOTKEYS",
+    "UPTIME_BPS",
     "escape_blended_vector",
     "gated_split_vector",
     "require_netuid",

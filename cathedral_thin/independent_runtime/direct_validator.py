@@ -23,7 +23,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import bittensor as bt
 
@@ -57,6 +57,7 @@ from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     ESCAPE_LANE_SHARE,
     SUBNET_OWNER_BURN_HOTKEYS,
+    UPTIME_BPS,
     DirectValidatorError,
     DirectWeightPlan,
     FinalizedMetagraphSnapshot,
@@ -105,9 +106,11 @@ from .telemetry import (
     TelemetrySpool,
     applied_reveal_receipt,
     build_telemetry_candidate,
+    history_rounds,
     journal_pending_plan_matches,
     journal_receipt_for_plan,
 )
+from .uptime_weight import UPTIME_RULE, uptime_factors
 
 DEFAULT_INTERVAL_SECONDS = 1500.0
 STATUS_NO_PERMIT = "NO_PERMIT"
@@ -405,6 +408,85 @@ def finalized_serving_miners_snapshot(
 
 INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
 INFRA_HALT_SCOPED = "scoped"
+
+
+def apply_uptime_rule(
+    plan: DirectWeightPlan,
+    history: Callable[[], Sequence[Mapping[str, Any]]] | None,
+    *,
+    now: datetime | None = None,
+) -> tuple[DirectWeightPlan, dict[str, object]]:
+    """Scale each approved miner's compute weight by its uptime (AB#327).
+
+    ``history`` reads the validator's own spooled, finalized rounds. Without
+    a spool, or when it cannot be read or scored, the plan is returned
+    unchanged and the summary says why: telemetry never stops a write. A plan
+    with a factor below full binds the factors into its evidence digest, so
+    the journal names what cut each miner.
+    """
+
+    summary: dict[str, object] = {"rule": UPTIME_RULE}
+    if history is None:
+        return plan, {**summary, "status": "NO_HISTORY"}
+    try:
+        when = now or datetime.now(timezone.utc)
+        hotkeys = dict(plan.uid_hotkeys)
+        compute_uids = [
+            uid
+            for uid, score in plan.raw_scores
+            if score > 0
+            and hotkeys.get(uid) in approved_miners.APPROVED_COMPUTE_HOTKEYS
+        ]
+        factors = uptime_factors(
+            history_rounds(history()),
+            hotkeys=[hotkeys[uid] for uid in compute_uids],
+            now=when,
+        )
+        summary["hotkeys"] = {
+            hotkeys[uid]: factors[hotkeys[uid]].as_document() for uid in compute_uids
+        }
+        cut = tuple(
+            sorted(
+                (uid, factors[hotkeys[uid]].factor_bps)
+                for uid in compute_uids
+                if factors[hotkeys[uid]].factor_bps < UPTIME_BPS
+            )
+        )
+        if not cut:
+            return plan, {**summary, "status": "FULL"}
+        evidence_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                canonical_document_bytes(
+                    {
+                        "direct_evidence_digest": plan.evidence_digest,
+                        "uptime": {
+                            "rule": UPTIME_RULE,
+                            "bps_by_uid": [list(row) for row in cut],
+                        },
+                    }
+                )
+            ).hexdigest()
+        )
+        scaled = dataclasses.replace(
+            plan,
+            evidence_digest=evidence_digest,
+            uptime_bps_by_uid=cut,
+            uptime_rule=UPTIME_RULE,
+        )
+        wire_uids, wire_weights = scaled.expected_vector()
+        scaled = dataclasses.replace(
+            scaled, wire_uids=wire_uids, wire_weights=wire_weights
+        )
+        scaled.kwargs()
+        return scaled, {**summary, "status": "APPLIED"}
+    except Exception as exc:  # noqa: BLE001 - never fails the cycle
+        error = (
+            str(exc)
+            if isinstance(exc, (TelemetryError, DirectValidatorError, ValueError))
+            else type(exc).__name__
+        )
+        return plan, {**summary, "status": "UNAVAILABLE", "error": error[:200]}
 
 
 def apply_escape_receipts(
@@ -979,6 +1061,9 @@ def _run_direct_cycle_unlocked(
             blockers=(),
         )
     plan = build_direct_plan(snapshot, result, tdx_policy=tdx_policy)
+    plan, uptime_summary = apply_uptime_rule(
+        plan, telemetry_sink.history if telemetry_sink is not None else None
+    )
     compute_unproven = compute_lane_unproven(result)
     evidence_summary = _evidence_cycle_summary(
         snapshot, result, plan, tdx_policy=tdx_policy
@@ -1067,6 +1152,7 @@ def _run_direct_cycle_unlocked(
         "evidence_summary": evidence_summary,
         "receipt": receipt.as_document(),
     }
+    event["uptime"] = uptime_summary
     if escape_summary is not None:
         event["escape_receipts"] = escape_summary
     if compute_unproven is not None:
