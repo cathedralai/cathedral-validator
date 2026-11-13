@@ -19,7 +19,7 @@ be set to turn the path on:
 
 | Variable | Mainnet value | Notes |
 |---|---|---|
-| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only, 10s total wall-clock timeout (connect, reads, and parse), no redirects, 4 MiB / 10_000 receipt caps. |
+| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only and paged: the validator adds `limit=200`, `since` (start of the reward window less 5 minutes) and, after page 1, `cursor`, and follows `next_cursor` until it is null. A body that is a list, or has no `next_cursor`, is the whole feed (a server that does not page). Each page: 10s wall-clock (connect, reads, and parse), 4 MiB cap; all pages: 30s, capped by the cycle time left. At most 25 pages (under the feed's 30 a minute limit) and 10_000 receipts; past either ceiling the oldest are read, as before paging. Any failed page fails the whole read. No redirects. A file is one document: 4 MiB / 10_000 receipt caps. |
 | `CATHEDRAL_ESCAPE_WEIGHT_FRACTION` | `0.1` | Must be in `[0, 1/10]`. `0` is off. Any positive value turns the lane on at the fixed 10 percent; an existing `0.05` keeps working. Values at or above `0.11` refuse to start. |
 | `CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS` | `604800` (7 days) or omit | Optional. Must be in `(0, 7776000]` (90 days). Measured from signed `planted_at`. |
 
@@ -58,7 +58,7 @@ This validator does not publish the feed. The control plane must:
 3. Turn on the public read-only feed flag. While the flag is off the URL
    returns 404. A 404 is `SOURCE_UNAVAILABLE`: the cycle still writes, approved
    miners keep the compute lane, and the escape share is burned that cycle.
-4. Serve uncompressed JSON at a plain `https://` path (no query string).
+4. Serve uncompressed JSON at a plain `https://` path. Configure the URL with no query string; the validator adds `limit`, `since` and `cursor` itself. Because `since` comes from the reward window, a window longer than the feed's 7-day default is now read in full.
 5. Publish one signed receipt per `(window_id, room_id)` for the reward window.
 
 Until those are true, leave the fraction at 0.

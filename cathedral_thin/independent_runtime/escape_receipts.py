@@ -53,12 +53,24 @@ MAX_REWARD_WINDOW_SECONDS = 90 * 24 * 3600
 # A receipt planted further in the future than this is refused, not deferred:
 # the control plane stamps planted_at from its own clock.
 MAX_FUTURE_SKEW_SECONDS = 300
+# Per document: one file, or one HTTPS page.
 MAX_FEED_BYTES = 4 * 1024 * 1024
 MAX_FEED_RECEIPTS = 10_000
-# Total wall-clock budget for connect, every read, and JSON parse. urllib's
-# socket timeout is per recv, so a feed that drips slower than this value
-# per byte would otherwise outlive FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
+# HTTPS feeds are read in pages (AB#691) so one large receipt cannot push the
+# whole feed over MAX_FEED_BYTES. The control plane caps the published claim
+# at 16 KiB, about 17.5 KiB a receipt, so 200 receipts stay under 4 MiB.
+FEED_PAGE_RECEIPTS = 200
+# The feed allows 30 requests a minute per IP; stay under it. A feed longer
+# than this is read oldest first up to the ceiling, as a single 10,000-receipt
+# read was before paging.
+MAX_FEED_PAGES = 25
+# Wall-clock budget for one page: connect, every read, and JSON parse.
+# urllib's socket timeout is per recv, so a feed that drips slower than this
+# value per byte would otherwise outlive FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
 FEED_TIMEOUT_SECONDS = 10.0
+# Wall-clock budget for every page together. The direct validator also caps it
+# at the cycle time left minus FEED_DEADLINE_SLACK_SECONDS.
+FEED_TOTAL_TIMEOUT_SECONDS = 30.0
 FEED_READ_CHUNK_BYTES = 64 * 1024
 # Leave time after the feed fetch for scoring, presign RPCs, and the write.
 # A hung feed must not spend the rest of FULL_CYCLE_RESPONSE_DEADLINE_SECONDS.
@@ -674,15 +686,49 @@ def _fetch_https(
     return body
 
 
+def _decode_feed_document(raw: bytes) -> tuple[list[object], object]:
+    """One document: a JSON list, or ``{"receipts": [...], "next_cursor": ...}``."""
+
+    if len(raw) > MAX_FEED_BYTES:
+        raise EscapeReceiptError("escape receipt feed is too large")
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise EscapeReceiptError("escape receipt feed is not JSON") from exc
+    next_cursor: object = None
+    if isinstance(document, dict):
+        next_cursor = document.get("next_cursor")
+        document = document.get("receipts")
+    if not isinstance(document, list):
+        raise EscapeReceiptError("escape receipt feed is not a receipt list")
+    if len(document) > MAX_FEED_RECEIPTS:
+        raise EscapeReceiptError("escape receipt feed has too many receipts")
+    return document, next_cursor
+
+
+def _feed_page_url(source: str, params: Mapping[str, object]) -> str:
+    return source + "?" + urllib.parse.urlencode(params)
+
+
 def load_receipt_feed(
     source: str,
     *,
     fetch: Callable[[str], bytes] | None = None,
-    timeout: float = FEED_TIMEOUT_SECONDS,
+    timeout: float = FEED_TOTAL_TIMEOUT_SECONDS,
+    window_seconds: int | None = None,
+    now: float | None = None,
 ) -> list[object]:
     """Read a JSON list of receipts, or ``{"receipts": [...]}``.
 
-    ``timeout`` is a total wall-clock budget for connect, reads, and parse.
+    A file is one document. An HTTPS source is read page by page: each request
+    adds ``limit``, ``since`` (when ``window_seconds`` is given) and, after the
+    first page, the previous page's ``next_cursor``. Paging stops when
+    ``next_cursor`` is missing or null, so a server that does not page (a list
+    body, or no ``next_cursor``) is read in one request as before. Every call
+    starts from the first page. Any failed page fails the whole read.
+
+    ``timeout`` is a total wall-clock budget for every connect, read, and
+    parse; each page also gets at most ``FEED_TIMEOUT_SECONDS``.
     """
 
     if not math.isfinite(timeout) or timeout <= 0:
@@ -692,33 +738,58 @@ def load_receipt_feed(
     getter = (
         fetch
         if fetch is not None
-        else (lambda url: _fetch_https(url, timeout=_feed_remaining(deadline)))
+        else (
+            lambda url: _fetch_https(
+                url, timeout=min(FEED_TIMEOUT_SECONDS, _feed_remaining(deadline))
+            )
+        )
     )
     _feed_remaining(deadline)
-    if source.startswith("https://"):
-        raw = getter(source)
-    else:
+    if not source.startswith("https://"):
         path = Path(source)
         if not path.is_file():
             raise EscapeReceiptError("escape receipt source is not a regular file")
         _feed_remaining(deadline)
         with path.open("rb") as handle:
             raw = handle.read(MAX_FEED_BYTES + 1)
-    _feed_remaining(deadline)
-    if len(raw) > MAX_FEED_BYTES:
-        raise EscapeReceiptError("escape receipt feed is too large")
-    try:
-        document = json.loads(raw)
-    except ValueError as exc:
-        raise EscapeReceiptError("escape receipt feed is not JSON") from exc
-    _feed_remaining(deadline)
-    if isinstance(document, dict):
-        document = document.get("receipts")
-    if not isinstance(document, list):
-        raise EscapeReceiptError("escape receipt feed is not a receipt list")
-    if len(document) > MAX_FEED_RECEIPTS:
-        raise EscapeReceiptError("escape receipt feed has too many receipts")
-    return document
+        _feed_remaining(deadline)
+        document, _ignored = _decode_feed_document(raw)
+        _feed_remaining(deadline)
+        return document
+
+    params: dict[str, object] = {"limit": FEED_PAGE_RECEIPTS}
+    if window_seconds is not None:
+        clock = time.time() if now is None else now
+        # The feed filters on signing time, which is never before planted_at,
+        # so nothing the reward window counts is left out. The skew margin
+        # only widens the read.
+        params["since"] = max(0, int(clock - window_seconds - MAX_FUTURE_SKEW_SECONDS))
+    receipts: list[object] = []
+    cursor: int | None = None
+    for _page in range(MAX_FEED_PAGES):
+        query = dict(params)
+        if cursor is not None:
+            query["cursor"] = cursor
+        raw = getter(_feed_page_url(source, query))
+        _feed_remaining(deadline)
+        page, next_cursor = _decode_feed_document(raw)
+        _feed_remaining(deadline)
+        receipts.extend(page)
+        if len(receipts) >= MAX_FEED_RECEIPTS:
+            return receipts[:MAX_FEED_RECEIPTS]
+        if next_cursor is None:
+            return receipts
+        if (
+            isinstance(next_cursor, bool)
+            or not isinstance(next_cursor, int)
+            or next_cursor < 0
+            or (cursor is not None and next_cursor <= cursor)
+        ):
+            raise EscapeReceiptError("escape receipt feed cursor did not advance")
+        if not page:
+            raise EscapeReceiptError("escape receipt feed page is empty mid-feed")
+        cursor = next_cursor
+    return receipts
 
 
 @dataclass(frozen=True)
@@ -852,8 +923,11 @@ __all__ = [
     "ESCAPE_REWARD_WINDOW_ENV",
     "ESCAPE_WEIGHT_FRACTION_ENV",
     "FEED_DEADLINE_SLACK_SECONDS",
+    "FEED_PAGE_RECEIPTS",
     "FEED_TIMEOUT_SECONDS",
+    "FEED_TOTAL_TIMEOUT_SECONDS",
     "MAX_FEED_BYTES",
+    "MAX_FEED_PAGES",
     "MAX_FEED_RECEIPTS",
     "MAX_WEIGHT_FRACTION",
     "CONTEST_SIGNER_SET_SCHEMA",
