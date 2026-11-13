@@ -75,6 +75,7 @@ from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DIRECT_VERSION_KEY,
     ESCAPE_LANE_SHARE,
+    UPTIME_BPS,
     PRIOR_DIRECT_VERSION_KEYS,
     SUBNET_OWNER_BURN_HOTKEYS,
     DirectSubmissionReceipt,
@@ -85,6 +86,7 @@ from .direct_contract import (
 )
 from .preview_io import canonical_document_bytes
 from .qvl import DIRECT_VALIDATOR_QVL_DIGEST
+from .uptime_weight import UPTIME_RULE
 
 STATE_SCHEMA = "cathedral_direct_validator_state_v1"
 STATUS_CONFIRMED = "CONFIRMED"
@@ -326,6 +328,39 @@ def _validate_compute_anchor_rows(
     ):
         raise DirectValidatorError("direct plan compute anchor units are inconsistent")
     return set(units)
+
+
+def _validate_uptime_rows(
+    plan: DirectWeightPlan, payable_compute_uids: set[int]
+) -> None:
+    """Check the uptime factors (AB#327); a plan without them passes as before.
+
+    Each row names a compute-lane UID once, with a factor below full, under the
+    rule this release computes.
+    """
+
+    rows = plan.uptime_bps_by_uid
+    if not rows:
+        if plan.uptime_rule != "":
+            raise DirectValidatorError("direct plan names an uptime rule without rows")
+        return
+    if (
+        plan.uptime_rule != UPTIME_RULE
+        or any(
+            not isinstance(row, tuple)
+            or len(row) != 2
+            or isinstance(row[0], bool)
+            or not isinstance(row[0], int)
+            or row[0] not in payable_compute_uids
+            or isinstance(row[1], bool)
+            or not isinstance(row[1], int)
+            or not 0 <= row[1] < UPTIME_BPS
+            for row in rows
+        )
+        or len({row[0] for row in rows}) != len(rows)
+        or list(rows) != sorted(rows)
+    ):
+        raise DirectValidatorError("direct plan uptime factors are inconsistent")
 
 
 def _require_presign_time(deadline: float, *, stage: str) -> None:
@@ -1177,8 +1212,17 @@ class DirectWeightWriter:
             raise DirectValidatorError(
                 "direct plan burn destination is not the pinned subnet owner hotkey"
             )
-        expected_uids, expected_weights = plan.expected_vector()
         approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+        # Uptime rows may name any approved compute UID with a verified machine,
+        # also one the anchor does not pay (the cut is then a no-op).
+        _validate_uptime_rows(
+            plan,
+            {
+                uid
+                for uid, score in raw_scores.items()
+                if score > 0 and uid_hotkeys.get(uid) in approved
+            },
+        )
         # Exactly who may be weighted: approved hotkeys with a verified
         # machine (in enforce, only those with delivered room-seconds),
         # verified escape breakers, and the burn destination.
