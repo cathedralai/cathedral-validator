@@ -60,9 +60,8 @@ MAX_FEED_RECEIPTS = 10_000
 # whole feed over MAX_FEED_BYTES. The control plane caps the published claim
 # at 16 KiB, about 17.5 KiB a receipt, so 200 receipts stay under 4 MiB.
 FEED_PAGE_RECEIPTS = 200
-# The feed allows 30 requests a minute per IP; stay under it. A feed longer
-# than this is read oldest first up to the ceiling, as a single 10,000-receipt
-# read was before paging.
+# The feed allows 30 requests a minute per IP; stay under it. If more pages
+# exist, refuse the incomplete read instead of weighting only older claims.
 MAX_FEED_PAGES = 25
 # Wall-clock budget for one page: connect, every read, and JSON parse.
 # urllib's socket timeout is per recv, so a feed that drips slower than this
@@ -789,7 +788,7 @@ def load_receipt_feed(
         if not page:
             raise EscapeReceiptError("escape receipt feed page is empty mid-feed")
         cursor = next_cursor
-    return receipts
+    raise EscapeReceiptError("escape receipt feed exceeds the page limit")
 
 
 @dataclass(frozen=True)

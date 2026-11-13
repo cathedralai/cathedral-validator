@@ -946,15 +946,24 @@ def test_a_full_page_at_the_largest_published_receipt_fits() -> None:
     assert len(loaded) == escape_receipts.FEED_PAGE_RECEIPTS
 
 
-def test_paging_stops_at_the_page_ceiling_and_keeps_the_oldest() -> None:
+def test_paging_refuses_a_partial_feed_at_the_page_ceiling() -> None:
     def fetch(url: str) -> bytes:
         cursor = int(_query(url).get("cursor", "0"))
         rows = [{"n": cursor * 10 + i} for i in range(10)]
         return json.dumps(_page(rows, cursor + 1)).encode()
 
-    loaded = escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch)
-    assert len(loaded) == escape_receipts.MAX_FEED_PAGES * 10
-    assert loaded[0] == {"n": 0}
+    with pytest.raises(EscapeReceiptError, match="exceeds the page limit"):
+        escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch)
+
+
+def test_5001st_receipt_is_never_silently_omitted() -> None:
+    def fetch(url: str) -> bytes:
+        cursor = int(_query(url).get("cursor", "0"))
+        rows = [{"n": cursor * 200 + i} for i in range(200)]
+        return json.dumps(_page(rows, cursor + 1)).encode()
+
+    with pytest.raises(EscapeReceiptError, match="exceeds the page limit"):
+        escape_receipts.load_receipt_feed(FEED_URL, fetch=fetch)
 
 
 def test_paging_stops_at_the_receipt_ceiling() -> None:
