@@ -1,0 +1,67 @@
+{
+  "_comment": "Signed by bigailabs/polariscomputer polaris/services/cathedral_delivery_receipts.py with test seed 0x19*32 (AB#319).",
+  "feed": {
+    "count": 3,
+    "receipts": [
+      {
+        "key_id": "contest-2026-11b",
+        "miner_hotkey": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
+        "room_seconds": 1800,
+        "rooms": [
+          {
+            "attestation_sha256": "baa75567481bf71709315b3752a29e63bbb5113c987df8ea17de59e9e5a72317",
+            "room_id": "miner-abcdef0123456789abcdef01.r2",
+            "seconds": 1800
+          }
+        ],
+        "schema": "cathedral_delivery_receipt_v0",
+        "sig": "od/IAlzTu3hjR4zM44TjYfjWpejLIYI8kP3r4AdQLkJItct8jULnBNj+rZ0rJlh9oUZvJvASMY6Va6iWyTbIBg==",
+        "signer": "control_plane",
+        "window_end": 1762995600,
+        "window_id": "delivery-1762992000",
+        "window_start": 1762992000
+      },
+      {
+        "key_id": "contest-2026-11b",
+        "miner_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "room_seconds": 3000,
+        "rooms": [
+          {
+            "attestation_sha256": "604d0b86bd4f184739fcc98791d35f009baea353b9bde8faf60b1a0ac3954d93",
+            "room_id": "miner-abcdef0123456789abcdef01.r1",
+            "seconds": 3000
+          }
+        ],
+        "schema": "cathedral_delivery_receipt_v0",
+        "sig": "a58KoIzjpSRVq5IrIQv0MZ4eHEyxrsmSe2amr/RPANeaLrSd8UjJF6RpX2RmAox6CMKlx9HvHSqnZD9kUT+sBA==",
+        "signer": "control_plane",
+        "window_end": 1762995600,
+        "window_id": "delivery-1762992000",
+        "window_start": 1762992000
+      },
+      {
+        "key_id": "contest-2026-11b",
+        "miner_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "room_seconds": 600,
+        "rooms": [
+          {
+            "attestation_sha256": "604d0b86bd4f184739fcc98791d35f009baea353b9bde8faf60b1a0ac3954d93",
+            "room_id": "miner-abcdef0123456789abcdef01.r1",
+            "seconds": 600
+          }
+        ],
+        "schema": "cathedral_delivery_receipt_v0",
+        "sig": "xSXD3bNoeN7rxi6NZuALz6fiwwg1ziqWIVxu0qBY7P/AwOcRzT3XT/HnP1wNwhQJsviXMC9MCTHZ/91hU0XYAw==",
+        "signer": "control_plane",
+        "window_end": 1762999200,
+        "window_id": "delivery-1762995600",
+        "window_start": 1762995600
+      }
+    ],
+    "schema": "cathedral_delivery_feed_v0",
+    "signer": "control_plane",
+    "window_seconds": 3600
+  },
+  "now": 1763001000,
+  "signer_pubkey_b64": "MfMyLUkj02xBwQm9sAmRkxh77ZmUIJbkkmokx379DS8="
+}
