@@ -26,10 +26,22 @@ from cathedral_thin.independent_runtime.escape_receipts import (
 )
 
 FIXTURE = json.loads(
-    (Path(__file__).resolve().parents[1] / "fixtures" / "escape_trimmed_receipt_polaris.json").read_text("utf-8")
+    (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "escape_trimmed_receipt_polaris.json"
+    ).read_text("utf-8")
 )
 RECEIPT = FIXTURE["receipt"]
-PUBLIC_CLAIM_KEYS = {"schema", "target", "window_id", "room_id", "commands", "proof_token", "breaker_hotkey"}
+PUBLIC_CLAIM_KEYS = {
+    "schema",
+    "target",
+    "window_id",
+    "room_id",
+    "commands",
+    "proof_token",
+    "breaker_hotkey",
+}
 BREAKER_UID = 23
 NOW = RECEIPT["planted_at"] + 60
 
@@ -38,7 +50,9 @@ def _signers(key_id: str = RECEIPT["key_id"]):
     return parse_contest_signers(
         {
             "schema": CONTEST_SIGNER_SET_SCHEMA,
-            "keys": [{"id": key_id, "not_before": 0, "pubkey_b64": FIXTURE["pubkey_b64"]}],
+            "keys": [
+                {"id": key_id, "not_before": 0, "pubkey_b64": FIXTURE["pubkey_b64"]}
+            ],
         }
     )
 
