@@ -20,6 +20,11 @@ from typing import Any, Mapping, Sequence
 
 from cathedral_thin.independent.constants import NETUID, W
 
+from .availability import (
+    AVAILABILITY_BPS,
+    AvailabilityRound,
+    rolling_availability,
+)
 from .direct_contract import DirectSubmissionReceipt, DirectWeightPlan
 from .preview_io import canonical_document_bytes
 from .testnet import request_network
@@ -41,6 +46,22 @@ REVEALED_SUBMISSION_STATUS = "REVEALED_CONFIRMED"
 # (direct_writer.STATUS_COMMITTED). It stays the stored receipt of an attempt
 # whose reveal is awaited, unproven or not applied.
 COMMITTED_SUBMISSION_STATUS = "COMMITTED"
+MINER_FIELDS = frozenset(
+    {
+        "uid",
+        "hotkey",
+        "distinct_verified_compute",
+        "tee_counts",
+        "sat_units",
+        "verification_ms",
+        "weight_u16",
+        "verified_at",
+        "status",
+    }
+)
+# Optional per-miner rolling availability (AB#326). Events spooled before it
+# existed carry no such key and stay valid.
+AVAILABILITY_FIELD = "availability_7d"
 
 
 class TelemetryError(RuntimeError):
@@ -493,17 +514,10 @@ def validate_public_telemetry_event(
     seen_uids: set[int] = set()
     total_weight = 0
     for miner in miners:
-        if not isinstance(miner, Mapping) or set(miner) != {
-            "uid",
-            "hotkey",
-            "distinct_verified_compute",
-            "tee_counts",
-            "sat_units",
-            "verification_ms",
-            "weight_u16",
-            "verified_at",
-            "status",
-        }:
+        if (
+            not isinstance(miner, Mapping)
+            or set(miner) - {AVAILABILITY_FIELD} != MINER_FIELDS
+        ):
             raise TelemetryError("telemetry miner fields are invalid")
         tee_counts = miner.get("tee_counts")
         verification = miner.get("verification_ms")
@@ -563,6 +577,8 @@ def validate_public_telemetry_event(
             )
         if not valid_timing or not valid_status:
             raise TelemetryError("telemetry miner values are invalid")
+        if AVAILABILITY_FIELD in miner:
+            _validate_availability(miner[AVAILABILITY_FIELD], distinct_compute)
         seen_uids.add(uid)
         total_weight += weight
     # An event prepared before the gated split has no burn and its miners hold
@@ -576,6 +592,88 @@ def validate_public_telemetry_event(
         raise TelemetryError("telemetry weights do not match a finalized vector")
     _verify_telemetry_signature(document)
     return dict(document)
+
+
+def _validate_availability(value: object, distinct_compute: int) -> None:
+    """The published round is always in its own window, so ``rounds >= 1``,
+    and a row with a verified machine has at least that round verified."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "verified_rounds",
+        "rounds",
+        "bps",
+    }:
+        raise TelemetryError("telemetry availability fields are invalid")
+    verified = _nonnegative_int(value.get("verified_rounds"))
+    rounds = _nonnegative_int(value.get("rounds"))
+    bps = _nonnegative_int(value.get("bps"))
+    if (
+        verified is None
+        or rounds is None
+        or bps is None
+        or rounds < 1
+        or verified > rounds
+        or bps != verified * AVAILABILITY_BPS // rounds
+        or (distinct_compute > 0 and verified < 1)
+    ):
+        raise TelemetryError("telemetry availability values are invalid")
+
+
+def _observed_at(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise TelemetryError("telemetry observation time is invalid")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise TelemetryError("telemetry observation time is invalid") from exc
+
+
+def _availability_round(document: Mapping[str, Any]) -> AvailabilityRound:
+    return AvailabilityRound(
+        observed_at=_observed_at(document.get("observed_at")),
+        verified_hotkeys=frozenset(
+            miner["hotkey"]
+            for miner in document["miners"]
+            if miner["distinct_verified_compute"] > 0
+        ),
+    )
+
+
+def candidate_with_availability(
+    candidate: Mapping[str, Any],
+    history: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Add each listed hotkey's seven-day availability to an unsigned round.
+
+    ``now`` is the round's own ``observed_at``, never the wall clock: a
+    commit-reveal or recovered round is finalized a cycle or more late. The
+    round itself is always one of the window's rounds.
+    """
+
+    miners = candidate.get("miners")
+    if not isinstance(miners, list) or any(
+        not isinstance(miner, Mapping)
+        or set(miner) != MINER_FIELDS
+        or not isinstance(miner.get("hotkey"), str)
+        or _nonnegative_int(miner.get("distinct_verified_compute")) is None
+        for miner in miners
+    ):
+        raise TelemetryError("pending telemetry candidate is invalid")
+    current = _availability_round(candidate)
+    rounds = [_availability_round(event) for event in history]
+    rounds.append(current)
+    scores = rolling_availability(
+        rounds,
+        hotkeys=[miner["hotkey"] for miner in miners],
+        now=current.observed_at,
+    )
+    return {
+        **dict(candidate),
+        "miners": [
+            {**dict(miner), AVAILABILITY_FIELD: scores[miner["hotkey"]].as_document()}
+            for miner in miners
+        ],
+    }
 
 
 def canonical_telemetry_path(state_path: Path) -> Path:
@@ -648,6 +746,34 @@ class TelemetrySpool:
         self.path = path
         self.reader_gid = reader_gid
         self.netuid = netuid
+
+    def history(self) -> list[dict[str, Any]]:
+        """Every spooled event that still validates, oldest first.
+
+        A line that no longer validates (another network, an older schema) is
+        skipped rather than failing the round it would only inform.
+        """
+
+        if not self.path.exists():
+            return []
+        if self.path.is_symlink():
+            raise TelemetryError("telemetry spool is a symlink")
+        try:
+            raw = self.path.read_bytes()
+        except OSError as exc:
+            raise TelemetryError("telemetry spool cannot be read") from exc
+        if len(raw) > MAX_TELEMETRY_HISTORY_BYTES:
+            raise TelemetryError("telemetry spool is not bounded")
+        events: list[dict[str, Any]] = []
+        for line in raw.splitlines():
+            try:
+                document = json.loads(line.decode("ascii"))
+                events.append(
+                    validate_public_telemetry_event(document, netuid=self.netuid)
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, TelemetryError):
+                continue
+        return events
 
     def append(self, event: Mapping[str, Any]) -> None:
         line = _event_line(event, netuid=self.netuid)
@@ -913,8 +1039,15 @@ class PendingTelemetryStore:
         if receipt.status == "EXPIRED_WITHOUT_INCLUSION":
             self.clear()
             return None
+        candidate = document["candidate"]
+        try:
+            candidate = candidate_with_availability(candidate, self.spool.history())
+        except TelemetryError:
+            # Availability is optional on the wire; an unreadable history must
+            # not stop the round itself from being published.
+            pass
         event = finalize_telemetry_candidate(
-            document["candidate"],
+            candidate,
             receipt,
             keypair=keypair,
             netuid=self.spool.netuid,
@@ -1134,6 +1267,7 @@ __all__ = [
     "applied_reveal_receipt",
     "build_telemetry_snapshot",
     "build_telemetry_candidate",
+    "candidate_with_availability",
     "canonical_telemetry_path",
     "latest_telemetry_event",
     "finalize_telemetry_candidate",
