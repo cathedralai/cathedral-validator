@@ -1,0 +1,76 @@
+{
+  "attestation": {
+    "amd": {
+      "ark_sha256": "4c6598d19c18719c5dfd4a7d335f674e5bfe1d8f800cea2cf270c10d103db2f1",
+      "product": "Genoa",
+      "tcb": {
+        "bootloader": 12,
+        "microcode": 88,
+        "snp": 27,
+        "tee": 0
+      }
+    },
+    "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+    "chip_id": "3920ee14a806803f...",
+    "host_data": "251294ef7b2702da92236b2d112c5e868ccbba269e0d0aaafa41b2694957d9e8",
+    "kernel_cmdline": "initrd=initrd console=ttyS0 loglevel=7 systemd.show_status=error panic=-1 rdinit=/init cathedral.hotel=nc-sealed-3 cathedral.debug=0",
+    "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+    "policy": "0x30000",
+    "report_version": 5
+  },
+  "cathedral_receipts": {
+    "count": 12,
+    "from_n": 1,
+    "head_n": 12,
+    "key_source": "examples/sandbox/audit_trail/sample-run-20261109/trusted-keys.json",
+    "keys_used": [
+      {
+        "fingerprint": "ed25519:6f40c1162b262b28",
+        "key_id": "cathedral-customer-receipt-2026-07-31-01"
+      }
+    ],
+    "to_n": 12
+  },
+  "commands": {
+    "matched": 4,
+    "not_compared": 0
+  },
+  "does_not_prove": [
+    "That nothing is missing: the chain head is what the database reports, unsigned; the guest does not sign file transfers, terminals or lifetime changes; exec and delete receipts are kept only since 2026-11-05; and a host that sent none (an older guest) left none.",
+    "What ran or what it printed: receipts carry sha256 hashes of commands, requests and output, never the content.",
+    "That the measurement is an approved build: no list of approved measurements is published yet.",
+    "That rooms on one host are kept apart by hardware: they share one guest, separated by gVisor."
+  ],
+  "failures": [
+    "Cathedral receipt 8: the signature does not verify with trusted key cathedral-customer-receipt-2026-07-31-01",
+    "Cathedral receipt 9: prev_sha256 is not the sha256 of receipt 8"
+  ],
+  "guest_receipts": {
+    "count": 5,
+    "events": {
+      "create": 1,
+      "exec": 4
+    },
+    "verified": 5
+  },
+  "hotel": "nc-sealed-3",
+  "not_proven": [],
+  "outputs": null,
+  "room_id": "nc-sealed-3.sbx_b4fc4d7d19e8",
+  "sandbox_id": "e801300f-7f56-4f34-a62d-a5f9ed15c0ad",
+  "secret_writes": {
+    "count": 0,
+    "matched": 0
+  },
+  "verdict": "FAIL",
+  "verified_results": {
+    "reason": "verdict is FAIL, not PASS",
+    "results": [],
+    "schema": "cathedral_verified_result_v1"
+  },
+  "verifier": {
+    "ran": "vendored",
+    "sha256": "72ef00ad44e300db4e4f594af9b4701742d0b58a1783891ce47bbdc32583cb4d",
+    "source": "https://github.com/cathedralai/cathedral-sandbox room-kit/verify_receipts.py at 6e420a95080879767e4e7b01aa1c7370fc9e5cdb"
+  }
+}
