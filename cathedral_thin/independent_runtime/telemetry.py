@@ -812,9 +812,14 @@ class TelemetrySpool:
             try:
                 document = json.loads(line.decode("ascii"))
                 hotkeys = document["verified"]
-                if not isinstance(hotkeys, list) or not all(
-                    isinstance(item, str) for item in hotkeys
+                if (
+                    document["netuid"] != self.netuid
+                    or document["network"] != request_network()
+                    or not isinstance(hotkeys, list)
+                    or not all(isinstance(item, str) for item in hotkeys)
                 ):
+                    # Another deployment's rounds (reused spool directory) or a
+                    # pre-scoping line: never credit them to this subnet.
                     continue
                 rounds.append(
                     AvailabilityRound(
@@ -832,17 +837,22 @@ class TelemetrySpool:
                 continue
         return rounds
 
+    def _ledger_line(self, item: AvailabilityRound) -> bytes:
+        return _canonical_json_bytes(
+            {
+                "netuid": self.netuid,
+                "network": request_network(),
+                "observed_at": item.observed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "verified": sorted(item.verified_hotkeys),
+            }
+        )
+
     def record_availability(self, event: Mapping[str, Any]) -> None:
         """Append a published round to the ledger, dropping rounds older than
         the window (and the oldest beyond the bounds)."""
 
         current = _availability_round(event)
-        line = _canonical_json_bytes(
-            {
-                "observed_at": event["observed_at"],
-                "verified": sorted(current.verified_hotkeys),
-            }
-        )
+        line = self._ledger_line(current)
         _secure_parent(self.path, reader_gid=self.reader_gid)
         path = self.ledger_path
         kept = [
@@ -851,12 +861,7 @@ class TelemetrySpool:
             if item.observed_at > current.observed_at - AVAILABILITY_WINDOW
         ]
         lines = [
-            _canonical_json_bytes(
-                {
-                    "observed_at": item.observed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "verified": sorted(item.verified_hotkeys),
-                }
-            )
+            self._ledger_line(item)
             for item in kept
             if item.observed_at != current.observed_at
         ]

@@ -344,3 +344,23 @@ def test_a_damaged_ledger_does_not_stop_publishing(tmp_path) -> None:
     spool.ledger_path.write_bytes(b"not json\n{}\n")
     event = _publish(spool, NOW)
     assert _availability(event)[TDX_MINER.ss58_address]["rounds"] == 2
+
+
+def test_ledger_rounds_from_another_netuid_or_network_are_ignored(
+    tmp_path, monkeypatch
+) -> None:
+    # A reused spool directory must not carry another deployment's rounds
+    # into this subnet's window.
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    _publish(spool, NOW - timedelta(days=1))
+    assert len(spool.availability_ledger()) == 1
+    other_netuid = TelemetrySpool(spool.path, netuid=spool.netuid + 1)
+    assert other_netuid.availability_ledger() == []
+    monkeypatch.setattr(telemetry, "request_network", lambda: "other-network")
+    assert spool.availability_ledger() == []
+    # Pre-scoping lines carry neither identity and are skipped too.
+    monkeypatch.undo()
+    spool.ledger_path.write_bytes(
+        b'{"observed_at":"2026-11-12T12:00:00Z","verified":["x"]}\n'
+    )
+    assert spool.availability_ledger() == []
