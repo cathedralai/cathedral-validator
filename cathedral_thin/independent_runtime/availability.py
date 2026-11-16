@@ -8,7 +8,7 @@ spool; see ``telemetry.PendingTelemetryStore.finalize``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -28,11 +28,6 @@ class AvailabilityRound:
 class HotkeyAvailability:
     verified_rounds: int
     rounds: int
-    # Seconds between the oldest round still held and ``now``, capped at the
-    # window. Below the window means the spool dropped older rounds, so the
-    # share covers less than seven days and a reader must not treat it as a
-    # full week.
-    covered_seconds: int = field(default=0, compare=False)
 
     @property
     def bps(self) -> int:
@@ -43,7 +38,6 @@ class HotkeyAvailability:
             "verified_rounds": self.verified_rounds,
             "rounds": self.rounds,
             "bps": self.bps,
-            "covered_seconds": self.covered_seconds,
         }
 
 
@@ -77,17 +71,12 @@ def rolling_availability(
     total = len(verified_by_time)
     if total == 0:
         return {}
-    covered_seconds = min(
-        int((now - min(verified_by_time)).total_seconds()),
-        int(window.total_seconds()),
-    )
     return {
         hotkey: HotkeyAvailability(
             verified_rounds=sum(
                 1 for seen in verified_by_time.values() if hotkey in seen
             ),
             rounds=total,
-            covered_seconds=covered_seconds,
         )
         for hotkey in hotkeys
     }
