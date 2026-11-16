@@ -22,6 +22,7 @@ from cathedral_thin.independent.constants import NETUID, W
 
 from .availability import (
     AVAILABILITY_BPS,
+    AVAILABILITY_WINDOW,
     AvailabilityRound,
     rolling_availability,
 )
@@ -598,12 +599,17 @@ def _validate_availability(value: object, distinct_compute: int) -> None:
     """The published round is always in its own window, so ``rounds >= 1``,
     and a row with a verified machine has at least that round verified."""
 
-    if not isinstance(value, Mapping) or set(value) != {
-        "verified_rounds",
-        "rounds",
-        "bps",
-    }:
+    base_keys = {"verified_rounds", "rounds", "bps"}
+    # covered_seconds was added after the first spooled events; both shapes stay valid.
+    if not isinstance(value, Mapping) or set(value) not in (
+        base_keys,
+        base_keys | {"covered_seconds"},
+    ):
         raise TelemetryError("telemetry availability fields are invalid")
+    if "covered_seconds" in value:
+        covered = _nonnegative_int(value["covered_seconds"])
+        if covered is None or covered > int(AVAILABILITY_WINDOW.total_seconds()):
+            raise TelemetryError("telemetry availability values are invalid")
     verified = _nonnegative_int(value.get("verified_rounds"))
     rounds = _nonnegative_int(value.get("rounds"))
     bps = _nonnegative_int(value.get("bps"))

@@ -78,12 +78,23 @@ def test_denominator_is_every_round_and_absence_is_not_verified() -> None:
         _round(NOW, A, B),
     ]
     scores = rolling_availability(rounds, hotkeys=[A, B, "newcomer"], now=NOW)
-    assert scores[A].as_document() == {"verified_rounds": 4, "rounds": 4, "bps": 10000}
-    assert scores[B].as_document() == {"verified_rounds": 2, "rounds": 4, "bps": 5000}
+    assert scores[A].as_document() == {
+        "verified_rounds": 4,
+        "rounds": 4,
+        "bps": 10000,
+        "covered_seconds": 10800,
+    }
+    assert scores[B].as_document() == {
+        "verified_rounds": 2,
+        "rounds": 4,
+        "bps": 5000,
+        "covered_seconds": 10800,
+    }
     assert scores["newcomer"].as_document() == {
         "verified_rounds": 0,
         "rounds": 4,
         "bps": 0,
+        "covered_seconds": 10800,
     }
 
 
@@ -198,8 +209,18 @@ def test_first_round_counts_itself(tmp_path) -> None:
     spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
     event = _publish(spool, NOW)
     assert _availability(event) == {
-        TDX_MINER.ss58_address: {"verified_rounds": 1, "rounds": 1, "bps": 10000},
-        SNP_MINER.ss58_address: {"verified_rounds": 0, "rounds": 1, "bps": 0},
+        TDX_MINER.ss58_address: {
+            "verified_rounds": 1,
+            "rounds": 1,
+            "bps": 10000,
+            "covered_seconds": 0,
+        },
+        SNP_MINER.ss58_address: {
+            "verified_rounds": 0,
+            "rounds": 1,
+            "bps": 0,
+            "covered_seconds": 0,
+        },
     }
     assert latest_telemetry_event(spool.path) == event
 
@@ -214,6 +235,7 @@ def test_history_in_the_spool_feeds_the_published_value(tmp_path) -> None:
         "verified_rounds": 2,
         "rounds": 3,
         "bps": 6666,
+        "covered_seconds": 172800,
     }
     assert validate_public_telemetry_event(event) == event
 
@@ -272,6 +294,9 @@ def test_unreadable_history_publishes_the_round_without_the_field(
 @pytest.mark.parametrize(
     "value",
     [
+        {"verified_rounds": 1, "rounds": 1, "bps": 10000, "covered_seconds": -1},
+        {"verified_rounds": 1, "rounds": 1, "bps": 10000, "covered_seconds": 604801},
+        {"verified_rounds": 1, "rounds": 1, "bps": 10000, "covered_seconds": "0"},
         {"verified_rounds": 1, "rounds": 0, "bps": 0},
         {"verified_rounds": 2, "rounds": 1, "bps": 20000},
         {"verified_rounds": 1, "rounds": 3, "bps": 3334},
@@ -307,3 +332,28 @@ def test_cross_repo_availability_fixture_validates() -> None:
         {"verified_rounds": 2, "rounds": 3, "bps": 6666},
         {"verified_rounds": 0, "rounds": 3, "bps": 0},
     ]
+
+
+def test_trimmed_history_reports_less_than_a_full_window() -> None:
+    # The spool drops the oldest rounds first. A miner that was down before the
+    # kept rounds must not read as a full week of 100%: coverage says how much
+    # of the window the share actually spans.
+    day = timedelta(days=1)
+    kept = [_round(NOW - 3 * day, A), _round(NOW - day, A), _round(NOW, A)]
+    score = rolling_availability(kept, hotkeys=[A], now=NOW)[A]
+    assert score.bps == 10000
+    assert score.covered_seconds == 3 * 86400
+    assert score.covered_seconds < int(AVAILABILITY_WINDOW.total_seconds())
+
+
+def test_coverage_never_exceeds_the_window() -> None:
+    # A round older than the window is excluded, so coverage is capped by the
+    # oldest round inside it, never by the oldest round held.
+    rounds = [
+        _round(NOW - timedelta(days=9), A),
+        _round(NOW - timedelta(days=6), A),
+        _round(NOW, A),
+    ]
+    score = rolling_availability(rounds, hotkeys=[A], now=NOW)[A]
+    assert score.rounds == 2
+    assert score.covered_seconds == 6 * 86400
