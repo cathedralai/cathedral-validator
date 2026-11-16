@@ -1202,23 +1202,12 @@ class DirectWeightWriter:
             )
         # Only a destination that receives weight can change what is signed.
         # A miner outside the vector earns zero, so an axon change by it must
-        # not cost the cycle its weight write (AB#721).
+        # not cost the cycle its weight write (AB#721). Escape and burn
+        # identities are re-read from the chain at the sign head in
+        # _require_finalized_eligibility.
         paid_uids = set(plan.wire_uids)
-        anchor_hotkeys = anchor.registered_hotkeys
-        fresh_hotkeys = fresh.registered_hotkeys
         for uid in sorted(paid_uids):
             if fresh_miners.get(uid) != anchor_miners.get(uid):
-                raise DirectValidatorError(
-                    "validator or serving miner set changed before direct signing"
-                )
-        if anchor_hotkeys is not None:
-            paid_hotkeys = {
-                hotkey for hotkey, uid in anchor_hotkeys.items() if uid in paid_uids
-            }
-            if fresh_hotkeys is None or any(
-                fresh_hotkeys.get(hotkey) != anchor_hotkeys[hotkey]
-                for hotkey in paid_hotkeys
-            ):
                 raise DirectValidatorError(
                     "validator or serving miner set changed before direct signing"
                 )

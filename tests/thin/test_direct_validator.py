@@ -2320,26 +2320,6 @@ def test_a_paid_miner_changing_its_axon_stops_the_write(
     assert subtensor.substrate.sign_calls == 0
 
 
-def test_the_burn_uid_changing_hands_stops_the_write(
-    tmp_path: Path, monkeypatch
-) -> None:
-    instance, subtensor, planned = writer(tmp_path, monkeypatch)
-    assert BURN_UID in planned.wire_uids
-    fresh = snapshot(ANCHOR_NUMBER + 1)
-    fresh = replace(
-        fresh,
-        registered_hotkeys={
-            **{k: v for k, v in fresh.registered_hotkeys.items() if k != BURN_HOTKEY},
-            "5NewOwner": BURN_UID,
-        },
-    )
-    instance.snapshot_reader = lambda _subtensor, _keypair: fresh
-
-    with pytest.raises(DirectValidatorError, match="serving miner set changed"):
-        submit_before_deadline(instance, planned)
-    assert subtensor.substrate.sign_calls == 0
-
-
 def test_the_validator_identity_changing_stops_the_write(
     tmp_path: Path, monkeypatch
 ) -> None:
