@@ -1196,12 +1196,32 @@ class DirectWeightWriter:
             or fresh.block_number - anchor.block_number >= MORTAL_PERIOD_BLOCKS
             or fresh.validator_uid != anchor.validator_uid
             or fresh.validator_hotkey != anchor.validator_hotkey
-            or fresh.miners != anchor.miners
-            or fresh_miners != anchor_miners
         ):
             raise DirectValidatorError(
                 "validator or serving miner set changed before direct signing"
             )
+        # Only a destination that receives weight can change what is signed.
+        # A miner outside the vector earns zero, so an axon change by it must
+        # not cost the cycle its weight write (AB#721).
+        paid_uids = set(plan.wire_uids)
+        anchor_hotkeys = anchor.registered_hotkeys
+        fresh_hotkeys = fresh.registered_hotkeys
+        for uid in sorted(paid_uids):
+            if fresh_miners.get(uid) != anchor_miners.get(uid):
+                raise DirectValidatorError(
+                    "validator or serving miner set changed before direct signing"
+                )
+        if anchor_hotkeys is not None:
+            paid_hotkeys = {
+                hotkey for hotkey, uid in anchor_hotkeys.items() if uid in paid_uids
+            }
+            if fresh_hotkeys is None or any(
+                fresh_hotkeys.get(hotkey) != anchor_hotkeys[hotkey]
+                for hotkey in paid_hotkeys
+            ):
+                raise DirectValidatorError(
+                    "validator or serving miner set changed before direct signing"
+                )
         try:
             canonical = _canonical_hash(
                 self.subtensor.substrate.get_block_hash(anchor.block_number),

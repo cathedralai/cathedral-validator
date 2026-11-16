@@ -2271,12 +2271,81 @@ def test_writer_refuses_remapped_miner_before_signing(
     assert subtensor.substrate.submit_calls == 0
 
 
-def test_writer_refuses_a_new_serving_miner_before_signing(
+def test_a_new_unpaid_serving_miner_does_not_stop_the_write(
     tmp_path: Path, monkeypatch
 ) -> None:
     instance, subtensor, planned = writer(tmp_path, monkeypatch)
     instance.snapshot_reader = lambda _subtensor, _keypair: snapshot(
         ANCHOR_NUMBER + 1, miners=(MINER_ONE_AXON, MINER_TWO_AXON)
+    )
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert subtensor.substrate.sign_calls == 1
+
+
+def test_an_unpaid_miner_changing_its_axon_does_not_stop_the_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    both = (MINER_ONE_AXON, MINER_TWO_AXON)
+    planned = plan(miners=both)
+    assert MINER_TWO_AXON.uid not in planned.wire_uids
+    instance, subtensor, planned = writer(tmp_path, monkeypatch, planned=planned)
+    moved = replace(MINER_TWO_AXON, ip="8.8.4.4", port=9999)
+    instance.snapshot_reader = lambda _subtensor, _keypair: snapshot(
+        ANCHOR_NUMBER + 1, miners=(MINER_ONE_AXON, moved)
+    )
+
+    receipt = submit_before_deadline(instance, planned)
+
+    assert receipt.status == STATUS_CONFIRMED
+    assert subtensor.substrate.sign_calls == 1
+
+
+def test_a_paid_miner_changing_its_axon_stops_the_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    both = (MINER_ONE_AXON, MINER_TWO_AXON)
+    instance, subtensor, planned = writer(
+        tmp_path, monkeypatch, planned=plan(miners=both)
+    )
+    moved = replace(MINER_ONE_AXON, port=9999)
+    instance.snapshot_reader = lambda _subtensor, _keypair: snapshot(
+        ANCHOR_NUMBER + 1, miners=(moved, MINER_TWO_AXON)
+    )
+
+    with pytest.raises(DirectValidatorError, match="serving miner set changed"):
+        submit_before_deadline(instance, planned)
+    assert subtensor.substrate.sign_calls == 0
+
+
+def test_the_burn_uid_changing_hands_stops_the_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    assert BURN_UID in planned.wire_uids
+    fresh = snapshot(ANCHOR_NUMBER + 1)
+    fresh = replace(
+        fresh,
+        registered_hotkeys={
+            **{k: v for k, v in fresh.registered_hotkeys.items() if k != BURN_HOTKEY},
+            "5NewOwner": BURN_UID,
+        },
+    )
+    instance.snapshot_reader = lambda _subtensor, _keypair: fresh
+
+    with pytest.raises(DirectValidatorError, match="serving miner set changed"):
+        submit_before_deadline(instance, planned)
+    assert subtensor.substrate.sign_calls == 0
+
+
+def test_the_validator_identity_changing_stops_the_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instance, subtensor, planned = writer(tmp_path, monkeypatch)
+    instance.snapshot_reader = lambda _subtensor, _keypair: replace(
+        snapshot(ANCHOR_NUMBER + 1), validator_hotkey="5OtherKey"
     )
 
     with pytest.raises(DirectValidatorError, match="serving miner set changed"):
