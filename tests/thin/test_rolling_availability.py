@@ -11,6 +11,7 @@ import pytest
 from bittensor_wallet import Keypair
 
 from cathedral_thin.independent.constants import NETUID
+from cathedral_thin.independent_runtime import telemetry
 from cathedral_thin.independent_runtime.availability import (
     AVAILABILITY_WINDOW,
     AvailabilityRound,
@@ -307,3 +308,39 @@ def test_cross_repo_availability_fixture_validates() -> None:
         {"verified_rounds": 2, "rounds": 3, "bps": 6666},
         {"verified_rounds": 0, "rounds": 3, "bps": 0},
     ]
+
+
+def test_a_trimmed_event_spool_does_not_inflate_availability(
+    tmp_path, monkeypatch
+) -> None:
+    # The event spool keeps only the newest rounds once it hits its bound. The
+    # miner was down for the first rounds; the ledger must still count them.
+    monkeypatch.setattr(telemetry, "MAX_TELEMETRY_HISTORY_EVENTS", 2)
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    _publish(spool, NOW - timedelta(days=5), verified=False)
+    _publish(spool, NOW - timedelta(days=4), verified=False)
+    _publish(spool, NOW - timedelta(days=1))
+    event = _publish(spool, NOW)
+    assert len(spool.history()) == 2
+    assert _availability(event)[TDX_MINER.ss58_address] == {
+        "verified_rounds": 2,
+        "rounds": 4,
+        "bps": 5000,
+    }
+
+
+def test_the_ledger_drops_rounds_older_than_the_window(tmp_path) -> None:
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    _publish(spool, NOW - timedelta(days=9))
+    _publish(spool, NOW - timedelta(days=1))
+    _publish(spool, NOW)
+    assert len(spool.availability_ledger()) == 2
+    assert oct(spool.ledger_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_a_damaged_ledger_does_not_stop_publishing(tmp_path) -> None:
+    spool = TelemetrySpool(tmp_path / "telemetry" / "events.jsonl")
+    _publish(spool, NOW - timedelta(days=1))
+    spool.ledger_path.write_bytes(b"not json\n{}\n")
+    event = _publish(spool, NOW)
+    assert _availability(event)[TDX_MINER.ss58_address]["rounds"] == 2

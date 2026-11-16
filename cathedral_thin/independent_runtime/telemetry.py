@@ -22,6 +22,7 @@ from cathedral_thin.independent.constants import NETUID, W
 
 from .availability import (
     AVAILABILITY_BPS,
+    AVAILABILITY_WINDOW,
     AvailabilityRound,
     rolling_availability,
 )
@@ -37,6 +38,13 @@ SR25519_CRYPTO_TYPE = 1
 MAX_TELEMETRY_EVENT_BYTES = 256 * 1024
 MAX_TELEMETRY_HISTORY_BYTES = 16 * 1024 * 1024
 MAX_TELEMETRY_HISTORY_EVENTS = 720
+# The event spool drops its oldest rounds first once a full subnet's rounds
+# reach MAX_TELEMETRY_HISTORY_BYTES, which can be under seven days. Availability
+# reads this compact ledger too, so a trimmed spool cannot turn a miner's missed
+# rounds into a perfect score. One line holds only a time and the verified
+# hotkeys, so a week at the shortest round interval fits well inside the bounds.
+MAX_AVAILABILITY_LEDGER_ROUNDS = 4096
+MAX_AVAILABILITY_LEDGER_BYTES = 8 * 1024 * 1024
 SUPPORTED_TEE_KINDS = frozenset({"tdx", "sev_snp"})
 FINALIZED_SUBMISSION_STATUSES = frozenset({"CONFIRMED", "RECOVERED_CONFIRMED"})
 # The writer's status for a timelocked commit the chain has revealed and
@@ -642,6 +650,7 @@ def _availability_round(document: Mapping[str, Any]) -> AvailabilityRound:
 def candidate_with_availability(
     candidate: Mapping[str, Any],
     history: Sequence[Mapping[str, Any]],
+    ledger: Sequence[AvailabilityRound] = (),
 ) -> dict[str, Any]:
     """Add each listed hotkey's seven-day availability to an unsigned round.
 
@@ -661,6 +670,7 @@ def candidate_with_availability(
         raise TelemetryError("pending telemetry candidate is invalid")
     current = _availability_round(candidate)
     rounds = [_availability_round(event) for event in history]
+    rounds.extend(ledger)
     rounds.append(current)
     scores = rolling_availability(
         rounds,
@@ -774,6 +784,109 @@ class TelemetrySpool:
             except (UnicodeDecodeError, json.JSONDecodeError, TelemetryError):
                 continue
         return events
+
+    @property
+    def ledger_path(self) -> Path:
+        return self.path.with_name("availability_rounds.jsonl")
+
+    def availability_ledger(self) -> list[AvailabilityRound]:
+        """Rounds recorded by ``record_availability``; unreadable lines are skipped.
+
+        Rounds are deduplicated against the event history by ``observed_at`` in
+        ``rolling_availability``, so the two sources may overlap.
+        """
+
+        path = self.ledger_path
+        if not path.exists():
+            return []
+        if path.is_symlink():
+            raise TelemetryError("availability ledger is a symlink")
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise TelemetryError("availability ledger cannot be read") from exc
+        if len(raw) > MAX_AVAILABILITY_LEDGER_BYTES:
+            raise TelemetryError("availability ledger is not bounded")
+        rounds: list[AvailabilityRound] = []
+        for line in raw.splitlines():
+            try:
+                document = json.loads(line.decode("ascii"))
+                hotkeys = document["verified"]
+                if not isinstance(hotkeys, list) or not all(
+                    isinstance(item, str) for item in hotkeys
+                ):
+                    continue
+                rounds.append(
+                    AvailabilityRound(
+                        observed_at=_observed_at(document["observed_at"]),
+                        verified_hotkeys=frozenset(hotkeys),
+                    )
+                )
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                TelemetryError,
+            ):
+                continue
+        return rounds
+
+    def record_availability(self, event: Mapping[str, Any]) -> None:
+        """Append a published round to the ledger, dropping rounds older than
+        the window (and the oldest beyond the bounds)."""
+
+        current = _availability_round(event)
+        line = _canonical_json_bytes(
+            {
+                "observed_at": event["observed_at"],
+                "verified": sorted(current.verified_hotkeys),
+            }
+        )
+        _secure_parent(self.path, reader_gid=self.reader_gid)
+        path = self.ledger_path
+        kept = [
+            item
+            for item in self.availability_ledger()
+            if item.observed_at > current.observed_at - AVAILABILITY_WINDOW
+        ]
+        lines = [
+            _canonical_json_bytes(
+                {
+                    "observed_at": item.observed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "verified": sorted(item.verified_hotkeys),
+                }
+            )
+            for item in kept
+            if item.observed_at != current.observed_at
+        ]
+        lines.append(line)
+        lines = lines[-MAX_AVAILABILITY_LEDGER_ROUNDS:]
+        while lines and sum(len(item) + 1 for item in lines) > (
+            MAX_AVAILABILITY_LEDGER_BYTES
+        ):
+            lines.pop(0)
+        temporary: str | None = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(b"".join(item + b"\n" for item in lines))
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Only the validator reads the ledger; the exporter reads events.
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            temporary = None
+        except OSError as exc:
+            raise TelemetryError("availability ledger cannot be persisted") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
     def append(self, event: Mapping[str, Any]) -> None:
         line = _event_line(event, netuid=self.netuid)
@@ -1041,7 +1154,9 @@ class PendingTelemetryStore:
             return None
         candidate = document["candidate"]
         try:
-            candidate = candidate_with_availability(candidate, self.spool.history())
+            candidate = candidate_with_availability(
+                candidate, self.spool.history(), self.spool.availability_ledger()
+            )
         except TelemetryError:
             # Availability is optional on the wire; an unreadable history must
             # not stop the round itself from being published.
@@ -1053,6 +1168,12 @@ class PendingTelemetryStore:
             netuid=self.spool.netuid,
         )
         self.spool.append(event)
+        try:
+            self.spool.record_availability(event)
+        except TelemetryError:
+            # The round is already published; a missed ledger line only
+            # shortens a later window, as the event spool alone would.
+            pass
         self.clear()
         return event
 
