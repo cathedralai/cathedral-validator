@@ -37,6 +37,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -437,7 +438,8 @@ class ResultStore:
         * same key, other or partly overlapping digests: ``disputed``, the first
           record and its score stay until a rerun resolves it;
         * ``rerun=True`` on a key: the rerun's result replaces the record and
-          closes any dispute (``resolved``). When ``sample_seed`` is given the
+          closes any dispute (``resolved``). The replaced and disputed digests
+          stay owned by this key. When ``sample_seed`` is given on a rerun the
           sample is marked completed so ``decide`` does not select it again;
         * a digest already counted for a different key: refused.
         """
@@ -471,10 +473,13 @@ class ResultStore:
             samples_done: list[str] = []
             if isinstance(existing, dict):
                 samples_done = list(existing.get("samples_done", []))
-                # Release every digest this key owned, including disputed ones.
-                for digest in [d for d, o in owners.items() if o == key.key_id]:
-                    del owners[digest]
-            if sample_seed is not None and sample_seed.hex() not in samples_done:
+            # Superseded and disputed digests stay owned by this key for good, so
+            # a replaced run can never be scored for another key or a later round.
+            if (
+                rerun
+                and sample_seed is not None
+                and sample_seed.hex() not in samples_done
+            ):
                 samples_done.append(sample_seed.hex())
             results[key.key_id] = {
                 "key": key.fields(),
@@ -549,7 +554,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bundle", type=Path, help="verify and record this bundle")
     parser.add_argument("--trusted-keys-file", type=Path)
     parser.add_argument("--approved-measurement", action="append", default=[])
-    parser.add_argument("--ctcli", default="ctcli", help="ctcli executable")
+    parser.add_argument(
+        "--ctcli", default="ctcli", help="ctcli command, split like a shell"
+    )
     parser.add_argument("--score", type=int)
     parser.add_argument("--rerun", action="store_true")
     options = parser.parse_args(argv)
@@ -574,11 +581,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise SpeedrunResultError(
                     "--bundle needs --trusted-keys-file and --score"
                 )
+            ctcli = tuple(shlex.split(options.ctcli))
+            if not ctcli:
+                raise SpeedrunResultError("--ctcli is empty")
             verified = verify_bundle_offline(
                 options.bundle,
                 trusted_keys_file=options.trusted_keys_file,
                 approved_measurements=options.approved_measurement,
-                ctcli=(options.ctcli,),
+                ctcli=ctcli,
             )
             answer["result_digests"] = list(verified.result_digests)
             answer["stored"] = store.record(

@@ -293,8 +293,45 @@ def test_second_different_run_is_a_dispute_then_rerun_resolves(tmp_path):
     record = store.lookup(key)
     assert record["score"] == 900 and record["disputes"] == []
     assert sr.decide(store, key) == sr.REUSE
-    # The replaced run's digests are released, so they are not stuck on this key.
-    assert store.record(_key(round=13), _verified(), score=1, now=NOW) == "recorded"
+    # The replaced run stays owned by this key; it never counts elsewhere.
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(_key(round=13), _verified(), score=1, now=NOW)
+
+
+def test_superseded_run_stays_owned_after_rerun(tmp_path):
+    store = _store(tmp_path)
+    key_a = _key()
+    key_b = _key(entry_digest="cc" * 32)
+    r1, r2 = _verified(), _other_run()
+    assert store.record(key_a, r1, score=700, now=NOW) == "recorded"
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(key_b, r1, score=700, now=NOW)
+    assert store.record(key_a, r2, score=900, now=NOW, rerun=True) == "resolved"
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(key_b, r1, score=700, now=NOW)
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(_key(round=13), r1, score=700, now=NOW)
+    assert store.lookup(key_b) is None and store.lookup(_key(round=13)) is None
+
+
+def test_disputed_run_stays_owned_after_rerun(tmp_path):
+    store = _store(tmp_path)
+    key = _key()
+    store.record(key, _verified(), score=700, now=NOW)
+    assert store.record(key, _other_run(), score=900, now=NOW) == "disputed"
+    assert store.record(key, _verified(), score=700, now=NOW, rerun=True) == "resolved"
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(_key(round=13), _other_run(), score=900, now=NOW)
+
+
+def test_first_record_does_not_mark_sample_done(tmp_path):
+    store = _store(tmp_path)
+    key = _key()
+    store.record(key, _verified(), score=1, now=NOW, sample_seed=SEED)
+    assert (
+        sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=1_000_000)
+        == sr.RERUN_SAMPLE
+    )
 
 
 def test_caller_dispute_forces_rerun(tmp_path):
@@ -398,3 +435,29 @@ def test_completed_sample_rerun_is_not_selected_again(tmp_path):
     assert (
         sr.decide(store, key, sample_seed=other, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
     )
+
+
+def test_cli_splits_ctcli_command(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_verify(bundle, **kwargs):
+        seen["ctcli"] = kwargs["ctcli"]
+        return _verified()
+
+    monkeypatch.setattr(sr, "verify_bundle_offline", fake_verify)
+    key = _key()
+    argv = [
+        "--store", str(tmp_path / "store.json"),
+        "--entry-digest", key.entry_digest,
+        "--model-digest", key.model_digest,
+        "--harness-version", key.harness_version,
+        "--room-size", str(key.room_size),
+        "--round", str(key.round),
+        "--bundle", str(tmp_path / "bundle.json"),
+        "--trusted-keys-file", str(tmp_path / "keys"),
+        "--score", "5",
+        "--ctcli", "python3 -m cli",
+    ]  # fmt: skip
+    assert sr.main(argv) == 0
+    assert seen["ctcli"] == ("python3", "-m", "cli")
+    assert sr.main([*argv[:-1], ""]) == 2
