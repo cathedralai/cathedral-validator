@@ -578,6 +578,11 @@ def test_distill_closed_store_report_verifies_and_binds_end_to_end(tmp_path):
         netuid=94,
         source_epoch=SOURCE_EPOCH,
         producer_hotkey=PRODUCER,
+        # This store was closed without an attestation posture, which the producer
+        # now refuses to export rather than emit bytes a validator cannot tell
+        # apart from an attested epoch. Acknowledged explicitly: the property under
+        # test is the report/receipt BINDING, and nothing here reaches an intake.
+        allow_unattested=True,
     )
     body = producer.canonical_report_bytes(document)
     proof = {
