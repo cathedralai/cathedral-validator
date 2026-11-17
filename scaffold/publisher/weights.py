@@ -100,6 +100,13 @@ PERMINER_PUBLIC_BASELINE_ENV = "CATHEDRAL_PERMINER_PUBLIC_BASELINE"
 # removes non-payable hotkeys from the signed weights when a fresh snapshot exists.
 PAYABLE_HOTKEYS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS"  # off | mark | filter
 PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_MAX_AGE_SECS"
+# What "filter" does when no fresh metagraph snapshot exists. "pass" (the default)
+# keeps today's fail-open: every scored hotkey stays payable, so a dead poller lets a
+# deregistered hotkey keep earning. "refuse" pays nobody instead, and the vector falls
+# back to the existing signed burn until the poller recovers. Ported from cathedral
+# #439 (issue cathedral#345); the default keeps vectors byte-identical, because the
+# extra metadata keys only appear under "refuse".
+PAYABLE_HOTKEYS_STALE_ENV = "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_STALE"  # pass | refuse
 # External score-source controls. Disabled by default; when enabled, source
 # scores are blended publisher-side before Cathedral signs the one validator feed.
 EXTERNAL_SCORES_ENABLED_ENV = "CATHEDRAL_EXTERNAL_SCORES_ENABLED"
@@ -607,6 +614,26 @@ def payable_hotkeys_mode() -> str:
     return "off"
 
 
+def payable_hotkeys_stale_policy() -> str:
+    """How `filter` behaves with no fresh snapshot: "pass" (default) or "refuse".
+
+    Deliberately NOT a copy of cathedral's accessor, which silently coerces an
+    unknown value to the default. This repo refuses an unknown economic mode under a
+    named launch profile (see `payable_hotkeys_mode`), and a typo in a reward-path
+    flag must not quietly select the fail-OPEN behaviour.
+    """
+    raw = os.environ.get(PAYABLE_HOTKEYS_STALE_ENV, "pass").strip().lower() or "pass"
+    if raw in {"pass", "refuse"}:
+        return raw
+    from . import launch_profile
+
+    if launch_profile.strict():
+        raise VectorError(
+            f"unknown {PAYABLE_HOTKEYS_STALE_ENV}={raw!r}; expected pass or refuse"
+        )
+    return "pass"
+
+
 def payable_hotkeys_max_age_secs() -> float:
     return max(0.0, _env_float(PAYABLE_HOTKEYS_MAX_AGE_SECS_ENV, 600.0))
 
@@ -675,6 +702,23 @@ def _apply_payable_hotkey_policy(
     payable, snapshot_meta = _load_fresh_metagraph_hotkeys(store, now=now)
     meta.update(snapshot_meta)
     if payable is None:
+        if mode_value == "filter" and payable_hotkeys_stale_policy() == "refuse":
+            # Pay nobody rather than everybody. Every caller falls through to the
+            # existing signed burn. These metadata keys appear ONLY under "refuse",
+            # so the default vector and its policy hash stay byte-identical.
+            meta.update(
+                {
+                    "stale_policy": "refuse",
+                    "enforced": True,
+                    "status": "refused_no_fresh_snapshot",
+                    "final_miner_count": 0,
+                }
+            )
+            print(
+                "[weights] payable-hotkey filter has no fresh metagraph snapshot "
+                "-> paying no hotkeys (signed burn fallback)"
+            )
+            return {}, meta
         meta["status"] = "no_fresh_snapshot"
         return scores, meta
 
@@ -1394,6 +1438,10 @@ def _apply_confidential_primary(
     if payable_hotkeys_mode() == "filter":
         ext, payable_meta = _apply_payable_hotkey_policy(store, ext, now=now)
         blend_meta["external_payable_filter"] = payable_meta
+        if payable_meta.get("status") == "refused_no_fresh_snapshot":
+            # Distinguish "the snapshot is missing" from "nobody was payable": the
+            # first is our own poller failing and is operationally actionable.
+            return _degrade("payable_snapshot_unavailable")
         if not ext:
             return _degrade("no_payable_confidential_scores")
 
