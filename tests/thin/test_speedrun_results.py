@@ -388,9 +388,13 @@ def test_completed_sample_rerun_is_not_selected_again(tmp_path):
     key = _key()
     store.record(key, _verified(), score=1, now=NOW)
     ppm = 1_000_000
-    assert sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
+    assert (
+        sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
+    )
     store.record(key, _verified(), score=1, now=NOW, rerun=True, sample_seed=SEED)
     assert sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=ppm) == sr.REUSE
     # A new round seed is a new documented sample.
     other = b"\x22" * 32
-    assert sr.decide(store, key, sample_seed=other, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
+    assert (
+        sr.decide(store, key, sample_seed=other, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
+    )

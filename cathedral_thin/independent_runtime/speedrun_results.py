@@ -582,7 +582,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             answer["result_digests"] = list(verified.result_digests)
             answer["stored"] = store.record(
-                key, verified, score=options.score,
+                key,
+                verified,
+                score=options.score,
                 rerun=options.rerun,
                 sample_seed=seed if options.rerun else None,
             )
