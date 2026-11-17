@@ -45,6 +45,7 @@ not something this module can infer.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -70,6 +71,28 @@ SEMANTIC_KEYS = (
     "scores",
     "evidence_sha256",
 )
+
+# Mirrors cybergym_contract.OPTIONAL_SEMANTIC_KEYS exactly, including order. Keys a
+# producer MAY carry: accepted, folded into the signed digest WHEN PRESENT, never
+# required, so a report without them verifies byte-identically to before.
+#
+# These shipped on the producer (cathedral-distill `cybergym_score_report`, which names
+# this very constant as the counterpart it requires) and in this repo's own intake
+# (`scaffold/publisher/cybergym_contract` and `cybergym_ingest._ALLOWED_KEYS`), but not
+# here. This module pinned the exact nine-key set, so a current producer's report --
+# which carries `nonce` and `dispatched_units` whenever the epoch recorded a frontier
+# row -- was refused `invalid_document: unexpected fields dispatched_units,nonce`, the
+# epoch proof did not verify, and the CyberGym lane's whole share burned. Two modules in
+# this repository disagreed about one wire contract, and the looser one was the intake.
+#
+# Widening is still a CLOSED list, not "ignore what you do not know": an unrecognised key
+# is refused exactly as before, so a derived column cannot ride into the signed material.
+OPTIONAL_SEMANTIC_KEYS = (
+    "nonce",
+    "dispatched_units",
+    "attestation_receipt",
+)
+_ALL_SEMANTIC_KEYS = SEMANTIC_KEYS + OPTIONAL_SEMANTIC_KEYS
 
 DEFAULT_MAX_AGE_SECS = 3600.0
 DEFAULT_MAX_FUTURE_SKEW_SECS = 120.0
@@ -180,8 +203,8 @@ def normalize(document: Any) -> dict:
     missing = [key for key in SEMANTIC_KEYS if key not in keys]
     if missing:
         raise EpochProofError("invalid_document", "missing " + ",".join(missing))
-    if keys != set(SEMANTIC_KEYS):
-        unexpected = sorted(keys - set(SEMANTIC_KEYS))
+    unexpected = sorted(keys - set(_ALL_SEMANTIC_KEYS))
+    if unexpected:
         raise EpochProofError(
             "invalid_document", "unexpected fields " + ",".join(unexpected)
         )
@@ -272,7 +295,7 @@ def normalize(document: Any) -> dict:
             raise EpochProofError("invalid_score", "score hotkey")
         normalized_scores[normalized_hotkey] = score
 
-    return {
+    normalized: dict = {
         "producer_hotkey": producer.strip(),
         "network": network,
         "netuid": netuid,
@@ -283,6 +306,49 @@ def normalize(document: Any) -> dict:
         "scores": normalized_scores,
         "evidence_sha256": evidence,
     }
+    # Optional tournament inputs, validated and canonicalized to the SAME form
+    # `cybergym_contract.normalize_semantic_document` and the producer's
+    # `cybergym_score_report.normalize_report` produce. The digest is taken over the
+    # normalized document, so a divergence of one float formatting or one stripped
+    # space here would make a genuine report fail to verify.
+    if "nonce" in document:
+        nonce = document["nonce"]
+        if not isinstance(nonce, str) or not nonce.strip() or len(nonce) > 256:
+            raise EpochProofError("invalid_document", "nonce")
+        normalized["nonce"] = nonce.strip()
+    if "dispatched_units" in document:
+        dispatched = document["dispatched_units"]
+        if isinstance(dispatched, bool) or not isinstance(dispatched, (int, float)):
+            raise EpochProofError("invalid_document", "dispatched_units")
+        dispatched = float(dispatched)
+        if not math.isfinite(dispatched) or dispatched < 0.0:
+            raise EpochProofError("invalid_document", "dispatched_units")
+        normalized["dispatched_units"] = dispatched
+    if "attestation_receipt" in document:
+        # Only the two-key {receipt, result_b64} shell is checked; the receipt object is
+        # carried VERBATIM so the exact bytes Cathedral signed survive, and the canonical
+        # serializer sort_keys-canonicalizes it recursively so both sides derive one
+        # identical digest from one identical object.
+        receipt_sample = document["attestation_receipt"]
+        if not isinstance(receipt_sample, Mapping):
+            raise EpochProofError("invalid_document", "attestation_receipt")
+        receipt = receipt_sample.get("receipt")
+        result_b64 = receipt_sample.get("result_b64")
+        if not isinstance(receipt, Mapping) or not receipt:
+            raise EpochProofError("invalid_document", "attestation_receipt.receipt")
+        if not isinstance(result_b64, str) or not result_b64 or len(result_b64) > 65536:
+            raise EpochProofError("invalid_document", "attestation_receipt.result_b64")
+        try:
+            base64.b64decode(result_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise EpochProofError(
+                "invalid_document", "attestation_receipt.result_b64 not base64"
+            ) from exc
+        normalized["attestation_receipt"] = {
+            "receipt": dict(receipt),
+            "result_b64": result_b64,
+        }
+    return normalized
 
 
 def verify_epoch_proof(
@@ -455,6 +521,7 @@ def verify_epoch_proof(
 __all__ = [
     "EPOCH_PROOF_SECRET_ENV",
     "SEMANTIC_KEYS",
+    "OPTIONAL_SEMANTIC_KEYS",
     "DEFAULT_MAX_AGE_SECS",
     "DEFAULT_MAX_FUTURE_SKEW_SECS",
     "EpochProofError",

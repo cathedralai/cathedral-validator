@@ -377,6 +377,11 @@ def test_distill_commands_to_restarted_intake_to_stateful_validator_preview(
                 str(NETUID),
                 "--producer-hotkey",
                 PRODUCER,
+                # A loopback preview scored with no Intel-TDX policy. The producer
+                # refuses to export it unattested without this acknowledgement,
+                # because the exported report carries no field a validator could
+                # use to tell it apart from an attested epoch.
+                "--allow-unattested-e2e",
                 "--out",
                 str(report_path),
             ]
@@ -563,6 +568,11 @@ def test_private_v2_miner_to_verifier_to_validator_preview(
                 str(NETUID),
                 "--producer-hotkey",
                 PRODUCER,
+                # A loopback preview scored with no Intel-TDX policy. The producer
+                # refuses to export it unattested without this acknowledgement,
+                # because the exported report carries no field a validator could
+                # use to tell it apart from an attested epoch.
+                "--allow-unattested-e2e",
                 "--out",
                 str(report_path),
             ]
