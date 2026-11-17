@@ -65,7 +65,7 @@ from .direct_contract import (
 from .errors import IndependentLiveError
 from .escape_receipts import (
     FEED_DEADLINE_SLACK_SECONDS,
-    FEED_TIMEOUT_SECONDS,
+    FEED_TOTAL_TIMEOUT_SECONDS,
     EscapeReceiptConfig,
     EscapeReceiptError,
     escape_config_from_environment,
@@ -431,7 +431,7 @@ def apply_escape_receipts(
         "window_seconds": config.window_seconds,
         "source_kind": "https" if config.source.startswith("https://") else "file",
     }
-    fetch_timeout = FEED_TIMEOUT_SECONDS
+    fetch_timeout = FEED_TOTAL_TIMEOUT_SECONDS
     if deadline_monotonic is not None:
         remaining = deadline_monotonic - time.monotonic()
         if remaining <= FEED_DEADLINE_SLACK_SECONDS:
@@ -441,9 +441,19 @@ def apply_escape_receipts(
                 "error": "cycle deadline",
             }
         fetch_timeout = min(
-            FEED_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
+            FEED_TOTAL_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
         )
-    loader = load or (lambda source: load_receipt_feed(source, timeout=fetch_timeout))
+    # One clock for the feed's since and for scoring, so the read covers the
+    # same window the scorer pays.
+    clock = time.time() if now is None else now
+    loader = load or (
+        lambda source: load_receipt_feed(
+            source,
+            timeout=fetch_timeout,
+            window_seconds=config.window_seconds,
+            now=clock,
+        )
+    )
     try:
         receipts = loader(config.source)
     except Exception as exc:  # noqa: BLE001 - never fails the cycle
@@ -462,7 +472,7 @@ def apply_escape_receipts(
             receipts,
             registered=registered,
             validator_uid=snapshot.validator_uid,
-            now=time.time() if now is None else now,
+            now=clock,
             window_seconds=config.window_seconds,
         )
         summary.update(escape_round.summary())
