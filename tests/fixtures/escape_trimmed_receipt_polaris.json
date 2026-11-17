@@ -1,0 +1,43 @@
+{
+  "_made_by": "bigailabs/polariscomputer 82f4fcc3 sign_contest_receipt, throwaway key, claim with notes, cmd, stdout and proof_token.method (all trimmed before signing)",
+  "pubkey_b64": "zZYL0sMR6ibMSqr2JZ+kEFBrqCmjAkvDkBOvyJlnA2U=",
+  "receipt": {
+    "claim": {
+      "breaker_hotkey": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+      "commands": [
+        {
+          "attested_room": "staging-sealed.fixture1"
+        },
+        {
+          "attested_room": "staging-sealed.fixture1"
+        }
+      ],
+      "proof_token": {
+        "kind": "host_nonce",
+        "nonce": "5bc81fdd7ac95e8195d55c264caaeb2f",
+        "window_id": "open-fixture0001"
+      },
+      "room_id": "staging-sealed.fixture1",
+      "schema": "escape_practice_claim_v0",
+      "target": "host",
+      "window_id": "open-fixture0001"
+    },
+    "host_nonce": "5bc81fdd7ac95e8195d55c264caaeb2f",
+    "key_id": "contest-2026-11b",
+    "nonce_origin": "control_plane",
+    "planted_at": 1794593037.944338,
+    "room_id": "staging-sealed.fixture1",
+    "schema": "escape_stage_c_receipt_v0",
+    "sig": "aT0+B0uKPeIkqYGsihRPc3ehxoRrp1UtytPAUsnc90GNRjZfMDj3wc6xerIZ4T9aPPUPoYrcn91pQNkalYovCg==",
+    "signer": "control_plane",
+    "window_id": "open-fixture0001"
+  },
+  "receipt_digest": "sha256:ea84964e99aaeb4deef69a31d90c539638a13c8a1409412e1f8b6dab5cc87614",
+  "trimmed_markers": [
+    "PRIVATE-NOTE",
+    "PRIVATE-STDOUT",
+    "PRIVATE-METHOD",
+    "PRIVATE-TOP",
+    "cat /run/escape-room/nonce"
+  ]
+}
