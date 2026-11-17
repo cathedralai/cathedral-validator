@@ -370,3 +370,27 @@ def test_real_tampered_bundle_is_refused():
     with pytest.raises(sr.SpeedrunResultError, match="verdict is FAIL") as exc:
         _real("bundle-tampered.json")
     assert exc.value.infra is False
+
+
+def test_disputed_run_cannot_count_for_another_key(tmp_path):
+    store = _store(tmp_path)
+    key = _key()
+    store.record(key, _verified(), score=700, now=NOW)
+    assert store.record(key, _other_run(), score=900, now=NOW) == "disputed"
+    with pytest.raises(sr.SpeedrunResultError, match="another Speedrun key"):
+        store.record(_key(round=13), _other_run(), score=900, now=NOW)
+    # The owning key can still adopt it on a rerun.
+    assert store.record(key, _other_run(), score=900, now=NOW, rerun=True) == "resolved"
+
+
+def test_completed_sample_rerun_is_not_selected_again(tmp_path):
+    store = _store(tmp_path)
+    key = _key()
+    store.record(key, _verified(), score=1, now=NOW)
+    ppm = 1_000_000
+    assert sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE
+    store.record(key, _verified(), score=1, now=NOW, rerun=True, sample_seed=SEED)
+    assert sr.decide(store, key, sample_seed=SEED, sample_rate_ppm=ppm) == sr.REUSE
+    # A new round seed is a new documented sample.
+    other = b"\x22" * 32
+    assert sr.decide(store, key, sample_seed=other, sample_rate_ppm=ppm) == sr.RERUN_SAMPLE

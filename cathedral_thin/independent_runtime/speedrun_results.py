@@ -428,6 +428,7 @@ class ResultStore:
         score: int,
         now: datetime | None = None,
         rerun: bool = False,
+        sample_seed: bytes | None = None,
     ) -> str:
         """Record a measured result. Returns ``recorded``, ``reused``, ``disputed``
         or ``resolved``.
@@ -436,7 +437,8 @@ class ResultStore:
         * same key, other or partly overlapping digests: ``disputed``, the first
           record and its score stay until a rerun resolves it;
         * ``rerun=True`` on a key: the rerun's result replaces the record and
-          closes any dispute (``resolved``);
+          closes any dispute (``resolved``). When ``sample_seed`` is given the
+          sample is marked completed so ``decide`` does not select it again;
         * a digest already counted for a different key: refused.
         """
 
@@ -460,12 +462,20 @@ class ResultStore:
                 disputes = existing.setdefault("disputes", [])
                 if digests not in [d.get("result_digests") for d in disputes]:
                     disputes.append({"result_digests": digests, "seen_at": stamp})
+                # A disputed run still counts once: it may not be scored for
+                # another key either.
+                for digest in digests:
+                    owners.setdefault(digest, key.key_id)
                 self._write(document)
                 return "disputed"
+            samples_done: list[str] = []
             if isinstance(existing, dict):
-                for digest in existing.get("result_digests", []):
-                    if owners.get(digest) == key.key_id:
-                        del owners[digest]
+                samples_done = list(existing.get("samples_done", []))
+                # Release every digest this key owned, including disputed ones.
+                for digest in [d for d, o in owners.items() if o == key.key_id]:
+                    del owners[digest]
+            if sample_seed is not None and sample_seed.hex() not in samples_done:
+                samples_done.append(sample_seed.hex())
             results[key.key_id] = {
                 "key": key.fields(),
                 "result_digests": digests,
@@ -474,6 +484,7 @@ class ResultStore:
                 "score": score,
                 "recorded_at": stamp,
                 "disputes": [],
+                "samples_done": samples_done,
             }
             for digest in digests:
                 owners[digest] = key.key_id
@@ -504,7 +515,9 @@ def decide(
     if sample_rate_ppm:
         if sample_seed is None:
             raise SpeedrunResultError("a sample rate needs a sample seed")
-        if sample_selected(key, seed=sample_seed, rate_ppm=sample_rate_ppm):
+        if sample_seed.hex() not in record.get("samples_done", []) and (
+            sample_selected(key, seed=sample_seed, rate_ppm=sample_rate_ppm)
+        ):
             return RERUN_SAMPLE
     return REUSE
 
@@ -569,7 +582,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             answer["result_digests"] = list(verified.result_digests)
             answer["stored"] = store.record(
-                key, verified, score=options.score, rerun=options.rerun
+                key, verified, score=options.score,
+                rerun=options.rerun,
+                sample_seed=seed if options.rerun else None,
             )
     except (SpeedrunResultError, ValueError) as exc:
         print(f"speedrun results: {exc}", file=sys.stderr)
