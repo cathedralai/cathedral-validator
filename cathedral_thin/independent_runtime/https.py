@@ -19,6 +19,7 @@ import http.client
 import ipaddress
 import json
 import socket
+import threading
 import ssl
 import time
 from typing import Any, Mapping
@@ -255,9 +256,16 @@ class HttpsEvidenceTransport:
                     (self.chosen_ip, endpoint.port), remaining()
                 )
                 raw.settimeout(remaining())
+                # Publish the socket before the handshake so the deadline
+                # watchdog can cut a peer that trickles its ServerHello.
                 self.sock = self._context.wrap_socket(
-                    raw, server_hostname=endpoint.host
+                    raw, server_hostname=endpoint.host, do_handshake_on_connect=False
                 )
+                # Kept apart from self.sock: on a Connection: close or HTTP/1.0
+                # response getresponse() hands the socket to the response and
+                # clears self.sock, and the watchdog must still reach it.
+                self.deadline_sock = self.sock
+                self.sock.do_handshake()
 
         connection = _Pinned(
             endpoint.host,
@@ -265,6 +273,24 @@ class HttpsEvidenceTransport:
             timeout=remaining(),
             context=tls_context_for_evidence(endpoint.host),
         )
+        expired = threading.Event()
+
+        def cut_at_deadline() -> None:
+            # Socket timeouts bound one idle recv, not the call: a peer that
+            # sends a byte per interval (a slow 100 Continue, header or body)
+            # would keep this worker alive past the cycle. At the absolute
+            # deadline the socket is shut down so the blocked read fails now.
+            expired.set()
+            sock = getattr(connection, "deadline_sock", None)
+            if sock is not None:
+                try:
+                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
+                except (OSError, ValueError):
+                    pass
+
+        watchdog = threading.Timer(remaining(), cut_at_deadline)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             connection.connect()
             peer_socket = connection.sock
@@ -311,8 +337,19 @@ class HttpsEvidenceTransport:
                 if budget < 0:
                     raise IndependentLiveError(oversize)
                 chunks.append(chunk)
+            if expired.is_set():
+                raise IndependentLiveError("evidence request exceeded its deadline")
             return int(response.status), b"".join(chunks)
+        except IndependentLiveError:
+            raise
+        except Exception as exc:
+            if expired.is_set():
+                raise IndependentLiveError(
+                    "evidence request exceeded its deadline"
+                ) from exc
+            raise
         finally:
+            watchdog.cancel()
             connection.close()
 
 

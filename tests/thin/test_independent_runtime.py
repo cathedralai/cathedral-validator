@@ -298,13 +298,29 @@ class BoundedTlsPeer:
         self.port = port
         self.requests = requests
         self.response_body = b'{"bounded":true}'
+        # "body", "body-close" or "headers": send one byte per
+        # ``trickle_interval`` forever.
+        self.trickle: str | None = None
+        self.trickle_interval = 0.2
 
     def serve_bytes(self, length: int) -> None:
         """Answer the next POST with exactly ``length`` bytes."""
         self.response_body = b"x" * length
 
-    def post(self, path: str, body: object = None, *, timeout: float = 10.0):
-        """Drive ``_post_peer`` against this peer on ``path``."""
+    def post(
+        self,
+        path: str,
+        body: object = None,
+        *,
+        timeout: float = 10.0,
+        absolute_deadline_seconds: float | None = None,
+    ):
+        """Drive ``_post_peer`` against this peer on ``path``.
+
+        ``timeout`` is the per-recv idle bound. With an absolute deadline the
+        remaining() callable behaves as in production: it shrinks and refuses
+        once the deadline has passed.
+        """
         endpoint = type(
             "Endpoint",
             (),
@@ -321,7 +337,17 @@ class BoundedTlsPeer:
             separators=(",", ":"),
         ).encode()
         transport = HttpsEvidenceTransport(timeout=timeout)
-        return transport._post_peer(endpoint, "127.0.0.1", encoded, lambda: timeout)
+        if absolute_deadline_seconds is None:
+            return transport._post_peer(endpoint, "127.0.0.1", encoded, lambda: timeout)
+        deadline = time.monotonic() + absolute_deadline_seconds
+
+        def remaining() -> float:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise IndependentLiveError("evidence request exceeded its deadline")
+            return min(left, timeout)
+
+        return transport._post_peer(endpoint, "127.0.0.1", encoded, remaining)
 
 
 @pytest.fixture
@@ -363,6 +389,33 @@ def content_length_close_tls_server(tmp_path):
             requests.append(
                 (self.path, self.rfile.read(length), self.headers.get("Authorization"))
             )
+            if peer[0].trickle is not None:
+                self.wfile.flush()
+                try:
+                    if peer[0].trickle == "headers":
+                        stream = b"HTTP/1.1 200 OK\r\nX-Slow: " + b"a" * 10_000
+                    else:
+                        # body-close hands the socket to the response, so
+                        # the watchdog cannot find it on the connection.
+                        close = (
+                            b"Connection: close\r\n"
+                            if peer[0].trickle == "body-close"
+                            else b""
+                        )
+                        self.wfile.write(
+                            b"HTTP/1.1 200 OK\r\n"
+                            + close
+                            + b"Content-Length: 100000\r\n\r\n"
+                        )
+                        stream = b"x" * 100_000
+                    for index in range(len(stream)):
+                        self.wfile.write(stream[index : index + 1])
+                        self.wfile.flush()
+                        time.sleep(peer[0].trickle_interval)
+                except OSError:
+                    pass
+                self.close_connection = True
+                return
             response_body = peer[0].response_body
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -398,6 +451,28 @@ def content_length_close_tls_server(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("mode", ["headers", "body", "body-close"])
+def test_https_transport_cuts_a_peer_that_trickles_past_the_absolute_deadline(
+    content_length_close_tls_server, mode
+):
+    """One byte per interval never trips the idle timeout (AB#721).
+
+    The 5 s idle bound is never reached, so only the absolute deadline can end
+    the call, and it must end it near 0.6 s rather than when the peer stops.
+    """
+
+    peer = content_length_close_tls_server
+    peer.trickle = mode
+    started = time.monotonic()
+
+    with pytest.raises(IndependentLiveError, match="exceeded its deadline"):
+        peer.post(EVIDENCE_PATH, timeout=5.0, absolute_deadline_seconds=0.6)
+
+    assert time.monotonic() - started < 2.5
+    # The deadline watchdog is cancelled, so repeated cycles add no threads.
+    assert not [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
 
 
 @pytest.mark.parametrize("path", [EVIDENCE_PATH, SAT_WORK_PATH])
