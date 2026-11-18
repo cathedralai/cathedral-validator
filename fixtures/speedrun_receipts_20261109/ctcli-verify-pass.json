@@ -1,0 +1,114 @@
+{
+  "attestation": {
+    "amd": {
+      "ark_sha256": "4c6598d19c18719c5dfd4a7d335f674e5bfe1d8f800cea2cf270c10d103db2f1",
+      "product": "Genoa",
+      "tcb": {
+        "bootloader": 12,
+        "microcode": 88,
+        "snp": 27,
+        "tee": 0
+      }
+    },
+    "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+    "chip_id": "3920ee14a806803f...",
+    "host_data": "251294ef7b2702da92236b2d112c5e868ccbba269e0d0aaafa41b2694957d9e8",
+    "kernel_cmdline": "initrd=initrd console=ttyS0 loglevel=7 systemd.show_status=error panic=-1 rdinit=/init cathedral.hotel=nc-sealed-3 cathedral.debug=0",
+    "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+    "policy": "0x30000",
+    "report_version": 5
+  },
+  "cathedral_receipts": {
+    "count": 12,
+    "from_n": 1,
+    "head_n": 12,
+    "key_source": "examples/sandbox/audit_trail/sample-run-20261109/trusted-keys.json",
+    "keys_used": [
+      {
+        "fingerprint": "ed25519:6f40c1162b262b28",
+        "key_id": "cathedral-customer-receipt-2026-07-31-01"
+      }
+    ],
+    "to_n": 12
+  },
+  "commands": {
+    "matched": 4,
+    "not_compared": 0
+  },
+  "does_not_prove": [
+    "That nothing is missing: the chain head is what the database reports, unsigned; the guest does not sign file transfers, terminals or lifetime changes; exec and delete receipts are kept only since 2026-11-05; and a host that sent none (an older guest) left none.",
+    "What ran or what it printed: receipts carry sha256 hashes of commands, requests and output, never the content.",
+    "That the measurement is an approved build: no list of approved measurements is published yet.",
+    "That rooms on one host are kept apart by hardware: they share one guest, separated by gVisor."
+  ],
+  "failures": [],
+  "guest_receipts": {
+    "count": 5,
+    "events": {
+      "create": 1,
+      "exec": 4
+    },
+    "verified": 5
+  },
+  "hotel": "nc-sealed-3",
+  "not_proven": [],
+  "outputs": null,
+  "room_id": "nc-sealed-3.sbx_b4fc4d7d19e8",
+  "sandbox_id": "e801300f-7f56-4f34-a62d-a5f9ed15c0ad",
+  "secret_writes": {
+    "count": 0,
+    "matched": 0
+  },
+  "verdict": "PASS",
+  "verified_results": {
+    "reason": null,
+    "results": [
+      {
+        "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+        "command_sha256": "622800edecf4eb899e28a62530f3432c775070f62ee877f45ba55915526a28e1",
+        "exit_code": 0,
+        "guest_receipt_sha256": "281a31756d18eb9f6b9c52ed16c95ee05b57561d9871751502580e6b3d43ee17",
+        "guest_result_sha256": "4113d217b184c4887e5650fa601596ef96881f378426687ee1d799016a3d7727",
+        "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+        "result_digest": "186396df10243f9170be8be65a98b02d51533e58b57b51d33bac561ae51130cf",
+        "stdout_sha256": "9d0ae83e540febd225949f3df4aba97c7a9f79fcf745d6c835780f52a57b50cf"
+      },
+      {
+        "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+        "command_sha256": "b43b02de3ae2dbb1aa4ad06221167aa0531730c3c80ae98bca2dbdd2ecc0ae52",
+        "exit_code": 0,
+        "guest_receipt_sha256": "3bf78d99bd27b456ae28d4df8f578e2a0ac196990c4c3a23921b1e136c43a2bf",
+        "guest_result_sha256": "841dd7c5e6704d1f62e80c47c458473e4efb34049b52b9be8e75b75a0aea6394",
+        "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+        "result_digest": "16c8a1a7908b0f27bc353714cf642024e4feab98b8dc400a74a63bb7c9ab7ec7",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+        "command_sha256": "945b024c43c3103e68c954ba0bc0575e677c353040f8a813c71453820139c6e8",
+        "exit_code": 0,
+        "guest_receipt_sha256": "8f45402726c6d3ff6d52bd888d38d28eb5efbebadf90fadde7a06df4a6c9da05",
+        "guest_result_sha256": "692899e676683b59c7cbe061f620026a70f4aa71cdd199e0ebc5cb9115da3c88",
+        "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+        "result_digest": "7aaba8f0f0ba6575cb971504451d201820594b75f6fb271498c6795bec7944c4",
+        "stdout_sha256": "546286cd0ab39192703aab68c7863c95f8d9480f380d4952ac1a139a7a058807"
+      },
+      {
+        "binding_sha256": "6509e915f2530be11dfa75435dd2cee3379ccf52b685ef7fb61a58417316c477",
+        "command_sha256": "5ef85bc4469b3759a0267db5afbb0bfebe44119170e98dac937254855185ee55",
+        "exit_code": 0,
+        "guest_receipt_sha256": "d18045185c68fe1f896e84ce6f78a9b90e5fecea7e7800336910426a206f39d3",
+        "guest_result_sha256": "e903205b2c15b0bba64336d489bb31a266b3a923231fdaffc358a0c14926cc65",
+        "measurement": "90030fe4c05881fa8445df762d5a142e72c02b05d5854839a91755afc15480953e1f88c8e1851625cfa21879315fc4db",
+        "result_digest": "5ef194b9c4824b8a6da2168ee2ed36cacac08129a85bf8b0342ac9b2f6206800",
+        "stdout_sha256": "a1795ce91cdecb6a03527fb90e14153bdada152e869e67ec1fe45720609a4526"
+      }
+    ],
+    "schema": "cathedral_verified_result_v1"
+  },
+  "verifier": {
+    "ran": "vendored",
+    "sha256": "72ef00ad44e300db4e4f594af9b4701742d0b58a1783891ce47bbdc32583cb4d",
+    "source": "https://github.com/cathedralai/cathedral-sandbox room-kit/verify_receipts.py at 6e420a95080879767e4e7b01aa1c7370fc9e5cdb"
+  }
+}

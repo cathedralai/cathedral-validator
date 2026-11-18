@@ -128,6 +128,7 @@ _STRICT_ENUMS: dict[str, tuple[str, ...]] = {
         "assigned_only",
     ),
     "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS": ("off", "mark", "filter"),
+    "CATHEDRAL_WEIGHTS_PAYABLE_HOTKEYS_STALE": ("pass", "refuse"),
     "CATHEDRAL_V2_CHALLENGE_SOURCE": ("planted", "combinatorial", "corpus"),
     "CATHEDRAL_V2_COMBINATORIAL_KIND": ("coloring", "latin"),
     "CATHEDRAL_EXTERNAL_SCORES_MODE": (
