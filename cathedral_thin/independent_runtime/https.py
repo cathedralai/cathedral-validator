@@ -261,6 +261,10 @@ class HttpsEvidenceTransport:
                 self.sock = self._context.wrap_socket(
                     raw, server_hostname=endpoint.host, do_handshake_on_connect=False
                 )
+                # Kept apart from self.sock: on a Connection: close or HTTP/1.0
+                # response getresponse() hands the socket to the response and
+                # clears self.sock, and the watchdog must still reach it.
+                self.deadline_sock = self.sock
                 self.sock.do_handshake()
 
         connection = _Pinned(
@@ -277,7 +281,7 @@ class HttpsEvidenceTransport:
             # would keep this worker alive past the cycle. At the absolute
             # deadline the socket is shut down so the blocked read fails now.
             expired.set()
-            sock = connection.sock
+            sock = getattr(connection, "deadline_sock", None)
             if sock is not None:
                 try:
                     socket.socket.shutdown(sock, socket.SHUT_RDWR)

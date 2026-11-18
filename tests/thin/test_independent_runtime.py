@@ -298,7 +298,8 @@ class BoundedTlsPeer:
         self.port = port
         self.requests = requests
         self.response_body = b'{"bounded":true}'
-        # "body" or "headers": send one byte per ``trickle_interval`` forever.
+        # "body", "body-close" or "headers": send one byte per
+        # ``trickle_interval`` forever.
         self.trickle: str | None = None
         self.trickle_interval = 0.2
 
@@ -394,8 +395,17 @@ def content_length_close_tls_server(tmp_path):
                     if peer[0].trickle == "headers":
                         stream = b"HTTP/1.1 200 OK\r\nX-Slow: " + b"a" * 10_000
                     else:
+                        # body-close hands the socket to the response, so
+                        # the watchdog cannot find it on the connection.
+                        close = (
+                            b"Connection: close\r\n"
+                            if peer[0].trickle == "body-close"
+                            else b""
+                        )
                         self.wfile.write(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            + close
+                            + b"Content-Length: 100000\r\n\r\n"
                         )
                         stream = b"x" * 100_000
                     for index in range(len(stream)):
@@ -443,7 +453,7 @@ def content_length_close_tls_server(tmp_path):
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("mode", ["headers", "body"])
+@pytest.mark.parametrize("mode", ["headers", "body", "body-close"])
 def test_https_transport_cuts_a_peer_that_trickles_past_the_absolute_deadline(
     content_length_close_tls_server, mode
 ):
