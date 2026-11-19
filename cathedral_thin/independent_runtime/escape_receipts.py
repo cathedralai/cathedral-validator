@@ -11,8 +11,11 @@ as a one-key set. Receipts are counted once, kept for a fixed reward window
 after the window was planted, and mapped to a UID registered at the cycle's
 finalized anchor.
 
-It is off unless the operator names a receipt source AND a positive weight
-fraction. Off, the plan, its identity, its evidence digest and the signed
+It is on by default (AB#830): with neither variable set, the validator reads
+the public feed ``ESCAPE_FEED_DEFAULT_SOURCE`` with the switch fraction 1/10.
+An operator turns it off with ``CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0`` (or a
+source of ``off`` or empty). Off, or on with no verified break, or with an
+unreadable feed, the plan, its identity, its evidence digest and the signed
 vector are byte-identical to a validator without this module.
 
 The receipt body and canonical bytes mirror ``authorizing_body`` and
@@ -42,7 +45,7 @@ from typing import Any, Callable, Iterable, Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .direct_contract import DirectValidatorError
+from .direct_contract import ESCAPE_FEED_DEFAULT_SOURCE, DirectValidatorError
 
 ESCAPE_RECEIPTS_SOURCE_ENV = "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE"
 ESCAPE_WEIGHT_FRACTION_ENV = "CATHEDRAL_ESCAPE_WEIGHT_FRACTION"
@@ -76,8 +79,12 @@ FEED_READ_CHUNK_BYTES = 64 * 1024
 FEED_DEADLINE_SLACK_SECONDS = 5.0
 MAX_REPORTED_HOTKEYS = 32
 # Hard cap so a mistyped 0.9 cannot give breakers almost the whole vector.
-# The intended mainnet share is 5 percent (1/20), well under this.
 MAX_WEIGHT_FRACTION = Fraction(1, 10)
+# Used when CATHEDRAL_ESCAPE_WEIGHT_FRACTION is absent from the environment.
+# Any positive value only switches the lane on (the share is ESCAPE_LANE_SHARE).
+DEFAULT_WEIGHT_FRACTION = Fraction(1, 10)
+SOURCE_ORIGIN_RELEASE_DEFAULT = "release_default"
+SOURCE_ORIGIN_OPERATOR = "operator"
 
 RECEIPT_SCHEMA = "escape_stage_c_receipt_v0"
 CLAIM_SCHEMA = "escape_practice_claim_v0"
@@ -522,6 +529,8 @@ class EscapeReceiptConfig:
     source: str
     fraction: Fraction
     window_seconds: int = DEFAULT_REWARD_WINDOW_SECONDS
+    # Where ``source`` came from, for the start-up log only.
+    source_origin: str = field(default=SOURCE_ORIGIN_OPERATOR, compare=False)
 
 
 def _parse_fraction(raw: str) -> Fraction:
@@ -541,15 +550,29 @@ def _parse_fraction(raw: str) -> Fraction:
 def escape_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> EscapeReceiptConfig | None:
-    """None (off) unless both a source and a positive fraction are set.
+    """The escape lane config, or None when the operator turned it off.
 
-    A set but malformed value raises: an operator who asked for receipts and
-    mistyped the fraction should see a refusal at start, not a silent off.
+    On by default: a variable absent from the environment takes the release
+    default (``ESCAPE_FEED_DEFAULT_SOURCE``, ``DEFAULT_WEIGHT_FRACTION``). A
+    variable that is set always wins: a fraction of ``0`` (or set but empty)
+    is off, and a source of ``off`` (or set but empty) is off. A set but
+    malformed value raises: an operator who mistyped the fraction or URL
+    should see a refusal at start, not a silent off.
     """
 
     env = os.environ if environ is None else environ
-    source = env.get(ESCAPE_RECEIPTS_SOURCE_ENV, "").strip()
-    fraction = _parse_fraction(env.get(ESCAPE_WEIGHT_FRACTION_ENV, "").strip() or "0")
+    if ESCAPE_WEIGHT_FRACTION_ENV in env:
+        fraction = _parse_fraction(env[ESCAPE_WEIGHT_FRACTION_ENV].strip() or "0")
+    else:
+        fraction = DEFAULT_WEIGHT_FRACTION
+    if ESCAPE_RECEIPTS_SOURCE_ENV in env:
+        source = env[ESCAPE_RECEIPTS_SOURCE_ENV].strip()
+        origin = SOURCE_ORIGIN_OPERATOR
+        if source.lower() == "off":
+            source = ""
+    else:
+        source = ESCAPE_FEED_DEFAULT_SOURCE
+        origin = SOURCE_ORIGIN_RELEASE_DEFAULT
     if not source or fraction == 0:
         return None
     raw_window = env.get(ESCAPE_REWARD_WINDOW_ENV, "").strip()
@@ -566,7 +589,12 @@ def escape_config_from_environment(
                 f"{ESCAPE_REWARD_WINDOW_ENV} must be in (0, {MAX_REWARD_WINDOW_SECONDS}]"
             )
     _require_source(source)
-    return EscapeReceiptConfig(source=source, fraction=fraction, window_seconds=window)
+    return EscapeReceiptConfig(
+        source=source,
+        fraction=fraction,
+        window_seconds=window,
+        source_origin=origin,
+    )
 
 
 def _require_source(source: str) -> None:
@@ -929,6 +957,7 @@ def score_escape_receipts(
 __all__ = [
     "BREAKER_HOTKEY_FIELD",
     "DEFAULT_REWARD_WINDOW_SECONDS",
+    "DEFAULT_WEIGHT_FRACTION",
     "ESCAPE_RECEIPTS_SOURCE_ENV",
     "ESCAPE_REWARD_WINDOW_ENV",
     "ESCAPE_WEIGHT_FRACTION_ENV",

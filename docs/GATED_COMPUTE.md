@@ -31,9 +31,10 @@ Rules:
   the lane.
 - The two shares are the constants `COMPUTE_LANE_SHARE` and `ESCAPE_LANE_SHARE`
   in `cathedral_thin/independent_runtime/direct_contract.py`. No environment
-  variable or host file changes them. The escape lane is switched on per host
-  as before ([Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md)); while it is
-  off its 10 percent is burned.
+  variable or host file changes them. The escape lane is on by default with
+  the public receipt feed; an operator can turn it off per host
+  ([Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md)). While it is off, or its
+  feed is unreadable, its 10 percent is burned.
 
 ## A cycle always writes
 
@@ -126,8 +127,9 @@ Removing a hotkey is the same change in reverse.
   it. Only the owner of an approved hotkey can do this, and today every
   approved hotkey is the subnet owner's own, so it is accepted for this
   release. It must be closed before any outside hotkey is put on the list.
-- **The escape lane is per host.** A validator without the escape source
-  configured burns the escape share, so validators can disagree on that lane.
+- **The escape lane is per host.** It is on by default, but a validator that
+  opted out, or could not read the feed that cycle, burns the escape share, so
+  validators can disagree on that lane.
 - **Telemetry is not a payout ledger.** It lists serving miners only, so an
   escape breaker that serves no axon is not shown, and no event is published
   for a cycle with no serving miner or with a burned unproven compute lane.

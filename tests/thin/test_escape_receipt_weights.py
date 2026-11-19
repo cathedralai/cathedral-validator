@@ -23,7 +23,10 @@ import test_direct_validator as base
 from cathedral_thin.independent.constants import W
 from cathedral_thin.independent_runtime import direct_validator as runtime
 from cathedral_thin.independent_runtime import escape_receipts
-from cathedral_thin.independent_runtime.direct_contract import DirectValidatorError
+from cathedral_thin.independent_runtime.direct_contract import (
+    ESCAPE_FEED_DEFAULT_SOURCE,
+    DirectValidatorError,
+)
 from cathedral_thin.independent_runtime.direct_writer import STATUS_CONFIRMED
 from cathedral_thin.independent_runtime.escape_receipts import (
     CONTEST_SIGNER_SET_SCHEMA,
@@ -374,35 +377,177 @@ def test_no_breaks_or_unreadable_source_leave_the_plan_unchanged(test_signer) ->
     assert same is planned and summary["status"] == "SOURCE_UNAVAILABLE"
 
 
-def test_off_by_default_changes_nothing(monkeypatch) -> None:
-    for name in (
-        escape_receipts.ESCAPE_RECEIPTS_SOURCE_ENV,
-        escape_receipts.ESCAPE_WEIGHT_FRACTION_ENV,
-        escape_receipts.ESCAPE_REWARD_WINDOW_ENV,
-    ):
+FEED = "https://api.polaris.computer/v1/escape/receipts/published"
+ESCAPE_ENV = (
+    escape_receipts.ESCAPE_RECEIPTS_SOURCE_ENV,
+    escape_receipts.ESCAPE_WEIGHT_FRACTION_ENV,
+    escape_receipts.ESCAPE_REWARD_WINDOW_ENV,
+)
+
+
+def test_on_by_default_with_the_release_feed(monkeypatch) -> None:
+    # AB#830: a validator with no escape lines reads the public feed with the
+    # switch fraction 1/10, like Cathedral's own validator.
+    for name in ESCAPE_ENV:
         monkeypatch.delenv(name, raising=False)
-    assert escape_config_from_environment() is None
-    # A source without a fraction, or a zero fraction, is still off.
-    assert (
-        escape_config_from_environment({"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x"})
-        is None
-    )
-    assert (
-        escape_config_from_environment(
-            {
-                "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x",
-                "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
-            }
+    assert ESCAPE_FEED_DEFAULT_SOURCE == FEED
+    assert escape_receipts.DEFAULT_WEIGHT_FRACTION == Fraction(1, 10)
+    for loaded in (
+        escape_config_from_environment(),
+        escape_config_from_environment({}),
+    ):
+        assert loaded == EscapeReceiptConfig(
+            source=FEED,
+            fraction=Fraction(1, 10),
+            window_seconds=DEFAULT_REWARD_WINDOW_SECONDS,
         )
-        is None
+        assert loaded.source_origin == "release_default"
+
+
+def test_an_explicit_zero_or_off_turns_the_lane_off() -> None:
+    off = (
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0"},
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.0"},
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": ""},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "off"},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": " OFF "},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": ""},
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/x",
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
+        },
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": FEED,
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
+            # Off is decided before the window is read, as before.
+            "CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "86400",
+        },
     )
-    # The plan a validator builds today has no escape block and the same
-    # identity as before this change.
+    for environ in off:
+        assert escape_config_from_environment(environ) is None, environ
+    # Off, the plan has no escape block and the same identity as before the
+    # escape lane existed.
     planned = base.plan()
     assert planned.escape_active is False
     assert "escape" not in planned.identity()
     assert planned.expected_vector() == (planned.wire_uids, planned.wire_weights)
     assert planned.snapshot.identity() == registered_snapshot().identity()
+
+
+def test_operator_settings_win_over_the_release_default() -> None:
+    # The exact lines Cathedral's UID 0 runs with today.
+    uid0 = escape_config_from_environment(
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": FEED,
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.05",
+            "CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "604800",
+        }
+    )
+    assert uid0 == EscapeReceiptConfig(
+        source=FEED, fraction=Fraction(1, 20), window_seconds=604800
+    )
+    assert uid0.source_origin == "operator"
+    own_file = escape_config_from_environment(
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "/etc/cathedral-validator/receipts.json"}
+    )
+    assert own_file == EscapeReceiptConfig(
+        source="/etc/cathedral-validator/receipts.json", fraction=Fraction(1, 10)
+    )
+    assert own_file.source_origin == "operator"
+    fraction_only = escape_config_from_environment(
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.05"}
+    )
+    assert fraction_only == EscapeReceiptConfig(source=FEED, fraction=Fraction(1, 20))
+    assert fraction_only.source_origin == "release_default"
+    window_only = escape_config_from_environment(
+        {"CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "86400"}
+    )
+    assert window_only == EscapeReceiptConfig(
+        source=FEED, fraction=Fraction(1, 10), window_seconds=86400
+    )
+
+
+def test_the_default_keeps_every_existing_refusal() -> None:
+    # On by default, a mistyped line still refuses at start, not a silent off.
+    refused = (
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0.11"},
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "-0.1"},
+        {"CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "ten"},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "http://insecure.example/feed"},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": FEED + "?x=1"},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "https://user@api.example/feed"},
+        {"CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "relative/receipts.json"},
+        {"CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "0"},
+        {"CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "7776001"},
+        {"CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "week"},
+        # A malformed fraction refuses even next to an off source, as before.
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "off",
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "1",
+        },
+    )
+    for environ in refused:
+        with pytest.raises(EscapeReceiptError):
+            escape_config_from_environment(environ)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        urllib.error.URLError("Name or service not known"),
+        TimeoutError("timed out"),
+        ConnectionRefusedError(111, "refused"),
+        EscapeReceiptError("escape receipt feed returned HTTP 503"),
+        ValueError("Expecting value"),
+    ],
+)
+def test_a_default_feed_that_is_down_writes_normal_weights_and_warns(
+    monkeypatch, capsys, failure
+) -> None:
+    import test_compute_anchor as anchor
+
+    for name in ESCAPE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    default = escape_config_from_environment()
+    assert default is not None and default.source == FEED
+
+    def down(source: str, **_kwargs) -> list[object]:
+        assert source == FEED
+        raise failure
+
+    monkeypatch.setattr(runtime, "load_receipt_feed", down)
+    off_event, off_plan = anchor.run_cycle(monkeypatch, source=None)
+    capsys.readouterr()
+    event, plan = anchor.run_cycle(monkeypatch, escape_config=default, source=None)
+    # The weight set still happens, with exactly the vector of a lane-off host.
+    assert plan == off_plan
+    assert (event["wire_uids"], event["wire_weights"]) == (
+        off_event["wire_uids"],
+        off_event["wire_weights"],
+    )
+    assert event["escape_receipts"]["status"] == "SOURCE_UNAVAILABLE"
+    warnings = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if '"WARN"' in line
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["level"] == "WARN"
+    assert warnings[0]["escape_receipts"]["status"] == "SOURCE_UNAVAILABLE"
+    assert "weights written as normal" in warnings[0]["escape_receipts"]["warning"]
+
+
+def test_a_readable_feed_prints_no_warning(monkeypatch, capsys) -> None:
+    import test_compute_anchor as anchor
+
+    monkeypatch.setattr(runtime, "load_receipt_feed", lambda source, **_k: [])
+    event, _plan = anchor.run_cycle(
+        monkeypatch,
+        escape_config=EscapeReceiptConfig(source=FEED, fraction=Fraction(1, 10)),
+        source=None,
+    )
+    assert event["escape_receipts"]["status"] == "NO_BREAKS"
+    assert '"WARN"' not in capsys.readouterr().out
 
 
 def test_malformed_config_refuses() -> None:
@@ -528,6 +673,85 @@ def test_cycle_deadline_skips_the_feed(test_signer) -> None:
     assert same is planned
     assert summary["status"] == "SOURCE_UNAVAILABLE"
     assert summary["error"] == "cycle deadline"
+
+
+def test_the_feed_read_keeps_the_writer_reserve(monkeypatch) -> None:
+    # AB#830: a hung feed must not take the time the writer needs to sign.
+    reserve = runtime.ESCAPE_FEED_WRITER_RESERVE_SECONDS
+    assert reserve == 40.0
+    budgets: list[float] = []
+
+    def hung(source: str, *, timeout: float, **_kwargs) -> list[object]:
+        budgets.append(timeout)
+        raise TimeoutError("feed hung for its whole budget")
+
+    monkeypatch.setattr(runtime, "load_receipt_feed", hung)
+    planned = machine_plan()
+    for left, most in ((200.0, 30.0), (55.0, 55.0 - reserve)):
+        before = time.monotonic()
+        same, summary = runtime.apply_escape_receipts(
+            planned, config(), now=NOW, deadline_monotonic=before + left
+        )
+        assert same is planned and summary["status"] == "SOURCE_UNAVAILABLE"
+        # Even a read that runs to its budget ends with the reserve left.
+        assert 0 < budgets[-1] <= most
+        assert (before + left) - (time.monotonic() + budgets[-1]) >= reserve - 1
+    calls = len(budgets)
+    same, summary = runtime.apply_escape_receipts(
+        planned, config(), now=NOW, deadline_monotonic=time.monotonic() + reserve - 1
+    )
+    assert len(budgets) == calls
+    assert same is planned
+    assert summary == {
+        **summary,
+        "status": "SOURCE_UNAVAILABLE",
+        "error": "cycle deadline",
+    }
+
+
+def test_off_returns_before_validating_the_other_lines() -> None:
+    # As before the default: an opted-out host with stale junk still starts.
+    for environ in (
+        {
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "http://stale.example/feed",
+        },
+        {
+            "CATHEDRAL_ESCAPE_WEIGHT_FRACTION": "0",
+            "CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "never",
+        },
+        {
+            "CATHEDRAL_ESCAPE_RECEIPTS_SOURCE": "off",
+            "CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS": "0",
+        },
+    ):
+        assert escape_config_from_environment(environ) is None, environ
+
+
+def test_a_scoring_failure_warns_and_writes(monkeypatch, capsys) -> None:
+    import test_compute_anchor as anchor
+
+    monkeypatch.setattr(runtime, "load_receipt_feed", lambda source, **_k: [{}])
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runtime, "score_escape_receipts", boom)
+    off_event, off_plan = anchor.run_cycle(monkeypatch, source=None)
+    capsys.readouterr()
+    event, plan = anchor.run_cycle(
+        monkeypatch,
+        escape_config=EscapeReceiptConfig(source=FEED, fraction=Fraction(1, 10)),
+        source=None,
+    )
+    assert plan == off_plan
+    assert event["escape_receipts"]["status"] == "SCORING_UNAVAILABLE"
+    [warning] = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if '"WARN"' in line
+    ]
+    assert warning["escape_receipts"]["status"] == "SCORING_UNAVAILABLE"
 
 
 def test_scoring_failure_leaves_the_plan_unchanged(test_signer, monkeypatch) -> None:

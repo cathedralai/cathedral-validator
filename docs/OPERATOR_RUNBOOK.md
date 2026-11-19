@@ -315,16 +315,17 @@ changes.
 
 ## Escape room payouts
 
-Off by default: until both `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` and a positive
-`CATHEDRAL_ESCAPE_WEIGHT_FRACTION` are set, the escape lane's 10 percent is
-burned. Any positive fraction turns the lane on; the share paid is the fixed
-10 percent ([Gated compute](GATED_COMPUTE.md)). The enable sequence, testnet 584
-staged-break check, mainnet switch, weight verification, and
-one-step rollback (set the fraction back to 0) are in
+On by default (AB#830): with no escape lines in `direct.env` the validator
+reads the public receipt feed `https://api.polaris.computer/v1/escape/receipts/published`
+and pays verified breakers the fixed 10 percent
+([Gated compute](GATED_COMPUTE.md)). Any line you set wins over the default.
+To opt out, set `CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0` and restart; the escape
+share is then burned. An unreadable feed never stops the write: that cycle
+burns the escape share and prints a `"level": "WARN"` line. Defaults, opt-out,
+weight verification and rollback are in
 [Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md). That page also covers
 contest signer key rotation (add a key, overlap, retire, emergency revoke,
-rollback). Do not set a positive fraction on mainnet until that testnet check
-has passed. Rotation is a validator software update of the pinned key set, not
+rollback). Rotation is a validator software update of the pinned key set, not
 a host file edit.
 
 

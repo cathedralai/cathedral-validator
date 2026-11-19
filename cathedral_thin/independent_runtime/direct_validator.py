@@ -423,6 +423,38 @@ INFRA_HALT_ENV = "CATHEDRAL_INFRA_HALT"
 INFRA_HALT_SCOPED = "scoped"
 
 
+# Time the escape read leaves for the writer, as the shadow anchor read does.
+ESCAPE_FEED_WRITER_RESERVE_SECONDS = 40.0
+_ESCAPE_WARNINGS = {
+    "SOURCE_UNAVAILABLE": "escape feed unreadable; no escape units this cycle,"
+    " weights written as normal",
+    "SCORING_UNAVAILABLE": "escape receipts could not be scored; no escape"
+    " units this cycle, weights written as normal",
+}
+
+
+def _warn_escape_lane_burned(summary: dict[str, object]) -> None:
+    """One WARN line when the escape share is burned by a failure this cycle.
+
+    The cycle itself is unaffected: the plan was returned unchanged, so the
+    escape share is burned and the weights are written as normal.
+    """
+
+    status = summary.get("status")
+    if status not in _ESCAPE_WARNINGS:
+        return
+    _print_event(
+        {
+            "level": "WARN",
+            "escape_receipts": {
+                "status": status,
+                "error": str(summary.get("error", ""))[:200],
+                "warning": _ESCAPE_WARNINGS[status],
+            },
+        }
+    )
+
+
 def apply_escape_receipts(
     plan: DirectWeightPlan,
     config: EscapeReceiptConfig,
@@ -450,15 +482,20 @@ def apply_escape_receipts(
     fetch_timeout = FEED_TOTAL_TIMEOUT_SECONDS
     if deadline_monotonic is not None:
         remaining = deadline_monotonic - time.monotonic()
-        if remaining <= FEED_DEADLINE_SLACK_SECONDS:
+        # The read never takes the time the writer needs for its pre-sign
+        # RPCs (AB#830): a hung feed after a slow round would otherwise skip
+        # the weight set. With the lane on by default every validator makes
+        # this read, so it reads only with the writer reserve left.
+        budget = remaining - max(
+            FEED_DEADLINE_SLACK_SECONDS, ESCAPE_FEED_WRITER_RESERVE_SECONDS
+        )
+        if budget <= 0:
             return plan, {
                 **summary,
                 "status": "SOURCE_UNAVAILABLE",
                 "error": "cycle deadline",
             }
-        fetch_timeout = min(
-            FEED_TOTAL_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
-        )
+        fetch_timeout = min(FEED_TOTAL_TIMEOUT_SECONDS, budget)
     # One clock for the feed's since and for scoring, so the read covers the
     # same window the scorer pays.
     clock = time.time() if now is None else now
@@ -1178,6 +1215,7 @@ def _run_direct_cycle_unlocked(
         plan, escape_summary = apply_escape_receipts(
             plan, escape_config, deadline_monotonic=cycle_deadline
         )
+        _warn_escape_lane_burned(escape_summary)
     # After the escape read, so a slow delivery feed cannot starve it.
     anchor_summary: dict[str, object] | None = None
     if direct_contract.COMPUTE_ANCHOR_MODE != "off":
@@ -1857,9 +1895,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     capacity_shadow = _capacity_shadow_from_environment()
     tdx_policy = _tdx_measurement_policy_from_environment()
-    # Off unless both CATHEDRAL_ESCAPE_RECEIPTS_SOURCE and a positive
-    # CATHEDRAL_ESCAPE_WEIGHT_FRACTION are set. A malformed setting refuses to
-    # start rather than silently paying nobody.
+    # On by default with the release feed (AB#830). The operator turns it
+    # off with CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0; a set value always wins. A
+    # malformed setting refuses to start rather than silently paying nobody.
     try:
         escape_config = escape_config_from_environment()
     except EscapeReceiptError as exc:
@@ -1870,6 +1908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "escape_receipts": {
                     "status": "ENABLED",
                     "source": escape_config.source,
+                    "source_origin": escape_config.source_origin,
                     # The configured fraction only switches the lane on; the
                     # share paid is the owner-set constant.
                     "fraction": str(ESCAPE_LANE_SHARE),
@@ -1877,6 +1916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             }
         )
+
     # The compute anchor's delivery feed: the release default unless the
     # operator file overrides it ("off" or empty disables the read). A
     # malformed source refuses to start, as the escape source does. Each
