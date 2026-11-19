@@ -144,6 +144,85 @@ Removing a hotkey is the same change in reverse.
 - **Unlisted miners are still challenged.** Their evidence cannot change the
   vector, but they are verified every cycle and take cycle time.
 
+## Anchor to delivered rooms
+
+AB#822. A verified machine proves a sealed chip exists; it does not prove the
+chip serves customers. The compute anchor ties the compute lane to customer
+room-seconds delivered on the hotel the miner runs on that chip.
+
+The mode is the release constant `COMPUTE_ANCHOR_MODE` in
+`cathedral_thin/independent_runtime/direct_contract.py`, next to the lane
+shares. No environment variable or host file changes it.
+
+| Mode | Reads the feed | Weights |
+|---|---|---|
+| `off` | No | Machine counts, as above |
+| `shadow` (this release) | Yes | Machine counts, unchanged; the cycle event reports what the anchor saw |
+| `enforce` | Yes | Delivered room-seconds; a feed error burns the compute lane |
+
+The feed:
+
+- Source: `DELIVERY_FEED_DEFAULT_SOURCE`
+  (`https://api.polaris.computer/v1/miners/delivery/published`), the signed
+  delivery feed (AB#319), verified against the same pinned contest signer set
+  as escape receipts. The operator file may set
+  `CATHEDRAL_DELIVERY_RECEIPTS_SOURCE` to another https URL or an absolute
+  path; `off` or an empty value disables the read. Unset means the default, so
+  outside validators read it without any setting. A malformed value refuses to
+  start.
+- Lookback: the 24 whole UTC hours ending at the last hour that closed 15
+  minutes or more before the cycle's wall clock. The request sends `since` and
+  `until` explicitly, and scoring runs with `now = until`, so the oldest hour
+  is counted and nothing outside the 24 hours is.
+- Units: integer room-seconds per hotkey (the receipts are whole seconds).
+- Order and time: the read runs after the escape read, so a slow delivery feed
+  cannot starve it, with the cycle deadline and the escape lane's slack.
+  Running out of time is a feed error.
+
+The rule:
+
+```
+delivered(H) = integer room-seconds for hotkey H in the lookback, from verified receipts
+eligible(uid) = hotkey approved AND verified machines > 0 this cycle
+enforce: compute row (uid, delivered(H)) for each eligible uid with delivered(H) > 0
+         the lane splits COMPUTE_LANE_SHARE over room-seconds; no row at all: the lane burns
+         feed error, timeout or disabled feed: the lane burns, compute_lane.status = BURNED_UNPROVEN
+shadow:  weights unchanged; feed errors are reported only
+```
+
+What stays the same in every mode:
+
+- `raw_scores` and `machine_ids_by_uid` keep counting verified machines, and
+  the SNP roster is built from verified machines before any anchor rule. A
+  hotel with no delivery is never dropped from the roster, so "no delivery, so
+  no roster row, so drained, so no delivery" cannot happen.
+- Shadow leaves the plan, its identity, its evidence digest and the signed
+  vector byte-identical to `off`. The cycle event gains `compute_anchor`:
+  `mode`, `feed_status` (`OK`, `ERROR`, `DISABLED`), `body_bytes`, and per
+  scored UID `hotkey`, `verified_machines` and `delivered_room_seconds`.
+
+In enforce the plan identity gains `compute_anchor` (`mode`, `units_by_uid`,
+`feed.accepted_digests`, `feed.refused`) and the evidence digest is re-bound
+over it, as the escape lane does. The writer re-checks the anchor units: each
+row must name an approved hotkey with a verified machine and positive
+room-seconds, the vector must be the one those units give, and the plan's mode
+must be the release's.
+
+Known limits:
+
+- Polaris signs on read from a live database, so two validators reading
+  minutes apart can see different seconds for the newest hours. Shares are
+  relative and the 24 hour window keeps this small; pinning to finalized hours
+  is open.
+- The feed is one unpaged body capped at 4 MiB (about 175 bytes a room-hour).
+  In enforce an oversized body is a feed error and burns the lane. The shadow
+  event carries `body_bytes` so the trend is visible before enforce.
+- Telemetry still reports a verified approved machine with no delivery as
+  `not_approved` in enforce; it is not a payout ledger.
+
+Enforce is a later release, after 24 hours of shadow events with delivery for
+every UID meant to be paid.
+
 ## Locking out validators on older releases
 
 Releases with the gated split stamp weight version key `10005001`

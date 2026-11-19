@@ -24,6 +24,21 @@ DIRECT_PLAN_SCHEMA = "cathedral_direct_validator_plan_v1"
 COMPUTE_LANE_SHARE = Fraction(1, 10)
 ESCAPE_LANE_SHARE = Fraction(1, 10)
 
+# Compute anchor (AB#822): pay the compute lane by customer room-seconds
+# delivered on the anchored hotel, not by a bare verified machine. A release
+# constant, like the shares, so every validator on a release applies one rule.
+# "off" never reads the delivery feed. "shadow" reads it and reports what it
+# would pay in the cycle event; the plan and the vector are unchanged.
+# "enforce" splits the compute lane over delivered room-seconds of approved
+# hotkeys with a verified machine, and burns it on a feed error.
+COMPUTE_ANCHOR_MODES = frozenset({"off", "shadow", "enforce"})
+COMPUTE_ANCHOR_MODE = "shadow"
+# The signed delivery feed (AB#319). An operator file may override it with
+# CATHEDRAL_DELIVERY_RECEIPTS_SOURCE; outside validators read this default.
+DELIVERY_FEED_DEFAULT_SOURCE = (
+    "https://api.polaris.computer/v1/miners/delivery/published"
+)
+
 # The version key the direct writer stamps on every weight call. Raised 12 Nov
 # 2026 with the gated compute split, so the owner can set the subnet's
 # weights_version to this value and refuse weights from validators on older
@@ -340,6 +355,18 @@ class DirectWeightPlan:
     # and the UID it held there. A plan without one is never signed.
     burn_uid: int | None = None
     burn_hotkey: str = ""
+    # Compute anchor (AB#822). Only an enforce plan carries units; every other
+    # plan is "off" here (shadow never touches the plan), and then identity()
+    # and the vector are exactly the machine-count plan. ``raw_scores`` and
+    # ``machine_ids_by_uid`` keep counting verified machines in every mode.
+    compute_anchor_units: tuple[tuple[int, int], ...] = ()
+    compute_anchor_mode: str = "off"
+    compute_anchor_accepted_digests: tuple[str, ...] = ()
+    compute_anchor_refused: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def compute_anchor_enforced(self) -> bool:
+        return self.compute_anchor_mode == "enforce"
 
     @property
     def escape_active(self) -> bool:
@@ -362,8 +389,12 @@ class DirectWeightPlan:
                 raise DirectValidatorError(
                     "escape UID hotkey disagrees with the miner row"
                 )
+        if self.compute_anchor_mode not in COMPUTE_ANCHOR_MODES:
+            raise DirectValidatorError("direct plan names an unknown anchor mode")
         return gated_split_vector(
-            self.raw_scores,
+            self.compute_anchor_units
+            if self.compute_anchor_enforced
+            else self.raw_scores,
             miner_hotkeys,
             approved_hotkeys=approved_miners.APPROVED_COMPUTE_HOTKEYS,
             escape_units=self.escape_units,
@@ -402,7 +433,19 @@ class DirectWeightPlan:
                 "units_by_uid": [list(row) for row in self.escape_units],
                 "uid_hotkeys": [list(row) for row in self.escape_uid_hotkeys],
             }
+        if self.compute_anchor_enforced:
+            document["compute_anchor"] = self.compute_anchor_identity()
         return document
+
+    def compute_anchor_identity(self) -> dict[str, object]:
+        return {
+            "mode": self.compute_anchor_mode,
+            "units_by_uid": [list(row) for row in self.compute_anchor_units],
+            "feed": {
+                "accepted_digests": list(self.compute_anchor_accepted_digests),
+                "refused": dict(self.compute_anchor_refused),
+            },
+        }
 
     def _base_identity(self) -> dict[str, object]:
         return {
@@ -450,7 +493,10 @@ class DirectSubmissionReceipt:
 
 
 __all__ = [
+    "COMPUTE_ANCHOR_MODE",
+    "COMPUTE_ANCHOR_MODES",
     "COMPUTE_LANE_SHARE",
+    "DELIVERY_FEED_DEFAULT_SOURCE",
     "DIRECT_PLAN_SCHEMA",
     "DIRECT_VERSION_KEY",
     "DirectSubmissionReceipt",

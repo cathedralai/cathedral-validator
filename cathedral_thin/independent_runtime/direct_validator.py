@@ -61,6 +61,12 @@ from .axon import (
     scan_axons,
 )
 from .commit_reveal import COMMIT_REVEAL_OPT_IN_ENV, parse_commit_reveal_opt_in
+from . import direct_contract
+from .delivery_receipts import (
+    AnchorDelivery,
+    delivery_source_from_environment,
+    read_anchor_delivery,
+)
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     ESCAPE_LANE_SHARE,
@@ -525,6 +531,158 @@ def apply_escape_receipts(
         }
 
 
+COMPUTE_ANCHOR_FEED_OK = "OK"
+COMPUTE_ANCHOR_FEED_ERROR = "ERROR"
+COMPUTE_ANCHOR_FEED_DISABLED = "DISABLED"
+
+
+def apply_compute_anchor(
+    plan: DirectWeightPlan,
+    source: str | None,
+    *,
+    mode: str | None = None,
+    now: float | None = None,
+    read: Callable[..., AnchorDelivery] | None = None,
+    deadline_monotonic: float | None = None,
+) -> tuple[DirectWeightPlan, dict[str, object]]:
+    """Anchor the compute lane to delivered customer room-seconds (AB#822).
+
+    Runs after the escape lane, so a slow delivery feed never starves the
+    escape read. The read gets the cycle deadline with the escape lane's
+    slack; running out of time is a feed error.
+
+    Shadow returns ``plan`` itself, so the plan, its identity and the vector
+    are byte-identical to a release without the anchor; the summary is for the
+    cycle event only, and a feed error changes nothing. Enforce pays the
+    compute lane over delivered room-seconds of approved hotkeys with a
+    verified machine this cycle, and burns the lane on a feed error (the
+    summary then names ``compute_lane_burned``). The approval gate itself
+    stays inside ``gated_split_vector``.
+    """
+
+    mode = direct_contract.COMPUTE_ANCHOR_MODE if mode is None else mode
+    if mode not in direct_contract.COMPUTE_ANCHOR_MODES or mode == "off":
+        raise DirectValidatorError("compute anchor mode does not read the feed")
+    clock = time.time() if now is None else now
+    delivery: AnchorDelivery | None = None
+    error: str | None = None
+    if source is None:
+        feed_status = COMPUTE_ANCHOR_FEED_DISABLED
+    else:
+        feed_status = COMPUTE_ANCHOR_FEED_ERROR
+        fetch_timeout = FEED_TOTAL_TIMEOUT_SECONDS
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - time.monotonic()
+            fetch_timeout = min(
+                FEED_TOTAL_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
+            )
+        if fetch_timeout <= 0:
+            error = "cycle deadline"
+        else:
+            try:
+                delivery = (read or read_anchor_delivery)(
+                    source, clock=clock, timeout=fetch_timeout
+                )
+                feed_status = COMPUTE_ANCHOR_FEED_OK
+            except Exception as exc:  # noqa: BLE001 - never fails the cycle
+                error = (
+                    str(exc)
+                    if isinstance(exc, (EscapeReceiptError, DirectValidatorError))
+                    else type(exc).__name__
+                )[:200]
+    verified = dict(plan.raw_scores)
+    delivered = dict(delivery.seconds_by_hotkey) if delivery is not None else {}
+    summary: dict[str, object] = {
+        "mode": mode,
+        "feed_status": feed_status,
+        "body_bytes": delivery.body_bytes if delivery is not None else None,
+        "uids": {
+            str(uid): {
+                "hotkey": hotkey,
+                "verified_machines": verified.get(uid, 0),
+                "delivered_room_seconds": (
+                    delivered.get(hotkey, 0) if delivery is not None else None
+                ),
+            }
+            for uid, hotkey in plan.uid_hotkeys
+        },
+    }
+    if delivery is not None:
+        summary.update(
+            {
+                "since": delivery.since,
+                "until": delivery.until,
+                "accepted": len(delivery.delivery_round.accepted_digests),
+                "refused": dict(sorted(delivery.delivery_round.refused.items())),
+            }
+        )
+    if error is not None:
+        summary["error"] = error
+    if mode != "enforce":
+        return plan, summary
+
+    approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+    burned_reason: str | None = None
+    units: tuple[tuple[int, int], ...] = ()
+    digests: tuple[str, ...] = ()
+    refused: tuple[tuple[str, int], ...] = ()
+    if delivery is None:
+        burned_reason = (
+            "delivery feed is disabled"
+            if feed_status == COMPUTE_ANCHOR_FEED_DISABLED
+            else "delivery feed is unavailable"
+        )
+    else:
+        units = tuple(
+            (uid, delivered[hotkey])
+            for uid, hotkey in plan.uid_hotkeys
+            if hotkey in approved
+            and verified.get(uid, 0) > 0
+            and delivered.get(hotkey, 0) > 0
+        )
+        digests = delivery.delivery_round.accepted_digests
+        refused = tuple(sorted(delivery.delivery_round.refused.items()))
+    anchored = dataclasses.replace(
+        plan,
+        compute_anchor_mode="enforce",
+        compute_anchor_units=units,
+        compute_anchor_accepted_digests=digests,
+        compute_anchor_refused=refused,
+    )
+    evidence = {
+        **anchored.compute_anchor_identity(),
+        "feed_status": feed_status,
+        "since": delivery.since if delivery is not None else None,
+        "until": delivery.until if delivery is not None else None,
+        "signer_set_sha256": (
+            delivery.delivery_round.evidence()["signer_set_sha256"]
+            if delivery is not None
+            else None
+        ),
+    }
+    evidence_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            canonical_document_bytes(
+                {
+                    "direct_evidence_digest": plan.evidence_digest,
+                    "compute_anchor": evidence,
+                }
+            )
+        ).hexdigest()
+    )
+    anchored = dataclasses.replace(anchored, evidence_digest=evidence_digest)
+    wire_uids, wire_weights = anchored.expected_vector()
+    anchored = dataclasses.replace(
+        anchored, wire_uids=wire_uids, wire_weights=wire_weights
+    )
+    anchored.kwargs()
+    summary["units_by_uid"] = [list(row) for row in units]
+    if burned_reason is not None:
+        summary["compute_lane_burned"] = burned_reason
+    return anchored, summary
+
+
 def _verifier_outage(result: MultiComputeRound) -> bool:
     """True when an INFRA verdict may mean this validator's verifier is down.
 
@@ -918,6 +1076,7 @@ def _run_direct_cycle_unlocked(
     pool_inventory: tuple[Path, str] | None = None,
     snp_roster: SnpRosterExport | None = None,
     escape_config: EscapeReceiptConfig | None = None,
+    compute_anchor_source: str | None = None,
 ) -> dict[str, Any]:
     """Recover first, otherwise derive and submit at most one fresh vector.
 
@@ -1008,6 +1167,12 @@ def _run_direct_cycle_unlocked(
         plan, escape_summary = apply_escape_receipts(
             plan, escape_config, deadline_monotonic=cycle_deadline
         )
+    # After the escape read, so a slow delivery feed cannot starve it.
+    anchor_summary: dict[str, object] | None = None
+    if direct_contract.COMPUTE_ANCHOR_MODE != "off":
+        plan, anchor_summary = apply_compute_anchor(
+            plan, compute_anchor_source, deadline_monotonic=cycle_deadline
+        )
     evidence_completed = time.monotonic()
     if evidence_completed >= cycle_deadline:
         raise DirectValidatorError("full evidence cycle expired before submission")
@@ -1089,10 +1254,19 @@ def _run_direct_cycle_unlocked(
     }
     if escape_summary is not None:
         event["escape_receipts"] = escape_summary
-    if compute_unproven is not None:
+    if anchor_summary is not None:
+        event["compute_anchor"] = anchor_summary
+    anchor_burned = (
+        anchor_summary.get("compute_lane_burned")
+        if anchor_summary is not None
+        else None
+    )
+    if compute_unproven is not None or anchor_burned is not None:
+        # An enforce anchor without a readable feed burns the lane as an
+        # INFRA verdict does: nobody is paid on unproven delivery.
         event["compute_lane"] = {
             "status": "BURNED_UNPROVEN",
-            "reason": compute_unproven,
+            "reason": compute_unproven or anchor_burned,
         }
     if pool_inventory is not None:
         try:
@@ -1277,6 +1451,7 @@ def run_direct_cycle(
     pool_inventory: tuple[Path, str] | None = None,
     snp_roster: SnpRosterExport | None = None,
     escape_config: EscapeReceiptConfig | None = None,
+    compute_anchor_source: str | None = None,
 ) -> dict[str, Any]:
     """Run one complete cycle while excluding a release activation.
 
@@ -1287,6 +1462,10 @@ def run_direct_cycle(
     hands to the writer, which refuses a plan for any subnet but its own. The
     default is the compiled netuid for callers that predate the setting;
     ``main`` always passes the value it resolved.
+
+    ``compute_anchor_source`` is the delivery feed the compute anchor reads
+    (``main`` resolves it from the environment). None means no read: in shadow
+    the event says DISABLED, in enforce the compute lane burns.
     """
 
     netuid = require_netuid(netuid)
@@ -1315,6 +1494,7 @@ def run_direct_cycle(
             pool_inventory=pool_inventory,
             snp_roster=snp_roster,
             escape_config=escape_config,
+            compute_anchor_source=compute_anchor_source,
         )
 
 
@@ -1686,6 +1866,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             }
         )
+    # The compute anchor's delivery feed: the release default unless the
+    # operator file overrides it ("off" or empty disables the read). A
+    # malformed source refuses to start, as the escape source does. Each
+    # cycle event reports the mode and the feed status.
+    try:
+        compute_anchor_source = delivery_source_from_environment()
+    except EscapeReceiptError as exc:
+        raise SystemExit(f"delivery receipt source refused: {exc}") from exc
     snp_roster, snp_roster_event = snp_roster_from_environment()
     if snp_roster_event is not None:
         _print_event(snp_roster_event)
@@ -1859,6 +2047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     pool_inventory=pool_inventory,
                     snp_roster=snp_roster,
                     escape_config=escape_config,
+                    compute_anchor_source=compute_anchor_source,
                 )
                 print(json.dumps(event, sort_keys=True, default=str), flush=True)
                 shadow_event = _capacity_shadow_event(event, capacity_shadow, netuid)

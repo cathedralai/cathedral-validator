@@ -716,12 +716,15 @@ def load_receipt_feed(
     timeout: float = FEED_TOTAL_TIMEOUT_SECONDS,
     window_seconds: int | None = None,
     now: float | None = None,
+    since: int | None = None,
+    until: int | None = None,
 ) -> list[object]:
     """Read a JSON list of receipts, or ``{"receipts": [...]}``.
 
     A file is one document. An HTTPS source is read page by page: each request
-    adds ``limit``, ``since`` (when ``window_seconds`` is given) and, after the
-    first page, the previous page's ``next_cursor``. Paging stops when
+    adds ``limit``, ``since`` (an explicit ``since``, else derived from
+    ``window_seconds``), ``until`` (when given) and, after the first page, the
+    previous page's ``next_cursor``. Paging stops when
     ``next_cursor`` is missing or null, so a server that does not page (a list
     body, or no ``next_cursor``) is read in one request as before. Every call
     starts from the first page. Any failed page fails the whole read.
@@ -763,6 +766,14 @@ def load_receipt_feed(
         # so nothing the reward window counts is left out. The skew margin
         # only widens the read.
         params["since"] = max(0, int(clock - window_seconds - MAX_FUTURE_SKEW_SECONDS))
+    # The delivery feed (AB#822) reads a fixed range of closed hours, so it
+    # names both ends. The escape call passes neither and is unchanged.
+    for name, value in (("since", since), ("until", until)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise EscapeReceiptError(f"receipt feed {name} is invalid")
+        params[name] = value
     receipts: list[object] = []
     cursor: int | None = None
     for _page in range(MAX_FEED_PAGES):
