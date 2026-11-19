@@ -43,9 +43,7 @@ DELIVERY_FEED_DEFAULT_SOURCE = (
 # verified break is scored by every validator, not only by Cathedral's own.
 # An operator file may override it, or turn the lane off with
 # CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0.
-ESCAPE_FEED_DEFAULT_SOURCE = (
-    "https://api.polaris.computer/v1/escape/receipts/published"
-)
+ESCAPE_FEED_DEFAULT_SOURCE = "https://api.polaris.computer/v1/escape/receipts/published"
 
 # The version key the direct writer stamps on every weight call. Raised 12 Nov
 # 2026 with the gated compute split, so the owner can set the subnet's

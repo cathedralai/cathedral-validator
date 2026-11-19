@@ -392,7 +392,10 @@ def test_on_by_default_with_the_release_feed(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     assert ESCAPE_FEED_DEFAULT_SOURCE == FEED
     assert escape_receipts.DEFAULT_WEIGHT_FRACTION == Fraction(1, 10)
-    for loaded in (escape_config_from_environment(), escape_config_from_environment({})):
+    for loaded in (
+        escape_config_from_environment(),
+        escape_config_from_environment({}),
+    ):
         assert loaded == EscapeReceiptConfig(
             source=FEED,
             fraction=Fraction(1, 10),
@@ -699,7 +702,11 @@ def test_the_feed_read_keeps_the_writer_reserve(monkeypatch) -> None:
     )
     assert len(budgets) == calls
     assert same is planned
-    assert summary == {**summary, "status": "SOURCE_UNAVAILABLE", "error": "cycle deadline"}
+    assert summary == {
+        **summary,
+        "status": "SOURCE_UNAVAILABLE",
+        "error": "cycle deadline",
+    }
 
 
 def test_off_returns_before_validating_the_other_lines() -> None:
