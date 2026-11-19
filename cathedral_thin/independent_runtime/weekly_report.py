@@ -591,11 +591,11 @@ def main(argv: Sequence[str], *, subtensor_factory: Any = None) -> int:
         WEEKLY_REPORT_COMMAND,
         _configured_netuid,
         _expected_hotkey,
-        _pinned_network,
+        _chain_target,
     )
 
     options = _parser(WEEKLY_REPORT_COMMAND).parse_args(list(argv))
-    network = _pinned_network(options.network)
+    chain = _chain_target(options)
     netuid = _configured_netuid(options.netuid)
     hotkey = _expected_hotkey(options.expected_hotkey)
     try:
@@ -633,7 +633,7 @@ def main(argv: Sequence[str], *, subtensor_factory: Any = None) -> int:
                 from cathedral_thin.bt_compat import make_subtensor
 
                 def subtensor_factory() -> Any:
-                    return make_subtensor(bt, network=network)
+                    return make_subtensor(bt, network=chain.connect_to)
 
             try:
                 subtensor = subtensor_factory()

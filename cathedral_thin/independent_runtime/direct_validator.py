@@ -28,6 +28,14 @@ from typing import Any, Callable, Sequence
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor, make_wallet
+from cathedral_thin.chain_target import (
+    ChainTarget,
+    ChainTargetError,
+    add_chain_arguments,
+    redact_endpoint,
+    resolve_chain_target,
+    scrub,
+)
 from cathedral_thin.independent.collect import EVIDENCE_KIND_SEV_SNP, EVIDENCE_KIND_TDX
 from cathedral_thin.independent.compute import ComputeAdapter, QuoteVerdict
 from cathedral_thin.independent.constants import (
@@ -62,7 +70,7 @@ from .direct_contract import (
     FinalizedMetagraphSnapshot,
     require_netuid,
 )
-from .errors import IndependentLiveError
+from .errors import ChainClientError, IndependentLiveError
 from .escape_receipts import (
     FEED_DEADLINE_SLACK_SECONDS,
     FEED_TOTAL_TIMEOUT_SECONDS,
@@ -85,6 +93,7 @@ from .preview_io import canonical_document_bytes
 from .testnet import (
     configured_netuid,
     expected_genesis_hash,
+    request_network,
     require_testnet_network,
     testnet_active,
 )
@@ -1310,9 +1319,64 @@ def run_direct_cycle(
 
 
 def _add_network_argument(parser: argparse.ArgumentParser) -> None:
-    """The one --network option, shared with the record-failed-write command."""
+    """The chain options, shared with record-failed-write and weekly-report.
 
-    parser.add_argument("--network", default="finney")
+    ``--network`` (alias ``--subtensor.network``) names the chain and stays
+    pinned to Finney. ``--subtensor.chain_endpoint`` (or
+    ``SUBTENSOR_CHAIN_ENDPOINT``) only changes where the connection goes,
+    for example the operator's own subtensor node. See ``chain_target``.
+    """
+
+    add_chain_arguments(
+        parser,
+        network_help=(
+            "chain network; this release accepts only finney (default), also "
+            "SUBTENSOR_NETWORK"
+        ),
+    )
+
+
+def _chain_target(options: argparse.Namespace) -> ChainTarget:
+    """Resolve flags and environment into the one pinned chain target."""
+
+    try:
+        target = resolve_chain_target(
+            getattr(options, "network", None),
+            getattr(options, "chain_endpoint", None),
+            default_network=request_network(),
+        )
+    except ChainTargetError as exc:
+        raise SystemExit(f"chain endpoint refused: {exc}") from exc
+    _pinned_network(target.network)
+    return target
+
+
+def _connect(target: ChainTarget) -> Any:
+    """Connect; an operator's own node must serve the pinned chain at start.
+
+    The pinned genesis is also checked every cycle and again before each
+    signature; this makes a wrong node fail at start, before readiness,
+    instead of at the first cycle. Every refusal is a status 1 message with
+    the endpoint redacted. The default entrypoint path is unchanged.
+    """
+
+    if target.endpoint is None:
+        return make_subtensor(bt, network=target.connect_to)
+    shown = redact_endpoint(target.endpoint)
+    try:
+        subtensor = make_subtensor(bt, network=target.connect_to)
+    except Exception as exc:
+        raise SystemExit(
+            f"chain endpoint {shown} refused: could not connect: {type(exc).__name__}"
+        ) from exc
+    try:
+        genesis = observed_genesis_hash(subtensor)
+    except ChainClientError as exc:
+        raise SystemExit(
+            f"chain endpoint {shown} refused: {scrub(str(exc), target.endpoint)}"
+        ) from exc
+    _print_event({"chain": {**target.event(), "genesis": genesis}})
+    return subtensor
 
 
 def _pinned_network(value: object) -> str:
@@ -1560,7 +1624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
     if options.confirm_direct_write is not True:
         raise SystemExit("--confirm-direct-write is required before any chain access")
-    _pinned_network(options.network)
+    chain_target = _chain_target(options)
     netuid = _configured_netuid(options.netuid)
     try:
         commit_reveal = parse_commit_reveal_opt_in(
@@ -1636,7 +1700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("loaded validator hotkey does not match --expected-hotkey")
     if not callable(getattr(keypair, "sign", None)):
         raise SystemExit("validator hotkey cannot sign")
-    subtensor = make_subtensor(bt, network=options.network)
+    subtensor = _connect(chain_target)
     from .direct_writer import (
         DirectSubmissionAmbiguous,
         DirectSubmissionContradiction,
@@ -1681,7 +1745,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(
                 "--pool-inventory must be an absolute path in an existing directory"
             )
-        pool_inventory = (options.pool_inventory, options.network)
+        pool_inventory = (options.pool_inventory, chain_target.network)
     if bool(options.telemetry_spool) != bool(options.telemetry_reader_group):
         raise SystemExit(
             "--telemetry-spool and --telemetry-reader-group must be supplied together"

@@ -425,6 +425,13 @@ updater can roll back to it when a new release fails to become ready. Once
 the host installs a bootstrap whose unit carries the line, the drop-in is
 redundant and harmless (the same file is read twice); remove it at leisure.
 
+An operator's own subtensor node is set the same way: the optional
+`/etc/cathedral-validator/direct-subtensor.env` holds
+`SUBTENSOR_CHAIN_ENDPOINT=ws://127.0.0.1:9944`, and a drop-in adds the
+`EnvironmentFile=-` line until the host's bootstrap carries it. Exact command:
+"Use your own subtensor node" in [VALIDATOR.md](../VALIDATOR.md).
+The pinned Finney genesis still refuses a node on any other chain.
+
 ## Commit-reveal subnets
 
 Live Finney SN94 has commit-reveal enabled. The writer defaults to timelocked

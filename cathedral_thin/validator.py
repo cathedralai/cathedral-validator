@@ -23,6 +23,13 @@ from .bt_compat import (
     make_subtensor,
     make_wallet,
 )
+from .chain_target import (
+    ChainTarget,
+    add_chain_arguments,
+    connect_legacy,
+    legacy_network_default,
+    resolve_args,
+)
 from .core import (
     PendingVector,
     StateStore,
@@ -913,7 +920,9 @@ def build_parser() -> argparse.ArgumentParser:
             "SN94 mainnet uses cathedral-validator."
         )
     )
-    parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "local"))
+    # --network/--subtensor.network, --subtensor.chain_endpoint and the
+    # SUBTENSOR_* environment; BT_NETWORK stays the fallback label.
+    add_chain_arguments(parser, network_default=legacy_network_default("local"))
     parser.add_argument(
         "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "1"))
     )
@@ -1006,6 +1015,15 @@ def validate_args(args: argparse.Namespace) -> None:
         )
 
 
+def _chain_target(args: argparse.Namespace) -> ChainTarget:
+    target = getattr(args, "chain_target", None)
+    if target is None:
+        target = resolve_args(
+            args, default_network=os.environ.get("BT_NETWORK") or "local"
+        )
+    return target
+
+
 async def async_main(args: argparse.Namespace) -> int:
     if args.broadcast and args.netuid == 94:
         raise ThinSubnetError(
@@ -1023,7 +1041,7 @@ async def async_main(args: argparse.Namespace) -> int:
         hotkey=args.wallet_hotkey,
         path=args.wallet_path or None,
     )
-    subtensor = make_subtensor(bt, network=args.network)
+    subtensor = connect_legacy(bt, _chain_target(args), make_subtensor=make_subtensor)
     dendrite = make_dendrite(bt, wallet=wallet)
     try:
         hotkey = str(wallet.hotkey.ss58_address)
@@ -1080,6 +1098,9 @@ async def async_main(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.chain_target = resolve_args(
+        args, default_network=os.environ.get("BT_NETWORK") or "local"
+    )
     validate_args(args)
     try:
         return asyncio.run(async_main(args))

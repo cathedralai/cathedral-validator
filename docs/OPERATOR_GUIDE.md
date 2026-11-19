@@ -96,6 +96,10 @@ docker exec -u cathedral-validator -e HOME=/var/lib/cathedral-validator \
 
 Moving from a systemd host: [Docker migration](AUTO_UPDATE.md#docker-migration).
 
+To use your own subtensor node instead of the public entrypoint, add
+`-e SUBTENSOR_CHAIN_ENDPOINT=ws://127.0.0.1:9944` (with `--network host`) to the
+`docker run` command: "Use your own subtensor node" in [VALIDATOR.md](../VALIDATOR.md).
+
 ## Install
 
 Read the [operator runbook](OPERATOR_RUNBOOK.md) first, including its

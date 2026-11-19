@@ -325,11 +325,14 @@ def test_readme_snp_policy_template_is_strict_json_with_the_runtime_shape() -> N
 
 def test_old_validator_page_is_only_a_compatibility_pointer() -> None:
     pointer = (ROOT / "VALIDATOR.md").read_text(encoding="utf-8")
-    assert pointer == (
+    assert pointer.startswith(
         "# Cathedral Validator\n\n"
         "The public installation and operating guide is on the "
         "[repository home page](README.md).\n"
     )
+    # AB#820: the one operator section kept here is the own-node setting.
+    headings = re.findall(r"^#{1,2} .*$", pointer, flags=re.M)
+    assert headings == ["# Cathedral Validator", "## Use your own subtensor node"]
 
 
 def test_former_public_installer_is_a_fail_closed_tombstone() -> None:
