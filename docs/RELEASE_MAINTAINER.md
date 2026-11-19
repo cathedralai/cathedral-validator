@@ -281,6 +281,11 @@ published, hosts need the drop-in in
 [Optional unit settings](AUTO_UPDATE.md#optional-unit-settings); publish the
 bootstrap with, or soon after, the release that ships the allowlist.
 
+Also waiting for the next bootstrap (AB#820): the direct unit's
+`EnvironmentFile=-/etc/cathedral-validator/direct-subtensor.env`, which carries
+an operator's own subtensor endpoint. Until then hosts add it with the drop-in
+in "Use your own subtensor node" in [VALIDATOR.md](../VALIDATOR.md).
+
 The privileged updater environment intentionally contains only the Cathedral
 project wheel, `cryptography`, `cffi`, and `pycparser`. It does not contain
 Bittensor or NumPy. Those validator dependencies stay in the signed runtime PEX.

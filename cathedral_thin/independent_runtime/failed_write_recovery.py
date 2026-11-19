@@ -31,14 +31,15 @@ from urllib.parse import urlsplit
 import bittensor as bt
 
 from cathedral_thin.bt_compat import make_subtensor
+from cathedral_thin.chain_target import scrub
 
 from .direct_validator import (
     RECORD_FAILED_WRITE_COMMAND,
     _add_netuid_argument,
     _add_network_argument,
+    _chain_target,
     _configured_netuid,
     _expected_hotkey,
-    _pinned_network,
 )
 from .direct_writer import (
     DirectWeightWriter,
@@ -108,7 +109,7 @@ def _parser() -> argparse.ArgumentParser:
         "--archive-endpoint",
         help=(
             "read the proof's history from this archive node instead of the "
-            "network's entrypoint; the pinned genesis still applies"
+            "configured chain endpoint; the pinned genesis still applies"
         ),
     )
     return parser
@@ -122,7 +123,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Return 0 once recorded, 1 when refused, and 75 when history is unreadable."""
 
     options = _parser().parse_args(argv)
-    network = _pinned_network(options.network)
+    # The same chain setting the validator uses: an operator's own node via
+    # --subtensor.chain_endpoint or SUBTENSOR_CHAIN_ENDPOINT. The pinned
+    # genesis still applies, checked by the writer before any proof.
+    chain = _chain_target(options)
     # The journal is scoped by netuid, so the command resolves it exactly as
     # the validator does and hands it to the writer it proves and records with.
     netuid = _configured_netuid(options.netuid)
@@ -133,13 +137,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         else None
     )
     try:
-        subtensor = make_subtensor(bt, network=archive or network)
+        subtensor = make_subtensor(bt, network=archive or chain.connect_to)
         bound_rpc_waits(subtensor)
     except Exception as exc:
         _print(
             {
                 "status": STATUS_REFUSED,
-                "error": f"chain client refused: {type(exc).__name__}: {exc}",
+                "error": (
+                    "chain client refused: "
+                    f"{type(exc).__name__}: {scrub(str(exc), chain.endpoint)}"
+                ),
             }
         )
         return EXIT_REFUSED

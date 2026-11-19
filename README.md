@@ -61,6 +61,8 @@ key fingerprint `sha256:9339edaba134edcea3b7f84e15a1f3b853b173be2cc645dbc6898c06
   status code, updates and trust.
 - [Operator runbook](docs/OPERATOR_RUNBOOK.md): step by step, with the chain rules.
 - [Validator auto-update](docs/AUTO_UPDATE.md): updates, recovery and pause.
+- [Use your own subtensor node](VALIDATOR.md): one `.env` line instead of
+  the public Finney entrypoint.
 
 **The Cathedral map.** Three public repositories, each linked to the other two:
 - **cathedral-validator** (this one): how SN94 weights are set and paid.

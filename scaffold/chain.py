@@ -39,8 +39,12 @@ def connection_target(network: str) -> str:
     global _announced
     endpoint = os.environ.get(CHAIN_ENDPOINT_ENV, "").strip()
     if endpoint and not _announced:
+        # scheme://host:port only; a provider URL can carry a key in its path.
+        from cathedral_thin.chain_target import redact_endpoint
+
         print(
-            f"[chain] {CHAIN_ENDPOINT_ENV} active -> connecting to {endpoint} "
+            f"[chain] {CHAIN_ENDPOINT_ENV} active -> connecting to "
+            f"{redact_endpoint(endpoint)} "
             f"(signing label stays {network!r})"
         )
         _announced = True

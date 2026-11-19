@@ -557,6 +557,42 @@ def test_cli_chain_readback_uses_the_latest_event_in_window(tmp_path, capsys) ->
     assert json.loads(out)["chain_readback"]["status"] == "MATCHES_LAST_APPLIED"
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "connect_to"),
+    ((None, "finney"), ("ws://127.0.0.1:9944", "ws://127.0.0.1:9944")),
+    ids=("default", "own-node"),
+)
+def test_cli_chain_readback_connects_with_the_default_factory(
+    tmp_path, capsys, monkeypatch, endpoint, connect_to
+) -> None:
+    """AB#820: the shipped factory (no injection) reaches the configured node."""
+
+    from cathedral_thin import bt_compat
+
+    for name in (
+        "SUBTENSOR_NETWORK",
+        "SUBTENSOR_CHAIN_ENDPOINT",
+        "CATHEDRAL_CHAIN_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    if endpoint is not None:
+        monkeypatch.setenv("SUBTENSOR_CHAIN_ENDPOINT", endpoint)
+    seen: list[str] = []
+    wire = {41: 3277, 42: 3276, BURN_UID: W - 6553}
+    chain = _chain(_stored(wire))
+    monkeypatch.setattr(
+        bt_compat,
+        "make_subtensor",
+        lambda _bt, *, network: seen.append(network) or chain,
+    )
+
+    code, out = _cli(tmp_path, capsys, "--format", "json", "--chain-readback")
+
+    assert code == 0
+    assert seen == [connect_to]
+    assert json.loads(out)["chain_readback"]["status"] == "MATCHES_LAST_APPLIED"
+
+
 def test_cli_refuses_a_bad_feed(tmp_path, capsys) -> None:
     uptime = tmp_path / "uptime.json"
     uptime.write_text(json.dumps({MINER_A: "2"}))

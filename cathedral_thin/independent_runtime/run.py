@@ -27,6 +27,11 @@ from typing import Any, Sequence
 
 import bittensor as bt
 
+from cathedral_thin.chain_target import (
+    ChainTargetError,
+    add_chain_arguments,
+    resolve_chain_target,
+)
 from cathedral_thin.independent.canary import submit_canary_once
 from cathedral_thin.independent.collect import (
     CollectedEvidence,
@@ -181,12 +186,27 @@ def cmd_rent(options: argparse.Namespace) -> int:
     return 0
 
 
-def _connect_subtensor() -> Any:
-    return bt.Subtensor(network="finney")
+def _connect_subtensor(options: argparse.Namespace | None = None) -> Any:
+    """Connect to Finney, or to the operator's own node when one is configured.
+
+    The callers check the pinned genesis right after connecting, so a node on
+    another chain is refused before anything is read or spent.
+    """
+
+    try:
+        target = resolve_chain_target(
+            getattr(options, "network", None),
+            getattr(options, "chain_endpoint", None),
+            default_network="finney",
+        )
+    except ChainTargetError as exc:
+        raise SystemExit(f"chain endpoint refused: {exc}") from exc
+    print(json.dumps({"chain": target.event()}, sort_keys=True), file=sys.stderr)
+    return bt.Subtensor(network=target.connect_to)
 
 
-def cmd_probe_sn94(_options: argparse.Namespace) -> int:
-    subtensor = _connect_subtensor()
+def cmd_probe_sn94(options: argparse.Namespace) -> int:
+    subtensor = _connect_subtensor(options)
     genesis = observed_genesis_hash(subtensor)
     metagraph = subtensor.metagraph(NETUID)
     view = metagraph_view(metagraph)
@@ -464,7 +484,7 @@ def cmd_run(options: argparse.Namespace) -> int:
     # ``snapshot_epoch`` for a useful diagnostic report, but never continue the
     # live path with it.
     try:
-        subtensor = _connect_subtensor()
+        subtensor = _connect_subtensor(options)
         report["genesis"] = observed_genesis_hash(subtensor)
         snapshot = snapshot_epoch(subtensor)
         anchor = snapshot.anchor
@@ -832,9 +852,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds to wait until the Worker is ready (0 skips wait)",
     )
 
-    sub.add_parser("probe-sn94", help="snapshot SN94 metagraph and serving axons")
+    probe = sub.add_parser(
+        "probe-sn94", help="snapshot SN94 metagraph and serving axons"
+    )
+    add_chain_arguments(probe)
 
     run = sub.add_parser("run", help="list/rent, collect, compose, canary submit")
+    add_chain_arguments(run)
     run.add_argument("--name", default="independent-canary-miner")
     run.add_argument(
         "--rent", action="store_true", help="create a TDX Worker if none listed"

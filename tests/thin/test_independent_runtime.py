@@ -1155,7 +1155,7 @@ def test_a_pruned_anchor_stops_before_worker_spend_or_miner_dial(
             return super().metagraph(netuid, block=block)
 
     subtensor = PrunedRunnerSubtensor(head, port=8443)
-    monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
+    monkeypatch.setattr(run_module, "_connect_subtensor", lambda *_a: subtensor)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("a pruned anchor must stop before Worker or miner I/O")
@@ -1259,7 +1259,7 @@ def prepared_runner(
     monkeypatch.delenv("CATHEDRAL_CANARY_HOTKEY_JSON", raising=False)
     monkeypatch.setattr(run_module, "fetch_public_json", lambda path: {})
     subtensor = RunnerSubtensor(head, port=port, extra_miners=extra_miners)
-    monkeypatch.setattr(run_module, "_connect_subtensor", lambda: subtensor)
+    monkeypatch.setattr(run_module, "_connect_subtensor", lambda *_a: subtensor)
     monkeypatch.setattr(run_module, "load_verifier", lambda path: FakePinnedVerifier())
     if bind_mass:
         monkeypatch.setattr(

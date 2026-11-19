@@ -10,6 +10,12 @@ from typing import Any
 import bittensor as bt
 
 from .bt_compat import listify, make_subtensor, make_wallet
+from .chain_target import (
+    add_chain_arguments,
+    connect_legacy,
+    legacy_network_default,
+    resolve_args,
+)
 from .core import ThinSubnetError
 
 
@@ -58,7 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read-only Cathedral thin registration/deployment preflight"
     )
-    parser.add_argument("--network", default=os.environ.get("BT_NETWORK", "finney"))
+    # --network/--subtensor.network, --subtensor.chain_endpoint and the
+    # SUBTENSOR_* environment; BT_NETWORK stays the fallback label.
+    add_chain_arguments(parser, network_default=legacy_network_default("finney"))
     parser.add_argument(
         "--netuid", type=int, default=int(os.environ.get("BT_NETUID", "94"))
     )
@@ -80,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    target = resolve_args(
+        args, default_network=os.environ.get("BT_NETWORK") or "finney"
+    )
     if args.netuid < 0:
         raise SystemExit("netuid must be non-negative")
     wallet = make_wallet(
@@ -89,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         path=args.wallet_path or None,
     )
     hotkey = str(wallet.hotkey.ss58_address)
-    subtensor = make_subtensor(bt, network=args.network)
+    subtensor = connect_legacy(bt, target, make_subtensor=make_subtensor)
     metagraph = subtensor.metagraph(args.netuid, lite=True)
     report = registration_report(
         metagraph,
