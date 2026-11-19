@@ -70,6 +70,7 @@ from .commit_reveal import (
     next_epoch_fire_block,
     predict_first_reveal_block,
 )
+from . import direct_contract
 from .direct_contract import (
     DIRECT_PLAN_SCHEMA,
     DIRECT_VERSION_KEY,
@@ -276,6 +277,55 @@ def _validate_escape_rows(
     ):
         raise DirectValidatorError("direct plan escape identities are inconsistent")
     return escape_hotkeys
+
+
+def _validate_compute_anchor_rows(
+    plan: DirectWeightPlan,
+    uid_hotkeys: Mapping[int, str],
+    raw_scores: Mapping[int, int],
+) -> set[int] | None:
+    """The UIDs an enforce anchor may pay, or None for a machine-count plan.
+
+    The mode is the release's, never a plan's choice: an enforce release
+    signs only enforce plans, and any other release signs only plans without
+    anchor units. Each anchor row must name an approved hotkey with a
+    verified machine this cycle and positive whole room-seconds.
+    """
+
+    release_mode = direct_contract.COMPUTE_ANCHOR_MODE
+    if plan.compute_anchor_mode not in direct_contract.COMPUTE_ANCHOR_MODES:
+        raise DirectValidatorError("direct plan names an unknown anchor mode")
+    if not plan.compute_anchor_enforced:
+        if (
+            release_mode == "enforce"
+            or plan.compute_anchor_units
+            or plan.compute_anchor_accepted_digests
+            or plan.compute_anchor_refused
+        ):
+            raise DirectValidatorError(
+                "direct plan compute anchor does not match the release mode"
+            )
+        return None
+    if release_mode != "enforce":
+        raise DirectValidatorError(
+            "direct plan compute anchor does not match the release mode"
+        )
+    approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
+    units = dict(plan.compute_anchor_units)
+    if len(units) != len(plan.compute_anchor_units) or any(
+        isinstance(uid, bool)
+        or not isinstance(uid, int)
+        or uid not in uid_hotkeys
+        or uid_hotkeys[uid] not in approved
+        or raw_scores.get(uid, 0) <= 0
+        or uid == plan.snapshot.validator_uid
+        or isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or seconds <= 0
+        for uid, seconds in units.items()
+    ):
+        raise DirectValidatorError("direct plan compute anchor units are inconsistent")
+    return set(units)
 
 
 def _require_presign_time(deadline: float, *, stage: str) -> None:
@@ -1106,6 +1156,7 @@ class DirectWeightWriter:
         machine_ids = dict(plan.machine_ids_by_uid)
         snapshot_hotkeys = {miner.uid: miner.hotkey for miner in plan.snapshot.miners}
         escape_hotkeys = _validate_escape_rows(plan, uid_hotkeys)
+        anchor_uids = _validate_compute_anchor_rows(plan, uid_hotkeys, raw_scores)
         # The burn destination is the pinned subnet owner hotkey at the UID it
         # held at the anchor. It is never a lane recipient, and it is this
         # validator's own UID only when this validator signs as that hotkey:
@@ -1129,12 +1180,17 @@ class DirectWeightWriter:
         expected_uids, expected_weights = plan.expected_vector()
         approved = approved_miners.APPROVED_COMPUTE_HOTKEYS
         # Exactly who may be weighted: approved hotkeys with a verified
-        # machine, verified escape breakers, and the burn destination.
-        payable_uids = {
-            uid
-            for uid, score in raw_scores.items()
-            if score > 0 and uid_hotkeys.get(uid) in approved
-        } | set(escape_hotkeys)
+        # machine (in enforce, only those with delivered room-seconds),
+        # verified escape breakers, and the burn destination.
+        payable_uids = (
+            {
+                uid
+                for uid, score in raw_scores.items()
+                if score > 0 and uid_hotkeys.get(uid) in approved
+            }
+            if anchor_uids is None
+            else anchor_uids
+        ) | set(escape_hotkeys)
         if (
             len(uid_hotkeys) != len(plan.uid_hotkeys)
             or len(raw_scores) != len(plan.raw_scores)

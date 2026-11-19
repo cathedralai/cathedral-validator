@@ -14,7 +14,9 @@ This module verifies each receipt, refuses unattested or malformed rooms,
 counts each room once per hour, and returns delivered hours per hotkey as
 exact fractions: the ``DeliveredHoursFeed`` input of the open-season rule.
 Feed errors raise, so a caller that fails open (the open-season rule) leaves
-the fleet whole. It is not wired into the direct validator here.
+the fleet whole. The direct validator reads it for the compute anchor
+(AB#822, ``read_anchor_delivery``): in shadow it only reports, in enforce it
+splits the compute lane by delivered room-seconds.
 
 Key rotation: a ``key_id`` must cover the hour's end (the earliest moment the
 hour can be signed). The control plane signs on read, so a key added with a
@@ -28,21 +30,29 @@ import base64
 import binascii
 import hashlib
 import math
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from cryptography.exceptions import InvalidSignature
 
+from .direct_contract import DELIVERY_FEED_DEFAULT_SOURCE
 from .escape_receipts import (
     FEED_TIMEOUT_SECONDS,
+    MAX_FEED_BYTES,
+    MAX_FEED_RECEIPTS,
     PINNED_CONTEST_SIGNERS,
     PINNED_CONTEST_SIGNERS_SHA256,
     ContestSignerSet,
     EscapeReceiptError,
     _candidate_signers,
+    _feed_remaining,
+    _fetch_https,
+    _require_source,
     canonical_bytes,
     load_receipt_feed,
 )
@@ -322,7 +332,150 @@ def delivered_hours_feed(
     return feed
 
 
+# The compute anchor (AB#822) ---------------------------------------------
+
+DELIVERY_RECEIPTS_SOURCE_ENV = "CATHEDRAL_DELIVERY_RECEIPTS_SOURCE"
+# The anchor reads only hours that closed at least this long before the cycle
+# clock. The control plane settles an hour 10 minutes after it closes.
+ANCHOR_SETTLE_SECONDS = 15 * 60
+ANCHOR_LOOKBACK_SECONDS = DEFAULT_LOOKBACK_SECONDS
+
+
+def delivery_source_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """The delivery feed the compute anchor reads, or None when disabled.
+
+    Unset means the release default, so validators without an operator file
+    still read the feed. An explicit ``off`` or an empty value disables the
+    read. Any other value must be an https URL or an absolute path, or this
+    raises, so a mistyped source refuses at start instead of reading nothing.
+    """
+
+    env = os.environ if environ is None else environ
+    if DELIVERY_RECEIPTS_SOURCE_ENV not in env:
+        return DELIVERY_FEED_DEFAULT_SOURCE
+    source = env[DELIVERY_RECEIPTS_SOURCE_ENV].strip()
+    if not source or source.lower() == "off":
+        return None
+    _require_source(source)
+    return source
+
+
+def anchor_lookback(clock: float) -> tuple[int, int]:
+    """``(since, until)``: the 24 whole UTC hours the anchor pays for.
+
+    ``until`` is the end of the last hour that closed at least
+    ``ANCHOR_SETTLE_SECONDS`` before ``clock``.
+    """
+
+    if not math.isfinite(clock) or clock < 0:
+        raise DeliveryReceiptError("anchor clock must be finite")
+    until = (
+        (math.floor(clock) - ANCHOR_SETTLE_SECONDS) // WINDOW_SECONDS * WINDOW_SECONDS
+    )
+    since = until - ANCHOR_LOOKBACK_SECONDS
+    if since < 0:
+        raise DeliveryReceiptError("anchor clock is before the first lookback")
+    return since, until
+
+
+def room_seconds(hours: Fraction) -> int:
+    """Exact integer room-seconds from delivered hours (receipts are whole seconds)."""
+
+    seconds = Fraction(hours) * WINDOW_SECONDS
+    if seconds.denominator != 1 or seconds < 0:
+        raise DeliveryReceiptError("delivered hours are not whole room-seconds")
+    return int(seconds)
+
+
+@dataclass(frozen=True)
+class AnchorDelivery:
+    """Delivered room-seconds per hotkey over one anchor lookback."""
+
+    since: int
+    until: int
+    seconds_by_hotkey: Mapping[str, int]
+    delivery_round: DeliveryRound
+    body_bytes: int
+
+
+def read_anchor_delivery(
+    source: str,
+    *,
+    clock: float,
+    timeout: float,
+    fetch: Callable[[str], bytes] | None = None,
+    signers: ContestSignerSet | None = None,
+) -> AnchorDelivery:
+    """Read, verify and score the delivery feed for one cycle's lookback.
+
+    ``since`` and ``until`` are sent explicitly and scoring runs with
+    ``now = until``, so the oldest hour of the range is never refused as
+    expired. Any read failure raises: the caller treats it as a feed error.
+    A read that hit the receipt ceiling raises too, since it may be partial.
+    """
+
+    since, until = anchor_lookback(clock)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise DeliveryReceiptError("delivery feed timeout is invalid")
+    deadline = time.monotonic() + timeout
+    body_bytes = 0
+
+    def counted(url: str) -> bytes:
+        nonlocal body_bytes
+        raw = (
+            fetch(url)
+            if fetch is not None
+            else _fetch_https(
+                url, timeout=min(FEED_TIMEOUT_SECONDS, _feed_remaining(deadline))
+            )
+        )
+        body_bytes += len(raw)
+        return raw
+
+    receipts = load_receipt_feed(
+        source,
+        fetch=counted,
+        timeout=timeout,
+        since=since,
+        until=until,
+    )
+    if not source.startswith("https://"):
+        body_bytes = min(Path(source).stat().st_size, MAX_FEED_BYTES)
+    if len(receipts) >= MAX_FEED_RECEIPTS:
+        raise DeliveryReceiptError("delivery feed reached the receipt ceiling")
+    # With now = until, the oldest hour of [since, until) ended
+    # ANCHOR_LOOKBACK_SECONDS - WINDOW_SECONDS before now, so it is kept, and
+    # an hour before since (ended a full lookback ago) is expired: exactly 24
+    # hours count even if the feed answers a wider range.
+    delivery_round = score_delivered_hours(
+        receipts,
+        now=float(until),
+        lookback_seconds=ANCHOR_LOOKBACK_SECONDS - WINDOW_SECONDS,
+        signers=signers,
+    )
+    return AnchorDelivery(
+        since=since,
+        until=until,
+        seconds_by_hotkey={
+            hotkey: room_seconds(hours)
+            for hotkey, hours in sorted(delivery_round.hours_by_hotkey.items())
+        },
+        delivery_round=delivery_round,
+        body_bytes=body_bytes,
+    )
+
+
 __all__ = [
+    "ANCHOR_LOOKBACK_SECONDS",
+    "ANCHOR_SETTLE_SECONDS",
+    "DELIVERY_RECEIPTS_SOURCE_ENV",
+    "AnchorDelivery",
+    "anchor_lookback",
+    "delivery_source_from_environment",
+    "read_anchor_delivery",
+    "room_seconds",
     "DEFAULT_LOOKBACK_SECONDS",
     "MAX_LOOKBACK_SECONDS",
     "RECEIPT_SCHEMA",
