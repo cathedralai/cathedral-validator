@@ -7,8 +7,9 @@ The public installation and operating guide is on the [repository home page](REA
 By default the validator connects to the public Finney entrypoint. If you run
 many validators from one IP and hit its rate limits, point it at your own
 subtensor node instead. Only the connection moves: the validator still checks
-that the node serves Finney (the pinned genesis hash) at start, every cycle and
-before every signature, and refuses any other chain.
+that the node serves Finney (the pinned genesis hash) at start and before any
+recovery, and refuses any other chain. Weights are signed for Finney's genesis,
+so they can never land on another chain.
 
 This needs a validator release that has the setting (AB#820). An older
 release ignores it and keeps using the public entrypoint; the `"chain"` log
@@ -25,7 +26,7 @@ Settings, highest priority first:
 `--subtensor.network` (or `--network`, or `SUBTENSOR_NETWORK`) names the chain
 and stays `finney`. A `ws://` or `wss://` URL there is taken as the endpoint;
 any other value than `finney` refuses to start. Use `ws://` for a node on this
-host, a private or Tailscale address, or a Docker service name, and `wss://`
+host, a private or Tailscale IP address, or a Docker service name, and `wss://`
 for anything else.
 
 ### systemd host (the README install)
