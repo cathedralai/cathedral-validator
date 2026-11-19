@@ -626,4 +626,4 @@ def test_validator_guide_has_the_exact_env_line_and_command() -> None:
     assert "## Use your own subtensor node" in guide
     assert "SUBTENSOR_CHAIN_ENDPOINT=ws://127.0.0.1:9944" in guide
     assert "/etc/cathedral-validator/direct-subtensor.env" in guide
-    assert "—" not in guide
+    assert "\u2014" not in guide
