@@ -145,7 +145,9 @@ values.
 
 ## Opt out, or one-step rollback
 
-Set the fraction to 0 and restart:
+Set the fraction to 0 and restart (Docker: add
+`-e CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0` to `docker run`; the container
+rewrites `direct.env`):
 
 ```bash
 # in /etc/cathedral-validator/direct.env

@@ -100,6 +100,11 @@ To use your own subtensor node instead of the public entrypoint, add
 `-e SUBTENSOR_CHAIN_ENDPOINT=ws://127.0.0.1:9944` (with `--network host`) to the
 `docker run` command: "Use your own subtensor node" in [VALIDATOR.md](../VALIDATOR.md).
 
+The escape lane is on by default ([Escape payout rollout](ESCAPE-PAYOUT-ROLLOUT.md)).
+In Docker the container rewrites `direct.env` on every start, so editing it
+does nothing: opt out with `-e CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0` on the
+`docker run` command.
+
 ## Install
 
 Read the [operator runbook](OPERATOR_RUNBOOK.md) first, including its
