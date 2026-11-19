@@ -38,6 +38,14 @@ COMPUTE_ANCHOR_MODE = "shadow"
 DELIVERY_FEED_DEFAULT_SOURCE = (
     "https://api.polaris.computer/v1/miners/delivery/published"
 )
+# The public escape receipt feed (AB#830). The escape lane is on by default:
+# a validator with no CATHEDRAL_ESCAPE_RECEIPTS_SOURCE reads this feed, so a
+# verified break is scored by every validator, not only by Cathedral's own.
+# An operator file may override it, or turn the lane off with
+# CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0.
+ESCAPE_FEED_DEFAULT_SOURCE = (
+    "https://api.polaris.computer/v1/escape/receipts/published"
+)
 
 # The version key the direct writer stamps on every weight call. Raised 12 Nov
 # 2026 with the gated compute split, so the owner can set the subnet's
@@ -498,6 +506,7 @@ __all__ = [
     "COMPUTE_LANE_SHARE",
     "DELIVERY_FEED_DEFAULT_SOURCE",
     "DIRECT_PLAN_SCHEMA",
+    "ESCAPE_FEED_DEFAULT_SOURCE",
     "DIRECT_VERSION_KEY",
     "DirectSubmissionReceipt",
     "DirectValidatorError",

@@ -1,8 +1,13 @@
 # Escape room payout rollout (SN94)
 
-Escape receipts are off until an operator sets both a feed source and a
-positive weight fraction. This page is the enable sequence. It does not change
-live config by itself.
+**The escape lane is on by default** (AB#830). A validator with no escape
+lines in `direct.env` reads the public receipt feed
+`https://api.polaris.computer/v1/escape/receipts/published` and pays verified
+breakers. Before this release only Cathedral's own validator (UID 0) scored
+breaks, so consensus clipped a break to about zero; now every validator on the
+default scores them. An operator can still opt out with
+`CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0`. This page covers the defaults, opt-out,
+verification and rollback.
 
 Since the gated split of 12 Nov 2026 ([Gated compute](GATED_COMPUTE.md)) the
 escape lane's share is fixed in the release at 10 percent of the vector. The
@@ -11,17 +16,18 @@ and breakers then share the fixed 10 percent, whatever the value says. While
 the lane is off, or on with no verified break, or its feed is unreadable, that
 10 percent is burned. It never goes to miners.
 
-## Required environment
+## Environment
 
-Edit `/etc/cathedral-validator/direct.env` (see
-`deploy/validator-update/direct.env.example`). Both of the first two lines must
-be set to turn the path on:
+Nothing to set: the defaults turn the lane on. Each line in
+`/etc/cathedral-validator/direct.env` (see
+`deploy/validator-update/direct.env.example`) overrides its default when it is
+present, and is validated exactly as before:
 
-| Variable | Mainnet value | Notes |
+| Variable | Default (unset) | Notes |
 |---|---|---|
-| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only and paged: the validator adds `limit=200`, `since` (start of the reward window less 5 minutes) and, after page 1, `cursor`, and follows `next_cursor` until it is null. A body that is a list, or has no `next_cursor`, is the whole feed (a server that does not page). Each page: 10s wall-clock (connect, reads, and parse), 4 MiB cap; all pages: 30s, capped by the cycle time left. At most 25 pages (under the feed's 30 a minute limit); if page 25 has `next_cursor`, the read fails rather than scoring an incomplete feed. The 10_000-receipt cap keeps the oldest, as before paging. Any failed page fails the whole read. No redirects. A file is one document: 4 MiB / 10_000 receipt caps. |
-| `CATHEDRAL_ESCAPE_WEIGHT_FRACTION` | `0.1` | Must be in `[0, 1/10]`. `0` is off. Any positive value turns the lane on at the fixed 10 percent; an existing `0.05` keeps working. Values at or above `0.11` refuse to start. |
-| `CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS` | `604800` (7 days) or omit | Optional. Must be in `(0, 7776000]` (90 days). Measured from signed `planted_at`. |
+| `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` | `https://api.polaris.computer/v1/escape/receipts/published` | `off` or an empty value turns the lane off. Otherwise an HTTPS URL of the control-plane receipt feed (no userinfo, query, or fragment) or an absolute path to a JSON file | File form is a JSON list, or `{"receipts": [...]}`. HTTPS is GET only and paged: the validator adds `limit=200`, `since` (start of the reward window less 5 minutes) and, after page 1, `cursor`, and follows `next_cursor` until it is null. A body that is a list, or has no `next_cursor`, is the whole feed (a server that does not page). Each page: 10s wall-clock (connect, reads, and parse), 4 MiB cap; all pages: 30s, capped by the cycle time left. At most 25 pages (under the feed's 30 a minute limit); if page 25 has `next_cursor`, the read fails rather than scoring an incomplete feed. The 10_000-receipt cap keeps the oldest, as before paging. Any failed page fails the whole read. No redirects. A file is one document: 4 MiB / 10_000 receipt caps. |
+| `CATHEDRAL_ESCAPE_WEIGHT_FRACTION` | `1/10` | Must be in `[0, 1/10]`. `0` (or an empty value) is off: the opt-out. Any positive value turns the lane on at the fixed 10 percent; an existing `0.05` keeps working. Values at or above `0.11` refuse to start. |
+| `CATHEDRAL_ESCAPE_REWARD_WINDOW_SECONDS` | `604800` (7 days) | Optional. Must be in `(0, 7776000]` (90 days). Measured from signed `planted_at`. |
 
 The validator verifies every receipt against the pinned contest signer set
 (`config/escape/contest-signers.json`, sha256 pin in
@@ -33,6 +39,11 @@ Each accepted receipt must name `claim.breaker_hotkey` (SS58). The breaker must
 be registered on the subnet at the cycle's finalized anchor. Unregistered
 hotkeys get nothing. This validator's own UID cannot win.
 
+Off is decided first: with the fraction at `0` or the source `off`, the other
+two lines are not validated, as before. With the lane on (including by
+default), a mistyped source or window refuses to start, and the updater then
+keeps the previous release. Fix or remove the line.
+
 Restart after editing:
 
 ```bash
@@ -40,8 +51,21 @@ sudo systemctl restart cathedral-validator-direct
 ```
 
 At start the service log should show
-`{"escape_receipts": {"status": "ENABLED", "source": "...", "fraction": "1/10", "window_seconds": 604800}}`.
-`fraction` is the fixed share, not the configured value.
+`{"escape_receipts": {"status": "ENABLED", "source": "...", "source_origin": "release_default", "fraction": "1/10", "window_seconds": 604800}}`.
+`source_origin` is `operator` when `direct.env` sets the source.
+`fraction` is the fixed share, not the configured value. An opted-out host
+prints no `escape_receipts` start line, as before.
+
+### Feed down
+
+An unreadable feed never stops the write and never crashes the validator. The
+cycle burns the escape share (no breaker UID in the vector), the compute lane
+is unchanged, the cycle event says `SOURCE_UNAVAILABLE`, and one extra line is
+printed:
+`{"level": "WARN", "escape_receipts": {"status": "SOURCE_UNAVAILABLE", "error": "...", "warning": "..."}}`.
+A scoring failure does the same with `SCORING_UNAVAILABLE`. The read keeps 40
+seconds of the cycle for the writer: if less than that is left, it is skipped
+(`cycle deadline`) rather than risk the weight set.
 A mistyped fraction or URL prints `escape receipt source refused:` and the unit
 retries. It does not silently run with the feature off.
 
@@ -61,11 +85,14 @@ This validator does not publish the feed. The control plane must:
 4. Serve uncompressed JSON at a plain `https://` path. Configure the URL with no query string; the validator adds `limit`, `since` and `cursor` itself. Because `since` comes from the reward window, a window longer than the feed's 7-day default is now read in full.
 5. Publish one signed receipt per `(window_id, room_id)` for the reward window.
 
-Until those are true, leave the fraction at 0.
+The public feed has been live since the mainnet switch on Cathedral's own
+validator; while it is down every validator burns the escape share.
 
 ## Testnet 584 staged break
 
-Do this before any mainnet fraction change.
+Use this to rehearse a change to the receipt format or scoring. The default
+feed names mainnet hotkeys, so on netuid 584 it scores `NO_BREAKS`; point a
+testnet host at a testnet feed to rehearse a break.
 
 1. Run the validator in testnet rehearsal (`CATHEDRAL_TESTNET=1`,
    `--network test`, `--netuid 584`). Use a testnet copy of `direct.env` with
@@ -86,21 +113,16 @@ Do this before any mainnet fraction change.
    write rather than paying the new holder. The cycle event names
    `an escape receipt UID changed hotkey before direct signing`.
 
-Do not continue to mainnet if step 5 or 6 fails, or if a 404 stops miner
+Do not ship the change if step 5 or 6 fails, or if a 404 stops miner
 weights.
 
-## Mainnet switch (netuid 94)
+## Mainnet (netuid 94)
 
-Only after the testnet staged break is confirmed:
-
-1. Keep the fraction at `0` until the mainnet feed flag is on and a cycle on
-   the production validator shows `SOURCE_UNAVAILABLE` with `HTTP 404`
-   gone (status `NO_BREAKS` or `APPLIED` with a real feed body).
-2. Set `CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0.1` in
-   `/etc/cathedral-validator/direct.env`. Do not change live chain config,
-   wallets, or the contest key.
-3. Restart `cathedral-validator-direct`.
-4. Confirm start-up `ENABLED` with `fraction` `1/10`.
+On by default from the release that carries AB#830; auto-update installs it
+with no operator step. Confirm start-up `ENABLED` with `fraction` `1/10` and
+`source_origin` `release_default` (or `operator` if `direct.env` sets the
+source). Hosts that already set both lines, like Cathedral's UID 0, keep their
+values.
 
 ## Verify weights after the switch
 
@@ -121,9 +143,9 @@ Only after the testnet staged break is confirmed:
 3. On chain, read this validator's weight row on netuid 94 and check the
    breaker UID against the cycle event.
 
-## One-step rollback
+## Opt out, or one-step rollback
 
-Set the fraction back to 0 and restart:
+Set the fraction to 0 and restart:
 
 ```bash
 # in /etc/cathedral-validator/direct.env
@@ -131,7 +153,8 @@ CATHEDRAL_ESCAPE_WEIGHT_FRACTION=0
 sudo systemctl restart cathedral-validator-direct
 ```
 
-Unsetting `CATHEDRAL_ESCAPE_RECEIPTS_SOURCE` is equivalent. The next cycle
+`CATHEDRAL_ESCAPE_RECEIPTS_SOURCE=off` is equivalent. Unsetting a line no
+longer turns the lane off: it brings back the default. The next cycle
 pays no breaker and burns the escape share. No journal migration.
 
 

@@ -24,3 +24,15 @@ def approved_compute_hotkeys(monkeypatch):
     """
 
     monkeypatch.setattr(approved_miners, "APPROVED_COMPUTE_HOTKEYS", _EveryHotkey())
+
+
+@pytest.fixture(autouse=True)
+def escape_lane_opted_out(monkeypatch):
+    """Run the older CLI tests with the escape lane off, as they were written.
+
+    The release turns the lane on by default (AB#830), which would make every
+    CLI test read the public feed over the network. The default itself is
+    tested in test_escape_receipt_weights.py, which removes this variable.
+    """
+
+    monkeypatch.setenv("CATHEDRAL_ESCAPE_WEIGHT_FRACTION", "0")
