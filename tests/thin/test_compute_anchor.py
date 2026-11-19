@@ -356,6 +356,32 @@ def test_out_of_time_is_a_feed_error_and_the_read_never_starts(mode) -> None:
     assert vector(anchored) == {base.BURN_UID: W}
 
 
+def test_a_shadow_read_is_capped_and_keeps_the_writer_reserve(mode) -> None:
+    mode("shadow")
+    called: list[float] = []
+
+    def read(source: str, *, clock: float, timeout: float):
+        called.append(timeout)
+        return reader()(source, clock=clock, timeout=timeout)
+
+    plan = verified_plan((ONE, 1))
+    # Plenty of time: the read is capped at the shadow limit.
+    anchor(plan, read, deadline_monotonic=time.monotonic() + 600)
+    assert called and called[-1] <= runtime.SHADOW_ANCHOR_FEED_TIMEOUT_SECONDS
+    # Less than the writer reserve left: the read never starts, weights unchanged.
+    called.clear()
+    shadowed, summary = anchor(
+        plan,
+        read,
+        deadline_monotonic=time.monotonic()
+        + runtime.SHADOW_ANCHOR_WRITER_RESERVE_SECONDS
+        - 1,
+    )
+    assert called == []
+    assert summary["error"] == "cycle deadline"
+    assert shadowed is plan
+
+
 # The writer -----------------------------------------------------------------
 
 

@@ -532,6 +532,9 @@ def apply_escape_receipts(
 
 
 COMPUTE_ANCHOR_FEED_OK = "OK"
+# Shadow mode: the anchor read is capped and keeps time back for the writer.
+SHADOW_ANCHOR_FEED_TIMEOUT_SECONDS = 10.0
+SHADOW_ANCHOR_WRITER_RESERVE_SECONDS = 40.0
 COMPUTE_ANCHOR_FEED_ERROR = "ERROR"
 COMPUTE_ANCHOR_FEED_DISABLED = "DISABLED"
 
@@ -576,6 +579,14 @@ def apply_compute_anchor(
             fetch_timeout = min(
                 FEED_TOTAL_TIMEOUT_SECONDS, remaining - FEED_DEADLINE_SLACK_SECONDS
             )
+            if mode == "shadow":
+                # A shadow read informs nothing, so it never takes the time the
+                # writer needs to sign: it reads only with a writer reserve left.
+                fetch_timeout = min(
+                    fetch_timeout, remaining - SHADOW_ANCHOR_WRITER_RESERVE_SECONDS
+                )
+        if mode == "shadow":
+            fetch_timeout = min(fetch_timeout, SHADOW_ANCHOR_FEED_TIMEOUT_SECONDS)
         if fetch_timeout <= 0:
             error = "cycle deadline"
         else:
