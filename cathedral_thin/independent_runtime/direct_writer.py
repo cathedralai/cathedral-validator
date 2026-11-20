@@ -1223,6 +1223,7 @@ class DirectWeightWriter:
                 if score > 0 and uid_hotkeys.get(uid) in approved
             },
         )
+        expected_uids, expected_weights = plan.expected_vector()
         # Exactly who may be weighted: approved hotkeys with a verified
         # machine (in enforce, only those with delivered room-seconds),
         # verified escape breakers, and the burn destination.
