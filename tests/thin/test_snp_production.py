@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -95,6 +96,26 @@ def test_snp_policy_uses_the_abi_debug_bit_and_allows_componentwise_tcb_checks()
     assert _tcb_meets_minimum(newer, minimum, "genoa") is True
     assert _tcb_meets_minimum(older_snp, minimum, "genoa") is False
     assert _tcb_meets_minimum(None, minimum, "genoa") is False
+
+
+def test_shipped_sn94_policy_refuses_hosts_below_the_sb3061_floor():
+    """AB#809: the shipped floor is SNP 0x1e (AMD-SB-3059) and Genoa microcode
+    0x5b (AMD-SB-3061, ucode 0x0A10115B). Values are the fleet on 21 Nov 2026."""
+
+    policy_path = (
+        Path(__file__).resolve().parents[2]
+        / "deploy/validator-update/sn94-snp-policy.json"
+    )
+    minimum = load_snp_policy(policy_path).generations["genoa"].minimum_tcb
+    assert minimum == 0x5B1E00000000000C
+    patched_snp_old_microcode = 0x581E00000000000C  # Frankfurt, Chicago
+    old_snp_old_microcode = 0x581C00000000000C  # Contabo, c46
+    fixed = 0x5B1E00000000000C
+    new_microcode_old_snp = 0x5B1C00000000000C
+    assert _tcb_meets_minimum(patched_snp_old_microcode, minimum, "genoa") is False
+    assert _tcb_meets_minimum(old_snp_old_microcode, minimum, "genoa") is False
+    assert _tcb_meets_minimum(new_microcode_old_snp, minimum, "genoa") is False
+    assert _tcb_meets_minimum(fixed, minimum, "genoa") is True
 
 
 class _SnpPass:
