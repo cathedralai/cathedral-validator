@@ -60,6 +60,7 @@ def receipt(
     planted_at: float = NOW - 3600,
     commands: int = 1,
     key_id: str | None = None,
+    drill: object = None,
 ) -> dict[str, object]:
     nonce = hashlib.sha256(window_id.encode()).hexdigest()[:32]
     claim: dict[str, object] = {
@@ -72,6 +73,8 @@ def receipt(
     }
     if hotkey is not None:
         claim["breaker_hotkey"] = hotkey
+    if drill is not None:
+        claim["drill"] = drill
     body = {
         "schema": "escape_stage_c_receipt_v0",
         "window_id": window_id,
@@ -192,6 +195,39 @@ def test_receipt_without_breaker_hotkey_is_refused(test_signer) -> None:
     with pytest.raises(EscapeReceiptError, match="breaker hotkey"):
         verify_escape_receipt(receipt(hotkey=None))
     assert score([receipt(hotkey=None)]).refused == {"no_breaker_hotkey": 1}
+
+
+def test_drill_receipt_is_refused_even_with_a_registered_hotkey(test_signer) -> None:
+    """AB#682: the control plane never publishes a drill; if one reached a feed it still pays nothing."""
+
+    drill = receipt(drill=True)  # validly signed, registered breaker: only the mark differs
+    with pytest.raises(escape_receipts.EscapeDrillReceiptError):
+        verify_escape_receipt(drill)
+    result = score([drill])
+    assert result.units_by_uid == () and result.accepted_digests == ()
+    assert result.refused == {"drill": 1}
+
+
+def test_drill_receipt_as_the_api_signs_it_is_refused(test_signer) -> None:
+    # What POST /v1/escape/drill/claim signs: no hotkey, drill true.
+    assert score([receipt(hotkey=None, drill=True)]).refused == {"drill": 1}
+
+
+@pytest.mark.parametrize("mark", [False, 0, "", "yes"])
+def test_any_drill_mark_is_refused(test_signer, mark) -> None:
+    assert score([receipt(drill=mark)]).refused == {"drill": 1}
+
+
+def test_negative_control_the_same_receipt_without_the_mark_pays(test_signer) -> None:
+    result = score([receipt()])
+    assert result.units_by_uid == ((BREAKER_UID, 1),) and result.refused == {}
+
+
+def test_drill_receipt_does_not_consume_the_room(test_signer) -> None:
+    real = receipt(commands=2)  # same window and room, a different body
+    result = score([receipt(drill=True), real])
+    assert result.units_by_uid == ((BREAKER_UID, 1),)
+    assert result.refused == {"drill": 1}
 
 
 # --- scoring ---------------------------------------------------------------
