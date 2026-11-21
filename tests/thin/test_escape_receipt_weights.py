@@ -200,7 +200,9 @@ def test_receipt_without_breaker_hotkey_is_refused(test_signer) -> None:
 def test_drill_receipt_is_refused_even_with_a_registered_hotkey(test_signer) -> None:
     """AB#682: the control plane never publishes a drill; if one reached a feed it still pays nothing."""
 
-    drill = receipt(drill=True)  # validly signed, registered breaker: only the mark differs
+    drill = receipt(
+        drill=True
+    )  # validly signed, registered breaker: only the mark differs
     with pytest.raises(escape_receipts.EscapeDrillReceiptError):
         verify_escape_receipt(drill)
     result = score([drill])
