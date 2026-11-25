@@ -3,7 +3,7 @@
   "generations": {
     "genoa": {
       "allowed_measurements": ["ba0b5c7be67712ff2cddafc027d865e4b4f91ccf2c252532d3245652e4fc5ad25783a616a7ba308cf47b97777caa73a7"],
-      "minimum_tcb": "0x581c00000000000c"
+      "minimum_tcb": "0x5b1e00000000000c"
     }
   }
 }
