@@ -90,6 +90,9 @@ RECEIPT_SCHEMA = "escape_stage_c_receipt_v0"
 CLAIM_SCHEMA = "escape_practice_claim_v0"
 NONCE_ORIGIN = "control_plane"
 BREAKER_HOTKEY_FIELD = "breaker_hotkey"
+# AB#682: set to true in the signed claim of an operator drill (polariscomputer
+# POST /v1/escape/drill/claim). Such a receipt is never published and never paid.
+DRILL_FIELD = "drill"
 
 # Vendored from bigailabs/polariscomputer docs/escape/contest-signer.ed25519.pub
 # (also at config/escape/contest-signer.ed25519.pub). The sha256 pins the file
@@ -129,6 +132,10 @@ PINNED_CONTEST_SIGNERS_SHA256 = (
 
 class EscapeReceiptError(DirectValidatorError):
     """One receipt, or the receipt configuration, is refused."""
+
+
+class EscapeDrillReceiptError(EscapeReceiptError):
+    """The receipt is an operator drill (AB#682): it never pays."""
 
 
 def _ed25519_public_key(pubkey_b64: str, *, label: str) -> Ed25519PublicKey:
@@ -404,6 +411,11 @@ def _check_claim(
         or token.get("nonce") != host_nonce
     ):
         raise EscapeReceiptError("claim proof token does not match the host nonce")
+    # AB#682: the control plane marks an operator drill inside the signed claim
+    # and never publishes it. Defense in depth: a receipt carrying the mark (any
+    # value; the signer only ever writes true) pays nothing, even on a feed.
+    if DRILL_FIELD in claim:
+        raise EscapeDrillReceiptError("receipt is an operator drill")
     hotkey = claim.get(BREAKER_HOTKEY_FIELD)
     if not isinstance(hotkey, str) or not hotkey or len(hotkey) > 64:
         raise EscapeReceiptError("receipt names no breaker hotkey")
@@ -894,6 +906,8 @@ def score_escape_receipts(
             verified.append(
                 verify_escape_receipt(receipt, pubkey=pubkey, signers=signers)
             )
+        except EscapeDrillReceiptError:
+            refuse("drill")
         except EscapeReceiptError as exc:
             refuse("no_breaker_hotkey" if "breaker hotkey" in str(exc) else "invalid")
         except (OverflowError, ValueError, TypeError, UnicodeError):
@@ -972,6 +986,8 @@ __all__ = [
     "CONTEST_SIGNER_SET_SCHEMA",
     "ContestSignerKey",
     "ContestSignerSet",
+    "DRILL_FIELD",
+    "EscapeDrillReceiptError",
     "EscapeReceiptConfig",
     "EscapeReceiptError",
     "EscapeRound",
